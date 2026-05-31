@@ -42,14 +42,13 @@ MediaLIB 不是一个网页壳，也不是单纯的播放器。它是使用 **Sw
 | --- | --- |
 | ![沉浸音乐播放器](assets/screenshots/02_music_player.png) | ![内置视频播放器](assets/screenshots/04_video_player.png) |
 
-| 播放设置 | 媒体源管理 |
+| 媒体源管理 | 保险库 |
 | --- | --- |
-| ![播放设置](assets/screenshots/03_settings_playback.png) | ![媒体源管理](assets/screenshots/09_media_sources.png) |
+| ![媒体源管理](assets/screenshots/09_media_source.png) | ![保险库](assets/screenshots/07_vault.png) |
 
-| 保险库 | 首页设置 |
+| 播放设置 | 其他设置 |
 | --- | --- |
-| ![保险库](assets/screenshots/07_vault.png) | ![首页设置](assets/screenshots/01_settings_home.png) |
-
+| ![播放设置](assets/screenshots/03_settings_playback.png) | ![其他设置](assets/screenshots/01_settings_home.png) |
 
 ## 当前功能
 
