@@ -2,7 +2,7 @@
 
 > 一款面向 macOS 的原生家庭影音媒体库：把本地硬盘、移动硬盘、NAS、SMB/FTP 挂载目录和 Emby 服务器里的视频与音乐整理到一个轻量、漂亮、可播放的媒体中心里。
 
-MediaLIB 不是一个网页壳，也不是单纯的播放器。它是使用 **SwiftUI + AppKit + SQLite + libmpv + AVFoundation** 构建的 macOS 原生应用，目标是在本地优先、隐私友好、离线可用的前提下，提供接近系统级体验的媒体库管理、视频播放、音乐播放、元数据补全和保险库能力。
+MediaLIB 不是一个网页壳，也不是单纯的播放器。它是使用 **SwiftUI + AppKit + SQLite + libmpv + AVFoundation** 构建的 macOS 原生应用，目标是在本地优先、隐私友好、离线可用的前提下，提供接近系统级体验的媒体库管理、视频播放、音乐播放、元数据补全能力。
 
 ![MediaLIB 视频库](assets/screenshots/05_video_library.png)
 
@@ -50,7 +50,6 @@ MediaLIB 不是一个网页壳，也不是单纯的播放器。它是使用 **Sw
 | --- | --- |
 | ![保险库](assets/screenshots/07_vault.png) | ![首页设置](assets/screenshots/01_settings_home.png) |
 
-> 公开仓库中如使用真实影视封面、剧集标题或第三方品牌画面，建议替换为自有素材或示例素材。
 
 ## 当前功能
 
@@ -160,5 +159,5 @@ MediaLIB 仍在持续开发中。
 MediaLIB 用于管理用户自己的本地、NAS 或授权服务器媒体内容。请确保你拥有对应媒体文件、海报、封面和元数据的使用权限。
 
 ## License
-
+GPL-3.0 license
 
