@@ -44,7 +44,30 @@ struct EpisodeRowView: View {
                 .foregroundStyle(selected ? AppColors.selectedGlassTint.opacity(0.92) : Color.secondary)
         }
         .padding(10)
-        .staticSurfaceBackground(selected: selected)
+        .staticSurfaceBackground(selected: selected, thickness: selected ? 1.36 : 1.18)
+        .overlay(alignment: .leading) {
+            if selected {
+                Capsule()
+                    .fill(AppColors.selectedGlassTint.opacity(0.82))
+                    .frame(width: 4)
+                    .padding(.vertical, 12)
+                    .padding(.leading, 3)
+            }
+        }
+        .overlay {
+            if selected {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(AppColors.selectedGlassTint.opacity(0.08))
+                    .allowsHitTesting(false)
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(
+                    selected ? AppColors.selectedGlassTint.opacity(0.42) : Color.clear,
+                    lineWidth: selected ? 1.2 : 0
+                )
+        }
     }
 
     private func durationText(_ duration: Double) -> String {

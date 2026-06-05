@@ -5,7 +5,8 @@ import UniformTypeIdentifiers
 
 private enum MusicLyricsPresenceCache {
     private static var values: [String: Bool] = [:]
-    private static var accessOrder: [String] = []
+    private static var accessTick: [String: Int] = [:]
+    private static var tickCounter = 0
     private static var cacheRevision = 0
     private static let maxValues = 4096
     private static let lock = NSLock()
@@ -90,15 +91,16 @@ private enum MusicLyricsPresenceCache {
     }
 
     private static func markRecentlyUsed(_ cacheKey: String) {
-        accessOrder.removeAll { $0 == cacheKey }
-        accessOrder.append(cacheKey)
+        tickCounter &+= 1
+        accessTick[cacheKey] = tickCounter
     }
 
     private static func trimIfNeeded() {
         guard values.count > maxValues else { return }
-        while values.count > maxValues, let oldestKey = accessOrder.first {
-            accessOrder.removeFirst()
+        while values.count > maxValues,
+              let oldestKey = accessTick.min(by: { $0.value < $1.value })?.key {
             values.removeValue(forKey: oldestKey)
+            accessTick.removeValue(forKey: oldestKey)
         }
     }
 
@@ -120,6 +122,7 @@ private enum MusicLibrarySnapshotCache {
         let section: MusicLibrarySection
         let searchText: String
         let sortMode: MusicSortMode
+        let sortOrder: MusicSortOrder
         let filterMode: MusicFilterMode
         let revision: Int
         let lyricsRevision: Int
@@ -132,7 +135,9 @@ private enum MusicLibrarySnapshotCache {
     }
 
     private static var values: [Key: Snapshot] = [:]
-    private static var accessOrder: [Key] = []
+    // 用单调递增时间戳替代线性扫描的 accessOrder 数组：O(1) 读写，淘汰时排序一次。
+    private static var accessTick: [Key: Int] = [:]
+    private static var tickCounter = 0
 
     static func snapshot(for key: Key) -> Snapshot? {
         guard let snapshot = values[key] else { return nil }
@@ -144,23 +149,27 @@ private enum MusicLibrarySnapshotCache {
         values[key] = snapshot
         markRecentlyUsed(key)
         if values.count > 16 {
-            while values.count > 16, let oldestKey = accessOrder.first {
-                accessOrder.removeFirst()
-                values.removeValue(forKey: oldestKey)
+            // 只在超出上限时排序一次，正常命中路径零开销。
+            let oldest = accessTick.min { $0.value < $1.value }?.key
+            if let oldest {
+                values.removeValue(forKey: oldest)
+                accessTick.removeValue(forKey: oldest)
             }
         }
     }
 
     private static func markRecentlyUsed(_ key: Key) {
-        accessOrder.removeAll { $0 == key }
-        accessOrder.append(key)
+        tickCounter += 1
+        accessTick[key] = tickCounter
     }
 }
 
 private struct MusicLibrarySnapshotBuildInput: Sendable {
+    let section: MusicLibrarySection
     let tracks: [MediaItem]
     let searchText: String
     let sortMode: MusicSortMode
+    let sortOrder: MusicSortOrder
     let filterMode: MusicFilterMode
 }
 
@@ -187,8 +196,8 @@ private enum MusicLibrarySnapshotBuilder {
         let tracks = resolvedTracks(from: input.tracks, input: input)
         return MusicLibrarySnapshotCache.Snapshot(
             rows: rowModels(from: tracks),
-            albums: albumGroups(from: tracks),
-            artists: artistGroups(from: tracks)
+            albums: albumGroups(from: tracks, sortMode: input.sortMode, sortOrder: input.sortOrder),
+            artists: artistGroups(from: tracks, sortMode: input.sortMode, sortOrder: input.sortOrder)
         )
     }
 
@@ -199,10 +208,7 @@ private enum MusicLibrarySnapshotBuilder {
             searched = tracks
         } else {
             searched = tracks.filter {
-                $0.title.localizedCaseInsensitiveContains(query) ||
-                ($0.originalTitle?.localizedCaseInsensitiveContains(query) ?? false) ||
-                ($0.artist?.localizedCaseInsensitiveContains(query) ?? false) ||
-                ($0.album?.localizedCaseInsensitiveContains(query) ?? false)
+                PinyinSearchMatcher.matches(query: query, in: [$0.title, $0.originalTitle, $0.artist, $0.album])
             }
         }
 
@@ -220,15 +226,24 @@ private enum MusicLibrarySnapshotBuilder {
         return filtered.sorted { lhs, rhs in
             switch input.sortMode {
             case .title:
-                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+                return sortedText(lhs.title, rhs.title, order: input.sortOrder) ?? true
             case .artist:
-                return (lhs.artist ?? "").localizedStandardCompare(rhs.artist ?? "") == .orderedAscending
+                return sortedText(lhs.artist ?? "", rhs.artist ?? "", order: input.sortOrder) ??
+                    sortedText(lhs.title, rhs.title, order: .primary) ?? true
             case .album:
-                return (lhs.album ?? "").localizedStandardCompare(rhs.album ?? "") == .orderedAscending
+                return sortedText(lhs.album ?? "", rhs.album ?? "", order: input.sortOrder) ??
+                    sortedText(lhs.title, rhs.title, order: .primary) ?? true
             case .recent:
-                return lhs.updatedAt > rhs.updatedAt
+                return sortedDate(lhs.updatedAt, rhs.updatedAt, order: input.sortOrder) ??
+                    sortedText(lhs.title, rhs.title, order: .primary) ?? true
             case .duration:
-                return (lhs.duration ?? 0) > (rhs.duration ?? 0)
+                return sortedDouble(lhs.duration ?? 0, rhs.duration ?? 0, order: input.sortOrder) ??
+                    sortedText(lhs.title, rhs.title, order: .primary) ?? true
+            case .mostPlayed:
+                return sortedNumber(lhs.playCountValue, rhs.playCountValue, order: input.sortOrder) ??
+                    sortedText(lhs.title, rhs.title, order: .primary) ?? true
+            case .workCount:
+                return sortedText(lhs.title, rhs.title, order: input.sortOrder) ?? true
             }
         }
     }
@@ -247,24 +262,73 @@ private enum MusicLibrarySnapshotBuilder {
         }
     }
 
-    static func albumGroups(from tracks: [MediaItem]) -> [MusicAlbumGroup] {
+    static func albumGroups(from tracks: [MediaItem], sortMode: MusicSortMode, sortOrder: MusicSortOrder) -> [MusicAlbumGroup] {
         let grouped = Dictionary(grouping: tracks) { item in
             MusicAlbumKey(title: item.album?.isEmpty == false ? item.album! : "未知专辑", artist: item.artist?.isEmpty == false ? item.artist! : "未知艺术家")
         }
-        return grouped.map { key, items in
+        let groups = grouped.map { key, items in
             MusicAlbumGroup(key: key, tracks: items.sorted { ($0.trackNumber ?? 0, $0.title) < ($1.trackNumber ?? 0, $1.title) })
         }
-        .sorted { $0.key.title.localizedStandardCompare($1.key.title) == .orderedAscending }
+        return groups.sorted { lhs, rhs in
+            switch sortMode {
+            case .artist:
+                return sortedText(lhs.key.artist, rhs.key.artist, order: sortOrder) ??
+                    sortedText(lhs.key.title, rhs.key.title, order: .primary) ?? true
+            case .recent:
+                return sortedDate(lhs.latestUpdatedAt, rhs.latestUpdatedAt, order: sortOrder) ??
+                    sortedText(lhs.key.title, rhs.key.title, order: .primary) ?? true
+            case .mostPlayed:
+                return sortedNumber(lhs.playCount, rhs.playCount, order: sortOrder) ??
+                    sortedText(lhs.key.title, rhs.key.title, order: .primary) ?? true
+            case .workCount:
+                return sortedNumber(lhs.tracks.count, rhs.tracks.count, order: sortOrder) ??
+                    sortedText(lhs.key.title, rhs.key.title, order: .primary) ?? true
+            default:
+                return sortedText(lhs.key.title, rhs.key.title, order: sortOrder) ?? true
+            }
+        }
     }
 
-    static func artistGroups(from tracks: [MediaItem]) -> [MusicArtistGroup] {
+    static func artistGroups(from tracks: [MediaItem], sortMode: MusicSortMode, sortOrder: MusicSortOrder) -> [MusicArtistGroup] {
         let grouped = Dictionary(grouping: tracks) { item in
             item.artist?.isEmpty == false ? item.artist! : "未知艺术家"
         }
-        return grouped.map { name, items in
+        let groups = grouped.map { name, items in
             MusicArtistGroup(name: name, tracks: items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending })
         }
-        .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        return groups.sorted { lhs, rhs in
+            switch sortMode {
+            case .workCount:
+                return sortedNumber(lhs.tracks.count, rhs.tracks.count, order: sortOrder) ??
+                    sortedText(lhs.name, rhs.name, order: .primary) ?? true
+            case .mostPlayed:
+                return sortedNumber(lhs.playCount, rhs.playCount, order: sortOrder) ??
+                    sortedText(lhs.name, rhs.name, order: .primary) ?? true
+            default:
+                return sortedText(lhs.name, rhs.name, order: sortOrder) ?? true
+            }
+        }
+    }
+
+    private static func sortedText(_ lhs: String, _ rhs: String, order: MusicSortOrder) -> Bool? {
+        let result = lhs.localizedStandardCompare(rhs)
+        guard result != .orderedSame else { return nil }
+        return order == .primary ? result == .orderedAscending : result == .orderedDescending
+    }
+
+    private static func sortedNumber(_ lhs: Int, _ rhs: Int, order: MusicSortOrder) -> Bool? {
+        guard lhs != rhs else { return nil }
+        return order == .primary ? lhs > rhs : lhs < rhs
+    }
+
+    private static func sortedDouble(_ lhs: Double, _ rhs: Double, order: MusicSortOrder) -> Bool? {
+        guard abs(lhs - rhs) > 0.000_1 else { return nil }
+        return order == .primary ? lhs > rhs : lhs < rhs
+    }
+
+    private static func sortedDate(_ lhs: Date, _ rhs: Date, order: MusicSortOrder) -> Bool? {
+        guard lhs != rhs else { return nil }
+        return order == .primary ? lhs > rhs : lhs < rhs
     }
 
     private static func durationText(_ duration: Double?) -> String {
@@ -288,9 +352,11 @@ private enum MusicLibrarySnapshotBuilder {
 struct MusicLibraryView: View {
     @EnvironmentObject private var appState: AppState
     let section: MusicLibrarySection
+    var onCreateSmartPlaylist: () -> Void = {}
     @State private var searchText = ""
     @State private var metadataItem: MediaItem?
     @State private var sortMode: MusicSortMode = .title
+    @State private var sortOrder: MusicSortOrder = .primary
     @State private var filterMode: MusicFilterMode = .all
     @State private var didLoadViewState = false
     @State private var visibleTrackRows: [MusicTrackRowModel] = []
@@ -335,6 +401,12 @@ struct MusicLibraryView: View {
             refreshVisibleContent(for: newSection, deferred: true)
         }
         .onChange(of: sortMode) { _ in
+            saveViewState(for: section)
+            searchRefreshTask?.cancel()
+            drilldown = nil
+            refreshVisibleContent(for: section, deferred: true)
+        }
+        .onChange(of: sortOrder) { _ in
             saveViewState(for: section)
             searchRefreshTask?.cancel()
             drilldown = nil
@@ -420,7 +492,7 @@ struct MusicLibraryView: View {
                 playlistPendingDeletion = nil
             }
         } message: { playlist in
-            Text("歌单会从 MediaLIB 索引中删除，歌曲文件不会被移动、删除或改名。")
+            Text("只会删掉这个歌单，你电脑里的歌曲文件不会被移动、删除或改名。")
         }
         .onChange(of: appState.musicPlaylists) { _ in
             refreshActivePlaylistDrilldown()
@@ -475,6 +547,16 @@ struct MusicLibraryView: View {
             GlassSearchField(placeholder: "搜索音乐", text: $searchText)
             if section == .playlists {
                 Button {
+                    onCreateSmartPlaylist()
+                } label: {
+                    Label("新建智能歌单", systemImage: "sparkles")
+                }
+                Button {
+                    importM3UPlaylist()
+                } label: {
+                    Label("导入 M3U", systemImage: "square.and.arrow.down")
+                }
+                Button {
                     presentPlaylistCreation(tracks: [], suggestedName: "新歌单")
                 } label: {
                     Label("新建歌单", systemImage: "plus")
@@ -487,12 +569,22 @@ struct MusicLibraryView: View {
                     Label("扫描", systemImage: "arrow.clockwise")
                 }
                 .disabled(appState.sources.isEmpty || appState.isScanning)
+
+                if showsResetAllPlayCountAction {
+                    Button {
+                        appState.resetAllMusicPlayCounts()
+                    } label: {
+                        Label("重置播放次数", systemImage: "arrow.counterclockwise")
+                    }
+                    .disabled(appState.musicTracks.allSatisfy { ($0.playCount ?? 0) == 0 })
+                }
             }
             if showsPlaybackHistoryAction {
-                Button {
+                Button(role: .destructive) {
                     appState.clearPlaybackHistory(playbackTraceTracks)
                 } label: {
                     Label("清除记录", systemImage: "clock.badge.xmark")
+                        .foregroundStyle(.red)
                 }
                 .disabled(playbackTraceTracks.isEmpty)
             }
@@ -504,9 +596,9 @@ struct MusicLibraryView: View {
             Image(systemName: "arrow.up")
                 .frame(width: 38, height: 38)
         }
-        .buttonStyle(.plain)
-        .liquidGlass(cornerRadius: 19)
-        .padding(.trailing, 22)
+        .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 19, horizontalPadding: 0, minHeight: 38, thickness: 1.04))
+        // 右边界与音乐底栏（含收起后的迷你栏）对齐：两者右缘都在 窗宽-24（musicMiniPlayerOuterInset=24）。
+        .padding(.trailing, 24)
         .padding(.bottom, scrollTopButtonBottomPadding)
         .help("返回顶部")
     }
@@ -562,6 +654,7 @@ struct MusicLibraryView: View {
             section: targetSection,
             searchText: searchText.trimmingCharacters(in: .whitespacesAndNewlines),
             sortMode: sortMode,
+            sortOrder: sortOrder,
             filterMode: filterMode,
             revision: appState.libraryRevision,
             lyricsRevision: MusicLyricsPresenceCache.revision
@@ -611,9 +704,11 @@ struct MusicLibraryView: View {
         guard key == snapshotKey(for: targetSection) else { return }
 
         let input = MusicLibrarySnapshotBuildInput(
+            section: targetSection,
             tracks: baseTracks,
             searchText: key.searchText,
             sortMode: key.sortMode,
+            sortOrder: key.sortOrder,
             filterMode: key.filterMode
         )
         let snapshot = await Task.detached(priority: .userInitiated) {
@@ -647,7 +742,7 @@ struct MusicLibraryView: View {
     private var musicControls: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
-                MusicFilterModeCapsules(selection: $filterMode)
+                MusicFilterModeCapsules(selection: $filterMode, modes: availableFilterModes)
 
                 Spacer(minLength: 18)
 
@@ -655,7 +750,7 @@ struct MusicLibraryView: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                MusicFilterModeCapsules(selection: $filterMode)
+                MusicFilterModeCapsules(selection: $filterMode, modes: availableFilterModes)
 
                 HStack {
                     Spacer(minLength: 0)
@@ -670,12 +765,12 @@ struct MusicLibraryView: View {
     }
 
     private var sortModeMenu: some View {
-        GlassMenuButton(title: sortMode.title, width: 156) {
-            ForEach(MusicSortMode.allCases) { mode in
+        GlassMenuButton(title: "\(sortMode.title(for: section)) · \(sortOrder.titleSuffix)") {
+            ForEach(availableSortModes) { mode in
                 Button {
-                    sortMode = mode
+                    selectSortMode(mode)
                 } label: {
-                    Label(mode.title, systemImage: sortMode == mode ? "checkmark" : "circle")
+                    Label(mode.title(for: section), systemImage: sortMode == mode ? sortOrder.systemImage : "circle")
                 }
             }
         }
@@ -686,6 +781,20 @@ struct MusicLibraryView: View {
             tracks: tracks,
             suggestedName: suggestedName
         )
+    }
+
+    private func importM3UPlaylist() {
+        let panel = NSOpenPanel()
+        panel.title = "导入 M3U 歌单"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = ["m3u", "m3u8"].compactMap { UTType(filenameExtension: $0) }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let baseName = url.deletingPathExtension().lastPathComponent
+        let count = appState.importMusicPlaylist(fromM3U: url, name: baseName.isEmpty ? "导入歌单" : baseName)
+        if count > 0 {
+            appState.alert = AppAlert(title: "导入完成", message: "已从 M3U 创建歌单，匹配到 \(count) 首库内歌曲。")
+        }
     }
 
     private func refreshActivePlaylistDrilldown() {
@@ -720,6 +829,7 @@ struct MusicLibraryView: View {
         if reset {
             didLoadViewState = false
             sortMode = .title
+            sortOrder = .primary
             filterMode = .all
         }
         guard !didLoadViewState else { return }
@@ -727,26 +837,73 @@ struct MusicLibraryView: View {
         let stateKeyPrefix = stateKeyPrefix(for: targetSection)
         sortMode = UserDefaults.standard.string(forKey: "\(stateKeyPrefix).sort")
             .flatMap(MusicSortMode.init(rawValue:)) ?? .title
+        if !availableSortModes(for: targetSection).contains(sortMode) {
+            sortMode = .title
+        }
+        sortOrder = UserDefaults.standard.string(forKey: "\(stateKeyPrefix).sortOrder")
+            .flatMap(MusicSortOrder.init(rawValue:)) ?? .primary
         filterMode = UserDefaults.standard.string(forKey: "\(stateKeyPrefix).filter")
             .flatMap(MusicFilterMode.init(rawValue:)) ?? .all
+        if !availableFilterModes(for: targetSection).contains(filterMode) {
+            filterMode = .all
+        }
     }
 
     private func saveViewState(for targetSection: MusicLibrarySection) {
         guard didLoadViewState else { return }
         let stateKeyPrefix = stateKeyPrefix(for: targetSection)
         UserDefaults.standard.set(sortMode.rawValue, forKey: "\(stateKeyPrefix).sort")
+        UserDefaults.standard.set(sortOrder.rawValue, forKey: "\(stateKeyPrefix).sortOrder")
         UserDefaults.standard.set(filterMode.rawValue, forKey: "\(stateKeyPrefix).filter")
+    }
+
+    private var availableSortModes: [MusicSortMode] {
+        availableSortModes(for: section)
+    }
+
+    private func availableSortModes(for targetSection: MusicLibrarySection) -> [MusicSortMode] {
+        switch targetSection {
+        case .artists:
+            return [.title, .workCount, .mostPlayed]
+        case .albums:
+            return [.title, .artist, .recent, .mostPlayed]
+        case .songs, .recent, .favorites, .unmatched:
+            return [.title, .artist, .album, .mostPlayed, .recent, .duration]
+        case .playlists:
+            return [.title]
+        }
+    }
+
+    private var availableFilterModes: [MusicFilterMode] {
+        availableFilterModes(for: section)
+    }
+
+    private func availableFilterModes(for targetSection: MusicLibrarySection) -> [MusicFilterMode] {
+        targetSection == .artists ? [.all] : MusicFilterMode.allCases
+    }
+
+    private var showsResetAllPlayCountAction: Bool {
+        sortMode == .mostPlayed && (section == .songs || section == .albums || section == .artists)
+    }
+
+    private func selectSortMode(_ mode: MusicSortMode) {
+        if sortMode == mode {
+            sortOrder.toggle()
+        } else {
+            sortMode = mode
+            sortOrder = .primary
+        }
     }
 
     private var subtitle: String {
         switch section {
-        case .songs: return "这里是你所有的歌曲。"
-        case .albums: return "歌曲按专辑分组，方便整张听。"
-        case .artists: return "歌曲按歌手分组。"
-        case .playlists: return "管理你的歌单"
-        case .recent: return "你最近听过的歌。"
-        case .favorites: return "你点过红心的歌都在这里。"
-        case .unmatched: return "缺少歌手或专辑信息、没匹配上封面歌词的歌。"
+        case .songs: return "浏览音乐库中的全部歌曲。"
+        case .albums: return "按专辑浏览歌曲。"
+        case .artists: return "按艺术家浏览歌曲。"
+        case .playlists: return "管理手动歌单与智能歌单。"
+        case .recent: return "查看最近播放的歌曲。"
+        case .favorites: return "查看已喜欢的歌曲。"
+        case .unmatched: return "查看信息或封面尚未补全的歌曲。"
         }
     }
 
@@ -795,34 +952,39 @@ struct MusicLibraryView: View {
                     MusicSongListView(
                         rows: displayedTrackRows,
                         showsHistoryAction: section == .recent,
+                        showsResetPlayCountAction: sortMode == .mostPlayed,
                         onSearchMetadata: { metadataItem = $0 },
                         onCreatePlaylist: { playlistCreationRequest = $0 }
                     )
                 }
             case .albums:
                 if displayedAlbumGroups.isEmpty {
-                    EmptyStateView(title: "暂无专辑", systemImage: "square.stack", message: "扫描音乐目录后，MediaLIB 会按专辑字段自动聚合。")
+                    EmptyStateView(title: "暂无专辑", systemImage: "square.stack", message: "扫描音乐目录后，歌曲会按专辑信息归类。")
                         .staticSurfaceBackground(cornerRadius: 22)
                 } else {
-                    ProgressiveMusicAlbumGrid(albums: displayedAlbumGroups) { album in
+                    ProgressiveMusicAlbumGrid(albums: displayedAlbumGroups, showsResetPlayCountAction: sortMode == .mostPlayed) { album in
                         drilldown = .album(album)
                     } onPlay: { album in
                         appState.replaceMusicQueueAndPlay(album.tracks)
                     } onCreatePlaylist: { request in
                         playlistCreationRequest = request
+                    } onResetPlayCounts: { album in
+                        appState.resetMusicPlayCounts(album.tracks)
                     }
                 }
             case .artists:
                 if displayedArtistGroups.isEmpty {
-                    EmptyStateView(title: "暂无艺术家", systemImage: "person.2", message: "扫描音乐目录后，MediaLIB 会按艺术家字段自动聚合。")
+                    EmptyStateView(title: "暂无艺术家", systemImage: "person.2", message: "扫描音乐目录后，歌曲会按艺术家信息归类。")
                         .staticSurfaceBackground(cornerRadius: 22)
                 } else {
-                    ProgressiveMusicArtistList(artists: displayedArtistGroups) { artist in
+                    ProgressiveMusicArtistList(artists: displayedArtistGroups, showsResetPlayCountAction: sortMode == .mostPlayed) { artist in
                         drilldown = .artist(artist)
                     } onPlay: { artist in
                         appState.replaceMusicQueueAndPlay(artist.tracks)
                     } onCreatePlaylist: { request in
                         playlistCreationRequest = request
+                    } onResetPlayCounts: { artist in
+                        appState.resetMusicPlayCounts(artist.tracks)
                     }
                 }
             case .playlists:
@@ -852,7 +1014,7 @@ struct MusicLibraryView: View {
         let playlists = displayPlaylists
         guard !query.isEmpty else { return playlists }
         return playlists.filter { playlist in
-            playlist.name.localizedCaseInsensitiveContains(query)
+            PinyinSearchMatcher.matches(query: query, in: [playlist.name])
         }
     }
 
@@ -876,31 +1038,56 @@ private struct MusicSongListView: View {
     @EnvironmentObject private var appState: AppState
     let rows: [MusicTrackRowModel]
     var showsHistoryAction: Bool = false
+    var showsResetPlayCountAction: Bool = false
+    // 设置后：在该列表里播放某首歌会把队列替换为这些歌曲（用于专辑/艺术家详情页）。
+    var queueContext: [MediaItem]? = nil
     let onSearchMetadata: (MediaItem) -> Void
     let onCreatePlaylist: (MusicPlaylistCreationRequest) -> Void
 
     var body: some View {
-        // 用 ScrollView + LazyVStack 取代原生 List：彻底避开 NSTableView 整行蓝色高亮，
-        // 右键能精确命中单首歌。LazyVStack 仍懒加载行，支持上千首歌。
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                MusicSongHeader()
-                    .padding(.horizontal, 6)
-                    .padding(.bottom, 4)
+        ScrollViewReader { proxy in
+            // 用 ScrollView + LazyVStack 取代原生 List：彻底避开 NSTableView 整行蓝色高亮，
+            // 右键能精确命中单首歌。LazyVStack 仍懒加载行，支持上千首歌。
+            // 列名行冻结：用 LazyVStack 原生的 pinnedViews(.sectionHeaders) 把 Section 的 header 钉在顶部，
+            // 滚动行从它下方穿过（header 加与卡片同色的 cleanPanelFill 底以干净遮挡）。这是最稳的固定表头方式，
+            // ScrollView 仍是 reader 的唯一子视图、照常撑满高度，不会出现之前 VStack / safeAreaInset 的高度异常。
+            ScrollView {
+                LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    // 锚点位于吸顶 Section 之前，回顶后表头和真正第一行都会回到初始位置。
+                    Color.clear.frame(height: 0).id("song-list-top")
 
-                ForEach(rows) { row in
-                    MusicSongRow(
-                        row: row,
-                        showsHistoryAction: showsHistoryAction,
-                        onSearchMetadata: onSearchMetadata,
-                        onCreatePlaylist: onCreatePlaylist
-                    )
-                    .id(row.id)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
+                    Section {
+                        ForEach(rows) { row in
+                            MusicSongRow(
+                                row: row,
+                                showsHistoryAction: showsHistoryAction,
+                                showsResetPlayCountAction: showsResetPlayCountAction,
+                                queueContext: queueContext,
+                                onSearchMetadata: onSearchMetadata,
+                                onCreatePlaylist: onCreatePlaylist
+                            )
+                            .id(row.id)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                        }
+
+                        Color.clear.frame(height: listBottomInset)
+                    } header: {
+                        // 点击列名行即回到顶部（取代原右下角的返回顶部按钮）。
+                        MusicSongHeader()
+                            .padding(.horizontal, 6)
+                            .padding(.top, 2)
+                            .padding(.bottom, 4)
+                            .background(AppColors.cleanPanelFill)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                withAnimation(AppMotion.fast) {
+                                    proxy.scrollTo("song-list-top", anchor: .top)
+                                }
+                            }
+                            .help("点击列名行回到顶部")
+                    }
                 }
-
-                Color.clear.frame(height: listBottomInset)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -998,6 +1185,7 @@ private enum MusicCollectionDrilldown: Identifiable {
 }
 
 private struct MusicCollectionTrackList: View {
+    @EnvironmentObject private var appState: AppState
     let collection: MusicCollectionDrilldown
     let rows: [MusicTrackRowModel]
     let onBack: () -> Void
@@ -1009,8 +1197,21 @@ private struct MusicCollectionTrackList: View {
     let onRemoveFromPlaylist: (MediaItem, MusicPlaylist) -> Void
     let onReplacePlaylistItems: (MusicPlaylist, [MediaItem]) -> Void
 
+    private func exportM3U(_ playlist: MusicPlaylist) {
+        let panel = NSSavePanel()
+        panel.title = "导出歌单为 M3U"
+        panel.nameFieldStringValue = "\(playlist.name).m3u"
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try appState.musicPlaylistM3UContent(playlist).write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            appState.alert = AppAlert(title: "导出失败", message: error.localizedDescription)
+        }
+    }
+
     var body: some View {
-        let tracks = rows.map(\.track)
+        let tracks = collection.tracks
         let playlist = collection.playlist
         let isFavoritePlaylist = playlist.map(MusicFavoritePlaylist.isFavorite) ?? false
 
@@ -1039,6 +1240,16 @@ private struct MusicCollectionTrackList: View {
 
                 Spacer(minLength: 16)
 
+                if let playlist {
+                    Button {
+                        exportM3U(playlist)
+                    } label: {
+                        Label("导出 M3U", systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
+                    .disabled(tracks.isEmpty)
+                }
+
                 if let playlist, !isFavoritePlaylist {
                     Button {
                         onRenamePlaylist(playlist)
@@ -1051,6 +1262,7 @@ private struct MusicCollectionTrackList: View {
                         onDeletePlaylist(playlist)
                     } label: {
                         Label("删除", systemImage: "trash")
+                            .foregroundStyle(.red)
                     }
                     .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
                 }
@@ -1093,6 +1305,9 @@ private struct MusicCollectionTrackList: View {
             } else {
                 MusicSongListView(
                     rows: rows,
+                    showsResetPlayCountAction: false,
+                    // 专辑/艺术家详情页：点歌播放时把队列替换为该集合的全部歌曲。
+                    queueContext: tracks,
                     onSearchMetadata: onSearchMetadata,
                     onCreatePlaylist: onCreatePlaylist
                 )
@@ -1126,7 +1341,7 @@ private struct MusicPlaylistTrackListView: View {
 
     @State private var orderedRows: [MusicTrackRowModel] = []
     @State private var draggedRowID: String?
-    @State private var rowsSignature = ""
+    @State private var rowsSignature: [String] = []
 
     var body: some View {
         List {
@@ -1162,7 +1377,7 @@ private struct MusicPlaylistTrackListView: View {
         .onAppear {
             syncRowsIfNeeded(force: true)
         }
-        .onChange(of: rows.map(\.id).joined(separator: "|")) { _ in
+        .onChange(of: rowIDs(from: rows)) { _ in
             syncRowsIfNeeded(force: false)
         }
         .onDisappear {
@@ -1208,7 +1423,7 @@ private struct MusicPlaylistTrackListView: View {
     }
 
     private func syncRowsIfNeeded(force: Bool) {
-        let signature = rows.map(\.id).joined(separator: "|")
+        let signature = rowIDs(from: rows)
         guard force || rowsSignature != signature else { return }
         rowsSignature = signature
         orderedRows = rows
@@ -1216,7 +1431,11 @@ private struct MusicPlaylistTrackListView: View {
 
     private func commitOrder() {
         onCommitOrder(orderedRows.map(\.track))
-        rowsSignature = orderedRows.map(\.id).joined(separator: "|")
+        rowsSignature = rowIDs(from: orderedRows)
+    }
+
+    private func rowIDs(from rows: [MusicTrackRowModel]) -> [String] {
+        rows.map(\.id)
     }
 }
 
@@ -1259,16 +1478,45 @@ private enum MusicSortMode: String, CaseIterable, Identifiable, Sendable {
     case album
     case recent
     case duration
+    case mostPlayed
+    case workCount
 
     var id: String { rawValue }
-    var title: String {
+    func title(for section: MusicLibrarySection) -> String {
+        if section == .artists {
+            switch self {
+            case .title: return "按名称"
+            case .workCount: return "按作品数量"
+            case .mostPlayed: return "按播放次数"
+            default: break
+            }
+        }
         switch self {
-        case .title: return "歌曲名"
+        case .title: return section == .albums ? "专辑名" : "歌曲名"
         case .artist: return "艺术家"
         case .album: return "专辑"
         case .recent: return "最近更新"
         case .duration: return "时长"
+        case .mostPlayed: return "最多播放"
+        case .workCount: return "作品数量"
         }
+    }
+}
+
+private enum MusicSortOrder: String, Sendable {
+    case primary
+    case reverse
+
+    mutating func toggle() {
+        self = self == .primary ? .reverse : .primary
+    }
+
+    var titleSuffix: String {
+        self == .primary ? "正序" : "倒序"
+    }
+
+    var systemImage: String {
+        self == .primary ? "arrow.down" : "arrow.up"
     }
 }
 
@@ -1291,10 +1539,11 @@ private enum MusicFilterMode: String, CaseIterable, Identifiable, Sendable {
 
 private struct MusicFilterModeCapsules: View {
     @Binding var selection: MusicFilterMode
+    let modes: [MusicFilterMode]
 
     var body: some View {
         HStack(spacing: 7) {
-            ForEach(MusicFilterMode.allCases) { mode in
+            ForEach(modes) { mode in
                 Button {
                     withAnimation(AppMotion.fast) {
                         selection = mode
@@ -1350,10 +1599,21 @@ private struct MusicSongRow: View {
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
     let row: MusicTrackRowModel
     var showsHistoryAction: Bool = false
+    var showsResetPlayCountAction: Bool = false
+    var queueContext: [MediaItem]? = nil
     let onSearchMetadata: (MediaItem) -> Void
     let onCreatePlaylist: (MusicPlaylistCreationRequest) -> Void
     var onRemoveFromPlaylist: ((MediaItem) -> Void)?
     @State private var isHovering = false
+
+    // 在专辑/艺术家详情页播放：把队列替换为该集合的歌曲，从点击的这首开始；否则走默认整库队列。
+    private func playRow() {
+        if let queueContext, !queueContext.isEmpty {
+            appState.replaceMusicQueueAndPlay(queueContext, startingAt: row.track)
+        } else {
+            appState.play(row.track)
+        }
+    }
 
     var body: some View {
         let hoverActive = isHovering && !suppressHoverDuringScroll
@@ -1476,10 +1736,11 @@ private struct MusicSongRow: View {
             }
         }
         .onTapGesture(count: 2) {
-            appState.play(row.track)
+            playRow()
         }
         .contextMenu {
-            Button("播放") { appState.play(row.track) }
+            Button("播放") { playRow() }
+            Button("开始电台") { appState.startRadio(seed: row.track) }
             Button("加入播放队列") { appState.addToMusicQueue(row.track) }
             Button("下一首播放") { appState.playNextInMusicQueue(row.track) }
             MusicPlaylistActionsMenu(
@@ -1488,7 +1749,10 @@ private struct MusicSongRow: View {
                 onCreateNew: onCreatePlaylist
             )
             if showsHistoryAction && row.track.hasPlaybackTrace {
-                Button("删除播放记录") { appState.clearPlaybackHistory(row.track) }
+                Button("删除播放记录", role: .destructive) { appState.clearPlaybackHistory(row.track) }
+            }
+            if showsResetPlayCountAction, (row.track.playCount ?? 0) > 0 {
+                Button("重置播放次数") { appState.resetMusicPlayCount(row.track) }
             }
             if let onRemoveFromPlaylist {
                 Button("从歌单移出", role: .destructive) {
@@ -1538,9 +1802,11 @@ private struct MusicAlbumCard: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
     let album: MusicAlbumGroup
+    let showsResetPlayCountAction: Bool
     let onOpen: () -> Void
     let onPlay: () -> Void
     let onCreatePlaylist: (MusicPlaylistCreationRequest) -> Void
+    let onResetPlayCounts: () -> Void
     @State private var isHovering = false
     private static let coverCacheTargetSize = CGSize(width: 180, height: 180)
 
@@ -1555,7 +1821,7 @@ private struct MusicAlbumCard: View {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .strokeBorder(.white.opacity(hoverActive ? 0.58 : 0.28), lineWidth: hoverActive ? 1.1 : 0.8)
                 }
-                .pointerInspectTilt(enabled: true, cornerRadius: 16)
+                .pointerInspectTilt(enabled: !suppressHoverDuringScroll, cornerRadius: 16)
 
             MarqueeText(text: album.key.title, font: .headline)
                 .frame(height: 20)
@@ -1593,6 +1859,9 @@ private struct MusicAlbumCard: View {
         .contextMenu {
             Button("查看歌曲") { onOpen() }
             Button("播放") { onPlay() }
+            if showsResetPlayCountAction, album.playCount > 0 {
+                Button("重置播放次数") { onResetPlayCounts() }
+            }
             MusicPlaylistActionsMenu(
                 tracks: album.tracks,
                 suggestedName: album.key.title,
@@ -1607,9 +1876,11 @@ private struct MusicArtistRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
     let artist: MusicArtistGroup
+    let showsResetPlayCountAction: Bool
     let onOpen: () -> Void
     let onPlay: () -> Void
     let onCreatePlaylist: (MusicPlaylistCreationRequest) -> Void
+    let onResetPlayCounts: () -> Void
     @State private var isHovering = false
 
     var body: some View {
@@ -1672,6 +1943,9 @@ private struct MusicArtistRow: View {
         .contextMenu {
             Button("查看歌曲") { onOpen() }
             Button("播放") { onPlay() }
+            if showsResetPlayCountAction, artist.playCount > 0 {
+                Button("重置播放次数") { onResetPlayCounts() }
+            }
             MusicPlaylistActionsMenu(
                 tracks: artist.tracks,
                 suggestedName: artist.name,
@@ -1684,9 +1958,11 @@ private struct MusicArtistRow: View {
 private struct ProgressiveMusicAlbumGrid: View {
     @EnvironmentObject private var appState: AppState
     let albums: [MusicAlbumGroup]
+    let showsResetPlayCountAction: Bool
     let onOpen: (MusicAlbumGroup) -> Void
     let onPlay: (MusicAlbumGroup) -> Void
     let onCreatePlaylist: (MusicPlaylistCreationRequest) -> Void
+    let onResetPlayCounts: (MusicAlbumGroup) -> Void
 
     var body: some View {
         GeometryReader { proxy in
@@ -1695,16 +1971,18 @@ private struct ProgressiveMusicAlbumGrid: View {
 
             List {
                 ForEach(0..<rows, id: \.self) { rowIndex in
-                    HStack(alignment: .top, spacing: 16) {
+                    HStack(alignment: .top, spacing: 20) {
                         ForEach(0..<columns, id: \.self) { columnIndex in
                             let index = rowIndex * columns + columnIndex
                             if index < albums.count {
                                 let album = albums[index]
                                 MusicAlbumCard(
                                     album: album,
+                                    showsResetPlayCountAction: showsResetPlayCountAction,
                                     onOpen: { onOpen(album) },
                                     onPlay: { onPlay(album) },
-                                    onCreatePlaylist: onCreatePlaylist
+                                    onCreatePlaylist: onCreatePlaylist,
+                                    onResetPlayCounts: { onResetPlayCounts(album) }
                                 )
                                 .frame(maxWidth: .infinity, alignment: .top)
                             } else {
@@ -1713,7 +1991,7 @@ private struct ProgressiveMusicAlbumGrid: View {
                             }
                         }
                     }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 16, trailing: 0))
+                    .listRowInsets(EdgeInsets(top: 6, leading: 0, bottom: 22, trailing: 0))
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                 }
@@ -1731,6 +2009,7 @@ private struct ProgressiveMusicAlbumGrid: View {
                 transaction.animation = nil
             }
             .bleedingListCard()
+            .environment(\.suppressPointerHoverDuringScroll, true)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .suppressHoverEffectsDuringScroll()
@@ -1738,7 +2017,7 @@ private struct ProgressiveMusicAlbumGrid: View {
     }
 
     private func columnCount(for width: CGFloat) -> Int {
-        let spacing: CGFloat = 16
+        let spacing: CGFloat = 20
         let minimumCardWidth: CGFloat = 220
         let availableWidth = max(width - 20, minimumCardWidth)
         return max(1, Int((availableWidth + spacing) / (minimumCardWidth + spacing)))
@@ -1757,18 +2036,22 @@ private struct ProgressiveMusicAlbumGrid: View {
 private struct ProgressiveMusicArtistList: View {
     @EnvironmentObject private var appState: AppState
     let artists: [MusicArtistGroup]
+    let showsResetPlayCountAction: Bool
     let onOpen: (MusicArtistGroup) -> Void
     let onPlay: (MusicArtistGroup) -> Void
     let onCreatePlaylist: (MusicPlaylistCreationRequest) -> Void
+    let onResetPlayCounts: (MusicArtistGroup) -> Void
 
     var body: some View {
         List {
             ForEach(artists) { artist in
                 MusicArtistRow(
                     artist: artist,
+                    showsResetPlayCountAction: showsResetPlayCountAction,
                     onOpen: { onOpen(artist) },
                     onPlay: { onPlay(artist) },
-                    onCreatePlaylist: onCreatePlaylist
+                    onCreatePlaylist: onCreatePlaylist,
+                    onResetPlayCounts: { onResetPlayCounts(artist) }
                 )
                 .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 10, trailing: 0))
                 .listRowBackground(Color.clear)
@@ -1929,6 +2212,8 @@ private struct MusicAlbumGroup: Identifiable, Sendable {
 
     var id: String { "\(key.artist)-\(key.title)" }
     var coverPath: String? { tracks.first?.posterPath }
+    var playCount: Int { tracks.reduce(0) { $0 + $1.playCountValue } }
+    var latestUpdatedAt: Date { tracks.map(\.updatedAt).max() ?? .distantPast }
 }
 
 private struct MusicArtistGroup: Identifiable, Sendable {
@@ -1936,7 +2221,101 @@ private struct MusicArtistGroup: Identifiable, Sendable {
     let tracks: [MediaItem]
 
     var id: String { name }
+    var playCount: Int { tracks.reduce(0) { $0 + $1.playCountValue } }
     var albumCount: Int {
         Set(tracks.map { $0.album?.isEmpty == false ? $0.album! : "未知专辑" }).count
+    }
+}
+
+private extension MediaItem {
+    var playCountValue: Int {
+        playCount ?? 0
+    }
+}
+
+// MARK: - 音乐智能歌单详情（复用 MusicSongListView，曲目按规则实时求值）
+
+struct MusicSmartPlaylistDetailView: View {
+    @EnvironmentObject private var appState: AppState
+    let playlist: MusicSmartPlaylist
+    let onEdit: () -> Void
+
+    @State private var metadataItem: MediaItem?
+    @State private var playlistCreationRequest: MusicPlaylistCreationRequest?
+
+    private var tracks: [MediaItem] {
+        appState.musicTracks(inSmart: playlist)
+    }
+
+    var body: some View {
+        let tracks = tracks
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
+                PageHeader(
+                    title: playlist.name,
+                    subtitle: "\(tracks.count) 首 · \(playlist.ruleSummary)",
+                    systemImage: "music.note.list"
+                ) {
+                    Button {
+                        appState.replaceMusicQueueAndPlay(tracks)
+                    } label: {
+                        Label("播放全部", systemImage: "play.fill")
+                    }
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 13, horizontalPadding: 12, minHeight: 34, prominent: true))
+                    .disabled(tracks.isEmpty)
+
+                    Button {
+                        onEdit()
+                    } label: {
+                        Label("编辑规则", systemImage: "slider.horizontal.3")
+                    }
+                }
+            }
+            .padding(.horizontal, AppSpacing.pageHorizontal)
+            .padding(.top, AppSpacing.pageVertical)
+            .padding(.bottom, AppSpacing.headerToControls)
+
+            content(tracks: tracks)
+                .padding(.horizontal, AppSpacing.pageHorizontal)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(AppPageBackground())
+        .sheet(item: $metadataItem) { item in
+            MetadataSearchView(item: item)
+                .environmentObject(appState)
+        }
+        .sheet(item: $playlistCreationRequest) { request in
+            MusicPlaylistCreationSheet(
+                request: request,
+                onCreate: { name in
+                    appState.createMusicPlaylist(name: name, tracks: request.tracks)
+                    playlistCreationRequest = nil
+                },
+                onCancel: {
+                    playlistCreationRequest = nil
+                }
+            )
+            .environmentObject(appState)
+        }
+    }
+
+    @ViewBuilder
+    private func content(tracks: [MediaItem]) -> some View {
+        if tracks.isEmpty {
+            EmptyStateView(
+                title: "暂无符合规则的歌曲",
+                systemImage: "music.note.list",
+                message: "调整筛选或加入时间规则，或先扫描音乐媒体源。"
+            )
+            .staticSurfaceBackground(cornerRadius: 22)
+        } else {
+            MusicSongListView(
+                rows: MusicLibrarySnapshotBuilder.rowModels(from: tracks),
+                queueContext: tracks,
+                onSearchMetadata: { metadataItem = $0 },
+                onCreatePlaylist: { playlistCreationRequest = $0 }
+            )
+        }
     }
 }

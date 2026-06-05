@@ -2,7 +2,7 @@ import AppKit
 import MediaLibCore
 import SwiftUI
 
-/// 单行标题：过长时不换行，尾部（即将超出的文字）渐隐；鼠标悬停时左右滚动显示完整标题。
+/// 单行标题：过长时不换行；鼠标悬停时整段文字循环滚动（首尾相接、无缝循环），不再左右往返。
 struct MarqueeText: View {
     let text: String
     var font: Font = .headline
@@ -14,6 +14,7 @@ struct MarqueeText: View {
     @State private var offset: CGFloat = 0
     @State private var hovering = false
 
+    private let gap: CGFloat = 46
     private var overflow: CGFloat { max(textWidth - containerWidth, 0) }
     private var hasOverflow: Bool { overflow > 1 }
 
@@ -21,70 +22,106 @@ struct MarqueeText: View {
         GeometryReader { proxy in
             let width = max(proxy.size.width, 1)
 
-            Text(text)
-                .font(font)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .offset(x: offset)
-                .frame(width: width, alignment: alignment)
-                .clipped()
-                .mask(maskGradient)
-                .overlay(alignment: .topLeading) {
-                    Text(text)
-                        .font(font)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .hidden()
-                        .background(
-                            GeometryReader { textProxy in
-                                Color.clear
-                                    .onAppear { textWidth = textProxy.size.width }
-                                    .onChange(of: textProxy.size.width) { textWidth = $0 }
-                            }
-                        )
-                        .allowsHitTesting(false)
+            ZStack(alignment: .leading) {
+                // 隐藏副本：测量整段文字的真实宽度。
+                measuredText
+                    .hidden()
+
+                if hovering, hasOverflow, !reduceMotion, !suppressHoverDuringScroll {
+                    // 循环滚动：两份文字首尾相接，整体向左平移一个 (文字宽 + 间隙)，
+                    // 到头瞬间复位再继续，形成无缝循环。
+                    HStack(spacing: gap) {
+                        measuredText
+                        measuredText
+                    }
+                    .offset(x: offset)
+                } else {
+                    measuredText
+                        .frame(width: width, alignment: alignment)
                 }
-                .contentShape(Rectangle())
-                .onAppear {
-                    containerWidth = width
-                }
-                .onChange(of: width) { newValue in
-                    containerWidth = newValue
-                    offset = 0
-                }
+            }
+            .frame(width: width, alignment: .leading)
+            .clipped()
+            .mask(maskGradient)
+            .contentShape(Rectangle())
+            .onAppear { containerWidth = width }
+            .onChange(of: width) { newValue in
+                containerWidth = newValue
+                restartIfNeeded()
+            }
         }
         .clipped()
         .onHover { isHovering in
-            guard hasOverflow, !reduceMotion, !suppressHoverDuringScroll else { return }
-            hovering = isHovering
+            guard hasOverflow, !reduceMotion, !suppressHoverDuringScroll else {
+                stopLoop()
+                return
+            }
             if isHovering {
-                withAnimation(.easeInOut(duration: Double(overflow) / 45 + 0.35)) {
-                    offset = -overflow
-                }
+                startLoop()
             } else {
-                withAnimation(AppMotion.hover) {
-                    offset = 0
-                }
+                stopLoop()
             }
         }
         .onChange(of: text) { _ in
+            stopLoop()
+        }
+        .onChange(of: suppressHoverDuringScroll) { suppressing in
+            if suppressing { stopLoop() }
+        }
+    }
+
+    private var measuredText: some View {
+        Text(text)
+            .font(font)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .background(
+                GeometryReader { textProxy in
+                    Color.clear
+                        .onAppear { textWidth = textProxy.size.width }
+                        .onChange(of: textProxy.size.width) { textWidth = $0 }
+                }
+            )
+            .allowsHitTesting(false)
+    }
+
+    private func startLoop() {
+        hovering = true
+        offset = 0
+        let distance = textWidth + gap
+        guard distance > 0 else { return }
+        let speed: Double = 40 // 点/秒，匀速循环
+        withAnimation(.linear(duration: Double(distance) / speed).repeatForever(autoreverses: false)) {
+            offset = -distance
+        }
+    }
+
+    private func stopLoop() {
+        guard hovering || offset != 0 else { return }
+        hovering = false
+        withAnimation(.easeOut(duration: 0.22)) {
             offset = 0
-            hovering = false
+        }
+    }
+
+    private func restartIfNeeded() {
+        if hovering {
+            startLoop()
+        } else {
+            offset = 0
         }
     }
 
     @ViewBuilder
     private var maskGradient: some View {
         if hasOverflow {
-            let edge: CGFloat = 0.07
-            let leadingClear = offset < -1
-            let trailingClear = offset > -overflow + 1
+            let edge: CGFloat = 0.06
             LinearGradient(
                 stops: [
-                    .init(color: leadingClear ? .clear : .black, location: 0),
+                    .init(color: hovering ? .clear : .black, location: 0),
                     .init(color: .black, location: edge),
                     .init(color: .black, location: 1 - edge),
-                    .init(color: trailingClear ? .clear : .black, location: 1)
+                    .init(color: .clear, location: 1)
                 ],
                 startPoint: .leading,
                 endPoint: .trailing
@@ -94,14 +131,12 @@ struct MarqueeText: View {
         }
     }
 }
-
-// P1：海报墙改为原生 List 虚拟化（grid-rows-in-List），替代原 LazyVGrid+手动分批方案。
-// 原方案 LazyVGrid 嵌在外层 ScrollView 内不回收，长滚动累积视图与缩略图；List 真正回收可见行。
-// 列数按宽度计算，单元格上限 posterMaxWidth、左对齐 + 尾部 Spacer，视觉等价于原 adaptive 网格。
 struct PosterGridList<Leading: View>: View {
     @EnvironmentObject private var appState: AppState
     let items: [MediaItem]
     var bottomInset: CGFloat = 16
+    var showsDeletePlaybackHistory: Bool = false
+    var selectionEnabled: Bool = false
     @ViewBuilder var leading: () -> Leading
 
     private let interItemSpacing: CGFloat = 20
@@ -133,7 +168,7 @@ struct PosterGridList<Leading: View>: View {
 
                         LazyVGrid(columns: gridItems, alignment: .leading, spacing: rowSpacing) {
                             ForEach(items) { item in
-                                PosterCardView(item: item, cacheTargetSize: cacheSize)
+                                PosterCardView(item: item, cacheTargetSize: cacheSize, showsDeletePlaybackHistory: showsDeletePlaybackHistory, selectionEnabled: selectionEnabled)
                             }
                         }
                         .padding(.horizontal, AppSpacing.pageHorizontal)
@@ -152,8 +187,7 @@ struct PosterGridList<Leading: View>: View {
                         Image(systemName: "arrow.up")
                             .frame(width: 38, height: 38)
                     }
-                    .buttonStyle(.plain)
-                    .liquidGlass(cornerRadius: 19)
+                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 19, horizontalPadding: 0, minHeight: 38, thickness: 1.04))
                     .padding(.trailing, 22)
                     .padding(.bottom, max(bottomInset - 4, 18))
                     .help("返回顶部")
@@ -182,7 +216,7 @@ struct PosterGridList<Leading: View>: View {
     }
 }
 
-private struct PosterBadgeFlowLayout: Layout {
+struct PosterBadgeFlowLayout: Layout {
     var horizontalSpacing: CGFloat = 5
     var verticalSpacing: CGFloat = 4
 
@@ -287,7 +321,12 @@ struct PosterCardView: View {
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
     let item: MediaItem
     var cacheTargetSize: CGSize? = nil
+    var showsDeletePlaybackHistory: Bool = false
+    var selectionEnabled: Bool = false
     @State private var isHovering = false
+
+    private var isSelectionActive: Bool { selectionEnabled && appState.isSelectionModeActive }
+    private var isSelected: Bool { appState.selectedItemIDs.contains(item.id) }
 
     var body: some View {
         // 统一裁剪比例：视频海报 2:3，音乐 1:1。海报以 fill 模式裁剪到固定比例框，
@@ -333,7 +372,7 @@ struct PosterCardView: View {
                     .padding(8)
                 }
 
-                if hoverActive {
+                if hoverActive && !isSelectionActive {
                     VStack(alignment: .leading, spacing: 7) {
                         RatingStars(value: item.rating, onRate: { rating in
                             appState.updateRating(item, rating: rating)
@@ -352,17 +391,35 @@ struct PosterCardView: View {
                     .onTapGesture {}
                 }
             }
-            .pointerInspectTilt(enabled: usesInspectHover, cornerRadius: 10)
+            .overlay(alignment: .topTrailing) {
+                if isSelectionActive {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 22, weight: .semibold))
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, isSelected ? AppColors.selectedGlassTint : .black.opacity(0.35))
+                        .background(Circle().fill(.black.opacity(0.28)).blur(radius: 2))
+                        .padding(8)
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .overlay {
+                if isSelectionActive && isSelected {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(AppColors.selectedGlassTint, lineWidth: 2.5)
+                }
+            }
+            .pointerInspectTilt(enabled: usesInspectHover && !isSelectionActive, cornerRadius: 10)
+            .scaleEffect(hoverActive && !reduceMotion ? 1.018 : 1)
             .contentShape(Rectangle())
             .onTapGesture {
-                appState.selectedItem = item
+                handlePrimaryTap()
             }
 
             MarqueeText(text: item.cardTitle, font: .headline)
                 .frame(height: 20)
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    appState.selectedItem = item
+                    handlePrimaryTap()
                 }
         }
         .padding(10)
@@ -389,17 +446,28 @@ struct PosterCardView: View {
                 .disabled(item.filePath == nil && appState.children(for: item).isEmpty)
             }
 
-            if item.hasPlaybackTrace {
-                Button("删除播放记录") {
+            if item.type == .music, item.filePath != nil {
+                Button("开始电台") {
+                    appState.startRadio(seed: item)
+                }
+            }
+
+            // 播放痕迹页和已解锁保险库允许直接清除当前条目的播放记录。
+            if showsDeletePlaybackHistory, item.hasPlaybackTrace {
+                Button("删除播放记录", role: .destructive) {
                     appState.clearPlaybackHistory(item)
                 }
             }
 
-            Button(item.watched ? "标记为未观看" : "标记为已观看") {
-                appState.markWatched(item, watched: !item.watched)
+            // #10 标记已观看：系列海报标记整个系列（含系列本身），单片只标记自身；
+            // 存在已观看标记时额外提供“清除已观看”。
+            markWatchedMenuItems
+
+            Button(item.watchlist ? "移出想看" : "加入想看") {
+                appState.toggleWatchlist(item)
             }
 
-            Button(item.favorite ? "取消收藏" : "收藏") {
+            Button(item.favorite ? "取消喜欢" : "喜欢") {
                 appState.toggleFavorite(item)
             }
 
@@ -427,6 +495,39 @@ struct PosterCardView: View {
         }
     }
 
+    /// 多选模式下点击切换选中状态；否则照常打开详情。
+    private func handlePrimaryTap() {
+        if isSelectionActive {
+            withAnimation(reduceMotion ? nil : AppMotion.fast) {
+                appState.toggleItemSelection(item.id)
+            }
+        } else {
+            appState.selectedItem = item
+        }
+    }
+
+    @ViewBuilder
+    private var markWatchedMenuItems: some View {
+        let episodes = appState.children(for: item)
+        if episodes.isEmpty {
+            if item.watched {
+                Button("清除已观看") { appState.markWatched(item, watched: false) }
+            } else {
+                Button("标记为已观看") { appState.markWatched(item, watched: true) }
+            }
+        } else {
+            let hasWatchedMark = item.watched || episodes.contains { $0.watched || $0.playProgress >= 0.9 }
+            Button("标记整个系列为已观看") {
+                appState.markAllWatched(episodes + [item], watched: true)
+            }
+            if hasWatchedMark {
+                Button("清除已观看") {
+                    appState.markAllWatched(episodes + [item], watched: false)
+                }
+            }
+        }
+    }
+
     private static var reclassificationTypes: [MediaType] {
         [.movie, .tvShow, .anime, .documentary, .variety, .music, .other, .privateCollection]
     }
@@ -437,8 +538,11 @@ struct PosterCardView: View {
 
     private var badgeTexts: [String] {
         var texts: [String] = []
+        if item.watchlist {
+            texts.append("想看")
+        }
         if item.favorite {
-            texts.append("收藏")
+            texts.append("喜欢")
         }
         if item.type != .music, item.watched || item.filePath != nil || item.type == .tvShow {
             texts.append(item.watched ? "已看" : "未看")
@@ -493,7 +597,7 @@ struct RatingStars: View {
                     Image(systemName: Double(index) <= (value ?? 0) ? "star.fill" : "star")
                         .font(.caption.weight(.semibold))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SubtleIconButtonStyle(minSize: 20))
                 .disabled(onRate == nil)
             }
         }
@@ -517,16 +621,28 @@ struct PosterImage: View {
     var body: some View {
         if usesDefaultMusicArtwork {
             MusicDefaultArtworkView(title: title)
+        } else if let cacheTargetSize {
+            // 海报墙：父级（aspectRatio + overlay）已给出确定尺寸，解码尺寸也稳定，
+            // 因此无需每格 GeometryReader。去掉它可消除滚动时逐格的尺寸上报/布局抖动（闪烁卡顿主因之一）。
+            posterContent(targetSize: cacheTargetSize)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
         } else {
+            // 其它用法（如详情页大图）未传入稳定解码尺寸时，仍用 GeometryReader 按显示尺寸解码，保证清晰度。
             GeometryReader { proxy in
-                let displaySize = proxy.size
-                let targetSize = cacheTargetSize ?? displaySize
-                if let remoteURL = remoteURL {
-                    RemotePosterImage(url: remoteURL, title: title, displaySize: displaySize, targetSize: targetSize, placeholder: AnyView(placeholder))
-                } else {
-                    LocalPosterImage(path: path, title: title, displaySize: displaySize, targetSize: targetSize, placeholder: AnyView(placeholder))
-                }
+                posterContent(targetSize: proxy.size)
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
             }
+        }
+    }
+
+    @ViewBuilder
+    private func posterContent(targetSize: CGSize) -> some View {
+        if let remoteURL = remoteURL {
+            RemotePosterImage(url: remoteURL, title: title, targetSize: targetSize, placeholder: AnyView(placeholder))
+        } else {
+            LocalPosterImage(path: path, title: title, targetSize: targetSize, placeholder: AnyView(placeholder))
         }
     }
 
@@ -579,7 +695,6 @@ struct PosterImage: View {
 private struct RemotePosterImage: View {
     let url: URL
     let title: String
-    let displaySize: CGSize
     let targetSize: CGSize
     let placeholder: AnyView
     @State private var image: NSImage?
@@ -594,11 +709,11 @@ private struct RemotePosterImage: View {
                 Image(nsImage: displayImage)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: displaySize.width, height: displaySize.height)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
             } else {
                 placeholder
-                    .frame(width: displaySize.width, height: displaySize.height)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .redacted(reason: .placeholder)
             }
         }
@@ -720,7 +835,6 @@ private struct LocalPosterImage: View {
     @EnvironmentObject private var appState: AppState
     let path: String?
     let title: String
-    let displaySize: CGSize
     let targetSize: CGSize
     let placeholder: AnyView
     @State private var image: NSImage?
@@ -737,17 +851,19 @@ private struct LocalPosterImage: View {
                 Image(nsImage: displayImage)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: displaySize.width, height: displaySize.height)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
             } else {
                 placeholder
-                    .frame(width: displaySize.width, height: displaySize.height)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .redacted(reason: path == nil ? [] : .placeholder)
             }
         }
         .task(id: cacheKey) {
             releaseTask?.cancel()
-            let revision = appState.libraryRevision
+            // posterRevision 仅在 reload()（元数据/封面真实变化）时递增，
+            // 文件存在性健康检查不触发它，避免该检查完成后全量图片重载。
+            let revision = appState.posterRevision
             let targetID = targetIdentity
             guard image == nil || loadedPath != path || loadedRevision != revision || loadedTargetID != targetID else { return }
             loadedPath = path
@@ -765,7 +881,8 @@ private struct LocalPosterImage: View {
             releaseTask?.cancel()
             releaseTask = Task { @MainActor in
                 do {
-                    try await Task.sleep(nanoseconds: 2_500_000_000)
+                    // 1.2s 足以覆盖快速滚动"回头"的场景；ArtworkImageCache 独立缓存兜底。
+                    try await Task.sleep(nanoseconds: 1_200_000_000)
                 } catch {
                     return
                 }
@@ -779,7 +896,7 @@ private struct LocalPosterImage: View {
     }
 
     private var cacheKey: String {
-        "\(path ?? "nil")-\(appState.libraryRevision)-\(targetIdentity)"
+        "\(path ?? "nil")-\(appState.posterRevision)-\(targetIdentity)"
     }
 
     private var targetIdentity: String {

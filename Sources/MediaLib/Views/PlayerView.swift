@@ -7,7 +7,9 @@ import OpenGL.GL3
 import SwiftUI
 
 enum VideoWindowSizing {
-    static let minimumPreferredWidth: CGFloat = 640
+    static let minimumPreferredWidth: CGFloat = 680
+    static let minimumControlSafeWidth: CGFloat = 680
+    static let minimumControlSafeHeight: CGFloat = 382
     static let minimumScreenWidthRatio: Double = 0.45
     static let maximumScreenWidthRatio: Double = 1.0
 
@@ -34,6 +36,56 @@ enum VideoWindowSizing {
         let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first
         return targetScreen?.visibleFrame.width ?? 1440
     }
+}
+
+private struct PendingTimelineSeek {
+    let revision: Int
+    let generation: Int
+    let targetTime: Double
+    let originTime: Double
+    let startedAt: Date
+    var lastReissuedAt: Date?
+    var reissueCount: Int = 0
+}
+
+struct PlaybackSeekState: Equatable {
+    enum Phase: Equatable {
+        case scrubbing
+        case seeking
+        case settled
+    }
+
+    let revision: Int
+    let phase: Phase
+    let targetTime: Double
+    let originTime: Double
+    let resolvedTime: Double?
+
+    var presentationTime: Double {
+        resolvedTime ?? targetTime
+    }
+
+    var isUserPreview: Bool {
+        phase == .scrubbing
+    }
+
+    var isAwaitingPlaybackClock: Bool {
+        phase == .seeking
+    }
+}
+
+struct PlayerPlaybackReport {
+    enum Phase: Equatable {
+        case started
+        case progress
+        case stopped
+    }
+
+    let phase: Phase
+    let item: MediaItem
+    let position: Double
+    let duration: Double?
+    let isPaused: Bool
 }
 
 struct VideoStreamQualityOption: Identifiable, Hashable, Sendable {
@@ -383,6 +435,7 @@ struct PlayerView: View {
     @State private var previewPrefersFFmpeg = false
     @State private var previewLoadTask: Task<Void, Never>?
     @State private var auxiliaryMetadataTask: Task<Void, Never>?
+    @State private var playbackMarkers: [PlaybackMarker] = []
 
     var body: some View {
         ZStack {
@@ -404,6 +457,8 @@ struct PlayerView: View {
 
             PlayerPlaybackStatusLayer(controller: controller, item: item)
 
+            PlayerMarkerSkipLayer(controller: controller, markers: playbackMarkers)
+
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 PlayerControlsBar(
@@ -416,6 +471,10 @@ struct PlayerView: View {
                     scrubberPreview: $scrubberPreview,
                     previewImage: previewImage,
                     previewIsLoading: previewIsLoading,
+                    markers: playbackMarkers,
+                    onSetMarkerBoundary: setMarkerBoundary,
+                    onAddChapter: addManualChapter,
+                    onDeleteMarker: deleteMarker,
                     onPlayAdjacent: playAdjacentVideo
                 )
                 .onHover { hovering in
@@ -477,7 +536,11 @@ struct PlayerView: View {
             controller.onVolumeChange = { volume in
                 appState.rememberPlayerVolume(volume, for: item.type)
             }
+            controller.onPlaybackReport = { report in
+                appState.syncEmbyPlayback(report)
+            }
             controller.configure(item: item, settings: appState.settings)
+            loadPlaybackMarkers()
             loadAuxiliaryPlaybackMetadata()
             scheduleControlsAutoHide()
         }
@@ -489,12 +552,16 @@ struct PlayerView: View {
             controller.onVolumeChange = nil
             controller.teardown()
             controller.saveProgress(appState: appState, reloadLibrary: false)
+            controller.onPlaybackReport = nil
         }
         .onChange(of: previewRequestKey) { _ in
             loadPreviewImage()
         }
         .onChange(of: appState.playbackCommandRequest?.id) { _ in
             handlePlaybackCommand()
+        }
+        .onReceive(controller.$chapters.removeDuplicates()) { chapters in
+            syncEmbeddedChapters(chapters)
         }
         .overlay {
             PlayerWindowChromeVisibilityLayer(controller: controller, controlsVisible: controlsVisible)
@@ -590,6 +657,77 @@ struct PlayerView: View {
         controller.teardown()
         controller.saveProgress(appState: appState, reloadLibrary: false)
         appState.playAdjacent(to: item, direction: direction)
+    }
+
+    private func loadPlaybackMarkers() {
+        playbackMarkers = appState.playbackMarkers(for: item)
+    }
+
+    private func syncEmbeddedChapters(_ chapters: [MpvChapter]) {
+        guard !chapters.isEmpty else { return }
+        let embedded = chapters.enumerated().map { index, chapter in
+            let endTime = chapters.indices.contains(index + 1)
+                ? chapters[index + 1].time
+                : (controller.duration > chapter.time ? controller.duration : nil)
+            return PlaybackMarker(
+                id: "embedded-\(item.id)-\(index)-\(Int((chapter.time * 1_000).rounded()))",
+                mediaID: item.id,
+                kind: .chapter,
+                title: chapter.title,
+                startTime: chapter.time,
+                endTime: endTime,
+                origin: .embedded
+            )
+        }
+        appState.replaceEmbeddedPlaybackChapters(for: item, chapters: embedded)
+        loadPlaybackMarkers()
+    }
+
+    private func setMarkerBoundary(_ kind: PlaybackMarker.Kind, _ isStart: Bool, _ time: Double) {
+        guard kind == .intro || kind == .credits else { return }
+        let existing = playbackMarkers.first { $0.kind == kind && $0.origin == .manual }
+        var marker = existing ?? PlaybackMarker(
+            id: "manual-\(item.id)-\(kind.rawValue)",
+            mediaID: item.id,
+            kind: kind,
+            title: kind.title,
+            startTime: max(time, 0),
+            origin: .manual
+        )
+        if isStart {
+            marker.startTime = max(time, 0)
+            if let endTime = marker.endTime, endTime <= marker.startTime {
+                marker.endTime = nil
+            }
+        } else {
+            if marker.startTime >= time {
+                marker.startTime = max(0, time - 90)
+            }
+            marker.endTime = max(time, marker.startTime + 0.1)
+        }
+        if appState.savePlaybackMarker(marker) != nil {
+            loadPlaybackMarkers()
+        }
+    }
+
+    private func addManualChapter(_ time: Double) {
+        let chapterNumber = playbackMarkers.filter { $0.kind == .chapter && $0.origin == .manual }.count + 1
+        let marker = PlaybackMarker(
+            mediaID: item.id,
+            kind: .chapter,
+            title: "手动章节 \(chapterNumber)",
+            startTime: time,
+            origin: .manual
+        )
+        if appState.savePlaybackMarker(marker) != nil {
+            loadPlaybackMarkers()
+        }
+    }
+
+    private func deleteMarker(_ marker: PlaybackMarker) {
+        guard marker.origin == .manual else { return }
+        appState.deletePlaybackMarker(marker)
+        loadPlaybackMarkers()
     }
 
     private func handlePlaybackCommand() {
@@ -1025,6 +1163,10 @@ private struct PlayerControlsBar: View {
     @Binding var scrubberPreview: VideoScrubberPreview?
     let previewImage: NSImage?
     let previewIsLoading: Bool
+    let markers: [PlaybackMarker]
+    let onSetMarkerBoundary: (PlaybackMarker.Kind, Bool, Double) -> Void
+    let onAddChapter: (Double) -> Void
+    let onDeleteMarker: (PlaybackMarker) -> Void
     let onPlayAdjacent: (Int) -> Void
     @StateObject private var timeline: PlayerControllerProjection<PlayerTimelineState>
     @StateObject private var transport: PlayerControllerProjection<PlayerTransportState>
@@ -1033,6 +1175,7 @@ private struct PlayerControlsBar: View {
     @State private var showingSubtitlePopover = false
     @State private var showingAudioPopover = false
     @State private var showingQualityPopover = false
+    @State private var showingMarkerPopover = false
 
     init(
         controller: MpvPlayerController,
@@ -1044,6 +1187,10 @@ private struct PlayerControlsBar: View {
         scrubberPreview: Binding<VideoScrubberPreview?>,
         previewImage: NSImage?,
         previewIsLoading: Bool,
+        markers: [PlaybackMarker],
+        onSetMarkerBoundary: @escaping (PlaybackMarker.Kind, Bool, Double) -> Void,
+        onAddChapter: @escaping (Double) -> Void,
+        onDeleteMarker: @escaping (PlaybackMarker) -> Void,
         onPlayAdjacent: @escaping (Int) -> Void
     ) {
         self.controller = controller
@@ -1055,6 +1202,10 @@ private struct PlayerControlsBar: View {
         _scrubberPreview = scrubberPreview
         self.previewImage = previewImage
         self.previewIsLoading = previewIsLoading
+        self.markers = markers
+        self.onSetMarkerBoundary = onSetMarkerBoundary
+        self.onAddChapter = onAddChapter
+        self.onDeleteMarker = onDeleteMarker
         self.onPlayAdjacent = onPlayAdjacent
         _timeline = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTimelineState.init))
         _transport = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTransportState.init))
@@ -1071,17 +1222,15 @@ private struct PlayerControlsBar: View {
                     .frame(width: 42, alignment: .trailing)
 
                 VideoProgressScrubber(
-                    currentTime: Binding(get: {
-                        timelineState.currentTime
-                    }, set: { value in
-                        controller.seek(to: value)
-                    }),
+                    currentTime: timelineState.currentTime,
                     duration: timelineState.duration,
                     enabled: timelineState.canControl && timelineState.duration > 0,
                     coarsePreviewBuckets: previewPrefersFFmpeg,
                     preview: $scrubberPreview,
                     previewImage: previewImage,
-                    previewIsLoading: previewIsLoading
+                    previewIsLoading: previewIsLoading,
+                    markers: markers,
+                    onSeek: { controller.seek(to: $0) }
                 )
 
                 Text(timelineState.formattedDuration)
@@ -1092,26 +1241,9 @@ private struct PlayerControlsBar: View {
 
             HStack(spacing: 0) {
                 HStack(spacing: 6) {
-                    AirPlayRoutePickerControl(
-                        session: controller.routePickerSession,
-                        player: controller.routePickerPlayer,
-                        tintColor: NSColor.white.withAlphaComponent(0.78),
-                        activeTintColor: NSColor.controlAccentColor,
-                        lightTint: .white.opacity(0.8),
-                        systemImage: "airplayvideo",
-                        prioritizesVideoDevices: true,
-                        size: 28,
-                        cornerRadius: 14,
-                        useGlassBackground: false,
-                        onRoutesWillBegin: {
-                            controller.prepareForVideoAirPlayRouteSelection()
-                        },
-                        onRoutesDidEnd: {
-                            controller.refreshVideoAirPlayRoute(afterRoutePicker: true)
-                        }
-                    )
-                    .id(transportState.routePickerRevision)
-
+                    // 视频隔空播放按钮已移除：内置视频经 libmpv 渲染到自有 OpenGL 视图，
+                    // AVRoutePicker 仅能驱动音频代理播放器，无法把画面投到外部设备，
+                    // 点击只会在本机播放、造成误导。系统级整窗投屏可由 macOS“屏幕镜像”承担。
                     subtitleButton
                         .disabled(!transportState.canControl)
                     audioButton
@@ -1120,6 +1252,8 @@ private struct PlayerControlsBar: View {
                         qualityButton
                             .disabled(!transportState.canControl)
                     }
+                    markerButton(currentTime: timelineState.currentTime, duration: timelineState.duration)
+                        .disabled(!transportState.canControl)
                 }
                 .frame(width: 180, alignment: .leading)
 
@@ -1140,11 +1274,8 @@ private struct PlayerControlsBar: View {
                         Image(systemName: transportState.isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 18, weight: .bold))
                             .foregroundStyle(.white)
-                            .frame(width: 40, height: 32)
-                            .background(Color.white.opacity(0.22), in: Circle())
-                            .overlay {
-                                Circle().stroke(.white.opacity(0.28), lineWidth: 1)
-                            }
+                            .frame(width: 48, height: 32)
+                            .playerCapsuleControl(cornerRadius: 16)
                     }
                     .keyboardShortcut(.space, modifiers: [])
                     .help("播放/暂停")
@@ -1248,24 +1379,7 @@ private struct PlayerControlsBar: View {
                 .font(.caption2.monospacedDigit().weight(.semibold))
                 .foregroundStyle(.white)
                 .frame(width: 48, height: 28)
-                .background {
-                    ZStack {
-                        Capsule().fill(.ultraThinMaterial)
-                        Capsule().fill(
-                            LinearGradient(
-                                colors: [.white.opacity(0.22), .white.opacity(0.07), .black.opacity(0.14)],
-                                startPoint: .topLeading, endPoint: .bottomTrailing
-                            )
-                        )
-                    }
-                }
-                .overlay {
-                    Capsule().strokeBorder(
-                        LinearGradient(colors: [.white.opacity(0.30), .white.opacity(0.09)], startPoint: .topLeading, endPoint: .bottomTrailing),
-                        lineWidth: 0.9
-                    )
-                }
-                .shadow(color: .black.opacity(0.06), radius: 2.5, y: 1)
+                .playerCapsuleControl(cornerRadius: 14)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingSpeedPopover, arrowEdge: .bottom) {
@@ -1283,30 +1397,13 @@ private struct PlayerControlsBar: View {
             HStack(spacing: 4) {
                 Image(systemName: "slider.horizontal.2.square")
                     .font(.system(size: 12, weight: .semibold))
-                Text(selectedQuality?.label ?? "清晰度")
+                Text("画质")
                     .font(.caption2.weight(.bold))
                     .lineLimit(1)
             }
             .foregroundStyle(.white)
-            .frame(width: 76, height: 28)
-            .background {
-                ZStack {
-                    Capsule().fill(.ultraThinMaterial)
-                    Capsule().fill(
-                        LinearGradient(
-                            colors: [.white.opacity(0.22), .white.opacity(0.07), .black.opacity(0.14)],
-                            startPoint: .topLeading, endPoint: .bottomTrailing
-                        )
-                    )
-                }
-            }
-            .overlay {
-                Capsule().strokeBorder(
-                    LinearGradient(colors: [.white.opacity(0.30), .white.opacity(0.09)], startPoint: .topLeading, endPoint: .bottomTrailing),
-                    lineWidth: 0.9
-                )
-            }
-            .shadow(color: .black.opacity(0.10), radius: 4, y: 1.5)
+            .frame(width: 58, height: 28)
+            .playerCapsuleControl(cornerRadius: 14)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingQualityPopover, arrowEdge: .bottom) {
@@ -1321,11 +1418,31 @@ private struct PlayerControlsBar: View {
                 controller.switchVideoQuality(to: option)
             }
         }
-        .help("清晰度")
+        .help("画质")
     }
 
-    private var selectedQuality: VideoStreamQualityOption? {
-        qualityOptions.first { $0.id == selectedQualityID } ?? qualityOptions.first
+    private func markerButton(currentTime: Double, duration: Double) -> some View {
+        Button {
+            togglePopover {
+                showingMarkerPopover.toggle()
+            }
+        } label: {
+            Image(systemName: "bookmark")
+                .playerControlIcon()
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showingMarkerPopover, arrowEdge: .bottom) {
+            PlayerMarkerPopover(
+                currentTime: currentTime,
+                duration: duration,
+                markers: markers,
+                onSeek: { controller.seek(to: $0) },
+                onSetBoundary: onSetMarkerBoundary,
+                onAddChapter: onAddChapter,
+                onDeleteMarker: onDeleteMarker
+            )
+        }
+        .help("章节与播放标记")
     }
 
     private func togglePopover(_ action: () -> Void) {
@@ -1515,7 +1632,7 @@ struct PlayerStatusOverlay: View {
             }
         }
         .padding(28)
-        .background(.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .playerGlass(cornerRadius: 22)
     }
 }
 
@@ -1548,12 +1665,12 @@ private struct PlayerBufferingOverlay: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 20)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .background(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .fill(
                     LinearGradient(
-                        colors: [.black.opacity(0.38), .black.opacity(0.48)],
+                        colors: [.white.opacity(0.18), .white.opacity(0.08), .black.opacity(0.18)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
@@ -1570,8 +1687,8 @@ private struct PlayerBufferingOverlay: View {
                     lineWidth: 0.9
                 )
         }
-        .shadow(color: .black.opacity(0.24), radius: 18, y: 8)
-        .shadow(color: .black.opacity(0.11), radius: 6, y: 2)
+        .shadow(color: .black.opacity(0.12), radius: 12, y: 5)
+        .shadow(color: .white.opacity(0.08), radius: 1, y: -0.5)
         .allowsHitTesting(false)
     }
 
@@ -1619,14 +1736,14 @@ private struct PlayerGlassModifier: ViewModifier {
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         content
-            .background(.ultraThinMaterial, in: shape)
+            .background(.thinMaterial, in: shape)
             .background(
                 shape.fill(
                     LinearGradient(
                         colors: [
-                            Color.white.opacity(0.26),
-                            Color.white.opacity(0.11),
-                            Color.black.opacity(0.24)
+                            Color.white.opacity(0.32),
+                            Color.white.opacity(0.14),
+                            Color.black.opacity(0.13)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -1649,8 +1766,8 @@ private struct PlayerGlassModifier: ViewModifier {
                     lineWidth: 0.9
                 )
             }
-            .shadow(color: .black.opacity(0.13), radius: 10, y: 4)
-            .shadow(color: .black.opacity(0.06), radius: 4, y: 2)
+            .shadow(color: .black.opacity(0.08), radius: 8, y: 3)
+            .shadow(color: .white.opacity(0.07), radius: 1, y: -0.5)
     }
 }
 
@@ -1781,7 +1898,7 @@ private struct PlayerSnapSlider: View {
             let knobCenterX = knobRadius + trackWidth * fraction
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Color.black.opacity(0.40))
+                    .fill(Color.white.opacity(0.18))
                     .frame(width: trackWidth, height: 6)
                     .offset(x: knobRadius)
                 Capsule()
@@ -1799,7 +1916,7 @@ private struct PlayerSnapSlider: View {
                 Circle()
                     .fill(.white)
                     .frame(width: Self.knobSize, height: Self.knobSize)
-                    .shadow(color: .black.opacity(0.26), radius: 7, y: 2)
+                    .shadow(color: .black.opacity(0.15), radius: 5, y: 1.5)
                     .overlay {
                         Circle().stroke(.white.opacity(0.42), lineWidth: 0.8)
                     }
@@ -1841,9 +1958,9 @@ private struct PlayerLinearSlider: View {
 
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Color.black.opacity(0.36))
+                    .fill(Color.white.opacity(0.17))
                     .overlay {
-                        Capsule().stroke(.white.opacity(0.10), lineWidth: 0.6)
+                        Capsule().stroke(.white.opacity(0.14), lineWidth: 0.6)
                     }
                     .frame(width: trackWidth, height: 5.5)
                     .offset(x: knobRadius)
@@ -1862,7 +1979,7 @@ private struct PlayerLinearSlider: View {
                 Circle()
                     .fill(.white)
                     .frame(width: Self.knobSize, height: Self.knobSize)
-                    .shadow(color: .black.opacity(0.28), radius: 7, y: 2)
+                    .shadow(color: .black.opacity(0.15), radius: 5, y: 1.5)
                     .overlay {
                         Circle().stroke(.white.opacity(0.48), lineWidth: 0.8)
                     }
@@ -1914,6 +2031,166 @@ private struct PlayerSpeedTickLabels: View {
         if abs(rate - 1.0) < 0.001 { return "1x" }
         if rate < 1 { return String(format: "%.2fx", rate) }
         return String(format: "%.1fx", rate)
+    }
+}
+
+private struct PlayerMarkerSkipLayer: View {
+    let controller: MpvPlayerController
+    let markers: [PlaybackMarker]
+    @StateObject private var timeline: PlayerControllerProjection<PlayerTimelineState>
+
+    init(controller: MpvPlayerController, markers: [PlaybackMarker]) {
+        self.controller = controller
+        self.markers = markers
+        _timeline = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTimelineState.init))
+    }
+
+    var body: some View {
+        VStack {
+            Spacer(minLength: 0)
+            if let marker = activeMarker, let endTime = marker.endTime {
+                Button {
+                    controller.seek(to: endTime)
+                } label: {
+                    Label("跳过\(marker.kind.title)", systemImage: "forward.end.fill")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .frame(height: 34)
+                }
+                .buttonStyle(.plain)
+                .playerGlass(cornerRadius: 17)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                .padding(.bottom, 98)
+            }
+        }
+        .animation(AppMotion.fast, value: activeMarker?.id)
+    }
+
+    private var activeMarker: PlaybackMarker? {
+        markers.first {
+            ($0.kind == .intro || $0.kind == .credits) && $0.contains(timeline.value.currentTime)
+        }
+    }
+}
+
+private struct PlayerMarkerPopover: View {
+    let currentTime: Double
+    let duration: Double
+    let markers: [PlaybackMarker]
+    let onSeek: (Double) -> Void
+    let onSetBoundary: (PlaybackMarker.Kind, Bool, Double) -> Void
+    let onAddChapter: (Double) -> Void
+    let onDeleteMarker: (PlaybackMarker) -> Void
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("章节与播放标记", systemImage: "bookmark")
+                    .font(.callout.weight(.semibold))
+
+                HStack(spacing: 7) {
+                    markerAction("片头开始", systemImage: "play.fill") {
+                        onSetBoundary(.intro, true, currentTime)
+                    }
+                    markerAction("片头结束", systemImage: "forward.end.fill") {
+                        onSetBoundary(.intro, false, currentTime)
+                    }
+                }
+                HStack(spacing: 7) {
+                    markerAction("片尾开始", systemImage: "text.append") {
+                        onSetBoundary(.credits, true, currentTime)
+                    }
+                    markerAction("片尾结束", systemImage: "stop.fill") {
+                        onSetBoundary(.credits, false, currentTime)
+                    }
+                }
+                Button {
+                    onAddChapter(currentTime)
+                } label: {
+                    Label("在 \(formatTime(currentTime)) 添加章节", systemImage: "bookmark.fill")
+                        .font(.caption.weight(.semibold))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .frame(height: 30)
+                        .playerCapsuleControl(cornerRadius: 9)
+                }
+                .buttonStyle(.plain)
+
+                Divider()
+                    .background(.white.opacity(0.18))
+
+                if markers.isEmpty {
+                    Text("当前视频还没有章节或手动标记。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(markers) { marker in
+                        HStack(spacing: 7) {
+                            Button {
+                                onSeek(marker.startTime)
+                            } label: {
+                                PlayerTrackRow(
+                                    title: marker.title,
+                                    subtitle: markerSubtitle(marker),
+                                    selected: marker.contains(currentTime)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            if marker.origin == .manual {
+                                Button(role: .destructive) {
+                                    onDeleteMarker(marker)
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .frame(width: 24, height: 24)
+                                        .foregroundStyle(.red)
+                                }
+                                .buttonStyle(.plain)
+                                .help("删除标记")
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(12)
+        }
+        .frame(width: 330)
+        .frame(maxHeight: 480)
+        .fixedSize(horizontal: true, vertical: false)
+        .playerPopoverGlass()
+    }
+
+    private func markerAction(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.caption2.weight(.semibold))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 9)
+                .frame(height: 28)
+                .playerCapsuleControl(cornerRadius: 9)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func markerSubtitle(_ marker: PlaybackMarker) -> String {
+        let origin = marker.origin == .embedded ? "内嵌章节" : "手动标记"
+        guard let endTime = marker.endTime, endTime > marker.startTime else {
+            return "\(origin) · \(formatTime(marker.startTime))"
+        }
+        return "\(origin) · \(formatTime(marker.startTime)) – \(formatTime(endTime))"
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
+        let total = Int(seconds.rounded())
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%d:%02d", minutes, seconds)
     }
 }
 
@@ -2339,14 +2616,17 @@ private struct VideoScrubberPreview: Equatable {
 }
 
 private struct VideoProgressScrubber: View {
-    @Binding var currentTime: Double
+    let currentTime: Double
     let duration: Double
     let enabled: Bool
     let coarsePreviewBuckets: Bool
     @Binding var preview: VideoScrubberPreview?
     let previewImage: NSImage?
     let previewIsLoading: Bool
+    let markers: [PlaybackMarker]
+    let onSeek: (Double) -> Void
     @State private var isDragging = false
+    @State private var draftTime: Double?
     @State private var lastPreviewLocation: CGPoint?
     @State private var lastPreviewUpdate = Date.distantPast
     @State private var lastPreviewBucket: Int?
@@ -2354,7 +2634,8 @@ private struct VideoProgressScrubber: View {
     var body: some View {
         GeometryReader { proxy in
             let width = max(proxy.size.width, 1)
-            let fraction = duration > 0 ? min(max(currentTime / duration, 0), 1) : 0
+            let displayTime = draftTime ?? currentTime
+            let fraction = duration > 0 ? min(max(displayTime / duration, 0), 1) : 0
             let progressWidth = width * CGFloat(fraction)
 
             ZStack(alignment: .leading) {
@@ -2364,10 +2645,25 @@ private struct VideoProgressScrubber: View {
                 Capsule()
                     .fill(.white.opacity(enabled ? 0.78 : 0.34))
                     .frame(width: progressWidth, height: 6)
+                ForEach(markers.filter { ($0.kind == .intro || $0.kind == .credits) && $0.isCompleteRange }) { marker in
+                    let startFraction = duration > 0 ? min(max(marker.startTime / duration, 0), 1) : 0
+                    let endFraction = duration > 0 ? min(max((marker.endTime ?? marker.startTime) / duration, 0), 1) : 0
+                    Capsule()
+                        .fill(marker.kind == .intro ? Color.cyan.opacity(0.62) : Color.orange.opacity(0.62))
+                        .frame(width: max(width * CGFloat(endFraction - startFraction), 2), height: 6)
+                        .offset(x: width * CGFloat(startFraction))
+                }
+                ForEach(markers) { marker in
+                    let markerFraction = duration > 0 ? min(max(marker.startTime / duration, 0), 1) : 0
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(.white.opacity(marker.kind == .chapter ? 0.82 : 0.96))
+                        .frame(width: 2, height: marker.kind == .chapter ? 9 : 11)
+                        .offset(x: min(max(width * CGFloat(markerFraction) - 1, 0), max(width - 2, 0)))
+                }
                 Circle()
                     .fill(.white)
                     .frame(width: isDragging ? 13 : 10, height: isDragging ? 13 : 10)
-                    .shadow(color: .black.opacity(0.20), radius: 4, y: 1)
+                    .shadow(color: .black.opacity(0.11), radius: 3, y: 1)
                     .offset(x: min(max(progressWidth - 5, 0), max(width - 10, 0)))
                     .opacity(enabled ? 1 : 0)
             }
@@ -2395,13 +2691,25 @@ private struct VideoProgressScrubber: View {
                             location: CGPoint(x: clampedX, y: value.location.y),
                             width: width,
                             force: true,
-                            updatePlaybackTime: true
+                            updateDraftTime: true
                         )
                     }
-                    .onEnded { _ in
+                    .onEnded { value in
+                        guard enabled, duration > 0 else {
+                            isDragging = false
+                            draftTime = nil
+                            return
+                        }
+                        let clampedX = min(max(value.location.x, 0), width)
+                        let target = Double(clampedX / max(width, 1)) * duration
                         isDragging = false
+                        draftTime = target
+                        onSeek(target)
                         lastPreviewLocation = nil
                         lastPreviewBucket = nil
+                        DispatchQueue.main.async {
+                            draftTime = nil
+                        }
                     }
             )
             .onContinuousHover { phase in
@@ -2416,7 +2724,7 @@ private struct VideoProgressScrubber: View {
                         location: CGPoint(x: clampedX, y: location.y),
                         width: width,
                         force: false,
-                        updatePlaybackTime: false
+                        updateDraftTime: false
                     )
                 case .ended:
                     if !isDragging {
@@ -2433,7 +2741,7 @@ private struct VideoProgressScrubber: View {
         location: CGPoint,
         width: CGFloat,
         force: Bool,
-        updatePlaybackTime: Bool
+        updateDraftTime: Bool
     ) {
         let target = Double(location.x / max(width, 1)) * duration
         let bucket = VideoFramePreviewGenerator.bucket(for: target, duration: duration, preferCoarse: coarsePreviewBuckets)
@@ -2454,8 +2762,8 @@ private struct VideoProgressScrubber: View {
         }
         lastPreviewLocation = location
         lastPreviewBucket = bucket
-        if updatePlaybackTime {
-            currentTime = target
+        if updateDraftTime {
+            draftTime = target
         }
         preview = VideoScrubberPreview(time: target, x: location.x)
     }
@@ -2527,9 +2835,9 @@ private struct PlayerProgressPreviewBubble: View {
                     .fill(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(0.16),
-                                Color.white.opacity(0.07),
-                                Color.black.opacity(0.30)
+                                Color.white.opacity(0.22),
+                                Color.white.opacity(0.10),
+                                Color.black.opacity(0.14)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -2540,7 +2848,7 @@ private struct PlayerProgressPreviewBubble: View {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .stroke(
                         LinearGradient(
-                            colors: [.white.opacity(0.30), .white.opacity(0.10), .black.opacity(0.18)],
+                            colors: [.white.opacity(0.34), .white.opacity(0.12), .white.opacity(0.05)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
@@ -2554,7 +2862,7 @@ private struct PlayerProgressPreviewBubble: View {
         }
         .padding(7)
         .playerGlass(cornerRadius: 13)
-        .shadow(color: .black.opacity(0.30), radius: 12, y: 5)
+        .shadow(color: .black.opacity(0.12), radius: 9, y: 4)
     }
 
     private static func format(_ seconds: Double) -> String {
@@ -2792,14 +3100,14 @@ private extension View {
             .foregroundStyle(.white)
             .tint(.white.opacity(0.92))
             .environment(\.colorScheme, .dark)
-            .background(.ultraThinMaterial, in: shape)
+            .background(.thinMaterial, in: shape)
             .background(
                 shape.fill(
                     LinearGradient(
                         colors: [
-                            Color.white.opacity(0.24),
-                            Color.white.opacity(0.10),
-                            Color.black.opacity(0.30)
+                            Color.white.opacity(0.30),
+                            Color.white.opacity(0.13),
+                            Color.black.opacity(0.15)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -2822,8 +3130,8 @@ private extension View {
                     lineWidth: 0.9
                 )
             }
-            .shadow(color: .black.opacity(0.12), radius: 10, y: 5)
-            .shadow(color: .black.opacity(0.06), radius: 4, y: 2)
+            .shadow(color: .black.opacity(0.08), radius: 9, y: 4)
+            .shadow(color: .white.opacity(0.07), radius: 1, y: -0.5)
             .transaction { transaction in
                 transaction.animation = nil
             }
@@ -2841,10 +3149,10 @@ private extension View {
             .frame(width: width, height: height)
             .background {
                 ZStack {
-                    Circle().fill(.ultraThinMaterial)
+                    Circle().fill(.thinMaterial)
                     Circle().fill(
                         LinearGradient(
-                            colors: [.white.opacity(0.26), .white.opacity(0.09), .black.opacity(0.16)],
+                            colors: [.white.opacity(0.30), .white.opacity(0.11), .black.opacity(0.08)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -2861,7 +3169,35 @@ private extension View {
                     lineWidth: 0.9
                 )
             }
-            .shadow(color: .black.opacity(0.08), radius: 2.5, y: 1)
+            .shadow(color: .black.opacity(0.045), radius: 2, y: 1)
+    }
+
+    func playerCapsuleControl(cornerRadius: CGFloat) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return self
+            .background {
+                ZStack {
+                    shape.fill(.thinMaterial)
+                    shape.fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0.31), .white.opacity(0.12), .black.opacity(0.08)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                }
+            }
+            .overlay {
+                shape.strokeBorder(
+                    LinearGradient(
+                        colors: [.white.opacity(0.38), .white.opacity(0.12)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 0.9
+                )
+            }
+            .shadow(color: .black.opacity(0.055), radius: 3, y: 1)
     }
 }
 
@@ -3002,8 +3338,20 @@ struct MpvTrack: Identifiable, Hashable {
     }
 }
 
+struct MpvChapter: Identifiable, Hashable {
+    let id: Int
+    let title: String
+    let time: Double
+}
+
 @MainActor
 final class MpvPlayerController: ObservableObject {
+    private struct PreloadedMusicItem {
+        let itemID: String
+        let filePath: String
+        let playerItem: AVPlayerItem
+    }
+
     @Published var errorMessage: String?
     @Published var statusMessage: String?
     @Published var isPreparing = false
@@ -3013,23 +3361,26 @@ final class MpvPlayerController: ObservableObject {
     @Published var playbackRate: Float = 1.0
     @Published var volume: Float = 0.8
     @Published var currentTime: Double = 0
+    @Published private(set) var lyricTime: Double = 0
     @Published var duration: Double = 0
     @Published var videoAspectRatio: CGFloat?
     @Published var audioTracks: [MpvTrack] = []
     @Published var subtitleTracks: [MpvTrack] = []
+    @Published var chapters: [MpvChapter] = []
     @Published var subtitleAutoLoadEnabled = false
     @Published var isBuffering = false
     @Published var bufferProgress: Double?
+    @Published var audioSpectrumBands: [CGFloat] = AudioSpectrumAnalyzer.silenceBands
+    @Published private(set) var seekSyncRevision = 0
+    @Published private(set) var seekState: PlaybackSeekState?
     @Published private(set) var routePickerRevision = 0
 
     let routePickerSession = AirPlayRoutePickerSession()
     var onVolumeChange: ((Float) -> Void)?
     var onPlaybackFinished: (() -> Void)?
+    var onPlaybackReport: ((PlayerPlaybackReport) -> Void)?
 
     var routePickerPlayer: AVPlayer? {
-        if item?.type == .music, keepLocalAudioWithAirPlay {
-            return audioRouteProxyPlayer ?? audioPlayer
-        }
         return audioPlayer ?? videoRouteProxyPlayer
     }
 
@@ -3069,8 +3420,10 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private var item: MediaItem?
+    /// A7：当前条目是否已套用过剧集音轨/字幕偏好（每次 configure 重置，避免重复套用或覆盖用户手动选择）。
+    private var didApplyTrackPreference = false
     private var libMpvClient: LibMpvClient?
-    private var audioPlayer: AVPlayer?
+    private var audioPlayer: AVQueuePlayer?
     private var audioLocalMirrorPlayer: AVPlayer?
     private var audioRouteProxyPlayer: AVPlayer?
     private var audioRouteProxyObservation: NSKeyValueObservation?
@@ -3081,41 +3434,78 @@ final class MpvPlayerController: ObservableObject {
     private var videoRouteProxyObservation: NSKeyValueObservation?
     private var videoRouteProxyActivationTask: Task<Void, Never>?
     private var videoRouteProxyIsActive = false
+    private var videoRouteProxyIsAudibleProbing = false
     private var audioEndObserver: NSObjectProtocol?
     private weak var renderView: MpvOpenGLView?
     private var timer: Timer?
     private var securityScopedURL: URL?
     private var didSaveProgress = false
+    private var didReportPlaybackStart = false
+    private var lastPlaybackProgressReportDate = Date.distantPast
     private var filePath: String?
     private var videoStartRetryCount = 0
     private var volumeBeforeMute: Float = 0.8
     private var playbackGeneration = 0
-    private var keepLocalAudioWithAirPlay = true
+    private var keepLocalAudioWithAirPlay = false
     private var lastTrackRefreshDate = Date.distantPast
     private var lastBufferingState: (active: Bool, progress: Double?) = (false, nil)
     private var playbackTimelineOffset: Double = 0
+    private var activeVideoQualityOption: VideoStreamQualityOption?
     private var initialRedrawTask: Task<Void, Never>?
+    private var audioSpectrumTask: Task<Void, Never>?
+    private var audioTransitionTask: Task<Void, Never>?
+    private var musicPreloadTask: Task<Void, Never>?
+    private var preloadedMusicItem: PreloadedMusicItem?
+    private var seekSyncCorrectionTask: Task<Void, Never>?
+    private var clearSeekStateTask: Task<Void, Never>?
+    private var pendingTimelineSeek: PendingTimelineSeek?
+    private var audioSpectrumVisualizationActive = false
+    private var lastAudioSpectrumSampleDate = Date.distantPast
+    private var musicNormalizationGain: Float = 1
+    private var musicTransitionMode: MusicTransitionMode = .immediate
+    private var musicSoftFadeDuration: Double = 0.8
+    // EQ：仅当启用且预设非纯平时才给音乐 AVPlayerItem 挂 MTAudioProcessingTap；变更下一首生效。
+    private var musicEqualizerEnabled = false
+    private var musicEqualizerGains: [Double] = MusicEqualizerPreset.flat.gainsDB
+    private var audioTransitionVolumeScale: Float = 1
+    private(set) var spectrumSuppressedDuringWindowDrag = false
+
+    /// 窗口拖动/缩放期间临时挂起频谱解码（拖动结束立即恢复）。
+    func setSpectrumSuppressedDuringWindowDrag(_ suppressed: Bool) {
+        spectrumSuppressedDuringWindowDrag = suppressed
+    }
 
     func configure(item: MediaItem, settings: AppSettings) {
         guard libMpvClient == nil, audioPlayer == nil, !isPreparing else { return }
         playbackGeneration += 1
         clearVideoRouteProxy()
         self.item = item
+        didApplyTrackPreference = false
         didSaveProgress = false
+        didReportPlaybackStart = false
+        lastPlaybackProgressReportDate = .distantPast
         videoStartRetryCount = 0
         errorMessage = nil
         statusMessage = "正在启动 mpv 内核。"
+        pendingTimelineSeek = nil
+        clearSeekStateTask?.cancel()
+        clearSeekStateTask = nil
+        seekState = nil
         isPreparing = true
         hasVideoFrame = false
         playbackRate = Float(settings.defaultPlaybackRate)
-        keepLocalAudioWithAirPlay = settings.keepLocalAudioWithAirPlay
+        keepLocalAudioWithAirPlay = false
         volume = Float(settings.rememberedVolume(for: item.type))
         volumeBeforeMute = max(volume, 0.4)
+        configureMusicOutput(for: item, settings: settings, isTrackTransition: false)
         videoAspectRatio = nil
         audioTracks = []
         subtitleTracks = []
+        chapters = []
         subtitleAutoLoadEnabled = false
+        audioSpectrumBands = AudioSpectrumAnalyzer.silenceBands
         playbackTimelineOffset = 0
+        activeVideoQualityOption = nil
         updateBuffering(active: false, progress: nil)
         lastTrackRefreshDate = .distantPast
 
@@ -3127,6 +3517,7 @@ final class MpvPlayerController: ObservableObject {
         self.filePath = filePath
         duration = item.duration ?? 0
         currentTime = item.type == .music ? 0 : (settings.rememberPlaybackPosition ? item.playPosition : 0)
+        lyricTime = currentTime
 
         if !item.isRemoteResource {
             let url = URL(fileURLWithPath: filePath)
@@ -3150,6 +3541,7 @@ final class MpvPlayerController: ObservableObject {
         }
         if self.item?.id == item.id,
            audioPlayer != nil,
+           audioPlayer?.currentItem != nil,
            libMpvClient == nil,
            errorMessage == nil {
             return
@@ -3160,6 +3552,59 @@ final class MpvPlayerController: ObservableObject {
             return
         }
         switchNativeAudio(to: item, settings: settings)
+    }
+
+    func updateMusicOutputSettings(settings: AppSettings) {
+        guard let item, item.type == .music, audioPlayer != nil else { return }
+        configureMusicOutput(for: item, settings: settings, isTrackTransition: false)
+        applyAudioOutputVolume()
+    }
+
+    func preloadNextMusicItem(_ nextItem: MediaItem?) {
+        musicPreloadTask?.cancel()
+        musicPreloadTask = nil
+
+        guard let nextItem,
+              nextItem.type == .music,
+              musicTransitionMode == .immediate,
+              !nextItem.isRemoteResource,
+              nextItem.id != item?.id,
+              let nextPath = nextItem.filePath,
+              FileManager.default.fileExists(atPath: nextPath),
+              let player = audioPlayer else {
+            clearPreloadedMusicItem()
+            return
+        }
+        if preloadedMusicItem?.itemID == nextItem.id {
+            return
+        }
+
+        clearPreloadedMusicItem()
+        let generation = playbackGeneration
+        let asset = AVURLAsset(url: URL(fileURLWithPath: nextPath))
+        musicPreloadTask = Task { @MainActor [weak self, weak player] in
+            guard let self, let player else { return }
+            do {
+                let playable = try await asset.load(.isPlayable)
+                _ = try await asset.load(.duration)
+                guard playable,
+                      !Task.isCancelled,
+                      self.playbackGeneration == generation,
+                      self.audioPlayer === player,
+                      self.item?.id != nextItem.id else { return }
+                let playerItem = self.makeAudioPlayerItem(asset: asset, isLocal: true, preloaded: true)
+                guard player.canInsert(playerItem, after: player.items().last) else { return }
+                player.insert(playerItem, after: player.items().last)
+                self.preloadedMusicItem = PreloadedMusicItem(
+                    itemID: nextItem.id,
+                    filePath: nextPath,
+                    playerItem: playerItem
+                )
+            } catch {
+                return
+            }
+            self.musicPreloadTask = nil
+        }
     }
 
     func attach(to view: MpvOpenGLView) {
@@ -3208,6 +3653,7 @@ final class MpvPlayerController: ObservableObject {
             scheduleInitialVideoRedraws()
             updateSystemNowPlaying()
             startTimer()
+            reportPlayback(.started, force: true)
             return
         } catch {
             fail("libmpv 播放核心启动失败：\(error.localizedDescription)")
@@ -3228,11 +3674,11 @@ final class MpvPlayerController: ObservableObject {
 
         let generation = playbackGeneration
         let playerItem = makeAudioPlayerItem(url: url)
-        let player = AVPlayer(playerItem: playerItem)
-        player.allowsExternalPlayback = !keepLocalAudioWithAirPlay
+        let player = AVQueuePlayer(items: [playerItem])
+        player.allowsExternalPlayback = true
         player.automaticallyWaitsToMinimizeStalling = false
-        player.actionAtItemEnd = .pause
-        player.volume = volume
+        player.actionAtItemEnd = .advance
+        player.volume = effectiveMusicVolume
 
         observeAudioEnd(for: playerItem, generation: generation)
         observeAudioExternalPlayback(for: player)
@@ -3261,17 +3707,17 @@ final class MpvPlayerController: ObservableObject {
                     player.playImmediately(atRate: self.playbackRate)
                     self.isPlaying = true
                     self.updateSystemNowPlaying()
+                    self.reportPlayback(.started, force: true)
                 }
             }
         } else {
             player.playImmediately(atRate: playbackRate)
             isPlaying = true
             updateSystemNowPlaying()
+            reportPlayback(.started, force: true)
         }
         startTimer()
-        if keepLocalAudioWithAirPlay {
-            refreshMusicAirPlayRoute(afterRoutePicker: true)
-        }
+        refreshMusicAirPlayRoute(afterRoutePicker: true)
     }
 
     private func switchNativeAudio(to nextItem: MediaItem, settings: AppSettings) {
@@ -3286,20 +3732,42 @@ final class MpvPlayerController: ObservableObject {
             return
         }
 
+        let queuedPreload: PreloadedMusicItem? = preloadedMusicItem.flatMap { preloaded -> PreloadedMusicItem? in
+            guard preloaded.itemID == nextItem.id,
+                  player.items().contains(where: { $0 === preloaded.playerItem }) else {
+                return nil
+            }
+            return preloaded
+        }
+        let alreadyAdvancedToPreload = queuedPreload.map { player.currentItem === $0.playerItem } == true
+        reportPlayback(.stopped, force: true)
         playbackGeneration += 1
         let generation = playbackGeneration
-        player.currentItem?.cancelPendingSeeks()
         removeAudioEndObserver()
-        removeAudioExternalPlaybackObserver()
-        audioRouteRefreshTask?.cancel()
-        audioRouteRefreshTask = nil
-        stopAudioLocalMirror()
-        clearAudioRouteProxy()
-        player.pause()
+        seekSyncCorrectionTask?.cancel()
+        seekSyncCorrectionTask = nil
+        musicPreloadTask?.cancel()
+        musicPreloadTask = nil
+        if alreadyAdvancedToPreload {
+            preloadedMusicItem = nil
+        } else {
+            player.currentItem?.cancelPendingSeeks()
+            removeAudioExternalPlaybackObserver()
+            audioRouteRefreshTask?.cancel()
+            audioRouteRefreshTask = nil
+            stopAudioLocalMirror()
+            clearAudioRouteProxy()
+            player.pause()
+            if queuedPreload == nil {
+                clearPreloadedMusicItem()
+            }
+        }
         stopSecurityScopedResource()
 
         self.item = nextItem
         didSaveProgress = false
+        didReportPlaybackStart = false
+        lastPlaybackProgressReportDate = .distantPast
         filePath = nextPath
         errorMessage = nil
         statusMessage = nil
@@ -3307,11 +3775,17 @@ final class MpvPlayerController: ObservableObject {
         isReady = true
         isPlaying = false
         playbackRate = Float(settings.defaultPlaybackRate)
-        keepLocalAudioWithAirPlay = settings.keepLocalAudioWithAirPlay
+        keepLocalAudioWithAirPlay = false
         volume = Float(settings.rememberedVolume(for: nextItem.type))
         volumeBeforeMute = max(volume, 0.4)
+        configureMusicOutput(for: nextItem, settings: settings, isTrackTransition: true)
         duration = nextItem.duration ?? 0
         currentTime = 0
+        lyricTime = 0
+        clearSeekStateTask?.cancel()
+        clearSeekStateTask = nil
+        seekState = nil
+        audioSpectrumBands = AudioSpectrumAnalyzer.silenceBands
 
         if !nextItem.isRemoteResource {
             let securityURL = URL(fileURLWithPath: nextPath)
@@ -3320,17 +3794,40 @@ final class MpvPlayerController: ObservableObject {
             }
         }
 
-        let playerItem = makeAudioPlayerItem(url: url)
+        let playerItem = queuedPreload?.playerItem ?? makeAudioPlayerItem(url: url)
         observeAudioEnd(for: playerItem, generation: generation)
-        observeAudioExternalPlayback(for: player)
-        player.allowsExternalPlayback = !keepLocalAudioWithAirPlay
-        player.volume = volume
+        player.allowsExternalPlayback = true
         player.automaticallyWaitsToMinimizeStalling = false
-        player.replaceCurrentItem(with: playerItem)
+        player.actionAtItemEnd = .advance
+        if !alreadyAdvancedToPreload {
+            observeAudioExternalPlayback(for: player)
+            if queuedPreload != nil {
+                player.advanceToNextItem()
+                preloadedMusicItem = nil
+            } else {
+                player.removeAllItems()
+                player.insert(playerItem, after: nil)
+            }
+        }
+        applyAudioOutputVolume()
         updateSystemNowPlaying()
-        configureMusicRouteProxyIfNeeded()
+        if !alreadyAdvancedToPreload {
+            configureMusicRouteProxyIfNeeded()
+        }
 
         let startSeconds = max(currentTime, 0)
+        if alreadyAdvancedToPreload {
+            isPlaying = player.rate > 0
+            if !isPlaying {
+                player.playImmediately(atRate: playbackRate)
+                isPlaying = true
+            }
+            startSoftFadeInIfNeeded(generation: generation)
+            updateSystemNowPlaying()
+            reportPlayback(.started, force: true)
+            startTimer()
+            return
+        }
         if startSeconds > 0 {
             player.seek(
                 to: CMTime(seconds: startSeconds, preferredTimescale: 600),
@@ -3345,18 +3842,20 @@ final class MpvPlayerController: ObservableObject {
                           player.currentItem === playerItem else { return }
                     player.playImmediately(atRate: self.playbackRate)
                     self.isPlaying = true
+                    self.startSoftFadeInIfNeeded(generation: generation)
                     self.updateSystemNowPlaying()
+                    self.reportPlayback(.started, force: true)
                 }
             }
         } else {
             player.playImmediately(atRate: playbackRate)
             isPlaying = true
+            startSoftFadeInIfNeeded(generation: generation)
             updateSystemNowPlaying()
+            reportPlayback(.started, force: true)
         }
         startTimer()
-        if keepLocalAudioWithAirPlay {
-            refreshMusicAirPlayRoute(afterRoutePicker: true)
-        }
+        refreshMusicAirPlayRoute(afterRoutePicker: true)
     }
 
     private func audioURL(for filePath: String, isRemote: Bool) -> URL? {
@@ -3366,20 +3865,43 @@ final class MpvPlayerController: ObservableObject {
         return URL(fileURLWithPath: filePath)
     }
 
-    private func makeAudioPlayerItem(url: URL) -> AVPlayerItem {
-        let playerItem = AVPlayerItem(url: url)
-        if url.isFileURL {
-            playerItem.preferredForwardBufferDuration = 0
+    private func makeAudioPlayerItem(url: URL, applyEqualizer: Bool = true) -> AVPlayerItem {
+        makeAudioPlayerItem(asset: AVURLAsset(url: url), isLocal: url.isFileURL, applyEqualizer: applyEqualizer)
+    }
+
+    private func makeAudioPlayerItem(asset: AVAsset, isLocal: Bool, preloaded: Bool = false, applyEqualizer: Bool = true) -> AVPlayerItem {
+        let playerItem = AVPlayerItem(asset: asset)
+        if isLocal {
+            playerItem.preferredForwardBufferDuration = preloaded ? 6 : 0
         } else {
             playerItem.preferredForwardBufferDuration = 2
         }
+        // 仅在启用且非纯平时挂 EQ；失败则保持原样（透传），不影响播放。
+        // 仅对本地文件挂 EQ：makeAudioMix 内部会同步访问 asset.tracks，远端资源在主线程同步取轨会阻塞 UI；
+        // EQ 主要面向本地高保真，远端流跳过以规避主线程卡顿。
+        if applyEqualizer, musicEqualizerEnabled, isLocal {
+            let processor = AudioEQProcessor(gainsDB: musicEqualizerGains)
+            if let mix = processor.makeAudioMix(for: asset) {
+                playerItem.audioMix = mix
+            }
+        }
         return playerItem
+    }
+
+    private func clearPreloadedMusicItem() {
+        musicPreloadTask?.cancel()
+        musicPreloadTask = nil
+        guard let preloadedMusicItem else { return }
+        if audioPlayer?.currentItem !== preloadedMusicItem.playerItem {
+            audioPlayer?.remove(preloadedMusicItem.playerItem)
+        }
+        self.preloadedMusicItem = nil
     }
 
     private func prepareVideoRouteProxy(for item: MediaItem, filePath: String) {
         clearVideoRouteProxy()
         guard let url = audioURL(for: filePath, isRemote: item.isRemoteResource) else { return }
-        let playerItem = makeAudioPlayerItem(url: url)
+        let playerItem = makeAudioPlayerItem(url: url, applyEqualizer: false)
         let player = AVPlayer(playerItem: playerItem)
         player.allowsExternalPlayback = true
         player.automaticallyWaitsToMinimizeStalling = false
@@ -3402,7 +3924,7 @@ final class MpvPlayerController: ObservableObject {
         videoRouteProxyActivationTask?.cancel()
         setVideoRouteProxyActive(player.isExternalPlaybackActive)
         if isPlaying {
-            syncVideoRouteProxyPlayback(probing: true)
+            syncVideoRouteProxyPlayback(probing: true, audibleProbe: afterRoutePicker)
         }
         videoRouteProxyActivationTask = Task { @MainActor [weak self, weak player] in
             let probeCount = afterRoutePicker ? 32 : 12
@@ -3420,6 +3942,11 @@ final class MpvPlayerController: ObservableObject {
                     return
                 }
             }
+            self?.videoRouteProxyIsAudibleProbing = false
+            self?.applyVideoLocalVolumeForRouteState()
+            if self?.videoRouteProxyIsActive != true {
+                player?.pause()
+            }
         }
     }
 
@@ -3427,14 +3954,18 @@ final class MpvPlayerController: ObservableObject {
         guard item?.type != .music else { return }
         routePickerRevision &+= 1
         videoRouteProxyPlayer?.allowsExternalPlayback = true
-        syncVideoRouteProxyPlayback(probing: true)
+        syncVideoRouteProxyPlayback(probing: true, audibleProbe: true)
     }
 
     private func setVideoRouteProxyActive(_ active: Bool) {
         guard item?.type != .music, let player = videoRouteProxyPlayer else { return }
         videoRouteProxyIsActive = active
+        if active {
+            videoRouteProxyIsAudibleProbing = false
+        }
         player.isMuted = !active
         player.volume = active ? volume : 0
+        applyVideoLocalVolumeForRouteState()
         if active {
             syncVideoRouteProxyPlayback(probing: false)
         } else {
@@ -3442,15 +3973,18 @@ final class MpvPlayerController: ObservableObject {
         }
     }
 
-    private func syncVideoRouteProxyPlayback(probing: Bool = false) {
+    private func syncVideoRouteProxyPlayback(probing: Bool = false, audibleProbe: Bool = false) {
         guard item?.type != .music, let player = videoRouteProxyPlayer else { return }
+        videoRouteProxyIsAudibleProbing = audibleProbe && probing && isPlaying
+        applyVideoLocalVolumeForRouteState()
         guard videoRouteProxyIsActive || probing else {
             player.pause()
             return
         }
         player.allowsExternalPlayback = true
-        player.volume = videoRouteProxyIsActive ? volume : 0
-        player.isMuted = probing || !videoRouteProxyIsActive
+        let proxyShouldOutput = videoRouteProxyIsActive || videoRouteProxyIsAudibleProbing
+        player.volume = proxyShouldOutput ? volume : 0
+        player.isMuted = !proxyShouldOutput
         player.seek(
             to: CMTime(seconds: max(currentTime, 0), preferredTimescale: 600),
             toleranceBefore: CMTime(seconds: 0.25, preferredTimescale: 600),
@@ -3477,19 +4011,23 @@ final class MpvPlayerController: ObservableObject {
         videoRouteProxyPlayer?.replaceCurrentItem(with: nil)
         videoRouteProxyPlayer = nil
         videoRouteProxyIsActive = false
+        videoRouteProxyIsAudibleProbing = false
+        applyVideoLocalVolumeForRouteState()
         routePickerRevision &+= 1
+    }
+
+    private func applyVideoLocalVolumeForRouteState() {
+        guard item?.type != .music, let libMpvClient else { return }
+        let localVolume = (videoRouteProxyIsActive || videoRouteProxyIsAudibleProbing) ? 0 : volume
+        libMpvClient.setDouble("volume", Double(localVolume * 100))
     }
 
     private func configureMusicRouteProxyIfNeeded() {
         guard item?.type == .music, let player = audioPlayer else { return }
-        player.allowsExternalPlayback = !keepLocalAudioWithAirPlay
-        if keepLocalAudioWithAirPlay {
-            stopAudioLocalMirror()
-            prepareAudioRouteProxyIfNeeded()
-        } else {
-            clearAudioRouteProxy()
-            setAudioLocalMirrorActive(false)
-        }
+        keepLocalAudioWithAirPlay = false
+        player.allowsExternalPlayback = true
+        clearAudioRouteProxy()
+        setAudioLocalMirrorActive(false)
         routePickerRevision &+= 1
     }
 
@@ -3530,7 +4068,7 @@ final class MpvPlayerController: ObservableObject {
               let proxy = audioRouteProxyPlayer else { return }
         audioRouteProxyIsActive = active
         proxy.isMuted = !active
-        proxy.volume = active ? volume : 0
+        proxy.volume = active ? effectiveMusicVolume : 0
         if active {
             syncAudioRouteProxyPlayback(probing: false)
         } else {
@@ -3548,7 +4086,7 @@ final class MpvPlayerController: ObservableObject {
         }
         proxy.allowsExternalPlayback = true
         proxy.isMuted = probing || !audioRouteProxyIsActive
-        proxy.volume = audioRouteProxyIsActive ? volume : 0
+        proxy.volume = audioRouteProxyIsActive ? effectiveMusicVolume : 0
         proxy.seek(
             to: CMTime(seconds: max(currentTime, 0), preferredTimescale: 600),
             toleranceBefore: CMTime(seconds: 0.20, preferredTimescale: 600),
@@ -3575,10 +4113,12 @@ final class MpvPlayerController: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self,
-                      self.playbackGeneration == generation,
-                      self.audioPlayer?.currentItem === playerItem else { return }
-                self.isPlaying = false
+                await Task.yield()
+                guard let self, self.playbackGeneration == generation else { return }
+                let advancedToPreloaded = self.preloadedMusicItem.map {
+                    self.audioPlayer?.currentItem === $0.playerItem
+                } == true
+                self.isPlaying = advancedToPreloaded || (self.audioPlayer?.rate ?? 0) > 0
                 self.onPlaybackFinished?()
             }
         }
@@ -3590,20 +4130,18 @@ final class MpvPlayerController: ObservableObject {
             Task { @MainActor in
                 guard let self,
                       self.audioPlayer === observedPlayer else { return }
-                self.setAudioLocalMirrorActive(observedPlayer.isExternalPlaybackActive)
+                self.routePickerRevision &+= 1
             }
         }
-        setAudioLocalMirrorActive(player.isExternalPlaybackActive)
+        routePickerRevision &+= 1
     }
 
     func refreshMusicAirPlayRoute(afterRoutePicker: Bool = false) {
-        guard item?.type == .music, let player = keepLocalAudioWithAirPlay ? audioRouteProxyPlayer : audioPlayer else { return }
+        guard item?.type == .music, let player = audioPlayer else { return }
         audioRouteRefreshTask?.cancel()
-        if keepLocalAudioWithAirPlay {
-            setAudioRouteProxyActive(player.isExternalPlaybackActive)
-        } else {
-            setAudioLocalMirrorActive(false)
-        }
+        keepLocalAudioWithAirPlay = false
+        player.allowsExternalPlayback = true
+        setAudioLocalMirrorActive(false)
         audioRouteRefreshTask = Task { @MainActor [weak self, weak player] in
             let probeCount = afterRoutePicker ? 32 : 12
             for _ in 0..<probeCount {
@@ -3614,14 +4152,10 @@ final class MpvPlayerController: ObservableObject {
                 }
                 guard let self,
                       let player,
-                      self.item?.type == .music else { return }
-                if self.keepLocalAudioWithAirPlay {
-                    guard self.audioRouteProxyPlayer === player else { return }
-                    self.setAudioRouteProxyActive(player.isExternalPlaybackActive)
-                } else {
-                    guard self.audioPlayer === player else { return }
-                    self.setAudioLocalMirrorActive(false)
-                }
+                      self.item?.type == .music,
+                      self.audioPlayer === player else { return }
+                player.allowsExternalPlayback = true
+                self.setAudioLocalMirrorActive(false)
                 if player.isExternalPlaybackActive {
                     return
                 }
@@ -3631,25 +4165,19 @@ final class MpvPlayerController: ObservableObject {
 
     func prepareForMusicAirPlayRouteSelection() {
         guard item?.type == .music else { return }
-        if keepLocalAudioWithAirPlay {
-            prepareAudioRouteProxyIfNeeded()
-            routePickerRevision &+= 1
-            syncAudioRouteProxyPlayback(probing: true)
-        } else if let player = audioPlayer {
-            player.allowsExternalPlayback = true
-            refreshMusicAirPlayRoute()
-        }
+        keepLocalAudioWithAirPlay = false
+        clearAudioRouteProxy()
+        setAudioLocalMirrorActive(false)
+        audioPlayer?.allowsExternalPlayback = true
+        refreshMusicAirPlayRoute()
     }
 
     func setAirPlayLocalMirrorEnabled(_ enabled: Bool) {
-        keepLocalAudioWithAirPlay = enabled
+        keepLocalAudioWithAirPlay = false
         guard item?.type == .music, let player = audioPlayer else { return }
-        player.allowsExternalPlayback = !enabled
+        player.allowsExternalPlayback = true
         configureMusicRouteProxyIfNeeded()
         setAudioLocalMirrorActive(false)
-        if enabled {
-            refreshMusicAirPlayRoute(afterRoutePicker: true)
-        }
     }
 
     private func removeAudioEndObserver() {
@@ -3685,13 +4213,13 @@ final class MpvPlayerController: ObservableObject {
         mirror.allowsExternalPlayback = false
         mirror.automaticallyWaitsToMinimizeStalling = false
         mirror.actionAtItemEnd = .pause
-        mirror.volume = volume
+        mirror.volume = effectiveMusicVolume
         audioLocalMirrorPlayer = mirror
     }
 
     private func syncAudioLocalMirrorPlayback() {
         guard let mirror = audioLocalMirrorPlayer else { return }
-        mirror.volume = volume
+        mirror.volume = effectiveMusicVolume
         mirror.seek(
             to: CMTime(seconds: max(currentTime, 0), preferredTimescale: 600),
             toleranceBefore: CMTime(seconds: 0.20, preferredTimescale: 600),
@@ -3726,6 +4254,10 @@ final class MpvPlayerController: ObservableObject {
     func togglePlay() {
         guard canControl else { return }
         if let audioPlayer {
+            if audioPlayer.currentItem == nil {
+                restartFromBeginning()
+                return
+            }
             if isPlaying {
                 audioPlayer.pause()
                 audioLocalMirrorPlayer?.pause()
@@ -3738,6 +4270,7 @@ final class MpvPlayerController: ObservableObject {
                 isPlaying = true
             }
             updateSystemNowPlaying()
+            reportPlayback(.progress, force: true)
             return
         }
         if let libMpvClient {
@@ -3746,6 +4279,7 @@ final class MpvPlayerController: ObservableObject {
             libMpvClient.setFlag("pause", !shouldPlay)
             syncVideoRouteProxyPlayback()
             updateSystemNowPlaying()
+            reportPlayback(.progress, force: true)
             return
         }
     }
@@ -3757,29 +4291,139 @@ final class MpvPlayerController: ObservableObject {
     func seek(to seconds: Double) {
         guard canControl else { return }
         let target = min(max(seconds, 0), max(duration, 0))
+        commitTimelineSeek(to: target)
+    }
+
+    func beginScrubbing(to seconds: Double) {
+        guard canControl else { return }
+        updateScrubbing(to: seconds, createIfNeeded: true)
+    }
+
+    func updateScrubbing(to seconds: Double) {
+        guard canControl else { return }
+        updateScrubbing(to: seconds, createIfNeeded: true)
+    }
+
+    func finishScrubbing(to seconds: Double) {
+        guard canControl else { return }
+        let target = clampedTimelineTime(seconds)
+        commitTimelineSeek(to: target)
+    }
+
+    func cancelScrubbing() {
+        guard seekState?.phase == .scrubbing else { return }
+        seekState = nil
+        currentTime = lyricTime
+        seekSyncRevision &+= 1
+    }
+
+    private func updateScrubbing(to seconds: Double, createIfNeeded: Bool) {
+        let target = clampedTimelineTime(seconds)
+        let revision: Int
+        let origin: Double
+        if let current = seekState, current.phase == .scrubbing {
+            revision = current.revision
+            origin = current.originTime
+        } else if createIfNeeded {
+            revision = nextSeekRevision()
+            origin = lyricTime
+        } else {
+            return
+        }
+        clearSeekStateTask?.cancel()
+        clearSeekStateTask = nil
+        seekSyncCorrectionTask?.cancel()
+        seekSyncCorrectionTask = nil
+        pendingTimelineSeek = nil
         currentTime = target
+        seekState = PlaybackSeekState(
+            revision: revision,
+            phase: .scrubbing,
+            targetTime: target,
+            originTime: origin,
+            resolvedTime: nil
+        )
+    }
+
+    private func commitTimelineSeek(to target: Double) {
+        let generation = playbackGeneration
+        let seekRevision = beginTimelineSeek(to: target, generation: generation)
         if let audioPlayer {
+            scheduleSeekSyncCorrection(for: generation)
             audioPlayer.seek(
                 to: CMTime(seconds: target, preferredTimescale: 600),
                 toleranceBefore: .zero,
                 toleranceAfter: .zero
-            )
+            ) { [weak self, weak audioPlayer] finished in
+                Task { @MainActor in
+                    guard let self,
+                          let audioPlayer,
+                          self.audioPlayer === audioPlayer,
+                          self.playbackGeneration == generation,
+                          self.seekState?.revision == seekRevision else { return }
+                    guard finished else {
+                        self.scheduleSeekSyncCorrection(for: generation)
+                        return
+                    }
+                    let actualTime = audioPlayer.currentTime().seconds
+                    if self.applyPlaybackClock(
+                        actualTime,
+                        generation: generation,
+                        currentTolerance: 0.035,
+                        lyricTolerance: 0.020,
+                        force: true
+                    ) {
+                        self.seekSyncRevision &+= 1
+                    }
+                    self.scheduleSeekSyncCorrection(for: generation)
+                }
+            }
             syncAudioLocalMirrorPlayback()
             syncAudioRouteProxyPlayback()
             updateSystemNowPlaying()
             return
         }
         if let libMpvClient {
+            if let activeVideoQualityOption,
+               !activeVideoQualityOption.appliesInPlace,
+               !activeVideoQualityOption.isOriginal,
+               playbackTimelineOffset > 0,
+               target < playbackTimelineOffset - 0.5 {
+                reloadRemoteQualityStream(activeVideoQualityOption, at: target, wasPlaying: isPlaying)
+                return
+            }
             try? libMpvClient.command(["seek", "\(mpvTimelineTime(for: target))", "absolute", "exact"])
             syncVideoRouteProxyPlayback()
             updateSystemNowPlaying()
+            scheduleSeekSyncCorrection(for: playbackGeneration)
             return
         }
     }
 
+    private func clampedTimelineTime(_ seconds: Double) -> Double {
+        min(max(seconds, 0), max(duration, 0))
+    }
+
+    private func nextSeekRevision() -> Int {
+        (seekState?.revision ?? 0) &+ 1
+    }
+
     func restartFromBeginning() {
         currentTime = 0
+        lyricTime = 0
+        clearSeekStateTask?.cancel()
+        clearSeekStateTask = nil
+        seekState = nil
         if let audioPlayer {
+            if audioPlayer.currentItem == nil,
+               let filePath,
+               let url = audioURL(for: filePath, isRemote: item?.isRemoteResource == true) {
+                let playerItem = makeAudioPlayerItem(url: url)
+                audioPlayer.removeAllItems()
+                audioPlayer.insert(playerItem, after: nil)
+                observeAudioEnd(for: playerItem, generation: playbackGeneration)
+            }
+            guard audioPlayer.currentItem != nil else { return }
             audioPlayer.seek(
                 to: .zero,
                 toleranceBefore: .zero,
@@ -3834,6 +4478,67 @@ final class MpvPlayerController: ObservableObject {
         }
     }
 
+    private var effectiveMusicVolume: Float {
+        min(max(volume * musicNormalizationGain * audioTransitionVolumeScale, 0), 1)
+    }
+
+    private func configureMusicOutput(for item: MediaItem, settings: AppSettings, isTrackTransition: Bool) {
+        audioTransitionTask?.cancel()
+        audioTransitionTask = nil
+        musicNormalizationGain = MusicLoudnessGain.linearGain(
+            mode: settings.musicLoudnessNormalization,
+            trackGainDB: item.loudnessTrackGainDB,
+            albumGainDB: item.loudnessAlbumGainDB,
+            trackPeak: item.loudnessTrackPeak,
+            albumPeak: item.loudnessAlbumPeak
+        )
+        musicTransitionMode = settings.musicTransitionMode
+        musicSoftFadeDuration = min(max(settings.musicSoftFadeDuration, 0.3), 2)
+        musicEqualizerEnabled = settings.musicEqualizerEnabled && !settings.musicEqualizerPreset.isFlat
+        musicEqualizerGains = settings.musicEqualizerPreset.gainsDB
+        audioTransitionVolumeScale = isTrackTransition && musicTransitionMode == .softFade ? 0 : 1
+    }
+
+    private func applyAudioOutputVolume() {
+        let outputVolume = effectiveMusicVolume
+        audioPlayer?.volume = outputVolume
+        audioLocalMirrorPlayer?.volume = outputVolume
+        audioRouteProxyPlayer?.volume = audioRouteProxyIsActive ? outputVolume : 0
+    }
+
+    private func startSoftFadeInIfNeeded(generation: Int) {
+        audioTransitionTask?.cancel()
+        audioTransitionTask = nil
+        guard musicTransitionMode == .softFade, audioTransitionVolumeScale < 1 else {
+            audioTransitionVolumeScale = 1
+            applyAudioOutputVolume()
+            return
+        }
+
+        let duration = musicSoftFadeDuration
+        audioTransitionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let steps = max(Int(duration * 60), 1)
+            for step in 1...steps {
+                do {
+                    try await Task.sleep(nanoseconds: 16_666_667)
+                } catch {
+                    return
+                }
+                // 代际变化（切歌/重新 configure）时提前退出。此处不必把 scale 复位为 1：
+                // 任何让 generation 变化的路径都会经 configure / configureMusicOutput 重置 audioTransitionVolumeScale，
+                // 因此中途残留的 <1 值必被下一首覆盖，不会出现音量卡在低位。
+                guard self.playbackGeneration == generation else { return }
+                let progress = Float(step) / Float(steps)
+                self.audioTransitionVolumeScale = progress * progress * (3 - 2 * progress)
+                self.applyAudioOutputVolume()
+            }
+            self.audioTransitionVolumeScale = 1
+            self.applyAudioOutputVolume()
+            self.audioTransitionTask = nil
+        }
+    }
+
     func setVolume(_ value: Float, remember: Bool = true) {
         let clamped = min(max(value, 0), 1)
         if clamped > 0 {
@@ -3844,17 +4549,12 @@ final class MpvPlayerController: ObservableObject {
             return
         }
         volume = clamped
-        if let audioPlayer {
-            audioPlayer.volume = volume
-        }
-        if let audioLocalMirrorPlayer {
-            audioLocalMirrorPlayer.volume = volume
-        }
-        if let audioRouteProxyPlayer {
-            audioRouteProxyPlayer.volume = audioRouteProxyIsActive ? volume : 0
+        if audioPlayer != nil {
+            applyAudioOutputVolume()
         }
         if let libMpvClient {
-            libMpvClient.setDouble("volume", Double(volume * 100))
+            let localVolume = (videoRouteProxyIsActive || videoRouteProxyIsAudibleProbing) ? 0 : volume
+            libMpvClient.setDouble("volume", Double(localVolume * 100))
         }
         if let videoRouteProxyPlayer {
             videoRouteProxyPlayer.volume = videoRouteProxyIsActive ? volume : 0
@@ -3864,12 +4564,211 @@ final class MpvPlayerController: ObservableObject {
         }
     }
 
+    func setAudioSpectrumVisualizationActive(_ active: Bool) {
+        audioSpectrumVisualizationActive = active
+        if !active {
+            audioSpectrumTask?.cancel()
+            audioSpectrumTask = nil
+        } else if isPlaying {
+            refreshAudioSpectrumIfNeeded(at: currentTime)
+        }
+    }
+
+    private func scheduleSeekSyncCorrection(for generation: Int) {
+        seekSyncCorrectionTask?.cancel()
+        seekSyncCorrectionTask = Task { @MainActor [weak self] in
+            for delay in [80_000_000, 160_000_000, 260_000_000, 420_000_000, 680_000_000, 1_000_000_000, 1_400_000_000, 1_900_000_000] {
+                do { try await Task.sleep(nanoseconds: UInt64(delay)) } catch { return }
+                guard let self,
+                      self.playbackGeneration == generation else { return }
+                if let audioPlayer = self.audioPlayer {
+                    let actualTime = audioPlayer.currentTime().seconds
+                    if self.applyPlaybackClock(
+                        actualTime,
+                        generation: generation,
+                        currentTolerance: 0.035,
+                        lyricTolerance: 0.020
+                    ) {
+                        self.seekSyncRevision &+= 1
+                    } else {
+                        self.reissuePendingSeekIfNeeded(
+                            observedTime: actualTime,
+                            generation: generation,
+                            audioPlayer: audioPlayer
+                        )
+                    }
+                } else if let libMpvClient = self.libMpvClient,
+                          let mpvTime = libMpvClient.getDouble("time-pos") {
+                    let logicalTime = self.playerTimelineTime(for: mpvTime)
+                    if self.applyPlaybackClock(
+                        logicalTime,
+                        generation: generation,
+                        currentTolerance: 0.035,
+                        lyricTolerance: 0.020
+                    ) {
+                        self.seekSyncRevision &+= 1
+                    } else {
+                        self.reissuePendingSeekIfNeeded(
+                            observedTime: logicalTime,
+                            generation: generation,
+                            libMpvClient: libMpvClient
+                        )
+                    }
+                }
+            }
+            self?.seekSyncCorrectionTask = nil
+        }
+    }
+
+    @discardableResult
+    private func beginTimelineSeek(to target: Double, generation: Int) -> Int {
+        let existingScrub = seekState?.phase == .scrubbing ? seekState : nil
+        let revision = existingScrub?.revision ?? nextSeekRevision()
+        let originTime = existingScrub?.originTime ?? lyricTime
+        clearSeekStateTask?.cancel()
+        clearSeekStateTask = nil
+        seekSyncCorrectionTask?.cancel()
+        seekSyncCorrectionTask = nil
+        pendingTimelineSeek = PendingTimelineSeek(
+            revision: revision,
+            generation: generation,
+            targetTime: target,
+            originTime: originTime,
+            startedAt: Date()
+        )
+        seekState = PlaybackSeekState(
+            revision: revision,
+            phase: .seeking,
+            targetTime: target,
+            originTime: originTime,
+            resolvedTime: nil
+        )
+        currentTime = target
+        seekSyncRevision &+= 1
+        return revision
+    }
+
+    @discardableResult
+    private func applyPlaybackClock(
+        _ time: Double,
+        generation: Int,
+        currentTolerance: Double,
+        lyricTolerance: Double,
+        force: Bool = false
+    ) -> Bool {
+        guard time.isFinite, time >= 0 else { return false }
+        let pendingBeforeClockUpdate = pendingTimelineSeek
+        if !force, shouldHoldClockUpdateFromPendingSeek(time, generation: generation) {
+            return false
+        }
+        if force {
+            pendingTimelineSeek = nil
+        }
+
+        var changed = false
+        if abs(currentTime - time) > currentTolerance {
+            currentTime = time
+            changed = true
+        }
+        if abs(lyricTime - time) > lyricTolerance || force {
+            lyricTime = time
+            changed = true
+        }
+        if let pending = pendingBeforeClockUpdate,
+           pending.generation == generation,
+           (pendingTimelineSeek == nil || force) {
+            seekState = PlaybackSeekState(
+                revision: pending.revision,
+                phase: .settled,
+                targetTime: pending.targetTime,
+                originTime: pending.originTime,
+                resolvedTime: time
+            )
+            scheduleSeekStateClear(revision: pending.revision)
+            changed = true
+        }
+        return changed
+    }
+
+    private func scheduleSeekStateClear(revision: Int) {
+        clearSeekStateTask?.cancel()
+        clearSeekStateTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 900_000_000) } catch { return }
+            guard let self,
+                  self.seekState?.revision == revision,
+                  self.seekState?.phase == .settled else { return }
+            self.seekState = nil
+            self.clearSeekStateTask = nil
+        }
+    }
+
+    private func shouldHoldClockUpdateFromPendingSeek(_ time: Double, generation: Int) -> Bool {
+        guard let pending = pendingTimelineSeek else { return false }
+        guard pending.generation == generation else {
+            pendingTimelineSeek = nil
+            return false
+        }
+
+        let distanceFromTarget = abs(time - pending.targetTime)
+        let distanceFromOrigin = abs(time - pending.originTime)
+        let requestedDistance = abs(pending.targetTime - pending.originTime)
+        let targetTolerance = item?.type == .music ? 0.30 : 0.24
+        let originLeaveDistance = min(max(requestedDistance * 0.45, 0.12), 0.85)
+        let didActuallyLeaveOrigin = requestedDistance <= 0.08 || distanceFromOrigin >= originLeaveDistance
+        if distanceFromTarget <= targetTolerance, didActuallyLeaveOrigin {
+            pendingTimelineSeek = nil
+            return false
+        }
+
+        if Date().timeIntervalSince(pending.startedAt) < 3.8 {
+            return true
+        }
+
+        pendingTimelineSeek = nil
+        return false
+    }
+
+    private func reissuePendingSeekIfNeeded(
+        observedTime: Double,
+        generation: Int,
+        audioPlayer: AVPlayer? = nil,
+        libMpvClient: LibMpvClient? = nil
+    ) {
+        guard observedTime.isFinite,
+              var pending = pendingTimelineSeek,
+              pending.generation == generation,
+              abs(observedTime - pending.targetTime) > 0.20,
+              abs(pending.targetTime - pending.originTime) > 0.08,
+              pending.reissueCount < 4 else { return }
+
+        let now = Date()
+        if let lastReissuedAt = pending.lastReissuedAt,
+           now.timeIntervalSince(lastReissuedAt) < 0.48 {
+            return
+        }
+
+        pending.reissueCount += 1
+        pending.lastReissuedAt = now
+        pendingTimelineSeek = pending
+
+        if let audioPlayer {
+            audioPlayer.seek(
+                to: CMTime(seconds: pending.targetTime, preferredTimescale: 600),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+        } else if let libMpvClient {
+            try? libMpvClient.command(["seek", "\(mpvTimelineTime(for: pending.targetTime))", "absolute", "exact"])
+        }
+    }
+
     func switchVideoQuality(to option: VideoStreamQualityOption) {
         guard item?.type != .music,
               let libMpvClient else { return }
         if option.appliesInPlace {
             libMpvClient.setString("vf", option.videoFilter ?? "")
             playbackTimelineOffset = 0
+            activeVideoQualityOption = option
             statusMessage = nil
             updateBuffering(active: false, progress: nil)
             syncVideoRouteProxyPlayback()
@@ -3880,24 +4779,28 @@ final class MpvPlayerController: ObservableObject {
         let targetURL = option.playbackURLString(startTime: resumeTime)
         filePath = targetURL
         playbackTimelineOffset = option.isOriginal ? 0 : resumeTime
+        activeVideoQualityOption = option
         currentTime = resumeTime
         if let itemDuration = item?.duration, itemDuration.isFinite, itemDuration > 0 {
             duration = itemDuration
         }
         statusMessage = "正在切换到 \(option.label)。"
-        updateBuffering(active: true, progress: 0)
-        hasVideoFrame = false
         audioTracks = []
         subtitleTracks = []
+        chapters = []
         subtitleAutoLoadEnabled = false
         lastTrackRefreshDate = .distantPast
         do {
             libMpvClient.setString("vf", "")
-            try libMpvClient.command(["loadfile", targetURL, "replace"])
+            var loadCommand = ["loadfile", targetURL, "replace"]
+            if option.isOriginal, resumeTime > 1 {
+                loadCommand.append("start=\(String(format: "%.3f", resumeTime))")
+            }
+            try libMpvClient.command(loadCommand)
             libMpvClient.setDouble("volume", Double(volume * 100))
             libMpvClient.setDouble("speed", Double(playbackRate))
             if option.isOriginal, resumeTime > 1 {
-                try? libMpvClient.command(["seek", "\(resumeTime)", "absolute", "keyframes"])
+                enforceQualityResumeTime(resumeTime, for: option)
             }
             libMpvClient.setFlag("pause", !wasPlaying)
             if let currentItem = item {
@@ -3908,6 +4811,58 @@ final class MpvPlayerController: ObservableObject {
             statusMessage = nil
             updateBuffering(active: false, progress: nil)
             fail("清晰度切换失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func reloadRemoteQualityStream(_ option: VideoStreamQualityOption, at target: Double, wasPlaying: Bool) {
+        guard let libMpvClient else { return }
+        let clampedTarget = min(max(target, 0), max(duration, 0))
+        let targetURL = option.playbackURLString(startTime: clampedTarget)
+        filePath = targetURL
+        playbackTimelineOffset = clampedTarget > 1 ? clampedTarget : 0
+        activeVideoQualityOption = option
+        currentTime = clampedTarget
+        statusMessage = "正在定位到 \(formatTime(clampedTarget))。"
+        audioTracks = []
+        subtitleTracks = []
+        chapters = []
+        subtitleAutoLoadEnabled = false
+        lastTrackRefreshDate = .distantPast
+        do {
+            try libMpvClient.command(["loadfile", targetURL, "replace"])
+            libMpvClient.setDouble("volume", Double(volume * 100))
+            libMpvClient.setDouble("speed", Double(playbackRate))
+            libMpvClient.setFlag("pause", !wasPlaying)
+            if let currentItem = item {
+                prepareVideoRouteProxy(for: currentItem, filePath: targetURL)
+            }
+            syncVideoRouteProxyPlayback(probing: true)
+            updateSystemNowPlaying()
+        } catch {
+            statusMessage = nil
+            fail("定位失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func enforceQualityResumeTime(_ resumeTime: Double, for option: VideoStreamQualityOption) {
+        let generation = playbackGeneration
+        Task { @MainActor [weak self] in
+            for attempt in 0..<8 {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(120_000_000 + attempt * 55_000_000))
+                } catch {
+                    return
+                }
+                guard let self,
+                      self.playbackGeneration == generation,
+                      self.activeVideoQualityOption?.id == option.id,
+                      let libMpvClient = self.libMpvClient else { return }
+                if self.currentTime >= resumeTime - 0.75 {
+                    return
+                }
+                try? libMpvClient.command(["seek", "\(resumeTime)", "absolute", "keyframes"])
+                self.currentTime = resumeTime
+            }
         }
     }
 
@@ -3935,6 +4890,8 @@ final class MpvPlayerController: ObservableObject {
         if let libMpvClient {
             try? libMpvClient.command(["set", "sub-visibility", "no"])
             try? libMpvClient.command(["set", "sid", "no"])
+            didApplyTrackPreference = true
+            if let item { TrackPreferenceStore.setSubtitle(.off, for: item) }
             refreshTrackLists(from: libMpvClient, force: true)
             return
         }
@@ -3994,6 +4951,10 @@ final class MpvPlayerController: ObservableObject {
         if let libMpvClient {
             try? libMpvClient.command(["set", "sid", "\(id)"])
             try? libMpvClient.command(["set", "sub-visibility", "yes"])
+            didApplyTrackPreference = true
+            if let item, let language = subtitleTracks.first(where: { $0.id == id })?.language {
+                TrackPreferenceStore.setSubtitle(.language(language), for: item)
+            }
             refreshTrackLists(from: libMpvClient, force: true)
             return
         }
@@ -4018,6 +4979,10 @@ final class MpvPlayerController: ObservableObject {
     func selectAudioTrack(_ id: Int) {
         if let libMpvClient {
             try? libMpvClient.command(["set", "aid", "\(id)"])
+            didApplyTrackPreference = true
+            if let item, let language = audioTracks.first(where: { $0.id == id })?.language {
+                TrackPreferenceStore.setAudioLanguage(language, for: item)
+            }
             refreshTrackLists(from: libMpvClient, force: true)
             return
         }
@@ -4038,6 +5003,7 @@ final class MpvPlayerController: ObservableObject {
     func saveProgress(appState: AppState, reloadLibrary: Bool = true) {
         guard !didSaveProgress, let item else { return }
         didSaveProgress = true
+        reportPlayback(.stopped, force: true)
         let savedPosition = item.type == .music ? 0 : currentTime
         let shouldReloadLibrary = item.type == .music ? false : reloadLibrary
         appState.updatePlayback(
@@ -4069,6 +5035,15 @@ final class MpvPlayerController: ObservableObject {
         timer = nil
         initialRedrawTask?.cancel()
         initialRedrawTask = nil
+        audioTransitionTask?.cancel()
+        audioTransitionTask = nil
+        clearPreloadedMusicItem()
+        seekSyncCorrectionTask?.cancel()
+        seekSyncCorrectionTask = nil
+        clearSeekStateTask?.cancel()
+        clearSeekStateTask = nil
+        pendingTimelineSeek = nil
+        seekState = nil
         removeAudioEndObserver()
         removeAudioExternalPlaybackObserver()
         audioRouteRefreshTask?.cancel()
@@ -4087,8 +5062,13 @@ final class MpvPlayerController: ObservableObject {
         videoAspectRatio = nil
         audioTracks = []
         subtitleTracks = []
+        chapters = []
         subtitleAutoLoadEnabled = false
+        audioSpectrumTask?.cancel()
+        audioSpectrumTask = nil
+        audioSpectrumBands = AudioSpectrumAnalyzer.silenceBands
         playbackTimelineOffset = 0
+        activeVideoQualityOption = nil
         updateBuffering(active: false, progress: nil)
         lastTrackRefreshDate = .distantPast
         stopSecurityScopedResource()
@@ -4099,6 +5079,15 @@ final class MpvPlayerController: ObservableObject {
         playbackGeneration += 1
         initialRedrawTask?.cancel()
         initialRedrawTask = nil
+        audioTransitionTask?.cancel()
+        audioTransitionTask = nil
+        clearPreloadedMusicItem()
+        seekSyncCorrectionTask?.cancel()
+        seekSyncCorrectionTask = nil
+        clearSeekStateTask?.cancel()
+        clearSeekStateTask = nil
+        pendingTimelineSeek = nil
+        seekState = nil
         removeAudioEndObserver()
         removeAudioExternalPlaybackObserver()
         audioRouteRefreshTask?.cancel()
@@ -4116,8 +5105,13 @@ final class MpvPlayerController: ObservableObject {
         videoAspectRatio = nil
         audioTracks = []
         subtitleTracks = []
+        chapters = []
         subtitleAutoLoadEnabled = false
+        audioSpectrumTask?.cancel()
+        audioSpectrumTask = nil
+        audioSpectrumBands = AudioSpectrumAnalyzer.silenceBands
         playbackTimelineOffset = 0
+        activeVideoQualityOption = nil
         updateBuffering(active: false, progress: nil)
         lastTrackRefreshDate = .distantPast
         stopSecurityScopedResource()
@@ -4136,6 +5130,40 @@ final class MpvPlayerController: ObservableObject {
         )
     }
 
+    func reportPlaybackStopped() {
+        reportPlayback(.stopped, force: true)
+    }
+
+    private func reportPlayback(_ phase: PlayerPlaybackReport.Phase, force: Bool = false) {
+        guard let item, item.metadataProvider == "Emby", item.externalID != nil else { return }
+        let now = Date()
+        if phase == .started {
+            guard !didReportPlaybackStart else { return }
+            didReportPlaybackStart = true
+            lastPlaybackProgressReportDate = now
+        } else {
+            guard didReportPlaybackStart else { return }
+            if phase == .progress, !force {
+                guard now.timeIntervalSince(lastPlaybackProgressReportDate) >= 15 else { return }
+            }
+            if phase == .stopped {
+                didReportPlaybackStart = false
+            }
+        }
+        if phase == .progress {
+            lastPlaybackProgressReportDate = now
+        }
+        onPlaybackReport?(
+            PlayerPlaybackReport(
+                phase: phase,
+                item: item,
+                position: max(currentTime, 0),
+                duration: duration > 0 ? duration : item.duration,
+                isPaused: !isPlaying
+            )
+        )
+    }
+
     private func startTimer() {
         timer?.invalidate()
         let interval = item?.type == .music ? 0.18 : 0.25
@@ -4149,9 +5177,14 @@ final class MpvPlayerController: ObservableObject {
                     }
                     let audioTime = audioPlayer.currentTime().seconds
                     if audioTime.isFinite, audioTime >= 0 {
-                        if self.isPlaying || abs(self.currentTime - audioTime) > 0.25 {
-                            self.currentTime = audioTime
-                        }
+                        // 进度条与歌词用同一更紧的容差，避免进度条比歌词慢半拍（两者锁步推进）。
+                        _ = self.applyPlaybackClock(
+                            audioTime,
+                            generation: self.playbackGeneration,
+                            currentTolerance: self.isPlaying ? 0.020 : 0.25,
+                            lyricTolerance: 0.020
+                        )
+                        self.refreshAudioSpectrumIfNeeded(at: audioTime)
                     }
                     let audioDuration = audioPlayer.currentItem?.duration.seconds ?? 0
                     if audioDuration.isFinite, audioDuration > 0, abs(self.duration - audioDuration) > 0.05 {
@@ -4161,14 +5194,18 @@ final class MpvPlayerController: ObservableObject {
                         self.isPlaying = false
                         audioPlayer.pause()
                     }
+                    self.reportPlayback(.progress)
                     return
                 }
                 if let libMpvClient = self.libMpvClient {
                     if let time = libMpvClient.getDouble("time-pos") {
                         let timelineTime = self.playerTimelineTime(for: time)
-                        if abs(self.currentTime - timelineTime) > 0.08 {
-                            self.currentTime = timelineTime
-                        }
+                        _ = self.applyPlaybackClock(
+                            timelineTime,
+                            generation: self.playbackGeneration,
+                            currentTolerance: 0.08,
+                            lyricTolerance: 0.035
+                        )
                     }
                     if let duration = libMpvClient.getDouble("duration"), duration > 0 {
                         let logicalDuration = self.logicalDuration(fromPlaybackDuration: duration)
@@ -4188,6 +5225,7 @@ final class MpvPlayerController: ObservableObject {
                         self.statusMessage = nil
                     }
                     self.refreshTrackLists(from: libMpvClient)
+                    self.reportPlayback(.progress)
                     return
                 }
             }
@@ -4199,6 +5237,33 @@ final class MpvPlayerController: ObservableObject {
     private func playerTimelineTime(for playbackTime: Double) -> Double {
         guard playbackTimelineOffset > 0 else { return playbackTime }
         return playbackTimelineOffset + max(playbackTime, 0)
+    }
+
+    private func refreshAudioSpectrumIfNeeded(at time: Double) {
+        guard audioSpectrumVisualizationActive,
+              isPlaying,
+              audioSpectrumTask == nil,
+              // 性能：窗口正被拖动/缩放时跳过频谱的 AVAssetReader 解码（每 0.34s 一次的 PCM 解码+FFT 是
+              // 播放期间持续的 CPU 开销，在无风扇机型上与拖窗合成抢资源）。跳过时频谱柱定格，拖动结束即恢复，
+              // 拖动中肉眼不可见，零观感牺牲。
+              !spectrumSuppressedDuringWindowDrag,
+              item?.type == .music,
+              item?.isRemoteResource != true,
+              let filePath,
+              Date().timeIntervalSince(lastAudioSpectrumSampleDate) > 0.34 else { return }
+        lastAudioSpectrumSampleDate = Date()
+        let generation = playbackGeneration
+        audioSpectrumTask = Task { @MainActor [weak self] in
+            let bands = await Task.detached(priority: .utility) {
+                await AudioSpectrumAnalyzer.bands(filePath: filePath, time: time, bandCount: 5)
+            }.value
+            guard let self,
+                  !Task.isCancelled,
+                  self.playbackGeneration == generation,
+                  self.item?.type == .music else { return }
+            self.audioSpectrumBands = bands
+            self.audioSpectrumTask = nil
+        }
     }
 
     private func mpvTimelineTime(for absoluteTime: Double) -> Double {
@@ -4292,6 +5357,7 @@ final class MpvPlayerController: ObservableObject {
         let now = Date()
         guard force || now.timeIntervalSince(lastTrackRefreshDate) > 1.0 else { return }
         lastTrackRefreshDate = now
+        refreshChapterList(from: client)
         guard let count = client.getInt64("track-list/count"), count > 0 else {
             if !audioTracks.isEmpty { audioTracks = [] }
             if !subtitleTracks.isEmpty { subtitleTracks = [] }
@@ -4328,6 +5394,59 @@ final class MpvPlayerController: ObservableObject {
         if subtitleTracks != subtitles {
             subtitleTracks = subtitles
         }
+        applyTrackPreferenceIfNeeded(client: client)
+    }
+
+    /// A7：轨道列表就绪后，套用同剧集记忆的音轨/字幕语言（仅一次，且不覆盖用户手动选择）。
+    private func applyTrackPreferenceIfNeeded(client: LibMpvClient) {
+        guard !didApplyTrackPreference, let item else { return }
+        guard !audioTracks.isEmpty || !subtitleTracks.isEmpty else { return }
+        didApplyTrackPreference = true
+
+        if let language = TrackPreferenceStore.audioLanguage(for: item),
+           let track = audioTracks.first(where: { ($0.language ?? "") == language }),
+           !track.isSelected {
+            try? client.command(["set", "aid", "\(track.id)"])
+        }
+
+        if let preference = TrackPreferenceStore.subtitle(for: item) {
+            switch preference {
+            case .off:
+                try? client.command(["set", "sub-visibility", "no"])
+                try? client.command(["set", "sid", "no"])
+            case .language(let language):
+                if let track = subtitleTracks.first(where: { ($0.language ?? "") == language }),
+                   !track.isSelected {
+                    try? client.command(["set", "sid", "\(track.id)"])
+                    try? client.command(["set", "sub-visibility", "yes"])
+                }
+            }
+        }
+    }
+
+    private func refreshChapterList(from client: LibMpvClient) {
+        guard let count = client.getInt64("chapter-list/count"), count > 0 else {
+            if !chapters.isEmpty { chapters = [] }
+            return
+        }
+        var next: [MpvChapter] = []
+        next.reserveCapacity(Int(count))
+        for index in 0..<Int(count) {
+            guard let playbackTime = client.getDouble("chapter-list/\(index)/time") else { continue }
+            let title = client.getString("chapter-list/\(index)/title")
+                .flatMap { $0.isEmpty ? nil : $0 }
+                ?? "章节 \(index + 1)"
+            next.append(
+                MpvChapter(
+                    id: index,
+                    title: title,
+                    time: playerTimelineTime(for: playbackTime)
+                )
+            )
+        }
+        if chapters != next {
+            chapters = next
+        }
     }
 
     private func formatTime(_ seconds: Double) -> String {
@@ -4342,6 +5461,134 @@ final class MpvPlayerController: ObservableObject {
         return String(format: "%d:%02d", minutes, seconds)
     }
 
+}
+
+private enum AudioSpectrumAnalyzer {
+    static let silenceBands: [CGFloat] = [0.18, 0.24, 0.20, 0.26, 0.21]
+
+    static func bands(filePath: String, time: Double, bandCount: Int) async -> [CGFloat] {
+        guard bandCount > 0 else { return [] }
+        let url = URL(fileURLWithPath: filePath)
+        guard url.isFileURL else { return silenceBands.prefixBands(bandCount) }
+
+        let asset = AVURLAsset(url: url)
+        guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
+              let reader = try? AVAssetReader(asset: asset) else {
+            return silenceBands.prefixBands(bandCount)
+        }
+
+        let output = AVAssetReaderTrackOutput(
+            track: track,
+            outputSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMIsFloatKey: true,
+                AVLinearPCMBitDepthKey: 32,
+                AVLinearPCMIsBigEndianKey: false
+            ]
+        )
+        output.alwaysCopiesSampleData = false
+        guard reader.canAdd(output) else { return silenceBands.prefixBands(bandCount) }
+        reader.add(output)
+        reader.timeRange = CMTimeRange(
+            start: CMTime(seconds: max(time, 0), preferredTimescale: 600),
+            duration: CMTime(seconds: 0.16, preferredTimescale: 600)
+        )
+        guard reader.startReading() else { return silenceBands.prefixBands(bandCount) }
+
+        var samples: [Float] = []
+        samples.reserveCapacity(4096)
+        while let sampleBuffer = output.copyNextSampleBuffer(), samples.count < 4096 {
+            defer { CMSampleBufferInvalidate(sampleBuffer) }
+            guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
+            let byteCount = CMBlockBufferGetDataLength(blockBuffer)
+            guard byteCount >= MemoryLayout<Float>.size else { continue }
+            var floats = Array(repeating: Float.zero, count: byteCount / MemoryLayout<Float>.size)
+            let status = floats.withUnsafeMutableBytes { buffer in
+                CMBlockBufferCopyDataBytes(
+                    blockBuffer,
+                    atOffset: 0,
+                    dataLength: min(byteCount, buffer.count),
+                    destination: buffer.baseAddress!
+                )
+            }
+            guard status == noErr else { continue }
+            samples.append(contentsOf: floats.prefix(max(0, 4096 - samples.count)))
+        }
+        reader.cancelReading()
+
+        return normalizedFrequencyBands(from: samples, bandCount: bandCount)
+    }
+
+    private static func normalizedFrequencyBands(from rawSamples: [Float], bandCount: Int) -> [CGFloat] {
+        guard rawSamples.count >= 64 else { return silenceBands.prefixBands(bandCount) }
+        let sampleCount = min(1024, rawSamples.count)
+        let step = max(rawSamples.count / sampleCount, 1)
+        var samples: [Double] = []
+        samples.reserveCapacity(sampleCount)
+        var index = 0
+        while index < rawSamples.count, samples.count < sampleCount {
+            let value = Double(rawSamples[index])
+            if value.isFinite {
+                samples.append(min(max(value, -1), 1))
+            }
+            index += step
+        }
+        guard samples.count >= 64 else { return silenceBands.prefixBands(bandCount) }
+
+        let mean = samples.reduce(0, +) / Double(samples.count)
+        for index in samples.indices {
+            let window = 0.5 - 0.5 * cos((2 * .pi * Double(index)) / Double(max(samples.count - 1, 1)))
+            samples[index] = (samples[index] - mean) * window
+        }
+
+        let maxBin = max(min(samples.count / 2 - 1, 96), bandCount)
+        let ranges = frequencyRanges(maxBin: maxBin, bandCount: bandCount)
+        let magnitudes = ranges.map { range in
+            var total = 0.0
+            var count = 0
+            for bin in range.lowerBound...range.upperBound {
+                let angleBase = -2.0 * .pi * Double(bin) / Double(samples.count)
+                var real = 0.0
+                var imaginary = 0.0
+                for (sampleIndex, sample) in samples.enumerated() {
+                    let angle = angleBase * Double(sampleIndex)
+                    real += sample * cos(angle)
+                    imaginary += sample * sin(angle)
+                }
+                total += sqrt(real * real + imaginary * imaginary)
+                count += 1
+            }
+            return count > 0 ? total / Double(count) : 0
+        }
+
+        let peak = max(magnitudes.max() ?? 0, 0.000_001)
+        let values = magnitudes.map { magnitude -> CGFloat in
+            let normalized = min(max(sqrt(magnitude / peak), 0), 1)
+            return CGFloat(0.16 + normalized * 0.84)
+        }
+        return values.isEmpty ? silenceBands.prefixBands(bandCount) : values
+    }
+
+    private static func frequencyRanges(maxBin: Int, bandCount: Int) -> [ClosedRange<Int>] {
+        guard bandCount > 0 else { return [] }
+        var ranges: [ClosedRange<Int>] = []
+        var lower = 1
+        for index in 0..<bandCount {
+            let fraction = pow(Double(index + 1) / Double(bandCount), 1.55)
+            let upper = max(lower, min(maxBin, Int((Double(maxBin) * fraction).rounded())))
+            ranges.append(lower...upper)
+            lower = min(upper + 1, maxBin)
+        }
+        return ranges
+    }
+}
+
+private extension Array where Element == CGFloat {
+    func prefixBands(_ count: Int) -> [CGFloat] {
+        if self.count == count { return self }
+        if self.count > count { return Array(prefix(count)) }
+        return self + Array(repeating: last ?? 0.2, count: count - self.count)
+    }
 }
 
 enum PlayerWindowActions {
@@ -4395,6 +5642,7 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
         private var currentPredictedAspect: CGFloat?
         private var pendingAspectProbe: Task<Void, Never>?
         private var hasAppliedAspectCorrection = false
+        private var minimumPlayerContentSize: NSSize?
 
         init(appState: AppState) {
             self.appState = appState
@@ -4491,7 +5739,8 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
             window.isOpaque = false
             window.hasShadow = true
             window.collectionBehavior = [.fullScreenPrimary]
-            window.minSize = Self.minimumPlayerSize(for: item, aspectOverride: predictedAspect)
+            let minimumContentSize = Self.minimumPlayerContentSize(for: item, aspectOverride: predictedAspect)
+            applyMinimumContentSize(minimumContentSize, to: window)
             window.contentAspectRatio = preferredSize
             window.contentResizeIncrements = NSSize(width: 1, height: 1)
             window.delegate = self
@@ -4554,7 +5803,8 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
                abs(currentPredictedAspect - aspect) < tolerance {
                 let stableSize = NSSize(width: max(window.contentLayoutRect.width, 1), height: max(window.contentLayoutRect.width, 1) / aspect)
                 window.contentAspectRatio = stableSize
-                window.minSize = Self.minimumPlayerSize(for: item, aspectOverride: aspect)
+                let minimumContentSize = Self.minimumPlayerContentSize(for: item, aspectOverride: aspect)
+                applyMinimumContentSize(minimumContentSize, to: window)
                 hasAppliedAspectCorrection = true
                 return
             }
@@ -4564,10 +5814,44 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
                 screen: sourceScreen,
                 aspectOverride: aspect
             )
-            window.minSize = Self.minimumPlayerSize(for: item, aspectOverride: aspect)
+            let minimumContentSize = Self.minimumPlayerContentSize(for: item, aspectOverride: aspect)
+            applyMinimumContentSize(minimumContentSize, to: window)
             resizeWindow(to: preferredSize, animate: hasAppliedAspectCorrection)
             currentPredictedAspect = aspect
             hasAppliedAspectCorrection = true
+        }
+
+        func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+            guard sender === window,
+                  !sender.styleMask.contains(.fullScreen),
+                  let minimumPlayerContentSize else {
+                return frameSize
+            }
+            let proposedContent = sender.contentRect(forFrameRect: NSRect(origin: .zero, size: frameSize)).size
+            guard proposedContent.width < minimumPlayerContentSize.width ||
+                    proposedContent.height < minimumPlayerContentSize.height else {
+                return frameSize
+            }
+
+            let ratioSize = sender.contentAspectRatio
+            let aspect = ratioSize.width > 0 && ratioSize.height > 0
+                ? ratioSize.width / ratioSize.height
+                : minimumPlayerContentSize.width / minimumPlayerContentSize.height
+            var clampedContent = proposedContent
+            if clampedContent.width < minimumPlayerContentSize.width {
+                clampedContent.width = minimumPlayerContentSize.width
+                clampedContent.height = max(clampedContent.height, clampedContent.width / aspect)
+            }
+            if clampedContent.height < minimumPlayerContentSize.height {
+                clampedContent.height = minimumPlayerContentSize.height
+                clampedContent.width = max(clampedContent.width, clampedContent.height * aspect)
+            }
+            return sender.frameRect(forContentRect: NSRect(origin: .zero, size: clampedContent)).size
+        }
+
+        func windowDidResize(_ notification: Notification) {
+            guard let window, notification.object as AnyObject? === window else { return }
+            clampPlayerWindowFrameIfNeeded(window)
         }
 
         func closeWindow(clearSelection: Bool = true) {
@@ -4583,6 +5867,7 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
             self.window = nil
             currentItemID = nil
             currentPredictedAspect = nil
+            minimumPlayerContentSize = nil
             if clearSelection, appState.activePlayerItem?.type != .music {
                 clearActiveSelectionSoon()
             }
@@ -4595,9 +5880,30 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
             let closedItemID = currentItemID
             currentItemID = nil
             currentPredictedAspect = nil
+            minimumPlayerContentSize = nil
             if appState.activePlayerItem?.type != .music {
                 clearActiveSelectionSoon(closedItemID: closedItemID)
             }
+        }
+
+        private func applyMinimumContentSize(_ contentSize: NSSize, to window: NSWindow) {
+            minimumPlayerContentSize = contentSize
+            window.contentMinSize = contentSize
+            window.minSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: contentSize)).size
+            clampPlayerWindowFrameIfNeeded(window)
+        }
+
+        private func clampPlayerWindowFrameIfNeeded(_ window: NSWindow) {
+            guard !window.styleMask.contains(.fullScreen),
+                  let minimumPlayerContentSize else { return }
+            let currentContent = window.contentRect(forFrameRect: window.frame).size
+            guard currentContent.width < minimumPlayerContentSize.width ||
+                    currentContent.height < minimumPlayerContentSize.height else { return }
+
+            var frameRect = window.frameRect(forContentRect: NSRect(origin: .zero, size: minimumPlayerContentSize))
+            frameRect.origin.x = window.frame.origin.x
+            frameRect.origin.y = window.frame.maxY - frameRect.height
+            window.setFrame(frameRect, display: true)
         }
 
         private func clearActiveSelectionSoon(closedItemID: String? = nil) {
@@ -4667,10 +5973,14 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
             return finalSize
         }
 
-        private static func minimumPlayerSize(for item: MediaItem, aspectOverride: CGFloat? = nil) -> NSSize {
+        private static func minimumPlayerContentSize(for item: MediaItem, aspectOverride: CGFloat? = nil) -> NSSize {
             let aspect = aspectOverride ?? videoAspectRatio(for: item)
-            let baseWidth: CGFloat = aspect >= 1 ? 480 : 320
-            return NSSize(width: baseWidth, height: baseWidth / aspect)
+            let safeAspect = aspect.isFinite && aspect > 0 ? aspect : 16.0 / 9.0
+            // 控制条最大宽约 596，加上播放器左右 18pt 安全边和标题栏圆角余量，低于 680pt 时
+            // 清晰度/音轨/音量/倍速等按钮会互相挤压；高度给底部两行控制条、锁定按钮和加载层留足空间。
+            let minimumWidth = max(VideoWindowSizing.minimumControlSafeWidth, VideoWindowSizing.minimumControlSafeHeight * safeAspect)
+            let minimumHeight = max(VideoWindowSizing.minimumControlSafeHeight, minimumWidth / safeAspect)
+            return NSSize(width: minimumWidth, height: minimumHeight)
         }
 
         private static func videoAspectRatio(for item: MediaItem) -> CGFloat {

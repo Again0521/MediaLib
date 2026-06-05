@@ -53,6 +53,7 @@ private enum HomeContentSnapshotBuilder {
 
 struct HomeView: View {
     @EnvironmentObject private var appState: AppState
+    let onOpenHealthCenter: () -> Void
     @State private var searchText = ""
     @State private var visibleHomeItems: [MediaItem] = []
     @State private var visibleHomeItemsKey = ""
@@ -60,6 +61,10 @@ struct HomeView: View {
     @State private var homeContentRefreshTask: Task<Void, Never>?
     @State private var homeSearchRefreshTask: Task<Void, Never>?
     @AppStorage("MediaLib.home.selectedTab") private var selectedTabRaw = HomeTab.overview.rawValue
+
+    init(onOpenHealthCenter: @escaping () -> Void = {}) {
+        self.onOpenHealthCenter = onOpenHealthCenter
+    }
 
     private var selectedTab: HomeTab {
         get { HomeTab(rawValue: selectedTabRaw) ?? .overview }
@@ -69,11 +74,13 @@ struct HomeView: View {
     var body: some View {
         let tab = currentTab
         let gridItems = displayedHomeItems(for: tab)
+        // 首页搜索框现在即"搜索全部媒体"：有输入时显示跨影音的全局结果（替代海报型分区路径）。
+        let isSearching = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
         Group {
-            if !appState.sources.isEmpty, isPosterTab(tab), !gridItems.isEmpty {
+            if !isSearching, !appState.sources.isEmpty, isPosterTab(tab), !gridItems.isEmpty {
                 // P1：首页海报型 tab 走原生 List 虚拟化；页头/扫描进度/标签栏/分区标题作为前导行随内容滚动。
-                PosterGridList(items: gridItems, bottomInset: gridBottomInset) {
+                PosterGridList(items: gridItems, bottomInset: gridBottomInset, showsDeletePlaybackHistory: tab == .continueWatching || tab == .nextUp) {
                     VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
                         header
                         if let progress = appState.scanProgress, appState.isScanning {
@@ -95,6 +102,15 @@ struct HomeView: View {
 
                         if appState.sources.isEmpty {
                             EmptyLibraryView()
+                        } else if isSearching {
+                            GlobalSearchView(query: searchText) { item in
+                                if item.type == .music {
+                                    appState.play(item)
+                                } else {
+                                    appState.selectedItem = item
+                                }
+                            }
+                            .environmentObject(appState)
                         } else {
                             HomeTabBar(tabs: enabledTabs, selection: tabSelection)
                             homeContent(for: tab)
@@ -127,6 +143,11 @@ struct HomeView: View {
             homeSearchRefreshTask?.cancel()
             refreshHomeItems(for: currentTab, deferred: true)
         }
+        .onChange(of: appState.favoriteRevision) { _ in
+            // 喜欢乐观更新只 bump favoriteRevision；首页“喜欢”标签需据此刷新。
+            homeSearchRefreshTask?.cancel()
+            refreshHomeItems(for: currentTab, deferred: true)
+        }
         .onDisappear {
             homeContentRefreshTask?.cancel()
             homeSearchRefreshTask?.cancel()
@@ -151,14 +172,15 @@ struct HomeView: View {
                     .foregroundStyle(.secondary)
             }
             if showsPlaybackHistoryAction {
-                Button {
+                Button(role: .destructive) {
                     appState.clearPlaybackHistory(homePlaybackTraceItems)
                 } label: {
                     Label("清除记录", systemImage: "clock.badge.xmark")
+                        .foregroundStyle(.red)
                 }
                 .disabled(homePlaybackTraceItems.isEmpty)
             }
-            GlassSearchField(placeholder: "搜索媒体", text: $searchText)
+            GlassSearchField(placeholder: "搜索全部媒体", text: $searchText)
             Button {
                 appState.scanSources(for: currentTab)
             } label: {
@@ -188,7 +210,7 @@ struct HomeView: View {
         switch tab {
         case .overview:
             HomeStatsView()
-            LibraryHealthView()
+            LibraryHealthView(onOpen: onOpenHealthCenter)
         case .privacy where !appState.privacyPINConfigured || !appState.privacyUnlocked:
             PrivacyLockView()
                 .frame(minHeight: 420)
@@ -260,6 +282,7 @@ struct HomeView: View {
             tab.rawValue,
             searchApplies(to: tab) ? searchText.trimmingCharacters(in: .whitespacesAndNewlines) : "",
             "\(appState.libraryRevision)",
+            "\(appState.favoriteRevision)",
             "\(appState.privacyUnlocked)"
         ].joined(separator: "|")
     }
@@ -461,7 +484,7 @@ struct HomeStatsView: View {
                 StatTile(title: "未观看", value: "\(stats.unwatchedCount)", systemImage: "eye")
             }
             if stats.favoriteCount > 0 {
-                StatTile(title: "收藏", value: "\(stats.favoriteCount)", systemImage: "heart")
+                StatTile(title: "喜欢", value: "\(stats.favoriteCount)", systemImage: "heart")
             }
             if stats.watchedMovieCount > 0 {
                 StatTile(title: "已看影片", value: "\(stats.watchedMovieCount)", systemImage: "checkmark.circle")
@@ -521,26 +544,38 @@ struct StatTile: View {
 struct LibraryHealthView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
+    let onOpen: () -> Void
+    @State private var isHovering = false
 
     var body: some View {
         let offline = appState.offlineSources
         let missingFiles = appState.missingFileItems
         let duplicateGroups = appState.duplicateTitleGroups
+        let missingMetadata = appState.missingMetadataItems
 
-        if !offline.isEmpty || !missingFiles.isEmpty || !duplicateGroups.isEmpty {
+        if !offline.isEmpty || !missingFiles.isEmpty || !duplicateGroups.isEmpty || !missingMetadata.isEmpty {
             let tipBlue = Color(red: 0.22, green: 0.52, blue: 0.92)
-            HStack(spacing: 12) {
-                Image(systemName: "externaldrive.badge.exclamationmark")
-                    .font(.title2)
-                    .foregroundStyle(tipBlue)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("媒体库健康提示")
-                        .font(.headline)
-                    Text("\(offline.count) 个媒体源不可访问，\(missingFiles.count) 个文件路径失效，\(duplicateGroups.count) 组疑似重复条目。")
+            let active = isHovering && !suppressHoverDuringScroll
+            Button(action: onOpen) {
+                HStack(spacing: 12) {
+                    Image(systemName: "externaldrive.badge.exclamationmark")
+                        .font(.title2)
+                        .foregroundStyle(active ? AppColors.selectedGlassTint.opacity(0.92) : tipBlue)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("媒体库需要处理")
+                            .font(.headline)
+                        Text("\(offline.count) 个媒体源不可访问，\(missingFiles.count) 个文件路径失效，\(duplicateGroups.count) 组疑似重复条目，\(missingMetadata.count) 个条目缺少核心信息。")
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
                         .foregroundStyle(.secondary)
                 }
-                Spacer()
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .padding(14)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
@@ -557,6 +592,17 @@ struct LibraryHealthView: View {
                         lineWidth: 1
                     )
             }
+            .repeatedSurfaceHover(active, cornerRadius: 14, tint: tipBlue, intensity: 0.78)
+            .brightness(active ? 0.006 : 0)
+            .onHover { hovering in
+                isHovering = suppressHoverDuringScroll ? false : hovering
+            }
+            .onChange(of: suppressHoverDuringScroll) { suppressing in
+                if suppressing {
+                    isHovering = false
+                }
+            }
+            .animation(reduceMotion ? nil : AppMotion.listHover, value: active)
         }
     }
 }
@@ -576,20 +622,21 @@ struct EmptyLibraryView: View {
                 )
             Text("还没有媒体源")
                 .font(.title2.weight(.semibold))
-            Text("在设置中添加本地文件夹、移动硬盘或 `/Volumes` 下的 NAS 挂载目录。")
+            Text("添加本地文件夹、移动硬盘、网络挂载或 Emby 媒体库后即可开始扫描。")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 380)
             HStack(spacing: 8) {
                 Image(systemName: "arrow.right.circle.fill")
                     .foregroundStyle(AppColors.selectedGlassTint.opacity(0.90))
-                Text("前往 **媒体源** 页面添加")
+                Text("前往 **媒体源** 添加")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
             .padding(.top, 4)
         }
-        .frame(maxWidth: .infinity, minHeight: 360)
+        // 内容在更高的卡片内水平+垂直居中，让磁盘动画位于空状态视觉中心。
+        .frame(maxWidth: .infinity, minHeight: 480, alignment: .center)
         .padding(32)
         .staticSurfaceBackground(cornerRadius: 22)
         .onAppear { breathe = true }
@@ -613,7 +660,7 @@ struct ScanProgressView: View {
                     .foregroundStyle(.secondary)
             }
             ProgressView(value: progress.fraction)
-                .tint(.accentColor)
+                .tint(AppColors.selectedGlassTint)
             if hidesPath {
                 Text("路径和文件名已隐藏")
                     .font(.caption)

@@ -1,6 +1,7 @@
 import AppKit
 import MediaLibCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct DetailView: View {
     @EnvironmentObject private var appState: AppState
@@ -21,6 +22,20 @@ struct DetailView: View {
         List {
             detailRow(top: 28, bottom: 8) { topBar }
             detailRow(top: 8, bottom: 8) { hero }
+
+            if item.type != .music, item.externalID?.hasPrefix("tmdb:") == true {
+                detailRow(top: 8, bottom: 8) {
+                    MediaTMDBExtrasView(item: item)
+                        .environmentObject(appState)
+                }
+            }
+
+            if item.type == .music, let artist = item.artist, !artist.trimmingCharacters(in: .whitespaces).isEmpty {
+                detailRow(top: 8, bottom: 8) {
+                    MusicArtistInfoView(artistName: artist)
+                        .environmentObject(appState)
+                }
+            }
 
             if !episodes.isEmpty {
                 detailRow(top: 12, bottom: 6) { episodeHeader(episodes) }
@@ -98,6 +113,11 @@ struct DetailView: View {
     private func episodeRow(_ episode: MediaItem) -> some View {
         EpisodeRowView(episode: episode, selected: selectedEpisodeID == episode.id)
             .contentShape(Rectangle())
+            .background {
+                EpisodeMouseDownSelectionMonitor {
+                    selectedEpisodeID = episode.id
+                }
+            }
             .onTapGesture(count: 2) {
                 selectedEpisodeID = episode.id
                 appState.play(episode, preserveSelection: true)
@@ -110,12 +130,14 @@ struct DetailView: View {
                 Button("快速预览") { appState.quickPreviewItem = episode }
                 Button("外部打开") { appState.openExternally(episode) }
                 Divider()
-                Button(episode.watched ? "标记为未看" : "标记为已看") {
-                    appState.markWatched(episode, watched: !episode.watched)
-                }
-                if episode.hasPlaybackTrace {
-                    Button("删除播放记录") {
-                        appState.clearPlaybackHistory(episode)
+                // #10 右键具体剧集只标记该集；已看完时提供“清除已观看”。
+                if episode.watched {
+                    Button("清除已观看") {
+                        appState.markWatched(episode, watched: false)
+                    }
+                } else {
+                    Button("标记为已观看") {
+                        appState.markWatched(episode, watched: true)
                     }
                 }
             }
@@ -172,12 +194,21 @@ struct DetailView: View {
                         .lineLimit(2)
                     Spacer()
                     Button {
+                        appState.toggleWatchlist(item)
+                    } label: {
+                        Image(systemName: item.watchlist ? "bookmark.fill" : "bookmark")
+                            .foregroundStyle(item.watchlist ? AppColors.selectedGlassTint : Color.primary)
+                    }
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 14, horizontalPadding: 10, minHeight: 30))
+                    .help(item.watchlist ? "移出想看" : "加入想看")
+                    Button {
                         appState.toggleFavorite(item)
                     } label: {
                         Image(systemName: item.favorite ? "heart.fill" : "heart")
+                            .foregroundStyle(item.favorite ? Color.red : Color.primary)
                     }
                     .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 14, horizontalPadding: 10, minHeight: 30))
-                    .help("收藏")
+                    .help(item.favorite ? "取消喜欢" : "喜欢")
                 }
 
                 HStack(spacing: 12) {
@@ -193,6 +224,8 @@ struct DetailView: View {
                     }
                 }
                 .foregroundStyle(.secondary)
+
+                ratingControl
 
                 if let collection = item.collectionTitle {
                     Label(collection, systemImage: "square.stack.3d.up")
@@ -214,7 +247,7 @@ struct DetailView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
                         Button {
-                            appState.play(item)
+                            appState.play(item, preserveSelection: true)
                         } label: {
                             Label("播放", systemImage: "play.fill")
                         }
@@ -259,6 +292,40 @@ struct DetailView: View {
         .surfaceBackground(cornerRadius: 24)
     }
 
+    // 评级控件：与海报右键菜单「评级」共用同一份数据（item.rating，1–5 星，经 appState.updateRating 写回）。
+    private var ratingControl: some View {
+        let current = min(item.rating.map { Int($0.rounded()) } ?? 0, 5)
+        return HStack(spacing: 8) {
+            Text("评级")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 3) {
+                ForEach(1...5, id: \.self) { star in
+                    Button {
+                        appState.updateRating(item, rating: star == current ? nil : Double(star))
+                    } label: {
+                        Image(systemName: star <= current ? "star.fill" : "star")
+                            .font(.system(size: 15))
+                            .foregroundStyle(star <= current ? Color.yellow : Color.secondary.opacity(0.5))
+                    }
+                    .buttonStyle(SubtleIconButtonStyle(minSize: 22))
+                    .help("\(star) 星")
+                }
+            }
+            if current > 0 {
+                Button {
+                    appState.updateRating(item, rating: nil)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(SubtleIconButtonStyle(minSize: 22))
+                .help("清除评级")
+            }
+        }
+    }
+
     private var fileStatus: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("文件")
@@ -275,7 +342,7 @@ struct DetailView: View {
                     Spacer()
                     if isRemote {
                         Button {
-                            appState.play(item)
+                            appState.play(item, preserveSelection: true)
                         } label: {
                             Label("打开", systemImage: "play.rectangle")
                         }
@@ -309,7 +376,14 @@ struct DetailView: View {
 
     private func chooseCustomArtwork(kind: ArtworkKind) {
         let panel = NSOpenPanel()
-        panel.allowedFileTypes = ["jpg", "jpeg", "png", "heic", "webp", "tiff", "bmp"]
+        panel.allowedContentTypes = [
+            UTType.jpeg,
+            UTType.png,
+            UTType.heic,
+            UTType.tiff,
+            UTType(filenameExtension: "webp"),
+            UTType(filenameExtension: "bmp")
+        ].compactMap { $0 }
         panel.message = kind == .poster ? "选择自定义封面图片" : "选择自定义背景图片"
         panel.prompt = "选择"
         panel.canChooseDirectories = false
@@ -366,6 +440,68 @@ struct DetailView: View {
             }.value
             guard fileStatusPath == filePath else { return }
             fileExists = exists
+        }
+    }
+}
+
+/// 只观察剧集行内的左键按下，不消费事件；选中态立即更新，SwiftUI 仍可继续识别单击和双击。
+private struct EpisodeMouseDownSelectionMonitor: NSViewRepresentable {
+    let onMouseDown: () -> Void
+
+    func makeNSView(context: Context) -> MonitorView {
+        let view = MonitorView(frame: .zero)
+        view.onMouseDown = onMouseDown
+        return view
+    }
+
+    func updateNSView(_ nsView: MonitorView, context: Context) {
+        nsView.onMouseDown = onMouseDown
+    }
+
+    static func dismantleNSView(_ nsView: MonitorView, coordinator: ()) {
+        nsView.stopMonitoring()
+    }
+
+    final class MonitorView: NSView {
+        var onMouseDown: (() -> Void)?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil {
+                stopMonitoring()
+            } else {
+                startMonitoring()
+            }
+        }
+
+        func stopMonitoring() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        private func startMonitoring() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                guard let self,
+                      let window,
+                      event.window === window,
+                      !isHidden,
+                      alphaValue > 0 else {
+                    return event
+                }
+                let point = convert(event.locationInWindow, from: nil)
+                if bounds.contains(point) {
+                    onMouseDown?()
+                }
+                return event
+            }
+        }
+
+        deinit {
+            stopMonitoring()
         }
     }
 }
@@ -478,7 +614,7 @@ struct MetadataSearchView: View {
         message = nil
         do {
             if item.type == .music {
-                results = try await service.searchMusic(query: cleaned, provider: appState.settings.musicMetadataProvider)
+                results = try await service.searchMusic(query: cleaned, provider: appState.settings.musicMetadataProvider, lastfmAPIKey: appState.settings.lastfmAPIKey)
             } else {
                 results = try await service.searchTMDB(
                     query: cleaned,
@@ -598,13 +734,11 @@ struct SubtitleSearchSheet: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 16) {
             header
-            Divider().padding(.horizontal, 20)
             content
         }
-        .frame(minWidth: 560, maxWidth: 560, minHeight: 440)
-        .background(AppPageBackground())
+        .appSheetChrome(width: AppSheetMetrics.standardWidth, minHeight: 440)
         .onAppear {
             language = appState.settings.subtitleLanguage
             if appState.settings.openSubtitlesAPIKey?.isEmpty == false {
@@ -615,20 +749,21 @@ struct SubtitleSearchSheet: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("搜索字幕").font(.title2.weight(.semibold))
-                Text(item.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            }
+            AppSheetHeader(
+                title: "搜索字幕",
+                subtitle: item.title,
+                systemImage: "captions.bubble",
+                subtitleLineLimit: 1,
+                truncationMode: .middle
+            )
             Spacer()
             Button { dismiss() } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 22))
-                    .foregroundStyle(.secondary)
+                Image(systemName: "xmark")
+                    .frame(width: 18, height: 18)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: 30, thickness: 0.92))
+            .help("关闭")
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
     }
 
     private var content: some View {
@@ -650,7 +785,11 @@ struct SubtitleSearchSheet: View {
                         Text(opt.label).tag(opt.code)
                     }
                 }
-                .frame(width: 130)
+                .adaptiveMenuControl(
+                    selectedTitle: languageOptions.first(where: { $0.code == language })?.label ?? language,
+                    minWidth: 96,
+                    maxWidth: 260
+                )
                 .onChange(of: language) { _ in
                     appState.settings.subtitleLanguage = language
                     appState.saveSettings()
@@ -706,9 +845,6 @@ struct SubtitleSearchSheet: View {
 
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 14)
-        .padding(.bottom, 18)
     }
 
     private func subtitleRow(_ result: SubtitleResult) -> some View {

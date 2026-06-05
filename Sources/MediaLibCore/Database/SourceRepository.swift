@@ -13,8 +13,8 @@ public final class SourceRepository {
             INSERT INTO media_sources (
               id, name, path, media_type, recursive, auto_scan, minimum_file_size,
               ignore_hidden_files, read_nfo, prefer_local_artwork, network_scraping_enabled,
-              screenshot_fallback_enabled, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              screenshot_fallback_enabled, include_in_metadata_fetch, include_in_health_check, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               name = excluded.name,
               path = excluded.path,
@@ -27,6 +27,8 @@ public final class SourceRepository {
               prefer_local_artwork = excluded.prefer_local_artwork,
               network_scraping_enabled = excluded.network_scraping_enabled,
               screenshot_fallback_enabled = excluded.screenshot_fallback_enabled,
+              include_in_metadata_fetch = excluded.include_in_metadata_fetch,
+              include_in_health_check = excluded.include_in_health_check,
               updated_at = excluded.updated_at
             """,
             bindings: bindings(for: source)
@@ -42,7 +44,7 @@ public final class SourceRepository {
             """
             SELECT id, name, path, media_type, recursive, auto_scan, minimum_file_size,
                    ignore_hidden_files, read_nfo, prefer_local_artwork, network_scraping_enabled,
-                   screenshot_fallback_enabled, created_at, updated_at
+                   screenshot_fallback_enabled, include_in_metadata_fetch, include_in_health_check, created_at, updated_at
             FROM media_sources
             ORDER BY created_at ASC
             """
@@ -60,8 +62,10 @@ public final class SourceRepository {
                 preferLocalArtwork: row.bool(9),
                 networkScrapingEnabled: row.bool(10),
                 screenshotFallbackEnabled: row.bool(11),
-                createdAt: row.date(12) ?? Date(),
-                updatedAt: row.date(13) ?? Date()
+                includeInMetadataFetch: row.bool(12),
+                includeInHealthCheck: row.bool(13),
+                createdAt: row.date(14) ?? Date(),
+                updatedAt: row.date(15) ?? Date()
             )
         }
     }
@@ -80,6 +84,8 @@ public final class SourceRepository {
             .bool(source.preferLocalArtwork),
             .bool(source.networkScrapingEnabled),
             .bool(source.screenshotFallbackEnabled),
+            .bool(source.includeInMetadataFetch),
+            .bool(source.includeInHealthCheck),
             .optionalDate(source.createdAt),
             .optionalDate(source.updatedAt)
         ]

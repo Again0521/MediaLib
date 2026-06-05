@@ -33,7 +33,7 @@ struct MusicPlaylistCreationSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            PageHeader(
+            AppSheetHeader(
                 title: request.tracks.isEmpty ? "新建歌单" : "新建歌单并添加歌曲",
                 subtitle: summary,
                 systemImage: "music.note.list"
@@ -50,8 +50,7 @@ struct MusicPlaylistCreationSheet: View {
             .padding(16)
             .staticSurfaceBackground(cornerRadius: 18)
 
-            HStack(spacing: 10) {
-                Spacer()
+            AppSheetActionFooter {
                 Button("取消") {
                     onCancel()
                 }
@@ -66,9 +65,7 @@ struct MusicPlaylistCreationSheet: View {
                 .disabled(trimmedName.isEmpty)
             }
         }
-        .padding(24)
-        .frame(width: 430)
-        .background(AppPageBackground())
+        .appSheetChrome(width: AppSheetMetrics.compactWidth)
     }
 
     private var trimmedName: String {
@@ -77,9 +74,9 @@ struct MusicPlaylistCreationSheet: View {
 
     private var summary: String {
         if request.tracks.isEmpty {
-            return "先创建空歌单，之后可从歌曲右键菜单继续添加。"
+            return "创建后可随时添加歌曲。"
         }
-        return "将 \(request.tracks.count) 首歌曲写入 MediaLIB 歌单索引。"
+        return "创建歌单并加入 \(request.tracks.count) 首歌曲。"
     }
 }
 
@@ -103,9 +100,9 @@ struct MusicPlaylistRenameSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            PageHeader(
+            AppSheetHeader(
                 title: "重命名歌单",
-                subtitle: "\(request.playlist.itemIDs.count) 首歌曲 · 仅更新 MediaLIB 歌单索引",
+                subtitle: "\(request.playlist.itemIDs.count) 首歌曲 · 不会修改歌曲文件",
                 systemImage: "pencil.line"
             )
 
@@ -120,8 +117,7 @@ struct MusicPlaylistRenameSheet: View {
             .padding(16)
             .staticSurfaceBackground(cornerRadius: 18)
 
-            HStack(spacing: 10) {
-                Spacer()
+            AppSheetActionFooter {
                 Button("取消") {
                     onCancel()
                 }
@@ -136,9 +132,7 @@ struct MusicPlaylistRenameSheet: View {
                 .disabled(trimmedName.isEmpty)
             }
         }
-        .padding(24)
-        .frame(width: 430)
-        .background(AppPageBackground())
+        .appSheetChrome(width: AppSheetMetrics.compactWidth)
     }
 
     private var trimmedName: String {

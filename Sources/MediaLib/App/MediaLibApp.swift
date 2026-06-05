@@ -1,8 +1,78 @@
+import AppKit
 import SwiftUI
 
 final class MediaLibAppDelegate: NSObject, NSApplicationDelegate {
+    private var windowObservers: [NSObjectProtocol] = []
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // 启动白条根因：SwiftUI 的标题栏窗口在首帧是“不透明白底 + 显示 App 标题”，
+        // 之后才被 SwiftUI 守卫改透明——中间那一帧就是顶部一闪而过的白条。
+        // 这里在窗口一创建（becomeKey/变为可见之前）就立刻把标题栏改透明、隐藏标题，
+        // 让第一帧起顶部就没有白底，从根上消除闪白。
+        let names: [Notification.Name] = [
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.didBecomeMainNotification,
+            NSWindow.didChangeScreenNotification
+        ]
+        windowObservers = names.map { name in
+            NotificationCenter.default.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { note in
+                guard let window = note.object as? NSWindow else { return }
+                Self.makeTitlebarSeamless(window)
+            }
+        }
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // SwiftUI 可能在本回调前后才创建窗口；前几帧连续套用，确保第一帧可见时标题栏已透明、无标题。
+        for delay in [0.0, 0.0, 0.02, 0.05, 0.12] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                for window in NSApp.windows {
+                    Self.makeTitlebarSeamless(window)
+                }
+            }
+        }
+    }
+
+    static func makeTitlebarSeamless(_ window: NSWindow) {
+        // 只处理主内容窗口。NSOpenPanel / NSSavePanel / NSAlert 都是 NSPanel；
+        // 它们同样可能带标题栏和可改尺寸，若误改成透明窗口会直接透出后方页面。
+        guard !(window is NSPanel),
+              window.styleMask.contains(.titled),
+              window.styleMask.contains(.resizable) else { return }
+        if window.titlebarAppearsTransparent != true {
+            window.titlebarAppearsTransparent = true
+        }
+        if window.titleVisibility != .hidden {
+            window.titleVisibility = .hidden
+        }
+        if window.isOpaque {
+            window.isOpaque = false
+        }
+        if window.backgroundColor != .clear {
+            window.backgroundColor = .clear
+        }
+        if window.contentView?.wantsLayer != true {
+            window.contentView?.wantsLayer = true
+        }
+        if window.contentView?.layer?.backgroundColor != NSColor.clear.cgColor {
+            window.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
+        }
+        if #available(macOS 11.0, *) {
+            if window.titlebarSeparatorStyle != .none {
+                window.titlebarSeparatorStyle = .none
+            }
+        }
+        if !window.styleMask.contains(.fullSizeContentView) {
+            window.styleMask.insert(.fullSizeContentView)
+        }
     }
 }
 
@@ -27,7 +97,7 @@ struct MediaLibApp: App {
                     appState.applyAppearance()
                 }
         }
-        .windowStyle(.titleBar)
+        .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)
         .commands {
             SidebarCommands()

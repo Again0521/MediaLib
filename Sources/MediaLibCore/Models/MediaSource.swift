@@ -13,6 +13,10 @@ public struct MediaSource: Identifiable, Codable, Hashable {
     public var preferLocalArtwork: Bool
     public var networkScrapingEnabled: Bool
     public var screenshotFallbackEnabled: Bool
+    /// 是否参与"一键拉取元数据"（剧集 TMDB / 音乐补全）。
+    public var includeInMetadataFetch: Bool
+    /// 是否参与"片库健康"检查（离线/失效/重复/元数据缺口）。
+    public var includeInHealthCheck: Bool
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -29,6 +33,8 @@ public struct MediaSource: Identifiable, Codable, Hashable {
         preferLocalArtwork: Bool = true,
         networkScrapingEnabled: Bool = true,
         screenshotFallbackEnabled: Bool = true,
+        includeInMetadataFetch: Bool = true,
+        includeInHealthCheck: Bool = true,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -44,6 +50,8 @@ public struct MediaSource: Identifiable, Codable, Hashable {
         self.preferLocalArtwork = preferLocalArtwork
         self.networkScrapingEnabled = networkScrapingEnabled
         self.screenshotFallbackEnabled = screenshotFallbackEnabled
+        self.includeInMetadataFetch = includeInMetadataFetch
+        self.includeInHealthCheck = includeInHealthCheck
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

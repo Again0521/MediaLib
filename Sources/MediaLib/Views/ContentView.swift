@@ -11,6 +11,7 @@ enum VideoLibrarySection: String, CaseIterable, Identifiable, Sendable {
     case other
     case privacy
     case watching
+    case watchlist
     case favorites
     case unwatched
     case watched
@@ -27,7 +28,8 @@ enum VideoLibrarySection: String, CaseIterable, Identifiable, Sendable {
         case .other: return "其他"
         case .privacy: return "保险库"
         case .watching: return "正在观看"
-        case .favorites: return "收藏"
+        case .watchlist: return "想看"
+        case .favorites: return "喜欢"
         case .unwatched: return "未观看"
         case .watched: return "已观看"
         }
@@ -43,6 +45,7 @@ enum VideoLibrarySection: String, CaseIterable, Identifiable, Sendable {
         case .other: return "tray"
         case .privacy: return "lock.rectangle.stack"
         case .watching: return "play.circle"
+        case .watchlist: return "bookmark"
         case .favorites: return "heart"
         case .unwatched: return "eye"
         case .watched: return "checkmark.circle"
@@ -62,7 +65,7 @@ enum MusicLibrarySection: String, CaseIterable, Identifiable, Sendable {
     var id: String { rawValue }
 
     static var sidebarCases: [MusicLibrarySection] {
-        allCases.filter { $0 != .favorites }
+        allCases.filter { $0 != .favorites && $0 != .unmatched }
     }
 
     var title: String {
@@ -117,38 +120,22 @@ enum EmbyLibrarySection: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-private struct EmbySidebarCategory: Identifiable {
-    enum Kind: Hashable {
-        case section(EmbyLibrarySection)
-        case library(EmbyLibrarySummary)
-    }
-
-    let id: String
-    let title: String
-    let systemImage: String
-    let destination: SidebarDestination
-
-    init(section: EmbyLibrarySection) {
-        id = "section-\(section.id)"
-        title = "EMBY \(section.title)"
-        systemImage = section.systemImage
-        destination = .emby(section)
-    }
-
-    init(library: EmbyLibrarySummary) {
-        id = "library-\(library.id)"
-        title = library.displayName
-        systemImage = library.systemImage
-        destination = .embyLibrary(library.id)
-    }
+struct EmbyRenameRequest: Identifiable {
+    let sourceID: String
+    var name: String
+    var id: String { sourceID }
 }
 
 enum SidebarDestination: Hashable, Identifiable, Sendable {
     case home
     case video(VideoLibrarySection)
     case music(MusicLibrarySection)
-    case emby(EmbyLibrarySection)
+    case embySection(String, EmbyLibrarySection)
     case embyLibrary(String)
+    case smartCollection(String)
+    case musicSmartPlaylist(String)
+    case health
+    case tasks
     case sources
     case settings
 
@@ -157,8 +144,12 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
         case .home: return "home"
         case .video(let section): return "video-\(section.rawValue)"
         case .music(let section): return "music-\(section.rawValue)"
-        case .emby(let section): return "emby-\(section.rawValue)"
+        case .embySection(let sourceID, let section): return "emby-section-\(sourceID)__\(section.rawValue)"
         case .embyLibrary(let libraryID): return "emby-library-\(libraryID)"
+        case .smartCollection(let collectionID): return "smart-collection-\(collectionID)"
+        case .musicSmartPlaylist(let playlistID): return "music-smart-playlist-\(playlistID)"
+        case .health: return "health"
+        case .tasks: return "tasks"
         case .sources: return "sources"
         case .settings: return "settings"
         }
@@ -169,6 +160,10 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
             self = .home
         } else if storedID == "sources" {
             self = .sources
+        } else if storedID == "health" {
+            self = .health
+        } else if storedID == "tasks" {
+            self = .tasks
         } else if storedID == "settings" {
             self = .settings
         } else if storedID.hasPrefix("video-") {
@@ -179,10 +174,18 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
             }
             guard let section = VideoLibrarySection(rawValue: raw) else { return nil }
             self = .video(section)
+        } else if storedID.hasPrefix("music-smart-playlist-") {
+            let playlistID = String(storedID.dropFirst("music-smart-playlist-".count))
+            guard !playlistID.isEmpty else { return nil }
+            self = .musicSmartPlaylist(playlistID)
         } else if storedID.hasPrefix("music-") {
             let raw = String(storedID.dropFirst("music-".count))
             if raw == MusicLibrarySection.favorites.rawValue {
                 self = .music(.playlists)
+                return
+            }
+            if raw == MusicLibrarySection.unmatched.rawValue {
+                self = .music(.songs)
                 return
             }
             guard let section = MusicLibrarySection(rawValue: raw) else { return nil }
@@ -195,8 +198,19 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
                 self = .embyLibrary(libraryID)
                 return
             }
-            guard let section = EmbyLibrarySection(rawValue: raw) else { return nil }
-            self = .emby(section)
+            if raw.hasPrefix("section-") {
+                let rest = String(raw.dropFirst("section-".count))
+                let parts = rest.components(separatedBy: "__")
+                guard parts.count == 2, !parts[0].isEmpty,
+                      let section = EmbyLibrarySection(rawValue: parts[1]) else { return nil }
+                self = .embySection(parts[0], section)
+                return
+            }
+            return nil
+        } else if storedID.hasPrefix("smart-collection-") {
+            let collectionID = String(storedID.dropFirst("smart-collection-".count))
+            guard !collectionID.isEmpty else { return nil }
+            self = .smartCollection(collectionID)
         } else {
             return nil
         }
@@ -207,8 +221,12 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
         case .home: return "首页"
         case .video(let section): return section.title
         case .music(let section): return section.title
-        case .emby(let section): return section.title
+        case .embySection(_, let section): return section.title
         case .embyLibrary: return "EMBY 分类"
+        case .smartCollection: return "智能集合"
+        case .musicSmartPlaylist: return "智能歌单"
+        case .health: return "片库健康"
+        case .tasks: return "任务中心"
         case .sources: return "媒体源"
         case .settings: return "设置"
         }
@@ -219,8 +237,12 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
         case .home: return "house"
         case .video(let section): return section.systemImage
         case .music(let section): return section.systemImage
-        case .emby(let section): return section.systemImage
+        case .embySection(_, let section): return section.systemImage
         case .embyLibrary: return "rectangle.stack"
+        case .smartCollection: return "sparkles.rectangle.stack"
+        case .musicSmartPlaylist: return "music.note.list"
+        case .health: return "stethoscope"
+        case .tasks: return "checklist"
         case .sources: return "externaldrive"
         case .settings: return "gearshape"
         }
@@ -229,29 +251,55 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selection: SidebarDestination? = .home
     @State private var isVideoExpanded = true
     @State private var isMusicExpanded = true
-    @State private var isEmbyExpanded = true
+    /// 已折叠的 Emby 来源（默认全部展开；只记录被用户折叠的）。
+    @State private var collapsedEmbySourceIDs: Set<String> = []
+    @State private var embyRenameRequest: EmbyRenameRequest?
     @State private var musicPlayerExpanded = true
-    // 沉浸式 chrome（隐藏工具栏/标题、透明标题栏、内容延伸到标题栏下）只在全屏播放器
+    // 沉浸式 chrome（隐藏标题/侧栏按钮、透明标题栏、内容延伸到标题栏下）只在全屏播放器
     // 已完全覆盖窗口时开启/关闭，使 chrome 切换引起的 navigationRoot 重排被覆盖层遮挡。
     @State private var musicImmersive = false
     @State private var musicController = MpvPlayerController()
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
     @State private var musicTransitionTask: Task<Void, Never>?
+    @State private var musicTransitionSuppressesBackground = false
+    @State private var musicTransitionShieldActive = false
+    @State private var musicBackgroundRootSuspended = false
     @State private var hadActiveMusic = false
+    @State private var musicMiniPlayerCollapsed = false
+    @State private var musicWindowPalette = AlbumColorPalette.fallback
+    @State private var musicWindowPaletteTask: Task<Void, Never>?
+    @State private var smartCollectionEditor: VideoSmartCollectionEditorRequest?
+    @State private var musicSmartPlaylistEditor: MusicSmartPlaylistEditorRequest?
+    @State private var showOnboarding = false
+    @State private var themeSwitching = false
+    @State private var themeSwitchTask: Task<Void, Never>?
     @Namespace private var musicPlayerNamespace
     @AppStorage("MediaLib.sidebar.selection") private var storedSelectionID = "home"
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .bottom) {
-                navigationRoot
-                    .frame(width: geometry.size.width, height: geometry.size.height)
-                    .allowsHitTesting(!musicExpandedOverlayActive)
-                    .environment(\.suppressPointerHoverDuringScroll, musicExpandedOverlayActive)
-                    .glassPerformanceMode(backgroundGlassPerformanceMode)
+                if musicBackgroundRootSuspended {
+                    Color.clear
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                } else {
+                    navigationRoot
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        // 用主题高亮色作为全局 tint：开关、滑块、Picker、默认按钮、进度条、列表选中高亮等
+                        // 系统控件都会跟随配色方案（音乐展开页是单独的 overlay，不在此分支内，不受影响）。
+                        .tint(AppColors.selectedGlassTint)
+                        .allowsHitTesting(!musicExpandedOverlayActive)
+                        .environment(\.suppressPointerHoverDuringScroll, musicExpandedOverlayActive)
+                        .glassPerformanceMode(backgroundGlassPerformanceMode)
+                        // 全屏音乐播放器已完全盖住窗口时，把背后的整库界面从树上卸掉，
+                        // 释放列表、海报墙和筛选结果的视图资源；收起时重新挂回。
+                        .id(musicBackgroundRootSuspended ? "music-root-suspended" : "music-root-active")
+                }
 
                 if let musicItem = musicPlayerBinding.wrappedValue {
                     MusicPlaybackHost(item: musicItem, controller: musicController)
@@ -265,15 +313,19 @@ struct ContentView: View {
                             controller: musicController,
                             leadingInset: musicMiniPlayerLeadingInset,
                             transitionNamespace: musicPlayerNamespace,
+                            isCollapsed: musicMiniPlayerCollapsed,
+                            onRequestReveal: revealMusicMiniPlayer,
                             onRequestExpand: expandMusicPlayer,
                             onRequestClose: closeMusicPlayer
                         )
                         .environmentObject(appState)
-                        .frame(width: musicMiniPlayerWidth(for: geometry.size.width), alignment: .bottomLeading)
-                        .padding(.leading, musicMiniPlayerLeadingInset + musicMiniPlayerOuterInset)
+                        .frame(width: musicMiniPlayerFrameWidth(for: geometry.size.width), alignment: .bottomLeading)
+                        .padding(.leading, musicMiniPlayerCollapsed ? 0 : musicMiniPlayerLeadingInset + musicMiniPlayerOuterInset)
+                        .padding(.trailing, musicMiniPlayerCollapsed ? musicMiniPlayerOuterInset : 0)
                         .padding(.bottom, 18)
-                        .frame(width: geometry.size.width, height: geometry.size.height, alignment: .bottomLeading)
+                        .frame(width: geometry.size.width, height: geometry.size.height, alignment: musicMiniPlayerCollapsed ? .bottomTrailing : .bottomLeading)
                         .transition(AppMotion.floatingBar)
+                        .animation(AppMotion.musicPlayer, value: musicMiniPlayerCollapsed)
                         .zIndex(21)
                     }
                 }
@@ -283,22 +335,47 @@ struct ContentView: View {
         .background {
             AppPageBackground(includeDirectionalLight: false)
         }
-        // 全屏播放器作为忽略安全区的整窗覆盖层：尺寸恒为整窗（不随工具栏显隐变化的安全区而改变），
-        // 因此 chrome 切换不会让它跳动，也始终盖住标题栏区域（展开过程顶部不再露白、不再抽搐）。
-        .overlay {
-            if let musicItem = musicPlayerBinding.wrappedValue, musicPlayerExpanded {
-                MusicPlayerView(
-                    item: musicItem,
-                    controller: musicController,
-                    transitionNamespace: musicPlayerNamespace,
-                    onRequestMinimize: minimizeMusicPlayer
-                )
-                .environmentObject(appState)
-                .transition(AppMotion.musicPlayerExpansion)
-                .ignoresSafeArea()
-                .zIndex(20)
+        .background {
+            if appState.activePlayerItem?.type == .music && !musicPlayerExpanded {
+                MusicMiniPlayerCollapseScrollMonitor { direction in
+                    handleMusicMiniPlayerScroll(direction)
+                }
+                .frame(width: 0, height: 0)
             }
         }
+        // 全屏播放器作为忽略安全区的整窗覆盖层：尺寸恒为整窗（不随窗口 chrome safe area 改变），
+        // 因此 chrome 切换不会让它跳动，也始终盖住标题栏区域（展开过程顶部不再露白、不再抽搐）。
+        .overlay {
+            ZStack {
+                if musicTransitionShieldActive {
+                    Color(nsColor: musicWindowPalette.backdropBaseNSColor(for: colorScheme))
+                        .ignoresSafeArea()
+                        .transition(.identity)
+                        .zIndex(18)
+                }
+
+                if let musicItem = musicPlayerBinding.wrappedValue, musicPlayerExpanded {
+                    MusicPlayerView(
+                        item: musicItem,
+                        controller: musicController,
+                        transitionNamespace: musicPlayerNamespace,
+                        onRequestMinimize: minimizeMusicPlayer
+                    )
+                    .environmentObject(appState)
+                    .transition(AppMotion.musicPlayerExpansion)
+                    .ignoresSafeArea()
+                    .zIndex(20)
+                }
+            }
+        }
+        .overlay {
+            if appState.sakuraEasterEggActive {
+                SakuraFallView()
+                    .allowsHitTesting(false)
+                    .zIndex(60)
+            }
+        }
+        .animation(.easeOut(duration: 0.4), value: appState.sakuraEasterEggActive)
         .background {
             VideoPlayerWindowPresenter(item: videoPlayerBinding)
                 .frame(width: 0, height: 0)
@@ -307,16 +384,99 @@ struct ContentView: View {
             QuickPreviewView(item: item)
                 .environmentObject(appState)
         }
+        .sheet(item: $smartCollectionEditor) { request in
+            VideoSmartCollectionSheet(
+                request: request,
+                onSave: { collection in
+                    appState.saveVideoSmartCollection(collection)
+                    smartCollectionEditor = nil
+                    selection = .smartCollection(collection.id)
+                },
+                onCancel: {
+                    smartCollectionEditor = nil
+                }
+            )
+        }
+        .sheet(item: $embyRenameRequest) { request in
+            EmbySourceRenameSheet(
+                request: request,
+                onSave: { newName in
+                    if var source = appState.sources.first(where: { $0.id == request.sourceID }) {
+                        source.name = newName
+                        appState.updateSource(source)
+                    }
+                    embyRenameRequest = nil
+                },
+                onCancel: { embyRenameRequest = nil }
+            )
+        }
+        .sheet(item: $musicSmartPlaylistEditor) { request in
+            MusicSmartPlaylistSheet(
+                request: request,
+                onSave: { playlist in
+                    appState.saveMusicSmartPlaylist(playlist)
+                    musicSmartPlaylistEditor = nil
+                    selection = .musicSmartPlaylist(playlist.id)
+                },
+                onCancel: {
+                    musicSmartPlaylistEditor = nil
+                }
+            )
+        }
         .alert(item: $appState.alert) { alert in
             Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("好")))
         }
+        .sheet(item: $appState.embyRestrictionNotice) { notice in
+            EmbyRestrictionSheet(notice: notice) {
+                appState.embyRestrictionNotice = nil
+            }
+        }
+        .sheet(isPresented: $showOnboarding) {
+            OnboardingView { goToSources in
+                appState.completeOnboarding()
+                showOnboarding = false
+                if goToSources {
+                    selection = .sources
+                }
+            }
+            .interactiveDismissDisabled()
+        }
+        .onAppear {
+            if !appState.settings.hasCompletedOnboarding {
+                showOnboarding = true
+            }
+        }
+        .onChange(of: appState.onboardingReplayRequested) { requested in
+            if requested {
+                showOnboarding = true
+                appState.onboardingReplayRequested = false
+            }
+        }
         .background {
-            MainWindowToolbarVisibilityGuard(hiddenForMusicOverlay: musicWindowChromeHidden)
+            MainWindowToolbarVisibilityGuard(
+                // R5-3：标题栏 chrome 在播放器一展开就隐藏（覆盖层此刻已盖住整窗），
+                // 不再等到 musicImmersive 延迟置位——否则展开后到沉浸前的这段时间，
+                // 顶部 AppKit 标题栏会露出一条白色横条。
+                hiddenForMusicOverlay: musicChromeShouldBeHidden,
+                hideSidebarToggleForMusicOverlay: musicChromeShouldBeHidden
+            )
                 .frame(width: 0, height: 0)
+        }
+        .background {
+            MusicExpansionWindowBackdropGuard(
+                active: musicWindowBackdropShouldBeActive,
+                color: musicWindowPalette.backdropBaseNSColor(for: colorScheme)
+            )
+            .frame(width: 0, height: 0)
+        }
+        .onAppear {
+            loadMusicWindowPalette()
         }
         .onChange(of: appState.activePlayerItem?.id) { _ in
             let activeMusic = appState.activePlayerItem?.type == .music
+            loadMusicWindowPalette()
             if activeMusic {
+                musicMiniPlayerCollapsed = false
                 if !hadActiveMusic {
                     hadActiveMusic = true
                     presentMusicMiniPlayer()
@@ -326,8 +486,39 @@ struct ContentView: View {
                 restoreSidebarAfterMusic()
             }
         }
+        .onChange(of: appState.activePlayerItem?.posterPath) { _ in
+            loadMusicWindowPalette()
+        }
         .onChange(of: appState.playbackCommandRequest?.id) { _ in
             handlePlaybackCommand()
+        }
+        // 配色切换：极短遮罩让下层在同一轮状态刷新中换到新配色，避免逐控件滞后。
+        .overlay {
+            if themeSwitching {
+                ZStack {
+                    AppColors.pageBackground.opacity(0.98)
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(AppColors.selectedGlassTint)
+                }
+                .ignoresSafeArea()
+                .transition(.opacity)
+                .zIndex(1000)
+                .allowsHitTesting(true)
+            }
+        }
+        .onChange(of: appState.themeRevision) { _ in
+            themeSwitchTask?.cancel()
+            withAnimation(.easeOut(duration: 0.06)) { themeSwitching = true }
+            themeSwitchTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 160_000_000)
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeIn(duration: 0.10)) { themeSwitching = false }
+            }
+        }
+        .onDisappear {
+            musicWindowPaletteTask?.cancel()
+            themeSwitchTask?.cancel()
         }
     }
 
@@ -337,9 +528,14 @@ struct ContentView: View {
                 Section("媒体库") {
                     sidebarRow(.home)
 
+                    sidebarGroupSpacer
+
                     DisclosureGroup(isExpanded: $isVideoExpanded) {
-                        // 「正在观看」「未观看」不再作为左侧栏分类，仅保留各分类页面内的同名子页面（筛选标签）。
-                        let sections = appState.visibleVideoSections.filter { $0 != .watching && $0 != .unwatched }
+                        // 「正在观看」「未观看」「已观看」都不再作为左侧栏分类，
+                        // 仅保留各分类页面内的同名子页面（筛选标签）。
+                        let sections = appState.visibleVideoSections.filter {
+                            $0 != .watching && $0 != .unwatched && $0 != .watched
+                        }
                         if sections.isEmpty {
                             Label("暂无视频", systemImage: "film")
                                 .foregroundStyle(.secondary)
@@ -348,6 +544,20 @@ struct ContentView: View {
                                 sidebarRow(.video(section))
                             }
                         }
+                        ForEach(appState.videoSmartCollections) { collection in
+                            smartCollectionSidebarRow(collection)
+                        }
+                        Button {
+                            smartCollectionEditor = .create()
+                        } label: {
+                            HStack(spacing: 10) {
+                                PlayfulSymbolIcon(systemImage: "plus", size: 22)
+                                Text("新建智能集合")
+                                    // 与其它目录行字体保持一致。
+                                    .font(.body)
+                            }
+                        }
+                        .buttonStyle(SidebarInlineActionButtonStyle())
                     } label: {
                         HStack(spacing: 10) {
                             PlayfulSymbolIcon(systemImage: "film", size: 22)
@@ -356,9 +566,19 @@ struct ContentView: View {
                             .font(.callout.weight(.semibold))
                     }
 
+                    sidebarGroupSpacer
+
                     DisclosureGroup(isExpanded: $isMusicExpanded) {
                         ForEach(MusicLibrarySection.sidebarCases) { section in
                             sidebarRow(.music(section))
+                        }
+                        // 仅在有智能歌单时才显示分隔线 + 列表；空列表下不再多出一条分割线，
+                        // 否则会让「音乐↔EMBY」的间距大于「视频↔音乐」，造成不统一。
+                        if !appState.musicSmartPlaylists.isEmpty {
+                            Divider()
+                            ForEach(appState.musicSmartPlaylists) { playlist in
+                                musicSmartPlaylistSidebarRow(playlist)
+                            }
                         }
                     } label: {
                         HStack(spacing: 10) {
@@ -368,35 +588,25 @@ struct ContentView: View {
                             .font(.callout.weight(.semibold))
                     }
 
-                    if !appState.embySources.isEmpty || appState.hasEmbyItems {
-                        DisclosureGroup(isExpanded: $isEmbyExpanded) {
-                            let categories = embySidebarCategories
-                            if categories.isEmpty {
-                                Label("暂无 EMBY 条目", systemImage: "server.rack")
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                ForEach(categories) { category in
-                                    sidebarRow(category.destination)
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 10) {
-                                PlayfulSymbolIcon(systemImage: "server.rack", size: 22)
-                                Text("EMBY")
-                            }
-                                .font(.callout.weight(.semibold))
-                        }
+                    // 每个 Emby 来源各自一个一级目录（可重命名），内含该源的分区与媒体库。
+                    ForEach(appState.embySources) { source in
+                        sidebarGroupSpacer
+                        embySourceGroup(for: source)
                     }
                 }
 
                 Section("管理") {
                     sidebarRow(.sources)
+                    sidebarRow(.health)
+                    sidebarRow(.tasks)
                     sidebarRow(.settings)
                 }
             }
             .scrollContentBackground(.hidden)
             .background(SidebarGlassBackground())
             .listStyle(.sidebar)
+            .tint(AppColors.selectedGlassTint)
+            .id(appState.themeRevision)
             .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 280)
             .onAppear {
                 selection = SidebarDestination(storedID: storedSelectionID) ?? .home
@@ -431,6 +641,10 @@ struct ContentView: View {
         return available
     }
 
+    private func musicMiniPlayerFrameWidth(for windowWidth: CGFloat) -> CGFloat {
+        musicMiniPlayerWidth(for: windowWidth)
+    }
+
     private var musicMiniReservesSidebar: Bool {
         appState.activePlayerItem?.type == .music &&
         !musicPlayerExpanded &&
@@ -445,8 +659,17 @@ struct ContentView: View {
         appState.activePlayerItem?.type == .music && musicImmersive
     }
 
+    private var musicChromeShouldBeHidden: Bool {
+        appState.activePlayerItem?.type == .music && musicImmersive
+    }
+
+    private var musicWindowBackdropShouldBeActive: Bool {
+        appState.activePlayerItem?.type == .music &&
+        (musicTransitionShieldActive || musicPlayerExpanded || musicImmersive || musicTransitionSuppressesBackground)
+    }
+
     private var backgroundGlassPerformanceMode: GlassPerformanceMode {
-        if musicExpandedOverlayActive {
+        if musicExpandedOverlayActive || musicTransitionSuppressesBackground || musicBackgroundRootSuspended {
             return .minimal
         }
         if appState.activePlayerItem?.type == .music {
@@ -455,22 +678,59 @@ struct ContentView: View {
         return .full
     }
 
+    private func handleMusicMiniPlayerScroll(_ direction: MusicMiniPlayerScrollDirection) {
+        guard appState.activePlayerItem?.type == .music, !musicPlayerExpanded else { return }
+        if !musicMiniPlayerCollapsed {
+            withAnimation(AppMotion.musicPlayer) {
+                musicMiniPlayerCollapsed = true
+            }
+        }
+    }
+
+    private func revealMusicMiniPlayer() {
+        guard musicMiniPlayerCollapsed else { return }
+        withAnimation(AppMotion.musicPlayer) {
+            musicMiniPlayerCollapsed = false
+        }
+    }
+
     // 音乐展开/收起：全屏播放器是覆盖层，不改窗口大小、不挤压底层界面。
     // chrome 隐藏在覆盖层挂上后再执行，恢复则等覆盖层收起后执行，避免中间帧露出系统白底。
     private func expandMusicPlayer() {
         musicTransitionTask?.cancel()
-        musicController.refreshMusicAirPlayRoute()
+        var immediate = Transaction()
+        immediate.disablesAnimations = true
+        withTransaction(immediate) {
+            musicBackgroundRootSuspended = false
+            musicTransitionShieldActive = true
+            musicTransitionSuppressesBackground = true
+            musicMiniPlayerCollapsed = false
+        }
         withAnimation(AppMotion.musicPlayer) {
             musicPlayerExpanded = true
         }
         musicTransitionTask = Task { @MainActor in
-            do { try await Task.sleep(nanoseconds: 18_000_000) } catch { return }
+            await Task.yield()
             guard appState.activePlayerItem?.type == .music, musicPlayerExpanded else { return }
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
                 musicImmersive = true
             }
+            // 等展开动画完全稳定后，再卸载背后的 NavigationSplitView。
+            // 过早卸载会改变 SwiftUI/NSWindow 内容树的 safe-area 与 titlebar 组合，正是展开末段白条的高风险点。
+            // 性能：musicPlayer 弹簧（response 0.40 / damping 0.90）约 0.55–0.7s 即视觉稳定，沉浸 chrome 已在
+            // 上方 Task.yield 后立即置位；原 1.15s 让背后整库（含海报墙 NSImage 显存）与全屏播放器的
+            // 两套离屏合成缓冲在 M 系列无风扇 GPU 上多并存约 0.35s，正是展开瞬间 WindowServer 内存冲高、
+            // 系统掉帧的高峰窗口。收紧到 0.80s（仍在稳定点之后留 ~0.1–0.25s 安全余量，不触发白条），
+            // 把双挂载峰值时长压掉约 30%，更早释放背后海报显存。
+            do { try await Task.sleep(nanoseconds: 800_000_000) } catch { return }
+            guard appState.activePlayerItem?.type == .music, musicPlayerExpanded, musicImmersive else { return }
+            withTransaction(transaction) {
+                musicBackgroundRootSuspended = true
+                musicTransitionShieldActive = false
+            }
+            musicTransitionSuppressesBackground = false
         }
     }
 
@@ -479,26 +739,48 @@ struct ContentView: View {
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
+            musicBackgroundRootSuspended = false
             musicPlayerExpanded = false
             musicImmersive = false
+            musicMiniPlayerCollapsed = false
+            musicTransitionShieldActive = false
         }
-        musicController.refreshMusicAirPlayRoute()
+        musicTransitionSuppressesBackground = false
     }
 
     private func minimizeMusicPlayer() {
         musicTransitionTask?.cancel()
-        musicController.refreshMusicAirPlayRoute()
-        withAnimation(AppMotion.musicPlayer) {
-            musicPlayerExpanded = false
+        var immediate = Transaction()
+        immediate.disablesAnimations = true
+        withTransaction(immediate) {
+            musicTransitionShieldActive = true
+            musicTransitionSuppressesBackground = true
+            musicMiniPlayerCollapsed = false
         }
         musicTransitionTask = Task { @MainActor in
-            do { try await Task.sleep(nanoseconds: 560_000_000) } catch { return }
+            if musicBackgroundRootSuspended {
+                var restoreTransaction = Transaction()
+                restoreTransaction.disablesAnimations = true
+                withTransaction(restoreTransaction) {
+                    musicBackgroundRootSuspended = false
+                }
+                // 先给背后的列表/海报墙一小段预热时间，再让全屏播放器退场。
+                do { try await Task.sleep(nanoseconds: 70_000_000) } catch { return }
+            }
+            guard appState.activePlayerItem?.type == .music, musicPlayerExpanded else { return }
+            withAnimation(AppMotion.musicPlayer) {
+                musicPlayerExpanded = false
+            }
+            // 配合更紧凑的 musicPlayer 弹簧，缩短收起时 overlay 与 chrome 恢复的重合窗口。
+            do { try await Task.sleep(nanoseconds: 400_000_000) } catch { return }
             guard appState.activePlayerItem?.type == .music, !musicPlayerExpanded else { return }
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
                 musicImmersive = false
+                musicTransitionShieldActive = false
             }
+            musicTransitionSuppressesBackground = false
         }
     }
 
@@ -507,22 +789,47 @@ struct ContentView: View {
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
+            musicBackgroundRootSuspended = false
             musicPlayerExpanded = false
             musicImmersive = false
+            musicMiniPlayerCollapsed = false
+            musicTransitionShieldActive = false
         }
-        musicController.refreshMusicAirPlayRoute()
+        musicTransitionSuppressesBackground = false
     }
 
     private func closeMusicPlayer() {
         musicTransitionTask?.cancel()
         withAnimation(AppMotion.fast) {
             musicPlayerExpanded = false
+            musicMiniPlayerCollapsed = false
             appState.activePlayerItem = nil
         }
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
+            musicBackgroundRootSuspended = false
             musicImmersive = false
+            musicTransitionShieldActive = false
+        }
+        musicTransitionSuppressesBackground = false
+    }
+
+    private func loadMusicWindowPalette() {
+        musicWindowPaletteTask?.cancel()
+        guard let item = appState.activePlayerItem, item.type == .music else {
+            musicWindowPalette = .fallback
+            return
+        }
+        let targetItemID = item.id
+        let targetPath = item.posterPath
+        musicWindowPaletteTask = Task {
+            let palette = await AlbumPaletteCache.palette(for: targetPath)
+            await MainActor.run {
+                guard !Task.isCancelled,
+                      appState.activePlayerItem?.id == targetItemID else { return }
+                musicWindowPalette = palette
+            }
         }
     }
 
@@ -572,30 +879,120 @@ struct ContentView: View {
     }
 
     private func sidebarRow(_ destination: SidebarDestination) -> some View {
-        HStack(spacing: 10) {
-            PlayfulSymbolIcon(systemImage: destination.systemImage, size: 22)
+        let selected = selection == destination
+        return HStack(spacing: 10) {
+            PlayfulSymbolIcon(systemImage: destination.systemImage, size: 22, selected: selected)
+                .id(appState.themeRevision)
             Text(title(for: destination))
         }
             .tag(destination)
+            .transaction { transaction in
+                transaction.disablesAnimations = true
+                transaction.animation = nil
+            }
     }
 
-    private var embySidebarCategories: [EmbySidebarCategory] {
-        let sections = EmbyLibrarySection.allCases
-            .filter(appState.hasEmbyItems(for:))
-            .map(EmbySidebarCategory.init(section:))
-        let libraries = appState.embyLibraries.map(EmbySidebarCategory.init(library:))
-        return sections + libraries
+    /// 一级目录之间的小间距占位行（首页/视频/音乐/各 Emby 来源之间统一留白）。
+    /// 无 tag 故不可选中，隐藏分隔线，背景透明。
+    private var sidebarGroupSpacer: some View {
+        Color.clear
+            .frame(height: 7)
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+            .allowsHitTesting(false)
+    }
+
+    private func smartCollectionSidebarRow(_ collection: VideoSmartCollection) -> some View {
+        HStack(spacing: 10) {
+            PlayfulSymbolIcon(systemImage: "sparkles.rectangle.stack", size: 22)
+            Text(collection.name)
+        }
+        .tag(SidebarDestination.smartCollection(collection.id))
+        .contextMenu {
+            Button("编辑") {
+                smartCollectionEditor = .edit(collection)
+            }
+            Button("删除", role: .destructive) {
+                if selection == .smartCollection(collection.id) {
+                    selection = .home
+                }
+                appState.deleteVideoSmartCollection(collection)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func embySourceGroup(for source: MediaSource) -> some View {
+        let libraries = appState.embyLibraries.filter { $0.sourceID == source.id }
+        DisclosureGroup(isExpanded: embyExpansionBinding(source.id)) {
+            ForEach(EmbyLibrarySection.allCases) { section in
+                if appState.hasEmbyItems(for: section, sourceID: source.id) {
+                    sidebarRow(.embySection(source.id, section))
+                }
+            }
+            // 同一来源内：视频/收藏与各媒体库目录之间不再插入分隔线与额外间距，保持紧凑一致。
+            ForEach(libraries) { library in
+                sidebarRow(.embyLibrary(library.id))
+            }
+        } label: {
+            HStack(spacing: 10) {
+                PlayfulSymbolIcon(systemImage: "server.rack", size: 22)
+                Text(source.name)
+            }
+            .font(.callout.weight(.semibold))
+            .contextMenu {
+                Button("重命名") {
+                    embyRenameRequest = EmbyRenameRequest(sourceID: source.id, name: source.name)
+                }
+            }
+        }
+    }
+
+    private func embyExpansionBinding(_ sourceID: String) -> Binding<Bool> {
+        Binding(
+            get: { !collapsedEmbySourceIDs.contains(sourceID) },
+            set: { expanded in
+                if expanded {
+                    collapsedEmbySourceIDs.remove(sourceID)
+                } else {
+                    collapsedEmbySourceIDs.insert(sourceID)
+                }
+            }
+        )
+    }
+
+    private func musicSmartPlaylistSidebarRow(_ playlist: MusicSmartPlaylist) -> some View {
+        HStack(spacing: 10) {
+            PlayfulSymbolIcon(systemImage: "music.note.list", size: 22)
+            Text(playlist.name)
+        }
+        .tag(SidebarDestination.musicSmartPlaylist(playlist.id))
+        .contextMenu {
+            Button("编辑") {
+                musicSmartPlaylistEditor = .edit(playlist)
+            }
+            Button("删除", role: .destructive) {
+                if selection == .musicSmartPlaylist(playlist.id) {
+                    selection = .home
+                }
+                appState.deleteMusicSmartPlaylist(playlist)
+            }
+        }
     }
 
     private func title(for destination: SidebarDestination) -> String {
         if destination == .video(.privacy) {
             return appState.settings.privacyVaultName
         }
-        if case .emby(let section) = destination {
-            return section.title
-        }
         if case .embyLibrary(let libraryID) = destination {
             return appState.embyLibraryTitle(libraryID)
+        }
+        if case .smartCollection(let collectionID) = destination {
+            return appState.videoSmartCollection(id: collectionID)?.name ?? "智能集合"
+        }
+        if case .musicSmartPlaylist(let playlistID) = destination {
+            return appState.musicSmartPlaylist(id: playlistID)?.name ?? "智能歌单"
         }
         return destination.title
     }
@@ -621,7 +1018,9 @@ struct ContentView: View {
     private func detailView(for destination: SidebarDestination) -> some View {
         switch destination {
         case .home:
-            HomeView()
+            HomeView {
+                selection = .health
+            }
         case .video(.privacy):
             if appState.privacyPINConfigured && appState.privacyUnlocked {
                 LibraryView(destination: destination)
@@ -631,14 +1030,41 @@ struct ContentView: View {
         case .video:
             LibraryView(destination: destination)
         case .music(let section):
-            MusicLibraryView(section: section)
-        case .emby, .embyLibrary:
+            MusicLibraryView(section: section) {
+                musicSmartPlaylistEditor = .create()
+            }
+        case .musicSmartPlaylist(let playlistID):
+            if let playlist = appState.musicSmartPlaylist(id: playlistID) {
+                MusicSmartPlaylistDetailView(playlist: playlist) {
+                    musicSmartPlaylistEditor = .edit(playlist)
+                }
+            } else {
+                EmptyStateView(title: "智能歌单不存在", systemImage: "music.note.list", message: "该智能歌单可能已被删除。")
+            }
+        case .embySection, .embyLibrary, .smartCollection:
             LibraryView(destination: destination)
+        case .health:
+            LibraryHealthCenterView()
+        case .tasks:
+            BackgroundTaskCenterView()
         case .sources:
             SourcesView()
         case .settings:
             SettingsView()
         }
+    }
+}
+
+private struct SidebarInlineActionButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            // 文字强度与其它目录行一致（满色），仅按下时变暗作为反馈。
+            .foregroundStyle(Color.primary.opacity(configuration.isPressed ? 0.55 : 1.0))
+            .contentShape(Rectangle())
+            .opacity(configuration.isPressed ? 0.78 : 1)
+            .animation(reduceMotion ? nil : AppMotion.fast, value: configuration.isPressed)
     }
 }
 
@@ -660,8 +1086,241 @@ struct StartupErrorView: View {
     }
 }
 
+private enum MusicMiniPlayerScrollDirection {
+    case down
+    case up
+}
+
+private struct MusicMiniPlayerCollapseScrollMonitor: NSViewRepresentable {
+    let onScroll: (MusicMiniPlayerScrollDirection) -> Void
+
+    func makeNSView(context: Context) -> MonitorView {
+        let view = MonitorView(frame: .zero)
+        view.onScroll = onScroll
+        return view
+    }
+
+    func updateNSView(_ nsView: MonitorView, context: Context) {
+        nsView.onScroll = onScroll
+    }
+
+    static func dismantleNSView(_ nsView: MonitorView, coordinator: ()) {
+        nsView.stopMonitoring()
+    }
+
+    final class MonitorView: NSView {
+        var onScroll: ((MusicMiniPlayerScrollDirection) -> Void)?
+        private var monitor: Any?
+        private var lastFire = Date.distantPast
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil {
+                stopMonitoring()
+            } else {
+                startMonitoring()
+            }
+        }
+
+        func stopMonitoring() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        private func startMonitoring() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self,
+                      let window,
+                      event.window === window,
+                      abs(event.scrollingDeltaY) > 0.15 else {
+                    return event
+                }
+                let now = Date()
+                guard now.timeIntervalSince(lastFire) > 0.08 else { return event }
+                lastFire = now
+                let delta = event.scrollingDeltaY
+                let scrollsDown = event.isDirectionInvertedFromDevice ? delta > 0 : delta < 0
+                onScroll?(scrollsDown ? .down : .up)
+                return event
+            }
+        }
+
+        deinit {
+            stopMonitoring()
+        }
+    }
+}
+
+private struct MusicExpansionWindowBackdropGuard: NSViewRepresentable {
+    let active: Bool
+    let color: NSColor
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        view.isHidden = true
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            context.coordinator.update(active: active, color: color, hostView: nsView)
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.restore()
+    }
+
+    final class Coordinator {
+        private weak var window: NSWindow?
+        private var windowState: WindowState?
+        private var layerStates: [ObjectIdentifier: LayerBackedViewState] = [:]
+        private var lastAppliedSignature: String?
+
+        func update(active: Bool, color: NSColor, hostView: NSView) {
+            guard let nextWindow = hostView.window else {
+                if active {
+                    DispatchQueue.main.async { [weak self, weak hostView] in
+                        guard let hostView else { return }
+                        self?.update(active: active, color: color, hostView: hostView)
+                    }
+                } else {
+                    restore()
+                }
+                return
+            }
+
+            if !active {
+                restore()
+                return
+            }
+
+            if window !== nextWindow {
+                restore()
+                window = nextWindow
+            }
+
+            let signature = Self.signature(active: active, color: color, window: nextWindow)
+            if signature == lastAppliedSignature {
+                return
+            }
+            lastAppliedSignature = signature
+
+            if windowState == nil {
+                windowState = WindowState(window: nextWindow)
+            }
+
+            nextWindow.isOpaque = false
+            nextWindow.backgroundColor = color
+            nextWindow.titleVisibility = .hidden
+            nextWindow.titlebarAppearsTransparent = true
+            if #available(macOS 11.0, *) {
+                nextWindow.titlebarSeparatorStyle = .none
+            }
+
+            // contentView 及其 superview 仍铺不透明取色底——这是“展开/切歌时露白条”的安全网。
+            applyLayerBackground(color, to: nextWindow.contentView)
+            applyLayerBackground(color, to: nextWindow.contentView?.superview)
+            // 标题栏容器改为透明：本 guard 仅在展开/过渡态生效，此时 SwiftUI 覆盖层（含整窗取色+多彩渐变 backdrop，
+            // ignoresSafeArea）已经盖住标题栏区域。原本给标题栏铺“扁平基色”会比下方带多彩渐变的 backdrop 更浅，
+            // 切歌后表现为顶部一条更浅的“未沉浸”色带。改为透明后，标题栏直接透出真实 backdrop，与正文同色、真正沉浸；
+            // 露白条仍由上面的 contentView 不透明底兜底。
+            applyLayerBackground(.clear, to: nextWindow.standardWindowButton(.closeButton)?.superview?.superview)
+        }
+
+        func restore() {
+            if let windowState, let window = windowState.window {
+                window.isOpaque = windowState.isOpaque
+                window.backgroundColor = windowState.backgroundColor
+                window.titleVisibility = windowState.titleVisibility
+                window.titlebarAppearsTransparent = windowState.titlebarAppearsTransparent
+                if #available(macOS 11.0, *),
+                   let separatorStyle = windowState.titlebarSeparatorStyle as? NSTitlebarSeparatorStyle {
+                    window.titlebarSeparatorStyle = separatorStyle
+                }
+            }
+
+            for state in layerStates.values {
+                guard let view = state.view else { continue }
+                view.wantsLayer = state.wantsLayer
+                view.layer?.backgroundColor = state.backgroundColor
+            }
+
+            window = nil
+            windowState = nil
+            layerStates.removeAll()
+            lastAppliedSignature = nil
+        }
+
+        private func applyLayerBackground(_ color: NSColor, to view: NSView?) {
+            guard let view else { return }
+            let id = ObjectIdentifier(view)
+            if layerStates[id] == nil {
+                layerStates[id] = LayerBackedViewState(view: view)
+            }
+            view.wantsLayer = true
+            view.layer?.backgroundColor = color.cgColor
+        }
+
+        private static func signature(active: Bool, color: NSColor, window: NSWindow) -> String {
+            let rgb = color.usingColorSpace(.sRGB) ?? color
+            return [
+                active ? "1" : "0",
+                String(ObjectIdentifier(window).hashValue),
+                String(format: "%.4f", Double(rgb.redComponent)),
+                String(format: "%.4f", Double(rgb.greenComponent)),
+                String(format: "%.4f", Double(rgb.blueComponent)),
+                String(format: "%.4f", Double(rgb.alphaComponent))
+            ].joined(separator: ":")
+        }
+
+        private struct WindowState {
+            weak var window: NSWindow?
+            let isOpaque: Bool
+            let backgroundColor: NSColor
+            let titleVisibility: NSWindow.TitleVisibility
+            let titlebarAppearsTransparent: Bool
+            let titlebarSeparatorStyle: Any?
+
+            init(window: NSWindow) {
+                self.window = window
+                isOpaque = window.isOpaque
+                backgroundColor = window.backgroundColor
+                titleVisibility = window.titleVisibility
+                titlebarAppearsTransparent = window.titlebarAppearsTransparent
+                if #available(macOS 11.0, *) {
+                    titlebarSeparatorStyle = window.titlebarSeparatorStyle
+                } else {
+                    titlebarSeparatorStyle = nil
+                }
+            }
+        }
+
+        private struct LayerBackedViewState {
+            weak var view: NSView?
+            let wantsLayer: Bool
+            let backgroundColor: CGColor?
+
+            init(view: NSView) {
+                self.view = view
+                wantsLayer = view.wantsLayer
+                backgroundColor = view.layer?.backgroundColor
+            }
+        }
+    }
+}
+
 private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
     let hiddenForMusicOverlay: Bool
+    let hideSidebarToggleForMusicOverlay: Bool
+    private static let minimumContentSize = NSSize(width: 1080, height: 700)
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -670,13 +1329,16 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         context.coordinator.hiddenForMusicOverlay = hiddenForMusicOverlay
+        context.coordinator.hideSidebarToggleForMusicOverlay = hideSidebarToggleForMusicOverlay
         context.coordinator.attach(to: view)
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.hiddenForMusicOverlay = hiddenForMusicOverlay
+        context.coordinator.hideSidebarToggleForMusicOverlay = hideSidebarToggleForMusicOverlay
         context.coordinator.attach(to: nsView)
+        context.coordinator.refreshTransientChrome()
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
@@ -685,12 +1347,17 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
 
     final class Coordinator {
         var hiddenForMusicOverlay = false
+        var hideSidebarToggleForMusicOverlay = false
         private weak var window: NSWindow?
-        private var originalToolbarVisible: Bool?
         private var originalTitleVisibility: NSWindow.TitleVisibility?
         private var originalTitlebarAppearsTransparent: Bool?
+        private var originalTitle: String?
+        private var originalIsOpaque: Bool?
+        private var originalBackgroundColor: NSColor?
         private var originalIsMovableByWindowBackground: Bool?
         private var originalContentMinSize: NSSize?
+        private var originalMinSize: NSSize?
+        private var resizeObserver: NSObjectProtocol?
         private var didEnableFullSizeContent = false
         @available(macOS 11.0, *)
         private var originalTitlebarSeparatorStyle: NSTitlebarSeparatorStyle? {
@@ -699,6 +1366,9 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
         }
         private var storedTitlebarSeparatorStyle: Any?
         private var lastAppliedHiddenState: Bool?
+        private var lastAppliedSidebarToggleState: Bool?
+        private var titlebarChromeOriginalAlpha: [ObjectIdentifier: (view: NSView, alpha: CGFloat)] = [:]
+        private var titlebarBackgroundOriginalState: [ObjectIdentifier: TitlebarBackgroundState] = [:]
 
         func attach(to view: NSView) {
             guard let nextWindow = view.window else {
@@ -712,41 +1382,53 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
             if window !== nextWindow {
                 restore()
                 window = nextWindow
-                originalToolbarVisible = nextWindow.toolbar?.isVisible
                 originalTitleVisibility = nextWindow.titleVisibility
                 originalTitlebarAppearsTransparent = nextWindow.titlebarAppearsTransparent
+                originalTitle = nextWindow.title
+                originalIsOpaque = nextWindow.isOpaque
+                originalBackgroundColor = nextWindow.backgroundColor
                 originalIsMovableByWindowBackground = nextWindow.isMovableByWindowBackground
                 originalContentMinSize = nextWindow.contentMinSize
+                originalMinSize = nextWindow.minSize
                 if #available(macOS 11.0, *) {
                     originalTitlebarSeparatorStyle = nextWindow.titlebarSeparatorStyle
                 }
+                installResizeClamp(for: nextWindow)
                 // 关键修复：fullSizeContentView 一次性常驻开启，之后再也不切换 styleMask。
-                // 这样音乐展开/收起只切换"工具栏可见性 + 标题栏透明度"，不会触发窗口 frame 重算，
+                // 这样音乐展开/收起只切换"标题栏透明度 + 侧栏按钮可见性"，不会触发窗口 frame 重算，
                 // 底层界面也不会因 styleMask 反复切换而抽搐（覆盖层只是盖在上面，不挤压任何东西）。
                 if !nextWindow.styleMask.contains(.fullSizeContentView) {
                     nextWindow.styleMask.insert(.fullSizeContentView)
                     didEnableFullSizeContent = true
                 }
-                // AppKit 级最小内容尺寸（取代 SwiftUI 的 .frame(min...)），但不能大于当前内容尺寸，
-                // 否则更新后首次打开或多次展开播放器会被系统强行撑高。
-                let currentContentSize = nextWindow.contentView?.bounds.size ?? nextWindow.frame.size
-                nextWindow.contentMinSize = NSSize(
-                    width: min(1120, max(originalContentMinSize?.width ?? 0, min(currentContentSize.width, 960))),
-                    height: min(720, max(originalContentMinSize?.height ?? 0, min(currentContentSize.height, 620)))
-                )
+                // #1 主窗口固定最小内容尺寸：侧栏最小 220 + 详情页最小宽度 820 ≈ 1040，取 1080 留出余量；
+                // 高度按详情页最小高 620 + 工具栏/页边距取 700。低于此尺寸时各组件（侧栏/海报墙/详情 hero）
+                // 会发生错位或挤压，因此设为硬下限。fullSizeContentView 已常驻、styleMask 不再切换，
+                // 设固定下限不会再触发以往"反复展开收起撑大窗口"的问题。
+                applyMinimumWindowSize(to: nextWindow)
                 lastAppliedHiddenState = nil
+                lastAppliedSidebarToggleState = nil
             }
             applyIfNeeded()
         }
 
         func restore() {
             guard let window else { return }
-            window.toolbar?.isVisible = originalToolbarVisible ?? true
+            if let resizeObserver {
+                NotificationCenter.default.removeObserver(resizeObserver)
+                self.resizeObserver = nil
+            }
+            window.isOpaque = originalIsOpaque ?? true
+            window.backgroundColor = originalBackgroundColor ?? NSColor.windowBackgroundColor
+            window.title = originalTitle ?? "MediaLIB"
             window.titleVisibility = originalTitleVisibility ?? .visible
             window.titlebarAppearsTransparent = originalTitlebarAppearsTransparent ?? false
             window.isMovableByWindowBackground = originalIsMovableByWindowBackground ?? false
             if let originalContentMinSize {
                 window.contentMinSize = originalContentMinSize
+            }
+            if let originalMinSize {
+                window.minSize = originalMinSize
             }
             if #available(macOS 11.0, *), let originalTitlebarSeparatorStyle {
                 window.titlebarSeparatorStyle = originalTitlebarSeparatorStyle
@@ -754,23 +1436,71 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
             if didEnableFullSizeContent {
                 window.styleMask.remove(.fullSizeContentView)
             }
+            restoreTitlebarBackground()
+            restoreTitlebarChrome()
             unhideTrafficLights(in: window)
+            setSidebarToggleHidden(false, in: window)
             self.window = nil
-            originalToolbarVisible = nil
             originalTitleVisibility = nil
             originalTitlebarAppearsTransparent = nil
+            originalTitle = nil
+            originalIsOpaque = nil
+            originalBackgroundColor = nil
             originalIsMovableByWindowBackground = nil
             originalContentMinSize = nil
+            originalMinSize = nil
             didEnableFullSizeContent = false
             if #available(macOS 11.0, *) {
                 originalTitlebarSeparatorStyle = nil
             }
             lastAppliedHiddenState = nil
+            lastAppliedSidebarToggleState = nil
+            titlebarChromeOriginalAlpha.removeAll()
+            titlebarBackgroundOriginalState.removeAll()
+        }
+
+        private func installResizeClamp(for window: NSWindow) {
+            if let resizeObserver {
+                NotificationCenter.default.removeObserver(resizeObserver)
+            }
+            resizeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResizeNotification,
+                object: window,
+                queue: .main
+            ) { [weak self, weak window] _ in
+                guard let self, let window else { return }
+                self.applyMinimumWindowSize(to: window)
+            }
+        }
+
+        private func applyMinimumWindowSize(to window: NSWindow) {
+            let firmMinSize = MainWindowToolbarVisibilityGuard.minimumContentSize
+            window.contentMinSize = firmMinSize
+            window.minSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: firmMinSize)).size
+            clampWindowFrameIfNeeded(window)
+        }
+
+        private func clampWindowFrameIfNeeded(_ window: NSWindow) {
+            guard !window.styleMask.contains(.fullScreen) else { return }
+            let firmMinSize = MainWindowToolbarVisibilityGuard.minimumContentSize
+            let currentContent = window.contentRect(forFrameRect: window.frame).size
+            guard currentContent.width < firmMinSize.width || currentContent.height < firmMinSize.height else { return }
+
+            let targetContent = NSSize(
+                width: max(currentContent.width, firmMinSize.width),
+                height: max(currentContent.height, firmMinSize.height)
+            )
+            var frameRect = window.frameRect(forContentRect: NSRect(origin: .zero, size: targetContent))
+            frameRect.origin.x = window.frame.origin.x
+            frameRect.origin.y = window.frame.maxY - frameRect.height
+            window.setFrame(frameRect, display: true)
         }
 
         private func applyIfNeeded() {
-            guard lastAppliedHiddenState != hiddenForMusicOverlay else { return }
+            guard lastAppliedHiddenState != hiddenForMusicOverlay ||
+                    lastAppliedSidebarToggleState != hideSidebarToggleForMusicOverlay else { return }
             lastAppliedHiddenState = hiddenForMusicOverlay
+            lastAppliedSidebarToggleState = hideSidebarToggleForMusicOverlay
             apply()
             // 单次异步重试，确保窗口就绪时也能套用，但不再有多次 setFrame 的抖动循环。
             DispatchQueue.main.async { [weak self] in
@@ -778,15 +1508,31 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
             }
         }
 
+        func refreshTransientChrome() {
+            guard hiddenForMusicOverlay || hideSidebarToggleForMusicOverlay,
+                  let window else { return }
+            if hiddenForMusicOverlay {
+                window.title = ""
+                window.titleVisibility = .hidden
+                window.titlebarAppearsTransparent = true
+            }
+            setTitlebarChromeHidden(hiddenForMusicOverlay, in: window)
+            setSidebarToggleHidden(hideSidebarToggleForMusicOverlay, in: window)
+        }
+
         private func apply() {
             guard let window else { return }
             // 安全网：在改 chrome 前后同步快照/还原窗口 frame，杜绝任何"撑大窗口"。单次同步 setFrame，
             // 不做以往的多次延迟还原（那会造成抖动）。
             let savedFrame: NSRect? = window.styleMask.contains(.fullScreen) ? nil : window.frame
-            // 关键：绝不切换 window.toolbar?.isVisible —— 切换统一工具栏可见性会让 AppKit 重算窗口 frame
-            // （这正是"反复展开收起把窗口撑大"的根因），且会改变安全区内边距导致底层重排。
-            // 工具栏始终保持原样可见，仅切换"标题栏透明度 + 标题文字可见性"这类纯渲染属性（不改 frame、不改安全区）。
+            // AppKit 的标题文本有时不跟随标题栏容器 alpha，同步清空可以避免顶部标题常驻。
+            window.title = ""
+            window.isOpaque = false
+            window.backgroundColor = .clear
             if hiddenForMusicOverlay {
+                // 音乐展开页需要沉浸到标题栏下方，但不能切 NSToolbar.isVisible：
+                // SwiftUI NavigationSplitView 的统一工具栏会在 safe area 更新时触发约束断言闪退。
+                // 保持 toolbar 结构稳定，只隐藏标题与侧栏按钮，并让播放器覆盖层接管顶部视觉。
                 window.titleVisibility = .hidden
                 window.titlebarAppearsTransparent = true
                 window.isMovableByWindowBackground = false
@@ -794,8 +1540,9 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
                     window.titlebarSeparatorStyle = .none
                 }
             } else {
-                window.titleVisibility = originalTitleVisibility ?? .visible
-                // 主界面也保持透明标题栏，让 AppPageBackground 填满顶端，不再露出系统白条。
+                // 主窗口常驻透明 titlebar 背景：如果普通态保留系统白底，展开播放器时那一层会先闪出来，
+                // 再被后续 AppKit chrome 清理动作擦掉。让普通态也没有白底，展开就不再需要抢救。
+                window.titleVisibility = .hidden
                 window.titlebarAppearsTransparent = true
                 window.isMovableByWindowBackground = originalIsMovableByWindowBackground ?? false
                 if #available(macOS 11.0, *) {
@@ -803,8 +1550,9 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
                 }
             }
             unhideTrafficLights(in: window)
+            setTitlebarChromeHidden(hiddenForMusicOverlay, in: window)
             // 音乐展开时隐藏工具栏里的侧栏切换按钮（隐藏其视图不改变 frame，不会撑大窗口）。
-            setSidebarToggleHidden(hiddenForMusicOverlay, in: window)
+            setSidebarToggleHidden(hideSidebarToggleForMusicOverlay, in: window)
             // 同步还原 frame：若上面任何属性意外触发了窗口尺寸变化，立即还原（单次、无延迟、无抖动）。
             if let savedFrame, !window.styleMask.contains(.fullScreen), window.frame != savedFrame {
                 window.setFrame(savedFrame, display: false)
@@ -813,13 +1561,188 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
 
         /// 隐藏/显示工具栏中的侧栏切换按钮视图（不动 toolbar.isVisible，因此不触发窗口 frame 重算）。
         private func setSidebarToggleHidden(_ hidden: Bool, in window: NSWindow) {
-            guard let items = window.toolbar?.items else { return }
-            for item in items {
+            for item in window.toolbar?.items ?? [] {
                 let id = item.itemIdentifier.rawValue.lowercased()
-                if id.contains("sidebar") || id.contains("toggle") {
+                let labelHints = [item.label, item.paletteLabel, item.toolTip].compactMap { $0 }.joined(separator: " ").lowercased()
+                if id.contains("sidebar") || id.contains("toggle") || labelHints.contains("sidebar") || labelHints.contains("边栏") || labelHints.contains("側邊欄") {
                     item.view?.isHidden = hidden
                 }
             }
+            if let titlebarRoot = window.standardWindowButton(.closeButton)?.superview?.superview {
+                setSidebarToggleButtonsHidden(hidden, in: titlebarRoot, window: window)
+            }
+            if let contentRoot = window.contentView?.superview {
+                setSidebarToggleButtonsHidden(hidden, in: contentRoot, window: window)
+            }
+            unhideTrafficLights(in: window)
+        }
+
+        private func setTitlebarChromeHidden(_ hidden: Bool, in window: NSWindow) {
+            guard let titlebarRoot = window.standardWindowButton(.closeButton)?.superview?.superview else { return }
+            // titlebar/toolbar 背景常驻透明，白条不再作为普通态底色存在；展开时只额外隐藏 chrome 内容。
+            clearTitlebarBackground(in: titlebarRoot, window: window)
+            if let contentFrameRoot = window.contentView?.superview {
+                clearTitlebarBackground(in: contentFrameRoot, window: window)
+            }
+
+            guard hidden else {
+                restoreTitlebarChrome()
+                unhideTrafficLights(in: window)
+                return
+            }
+            fadeTitlebarChrome(in: titlebarRoot, window: window)
+            unhideTrafficLights(in: window)
+        }
+
+        private func fadeTitlebarChrome(in view: NSView, window: NSWindow) {
+            if containsTrafficLight(in: view, window: window) {
+                for subview in view.subviews {
+                    fadeTitlebarChrome(in: subview, window: window)
+                }
+                return
+            }
+
+            if shouldFadeTitlebarChromeView(view) {
+                let id = ObjectIdentifier(view)
+                if titlebarChromeOriginalAlpha[id] == nil {
+                    titlebarChromeOriginalAlpha[id] = (view, view.alphaValue)
+                }
+                view.alphaValue = 0
+                return
+            }
+
+            for subview in view.subviews {
+                fadeTitlebarChrome(in: subview, window: window)
+            }
+        }
+
+        private func restoreTitlebarChrome() {
+            for state in titlebarChromeOriginalAlpha.values {
+                state.view.alphaValue = state.alpha
+            }
+            titlebarChromeOriginalAlpha.removeAll()
+        }
+
+        private func clearTitlebarBackground(in view: NSView, window: NSWindow) {
+            if shouldClearTitlebarBackgroundView(view, window: window) {
+                let id = ObjectIdentifier(view)
+                if titlebarBackgroundOriginalState[id] == nil {
+                    titlebarBackgroundOriginalState[id] = TitlebarBackgroundState(view: view)
+                }
+                view.wantsLayer = true
+                view.layer?.backgroundColor = NSColor.clear.cgColor
+                if let visualEffectView = view as? NSVisualEffectView {
+                    visualEffectView.isEmphasized = false
+                    visualEffectView.blendingMode = .withinWindow
+                }
+            }
+
+            for subview in view.subviews {
+                clearTitlebarBackground(in: subview, window: window)
+            }
+        }
+
+        private func restoreTitlebarBackground() {
+            for state in titlebarBackgroundOriginalState.values {
+                guard let view = state.view else { continue }
+                if let visualEffectView = view as? NSVisualEffectView,
+                   let visualEffectState = state.visualEffectState {
+                    visualEffectView.material = visualEffectState.material
+                    visualEffectView.blendingMode = visualEffectState.blendingMode
+                    visualEffectView.state = visualEffectState.state
+                    visualEffectView.isEmphasized = visualEffectState.isEmphasized
+                }
+                view.wantsLayer = state.wantsLayer
+                view.layer?.backgroundColor = state.backgroundColor
+            }
+            titlebarBackgroundOriginalState.removeAll()
+        }
+
+        private func containsTrafficLight(in view: NSView, window: NSWindow) -> Bool {
+            [window.standardWindowButton(.closeButton),
+             window.standardWindowButton(.miniaturizeButton),
+             window.standardWindowButton(.zoomButton)]
+                .compactMap { $0 }
+                .contains { button in
+                    button === view || viewContainsAncestor(view, of: button)
+                }
+        }
+
+        private func viewContainsAncestor(_ ancestor: NSView, of descendant: NSView) -> Bool {
+            var current: NSView? = descendant
+            while let view = current {
+                if view === ancestor { return true }
+                current = view.superview
+            }
+            return false
+        }
+
+        private func shouldFadeTitlebarChromeView(_ view: NSView) -> Bool {
+            if view is NSButton { return false }
+            let className = NSStringFromClass(type(of: view)).lowercased()
+            return className.contains("toolbar") ||
+                className.contains("titlebar") ||
+                className.contains("visualeffect") ||
+                className.contains("separator") ||
+                className.contains("decoration") ||
+                className.contains("background") ||
+                className.contains("text") ||
+                className.contains("label") ||
+                className.contains("field")
+        }
+
+        private func shouldClearTitlebarBackgroundView(_ view: NSView, window: NSWindow) -> Bool {
+            if view is NSButton { return false }
+            let className = NSStringFromClass(type(of: view)).lowercased()
+            if containsTrafficLight(in: view, window: window) {
+                return className.contains("titlebar") ||
+                    className.contains("toolbar") ||
+                    className.contains("visualeffect") ||
+                    className.contains("themeframe")
+            }
+            return className.contains("titlebar") ||
+                className.contains("toolbar") ||
+                className.contains("visualeffect") ||
+                className.contains("separator") ||
+                className.contains("decoration") ||
+                className.contains("background")
+        }
+
+        private func setSidebarToggleButtonsHidden(_ hidden: Bool, in view: NSView, window: NSWindow) {
+            if let button = view as? NSButton,
+               !isTrafficLight(button, in: window),
+               looksLikeSidebarToggle(button) {
+                button.isHidden = hidden
+            }
+            for subview in view.subviews {
+                setSidebarToggleButtonsHidden(hidden, in: subview, window: window)
+            }
+        }
+
+        private func isTrafficLight(_ button: NSButton, in window: NSWindow) -> Bool {
+            button === window.standardWindowButton(.closeButton) ||
+            button === window.standardWindowButton(.miniaturizeButton) ||
+            button === window.standardWindowButton(.zoomButton)
+        }
+
+        private func looksLikeSidebarToggle(_ button: NSButton) -> Bool {
+            let action = button.action.map { NSStringFromSelector($0) }
+            let hints = [
+                button.identifier?.rawValue,
+                button.toolTip,
+                button.accessibilityLabel(),
+                action,
+                String(describing: button.cell)
+            ]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+
+            return hints.contains("sidebar") ||
+                hints.contains("side bar") ||
+                hints.contains("togglesidebar") ||
+                hints.contains("边栏") ||
+                hints.contains("側邊欄")
         }
 
         private func unhideTrafficLights(in window: NSWindow) {
@@ -828,5 +1751,87 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
             window.standardWindowButton(.zoomButton)?.isHidden = false
             window.standardWindowButton(.closeButton)?.superview?.isHidden = false
         }
+
+        private struct TitlebarBackgroundState {
+            weak var view: NSView?
+            let wantsLayer: Bool
+            let backgroundColor: CGColor?
+            let visualEffectState: TitlebarVisualEffectState?
+
+            init(view: NSView) {
+                self.view = view
+                wantsLayer = view.wantsLayer
+                backgroundColor = view.layer?.backgroundColor
+                if let visualEffectView = view as? NSVisualEffectView {
+                    visualEffectState = TitlebarVisualEffectState(
+                        material: visualEffectView.material,
+                        blendingMode: visualEffectView.blendingMode,
+                        state: visualEffectView.state,
+                        isEmphasized: visualEffectView.isEmphasized
+                    )
+                } else {
+                    visualEffectState = nil
+                }
+            }
+        }
+
+        private struct TitlebarVisualEffectState {
+            let material: NSVisualEffectView.Material
+            let blendingMode: NSVisualEffectView.BlendingMode
+            let state: NSVisualEffectView.State
+            let isEmphasized: Bool
+        }
+    }
+}
+
+struct EmbySourceRenameSheet: View {
+    let request: EmbyRenameRequest
+    let onSave: (String) -> Void
+    let onCancel: () -> Void
+
+    @State private var name: String
+
+    init(request: EmbyRenameRequest, onSave: @escaping (String) -> Void, onCancel: @escaping () -> Void) {
+        self.request = request
+        self.onSave = onSave
+        self.onCancel = onCancel
+        _name = State(initialValue: request.name)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            AppSheetHeader(
+                title: "重命名 Emby 来源",
+                subtitle: "新名称会同步显示在侧边栏和媒体源列表中。",
+                systemImage: "pencil"
+            )
+
+            VStack(spacing: 14) {
+                SettingsRow(title: "名称", systemImage: "pencil.line") {
+                    TextField("Emby 来源名称", text: $name)
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.trailing)
+                        .glassFormField()
+                        .frame(width: 220, alignment: .trailing)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .staticSurfaceBackground(cornerRadius: AppRadius.card)
+
+            AppSheetActionFooter {
+                Button("取消", action: onCancel)
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                Button {
+                    onSave(name.trimmingCharacters(in: .whitespacesAndNewlines))
+                } label: {
+                    Label("保存", systemImage: "checkmark")
+                }
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .appSheetChrome(width: 460)
     }
 }

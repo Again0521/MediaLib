@@ -8,6 +8,40 @@ struct EmbySession {
     var accessToken: String
 }
 
+enum EmbyServiceError: LocalizedError {
+    case authenticationExpired
+    /// 服务器疑似限制第三方客户端接入（白名单 / 451 / 自定义 HTML 错误页 / 含关键字）。
+    /// 不应自动重试或反复重新登录，应提示用户联系管理员加入白名单。
+    case clientRestricted(statusCode: Int?, reason: String?)
+    case requestFailed(statusCode: Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .authenticationExpired:
+            return "Emby 登录已失效，需要重新认证。"
+        case .clientRestricted:
+            return "该 Emby 服务器可能限制第三方客户端接入。请联系管理员将 MediaLIB 加入白名单。"
+        case .requestFailed(let statusCode):
+            return "Emby 请求失败（HTTP \(statusCode)），请检查服务器状态和网络连接。"
+        }
+    }
+}
+
+/// MediaLIB 向 Emby 表明身份的客户端信息，受限服务器提示中可复制给管理员加入白名单。
+struct EmbyClientIdentity: Equatable, Sendable {
+    var client: String
+    var device: String
+    var deviceID: String
+    var version: String
+    var userAgent: String
+}
+
+enum EmbyPlaybackPhase {
+    case started
+    case progress
+    case stopped
+}
+
 struct EmbyLibrarySummary: Identifiable, Hashable, Sendable {
     var id: String
     var sourceID: String
@@ -39,12 +73,43 @@ struct EmbyService {
     private let version = "1.0.0"
     private let pageSize = 300
 
+    private var userAgent: String {
+        "\(clientName)/\(version) (macOS)"
+    }
+
+    /// 当前发往 Emby 的客户端身份，受限服务器提示中展示给用户复制。
+    func clientIdentity() -> EmbyClientIdentity {
+        EmbyClientIdentity(
+            client: clientName,
+            device: deviceName,
+            deviceID: deviceIdentifier(),
+            version: version,
+            userAgent: userAgent
+        )
+    }
+
+    func isAuthenticationFailure(_ error: Error) -> Bool {
+        guard let serviceError = error as? EmbyServiceError else { return false }
+        if case .authenticationExpired = serviceError {
+            return true
+        }
+        return false
+    }
+
+    /// 是否为受限服务器（白名单）错误——调用方据此停止重试并提示用户。
+    func isClientRestriction(_ error: Error) -> Bool {
+        guard let serviceError = error as? EmbyServiceError else { return false }
+        if case .clientRestricted = serviceError { return true }
+        return false
+    }
+
     func authenticate(serverURL: URL, username: String, password: String) async throws -> EmbySession {
         let baseURL = normalizedServerURL(serverURL)
         var request = URLRequest(url: baseURL.appendingPathComponent("Users/AuthenticateByName"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(authorizationHeader(accessToken: nil), forHTTPHeaderField: "X-Emby-Authorization")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = try JSONEncoder().encode(EmbyLoginRequest(Username: username, Pw: password))
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -90,6 +155,7 @@ struct EmbyService {
         }
         var request = URLRequest(url: url)
         request.setValue(authorizationHeader(accessToken: session.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
@@ -106,6 +172,77 @@ struct EmbyService {
                     sourceName: sourceName
                 )
             }
+    }
+
+    func reportPlayback(
+        session: EmbySession,
+        itemID: String,
+        playSessionID: String,
+        phase: EmbyPlaybackPhase,
+        position: Double,
+        duration: Double?,
+        isPaused: Bool,
+        filePath: String?
+    ) async throws {
+        let endpoint: String
+        switch phase {
+        case .started:
+            endpoint = "Sessions/Playing"
+        case .progress:
+            endpoint = "Sessions/Playing/Progress"
+        case .stopped:
+            endpoint = "Sessions/Playing/Stopped"
+        }
+        let payload = EmbyPlaybackReportRequest(
+            ItemId: itemID,
+            MediaSourceId: mediaSourceID(from: filePath),
+            PlaySessionId: playSessionID,
+            PositionTicks: Self.ticks(from: position),
+            RunTimeTicks: duration.map(Self.ticks(from:)),
+            IsPaused: isPaused,
+            PlayMethod: "DirectStream"
+        )
+        try await sendAuthenticated(
+            session: session,
+            pathComponents: endpoint.split(separator: "/").map(String.init),
+            method: "POST",
+            body: try JSONEncoder().encode(payload)
+        )
+    }
+
+    func setFavorite(session: EmbySession, itemID: String, favorite: Bool) async throws {
+        try await sendAuthenticated(
+            session: session,
+            pathComponents: ["Users", session.userID, "FavoriteItems", itemID],
+            method: favorite ? "POST" : "DELETE"
+        )
+    }
+
+    func setPlayed(session: EmbySession, itemID: String, played: Bool) async throws {
+        try await sendAuthenticated(
+            session: session,
+            pathComponents: ["Users", session.userID, "PlayedItems", itemID],
+            method: played ? "POST" : "DELETE"
+        )
+    }
+
+    func validateSession(_ session: EmbySession) async throws {
+        try await sendAuthenticated(
+            session: session,
+            pathComponents: ["Users", session.userID],
+            method: "GET"
+        )
+    }
+
+    func refreshedResourceURLString(_ value: String?, session: EmbySession) -> String? {
+        guard let value,
+              var components = URLComponents(string: value),
+              components.url?.host == session.serverURL.host else { return value }
+        var queryItems = components.queryItems ?? []
+        queryItems.removeAll { $0.name.caseInsensitiveCompare("api_key") == .orderedSame }
+        queryItems.append(URLQueryItem(name: "api_key", value: session.accessToken))
+        components.queryItems = queryItems
+        return components.string ?? value
     }
 
     static func librarySourcePath(base: String, library: EmbyLibrarySummary) -> String {
@@ -221,6 +358,7 @@ struct EmbyService {
         }
         var request = URLRequest(url: url)
         request.setValue(authorizationHeader(accessToken: session.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
@@ -280,7 +418,8 @@ struct EmbyService {
             favorite: dto.UserData?.IsFavorite ?? false,
             externalID: dto.Id,
             metadataProvider: "Emby",
-            lastPlayedAt: dto.UserData?.LastPlayedDate.flatMap(Self.parseEmbyDate)
+            lastPlayedAt: dto.UserData?.LastPlayedDate.flatMap(Self.parseEmbyDate),
+            genre: (dto.Genres?.isEmpty == false) ? dto.Genres?.joined(separator: ", ") : nil
         )
     }
 
@@ -382,6 +521,44 @@ struct EmbyService {
         return components?.url
     }
 
+    private func sendAuthenticated(
+        session: EmbySession,
+        pathComponents: [String],
+        method: String,
+        body: Data? = nil
+    ) async throws {
+        var url = session.serverURL
+        for component in pathComponents {
+            url.appendPathComponent(component)
+        }
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "api_key", value: session.accessToken)]
+        guard let requestURL = components?.url else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: requestURL)
+        request.httpMethod = method
+        request.setValue(authorizationHeader(accessToken: session.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        if let body {
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+    }
+
+    private func mediaSourceID(from filePath: String?) -> String? {
+        guard let filePath,
+              let components = URLComponents(string: filePath) else { return nil }
+        return components.queryItems?.first(where: { $0.name == "MediaSourceId" })?.value
+    }
+
+    static func ticks(from seconds: Double) -> Int64 {
+        guard seconds.isFinite, seconds > 0 else { return 0 }
+        return Int64((seconds * 10_000_000).rounded())
+    }
+
     private func normalizedServerURL(_ url: URL) -> URL {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         if components?.scheme == nil {
@@ -420,12 +597,44 @@ struct EmbyService {
     private func validate(response: URLResponse, data: Data) throws {
         guard let http = response as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else {
-            throw NSError(
-                domain: "MediaLib.Emby",
-                code: http.statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "Emby 请求失败（HTTP \(http.statusCode)），请检查服务器地址和登录信息。"]
-            )
+            if let reason = Self.clientRestrictionReason(statusCode: http.statusCode, data: data, response: http) {
+                throw EmbyServiceError.clientRestricted(statusCode: http.statusCode, reason: reason)
+            }
+            if http.statusCode == 401 || http.statusCode == 403 {
+                throw EmbyServiceError.authenticationExpired
+            }
+            throw EmbyServiceError.requestFailed(statusCode: http.statusCode)
         }
+    }
+
+    /// 判定一次失败响应是否为「受限客户端」拒绝。返回非 nil 表示是，并附带可读原因。
+    /// 命中条件：含白名单/禁止类关键字、HTTP 451、HTTP 403、或返回了 HTML 错误页。
+    private static func clientRestrictionReason(statusCode: Int, data: Data, response: HTTPURLResponse) -> String? {
+        let body = String(data: data.prefix(8192), encoding: .utf8)?.lowercased() ?? ""
+        let keywords = [
+            "whitelist", "not whitelisted", "client not allowed", "client is not allowed",
+            "unsupported client", "unsupported device", "forbidden", "access denied",
+            "not allowed", "client blocked", "blocked client"
+        ]
+        let matchedKeyword = keywords.first { body.contains($0) }
+        let contentType = (response.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+        let looksLikeHTML = contentType.contains("text/html") || body.contains("<html")
+
+        if statusCode == 451 {
+            return matchedKeyword.map { "服务器返回 451 且包含关键字「\($0)」" }
+                ?? "服务器返回 HTTP 451（通常表示访问被策略拦截）"
+        }
+        if statusCode == 403 {
+            return matchedKeyword.map { "服务器返回 403 且包含关键字「\($0)」" }
+                ?? "服务器返回 HTTP 403 Forbidden"
+        }
+        if let matchedKeyword {
+            return "响应包含关键字「\(matchedKeyword)」（HTTP \(statusCode)）"
+        }
+        if looksLikeHTML {
+            return "服务器返回了非标准的 HTML 错误页（HTTP \(statusCode)）"
+        }
+        return nil
     }
 
     private static func parseEmbyDate(_ value: String) -> Date? {
@@ -437,6 +646,16 @@ struct EmbyService {
         iso.formatOptions = [.withInternetDateTime]
         return iso.date(from: value)
     }
+}
+
+private struct EmbyPlaybackReportRequest: Encodable {
+    let ItemId: String
+    let MediaSourceId: String?
+    let PlaySessionId: String
+    let PositionTicks: Int64
+    let RunTimeTicks: Int64?
+    let IsPaused: Bool
+    let PlayMethod: String
 }
 
 private struct EmbyLoginRequest: Encodable {
@@ -478,6 +697,7 @@ private struct EmbyItemDTO: Decodable {
     let Album: String?
     let CollectionType: String?
     let MediaSources: [EmbyMediaSourceDTO]?
+    let Genres: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case Id
@@ -498,6 +718,7 @@ private struct EmbyItemDTO: Decodable {
         case Album
         case CollectionType
         case MediaSources
+        case Genres
     }
 }
 

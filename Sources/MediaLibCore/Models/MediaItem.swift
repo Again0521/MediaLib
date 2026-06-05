@@ -10,6 +10,8 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
     public var trackNumber: Int?
     public var year: Int?
     public var overview: String?
+    /// 类型 / 题材标签（逗号分隔的名称，如 "动作, 科幻"），来自 TMDB genre。
+    public var genre: String?
     public var posterPath: String?
     public var backdropPath: String?
     public var rating: Double?
@@ -25,10 +27,16 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
     public var resolution: String?
     public var videoBitrate: Int64?
     public var duration: Double?
+    public var loudnessTrackGainDB: Double?
+    public var loudnessAlbumGainDB: Double?
+    public var loudnessTrackPeak: Double?
+    public var loudnessAlbumPeak: Double?
+    public var playCount: Int?
     public var playPosition: Double
     public var playProgress: Double
     public var watched: Bool
     public var favorite: Bool
+    public var watchlist: Bool
     public var externalID: String?
     public var metadataProvider: String?
     public var collectionTitle: String?
@@ -61,16 +69,23 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
         resolution: String? = nil,
         videoBitrate: Int64? = nil,
         duration: Double? = nil,
+        loudnessTrackGainDB: Double? = nil,
+        loudnessAlbumGainDB: Double? = nil,
+        loudnessTrackPeak: Double? = nil,
+        loudnessAlbumPeak: Double? = nil,
+        playCount: Int? = 0,
         playPosition: Double = 0,
         playProgress: Double = 0,
         watched: Bool = false,
         favorite: Bool = false,
+        watchlist: Bool = false,
         externalID: String? = nil,
         metadataProvider: String? = nil,
         collectionTitle: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
-        lastPlayedAt: Date? = nil
+        lastPlayedAt: Date? = nil,
+        genre: String? = nil
     ) {
         self.id = id
         self.type = type
@@ -96,16 +111,23 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
         self.resolution = resolution
         self.videoBitrate = videoBitrate
         self.duration = duration
+        self.loudnessTrackGainDB = loudnessTrackGainDB
+        self.loudnessAlbumGainDB = loudnessAlbumGainDB
+        self.loudnessTrackPeak = loudnessTrackPeak
+        self.loudnessAlbumPeak = loudnessAlbumPeak
+        self.playCount = playCount
         self.playPosition = playPosition
         self.playProgress = playProgress
         self.watched = watched
         self.favorite = favorite
+        self.watchlist = watchlist
         self.externalID = externalID
         self.metadataProvider = metadataProvider
         self.collectionTitle = collectionTitle
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.lastPlayedAt = lastPlayedAt
+        self.genre = genre
     }
 
     public var displayYear: String {

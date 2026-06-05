@@ -26,7 +26,7 @@ struct PrivacyLockView: View {
     }
 
     private var subtitle: String {
-        appState.privacyPINConfigured ? "使用 Touch ID 或应用内密码解锁。" : "首次使用前请创建 4 到 8 位数字密码。"
+        appState.privacyPINConfigured ? "使用 Touch ID 或密码解锁。" : "创建 4 到 8 位数字密码。"
     }
 
     private var lockPanel: some View {
@@ -37,7 +37,7 @@ struct PrivacyLockView: View {
                 Text(appState.privacyPINConfigured ? "\(appState.settings.privacyVaultName)已锁定" : "设置保险库密码")
                     .font(.title3.weight(.semibold))
                     .multilineTextAlignment(.center)
-                Text(appState.privacyPINConfigured ? "路径、文件名和内容会在锁定状态下隐藏。" : "设置后会立即解锁保险库，之后可在设置中管理密码。")
+                Text(appState.privacyPINConfigured ? "锁定时隐藏路径、文件名和内容。" : "设置完成后会解锁保险库，密码可在设置中管理。")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
@@ -58,7 +58,7 @@ struct PrivacyLockView: View {
 
     private var unlockControls: some View {
         VStack(alignment: .center, spacing: 12) {
-            HStack(spacing: 8) {
+            HStack(spacing: 5) {
                 SecureField("4-8 位数字", text: $pin)
                     .glassFormField()
                     .multilineTextAlignment(.center)
@@ -82,11 +82,11 @@ struct PrivacyLockView: View {
                         Label("Touch ID", systemImage: "touchid")
                     }
                     .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
-                    .frame(width: 126)
+                    .frame(width: 118)
                 }
             }
 
-            Text("解锁前不会显示保险库内容，也不会展示保险库媒体源路径。")
+            Text("解锁前隐藏保险库内容与媒体源路径。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -119,7 +119,7 @@ struct PrivacyLockView: View {
                 .disabled(!canCreatePIN)
             }
 
-            Text("密码哈希仅保存在本机凭据目录中，不会触碰系统钥匙串。")
+            Text("密码验证信息只保存在本机，不使用系统钥匙串。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

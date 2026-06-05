@@ -26,13 +26,58 @@ public enum ExternalPlayerError: LocalizedError {
 
 public final class ExternalPlayerService {
     private let workspace: NSWorkspace
+    private let cacheLock = NSLock()
+    private var cachedKnownPlayers: [ExternalPlayer]?
+    private var cachedAvailablePlayersByCustomPath: [String: [ExternalPlayer]] = [:]
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var appActivationObserver: NSObjectProtocol?
 
     public init(workspace: NSWorkspace = .shared) {
         self.workspace = workspace
+        let center = workspace.notificationCenter
+        workspaceObservers = [
+            center.addObserver(
+                forName: NSWorkspace.didLaunchApplicationNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.invalidatePlayerCache()
+            },
+            center.addObserver(
+                forName: NSWorkspace.didTerminateApplicationNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.invalidatePlayerCache()
+            }
+        ]
+        appActivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.invalidatePlayerCache()
+        }
+    }
+
+    deinit {
+        for observer in workspaceObservers {
+            workspace.notificationCenter.removeObserver(observer)
+        }
+        if let appActivationObserver {
+            NotificationCenter.default.removeObserver(appActivationObserver)
+        }
     }
 
     public var knownPlayers: [ExternalPlayer] {
-        knownPlayerDefinitions.map { definition in
+        cacheLock.lock()
+        if let cachedKnownPlayers {
+            cacheLock.unlock()
+            return cachedKnownPlayers
+        }
+        cacheLock.unlock()
+
+        let discovered = knownPlayerDefinitions.map { definition in
             let discoveredURL = workspace.urlForApplication(withBundleIdentifier: definition.bundleIdentifier)
             return ExternalPlayer(
                 name: definition.name,
@@ -40,9 +85,21 @@ public final class ExternalPlayerService {
                 bundleIdentifier: definition.bundleIdentifier
             )
         }
+        cacheLock.lock()
+        cachedKnownPlayers = discovered
+        cacheLock.unlock()
+        return discovered
     }
 
     public func availablePlayers(customPath: String? = nil) -> [ExternalPlayer] {
+        let cacheKey = customPath ?? ""
+        cacheLock.lock()
+        if let cached = cachedAvailablePlayersByCustomPath[cacheKey] {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+
         var players = knownPlayers.filter { FileManager.default.fileExists(atPath: $0.path) }
         if let customPath, FileManager.default.fileExists(atPath: customPath) {
             let customPlayer = ExternalPlayer(name: URL(fileURLWithPath: customPath).deletingPathExtension().lastPathComponent, path: customPath, bundleIdentifier: nil)
@@ -50,7 +107,18 @@ public final class ExternalPlayerService {
                 players.append(customPlayer)
             }
         }
+        cacheLock.lock()
+        cachedAvailablePlayersByCustomPath[cacheKey] = players
+        cacheLock.unlock()
         return players
+    }
+
+    /// 外部播放器安装、退出或设置路径变化后刷新；普通 SwiftUI 重算只读取缓存。
+    public func invalidatePlayerCache() {
+        cacheLock.lock()
+        cachedKnownPlayers = nil
+        cachedAvailablePlayersByCustomPath.removeAll(keepingCapacity: true)
+        cacheLock.unlock()
     }
 
     public func open(filePath: String, preferredPlayerPath: String?) throws {

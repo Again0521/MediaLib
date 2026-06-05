@@ -14,7 +14,7 @@ struct SourcesView: View {
             VStack(alignment: .leading, spacing: 22) {
                 PageHeader(
                     title: "媒体源",
-                    subtitle: "为电影、电视剧、音乐和保险库目录分别设置类型，扫描会按目录类型稳定归档。",
+                    subtitle: "管理本地文件夹、移动硬盘、网络挂载和 Emby 媒体库。",
                     systemImage: "externaldrive"
                 )
 
@@ -28,7 +28,7 @@ struct SourcesView: View {
                     EmptyStateView(
                         title: "还没有媒体源",
                         systemImage: "externaldrive.badge.plus",
-                        message: "添加本机文件夹、外接硬盘，或 `/Volumes` 下已挂载的 NAS 目录。"
+                        message: "添加本地文件夹、移动硬盘、网络挂载或 Emby 媒体库后即可开始扫描。"
                     )
                     .frame(minHeight: 320)
                 } else {
@@ -91,48 +91,37 @@ struct SourcesView: View {
     ]
 
     private var sourceActionsToolbar: some View {
-        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        return ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    Button {
-                        chooseMediaSource()
-                    } label: {
-                        Label("添加", systemImage: "plus")
-                    }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32, prominent: true))
-
-                    Button {
-                        showingEmbySheet = true
-                    } label: {
-                        Label("Emby 登录", systemImage: "server.rack")
-                    }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
-
-                    Button {
-                        showingNetworkSheet = true
-                    } label: {
-                        Label("网络设备", systemImage: "network")
-                    }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
-
-                    Button {
-                        appState.scanAllSources()
-                    } label: {
-                        Label("扫描全部", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
-                    .disabled(appState.sources.isEmpty || appState.isScanning)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 9)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        AppSurfaceToolbar {
+            Button {
+                chooseMediaSource()
+            } label: {
+                Label("添加…", systemImage: "plus")
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .clipShape(shape)
-            .staticSurfaceBackground(cornerRadius: 18, thickness: 1.04)
-            .overlay {
-                shape.stroke(.white.opacity(0.64), lineWidth: 0.7)
+            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32, prominent: true))
+
+            Button {
+                showingEmbySheet = true
+            } label: {
+                Label(appState.isConnectingEmby ? "Emby 连接中" : "Emby 登录…", systemImage: "server.rack")
             }
+            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
+            .disabled(appState.isConnectingEmby)
+
+            Button {
+                showingNetworkSheet = true
+            } label: {
+                Label("网络设备…", systemImage: "network")
+            }
+            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
+
+            Button {
+                appState.scanAllSources()
+            } label: {
+                Label("扫描全部", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
+            .disabled(appState.sources.isEmpty || appState.isScanning)
+        }
     }
 }
 
@@ -142,20 +131,13 @@ private struct EmbyLoginSheet: View {
     @State private var server = ""
     @State private var username = ""
     @State private var password = ""
-    @State private var isConnecting = false
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
-                PlayfulSymbolIcon(systemImage: "server.rack", size: 42)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("连接 Emby")
-                        .font(.title3.weight(.semibold))
-                    Text("登录后从 Emby API 获取资源，并按服务器分类同步到 EMBY 目录。")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            AppSheetHeader(
+                title: "连接 Emby",
+                subtitle: "登录后，媒体库会在后台同步到独立的 EMBY 目录。",
+                systemImage: "server.rack"
+            )
 
             TextField("服务器地址，例如 http://192.168.1.20:8096", text: $server)
                 .glassFormField()
@@ -166,35 +148,30 @@ private struct EmbyLoginSheet: View {
             SecureField("密码", text: $password)
                 .glassFormField()
 
-            Text("MediaLIB 会把 Emby token 保存在本机凭据目录中，不会触碰系统钥匙串；导入条目会记录 Emby ItemId、分类 ViewId 和播放流地址，刷新时保持同一内部资源映射。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .staticSurfaceBackground(cornerRadius: 10, thickness: 0.86)
+            AppInfoNote(text: "登录信息只保存在本机，用于后续自动同步。MediaLIB 不会使用系统钥匙串。", systemImage: "lock")
 
-            HStack {
-                Spacer()
+            AppSheetActionFooter {
                 Button("取消", role: .cancel) {
                     dismiss()
                 }
                 .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
-                Button(isConnecting ? "连接中..." : "登录并同步") {
-                    isConnecting = true
+                Button("登录并同步") {
+                    let request = (server: server, username: username, password: password)
+                    dismiss()
                     Task {
-                        await appState.connectEmbyServer(server: server, username: username, password: password)
-                        isConnecting = false
-                        dismiss()
+                        await Task.yield()
+                        await appState.connectEmbyServer(
+                            server: request.server,
+                            username: request.username,
+                            password: request.password
+                        )
                     }
                 }
                 .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
-                .disabled(isConnecting || server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding(22)
-        .frame(width: 620)
-        .background(AppPageBackground())
+        .appSheetChrome(width: AppSheetMetrics.wideWidth)
     }
 }
 
@@ -212,16 +189,11 @@ private struct NetworkMediaSourceSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
-                PlayfulSymbolIcon(systemImage: "network", size: 42)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("添加网络设备")
-                        .font(.title3.weight(.semibold))
-                    Text("支持 smb://、ftp://、ftps://。连接后选择挂载目录并指定分类。")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            AppSheetHeader(
+                title: "添加网络设备",
+                subtitle: "支持 SMB、FTP 和 FTPS。连接后选择挂载目录与媒体分类。",
+                systemImage: "network"
+            )
 
             TextField("smb://nas.local/Media 或 ftp://192.168.1.10/Movies", text: $networkURL)
                 .glassFormField()
@@ -237,16 +209,9 @@ private struct NetworkMediaSourceSheet: View {
 
             MediaTypeGridPicker(selection: $mediaType, mediaTypes: mediaTypes, vaultName: vaultName)
 
-            Text("macOS 会负责 SMB/FTP 登录和挂载；选择目录后 MediaLIB 使用现有扫描器导入，之后可像本地媒体源一样重新扫描。")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .staticSurfaceBackground(cornerRadius: 10, thickness: 0.86)
+            AppInfoNote(text: "macOS 负责登录和挂载；MediaLIB 从选中的目录扫描内容。", systemImage: "externaldrive.connected.to.line.below")
 
-            HStack {
-                Spacer()
+            AppSheetActionFooter {
                 Button("取消", role: .cancel) {
                     dismiss()
                 }
@@ -258,9 +223,7 @@ private struct NetworkMediaSourceSheet: View {
                 .disabled(networkURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
-        .padding(22)
-        .frame(width: 620)
-        .background(AppPageBackground())
+        .appSheetChrome(width: AppSheetMetrics.wideWidth)
     }
 
     private func connectAndPickDirectory() {
@@ -321,21 +284,15 @@ private struct MediaSourceTypeSelectionSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 12) {
-                PlayfulSymbolIcon(systemImage: "folder.badge.plus", size: 42)
+            AppSheetHeader(
+                title: "选择媒体源分类",
+                subtitle: sourceSummary,
+                systemImage: "folder.badge.plus",
+                subtitleLineLimit: 1,
+                truncationMode: .middle
+            )
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("选择媒体源分类")
-                        .font(.title3.weight(.semibold))
-                    Text(sourceSummary)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-
-            Text("添加前先选择分类，MediaLIB 会按该分类扫描归档；之后仍可在媒体源列表中修改。")
+            Text("选择该目录的媒体分类；添加后仍可在媒体源列表中修改。")
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
@@ -362,17 +319,15 @@ private struct MediaSourceTypeSelectionSheet: View {
                 }
             }
 
-            HStack {
-                Spacer()
+            AppSheetActionFooter {
                 Button("取消", role: .cancel) {
                     onCancel()
                 }
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
                 .keyboardShortcut(.cancelAction)
             }
         }
-        .padding(22)
-        .frame(width: 560)
-        .background(AppPageBackground())
+        .appSheetChrome(width: AppSheetMetrics.standardWidth)
     }
 
     private var sourceSummary: String {
@@ -450,12 +405,19 @@ private struct MediaTypeGridPicker: View {
     }
 }
 
+/// 媒体源行内同类下拉框的统一宽度，保证各行对齐。
+private enum SourceRowMetrics {
+    static let typeMenuWidth: CGFloat = 118
+    static let participationMenuWidth: CGFloat = 168
+}
+
 struct SourceRowView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
     let source: MediaSource
     @State private var isHovering = false
+    @State private var showDeleteConfirmation = false
 
     var body: some View {
         let isLockedPrivateSource = source.mediaType == .privateCollection && !appState.privacyUnlocked
@@ -476,17 +438,24 @@ struct SourceRowView: View {
                     Text(sourceTitle(isLockedPrivateSource: isLockedPrivateSource))
                         .font(.headline)
                 }
-                Text(isLockedPrivateSource ? "路径已隐藏，解锁\(appState.settings.privacyVaultName)后可查看。" : source.displayPath)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                if isLockedPrivateSource {
+                    Text("路径已隐藏，解锁\(appState.settings.privacyVaultName)后可查看。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } else {
+                    // 路径过长时截断；鼠标悬停在该行时循环滚动完整路径。
+                    MarqueeText(text: source.displayPath, font: .caption)
+                        .frame(height: 15)
+                        .foregroundStyle(.secondary)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 12) {
                 if source.sourceKind == .emby {
-                    GlassMenuButton(title: "EMBY", width: 128) {
+                    GlassMenuButton(title: "EMBY", width: SourceRowMetrics.typeMenuWidth) {
                         Button {
                         } label: {
                             Label("EMBY", systemImage: "server.rack")
@@ -494,7 +463,7 @@ struct SourceRowView: View {
                         .disabled(true)
                     }
                 } else {
-                    GlassMenuButton(title: title(for: source.mediaType), width: 128) {
+                    GlassMenuButton(title: title(for: source.mediaType), width: SourceRowMetrics.typeMenuWidth) {
                         ForEach(Self.mediaTypes, id: \.self) { mediaType in
                             Button {
                                 var updated = source
@@ -507,11 +476,41 @@ struct SourceRowView: View {
                     }
                 }
 
+                GlassMenuButton(title: participationTitle, width: SourceRowMetrics.participationMenuWidth) {
+                    Toggle("参与元数据拉取", isOn: Binding(
+                        get: { source.includeInMetadataFetch },
+                        set: { newValue in
+                            var updated = source
+                            updated.includeInMetadataFetch = newValue
+                            appState.updateSource(updated)
+                        }
+                    ))
+                    Toggle("参与健康检查", isOn: Binding(
+                        get: { source.includeInHealthCheck },
+                        set: { newValue in
+                            var updated = source
+                            updated.includeInHealthCheck = newValue
+                            appState.updateSource(updated)
+                        }
+                    ))
+                }
+
                 if !isReachable {
                     Text("不可访问")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Color.orange)
                         .frame(width: 58, alignment: .trailing)
+                }
+
+                if !isReachable, appState.canRemountNetworkSource(source) {
+                    Button {
+                        appState.remountNetworkSource(source)
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: 32, thickness: 0.96))
+                    .help("重新挂载")
                 }
 
                 Button {
@@ -525,13 +524,26 @@ struct SourceRowView: View {
                 .help("扫描")
 
                 Button(role: .destructive) {
-                    appState.deleteSource(source)
+                    showDeleteConfirmation = true
                 } label: {
                     Image(systemName: "trash")
                         .frame(width: 18, height: 18)
+                        .foregroundStyle(.red)
                 }
                 .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: 32, thickness: 0.96))
                 .help("删除")
+                .confirmationDialog(
+                    "删除媒体源「\(source.name)」？",
+                    isPresented: $showDeleteConfirmation,
+                    titleVisibility: .visible
+                ) {
+                    Button("删除", role: .destructive) {
+                        appState.deleteSource(source)
+                    }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("将从媒体库移除该来源已索引的条目；你磁盘上的原始文件不会被删除。")
+                }
             }
             .fixedSize(horizontal: true, vertical: false)
         }
@@ -551,6 +563,15 @@ struct SourceRowView: View {
             if suppressing {
                 isHovering = false
             }
+        }
+    }
+
+    private var participationTitle: String {
+        switch (source.includeInMetadataFetch, source.includeInHealthCheck) {
+        case (true, true): return "元数据与健康检查"
+        case (true, false): return "仅元数据拉取"
+        case (false, true): return "仅健康检查"
+        case (false, false): return "不参与检查"
         }
     }
 

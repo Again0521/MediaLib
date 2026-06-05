@@ -184,22 +184,22 @@ public final class ThumbnailGenerator {
         process.standardOutput = Pipe()
         process.standardError = Pipe()
 
+        // Semaphore 让线程真正阻塞，取代原来每 50ms 轮询一次的忙等。
+        let semaphore = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in semaphore.signal() }
+
         do {
             try process.run()
         } catch {
             return false
         }
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        if process.isRunning {
+        let waitResult = semaphore.wait(timeout: .now() + timeout)
+        if waitResult == .timedOut {
             process.terminate()
             process.waitUntilExit()
             return false
         }
-        process.waitUntilExit()
         return process.terminationStatus == 0
     }
 

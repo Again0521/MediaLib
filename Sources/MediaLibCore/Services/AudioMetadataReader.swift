@@ -10,6 +10,10 @@ public struct AudioMetadata: Sendable {
     public var duration: Double?
     public var artworkPath: String?
     public var lyrics: String?
+    public var loudnessTrackGainDB: Double?
+    public var loudnessAlbumGainDB: Double?
+    public var loudnessTrackPeak: Double?
+    public var loudnessAlbumPeak: Double?
     public var hasEmbeddedMetadata: Bool
 }
 
@@ -66,6 +70,22 @@ public final class AudioMetadataReader {
         )
         let trackNumber = await trackNumber(in: allMetadata)
         let year = await year(in: allMetadata)
+        let loudnessTrackGainDB = await loudnessValue(
+            keys: ["replaygain_track_gain", "replaygain track gain", "r128_track_gain", "r128 track gain"],
+            in: allMetadata
+        )
+        let loudnessAlbumGainDB = await loudnessValue(
+            keys: ["replaygain_album_gain", "replaygain album gain", "r128_album_gain", "r128 album gain"],
+            in: allMetadata
+        )
+        let loudnessTrackPeak = await numericValue(
+            keys: ["replaygain_track_peak", "replaygain track peak"],
+            in: allMetadata
+        )
+        let loudnessAlbumPeak = await numericValue(
+            keys: ["replaygain_album_peak", "replaygain album peak"],
+            in: allMetadata
+        )
 
         return AudioMetadata(
             title: title,
@@ -76,9 +96,15 @@ public final class AudioMetadataReader {
             duration: duration.map { CMTimeGetSeconds($0) }.flatMap { $0.isFinite ? $0 : nil },
             artworkPath: artworkPath,
             lyrics: lyrics,
+            loudnessTrackGainDB: loudnessTrackGainDB,
+            loudnessAlbumGainDB: loudnessAlbumGainDB,
+            loudnessTrackPeak: loudnessTrackPeak,
+            loudnessAlbumPeak: loudnessAlbumPeak,
             hasEmbeddedMetadata: [title, artist, album, artworkPath, lyrics].contains { $0?.isEmpty == false } ||
                 trackNumber != nil ||
-                year != nil
+                year != nil ||
+                loudnessTrackGainDB != nil ||
+                loudnessAlbumGainDB != nil
         )
     }
 
@@ -166,6 +192,36 @@ public final class AudioMetadataReader {
             }
             if let text = try? await item.load(.stringValue), text.count >= 4, let year = Int(text.prefix(4)) {
                 return year
+            }
+        }
+        return nil
+    }
+
+    private func loudnessValue(keys: [String], in metadata: [AVMetadataItem]) async -> Double? {
+        guard let match = await numericMetadataMatch(keys: keys, in: metadata) else { return nil }
+        if match.key.contains("r128"), abs(match.value) > 24 {
+            return match.value / 256
+        }
+        return match.value
+    }
+
+    private func numericValue(keys: [String], in metadata: [AVMetadataItem]) async -> Double? {
+        await numericMetadataMatch(keys: keys, in: metadata)?.value
+    }
+
+    private func numericMetadataMatch(keys: [String], in metadata: [AVMetadataItem]) async -> (key: String, value: Double)? {
+        let loweredKeys = keys.map { $0.lowercased() }
+        for item in metadata {
+            let key = metadataKeyDescription(for: item)
+            guard loweredKeys.contains(where: { key.contains($0) }) else { continue }
+            if let number = try? await item.load(.numberValue)?.doubleValue, number.isFinite {
+                return (key, number)
+            }
+            guard let text = try? await item.load(.stringValue) else { continue }
+            let scanner = Scanner(string: text.replacingOccurrences(of: ",", with: "."))
+            scanner.charactersToBeSkipped = CharacterSet(charactersIn: " \t")
+            if let number = scanner.scanDouble(), number.isFinite {
+                return (key, number)
             }
         }
         return nil

@@ -14,8 +14,9 @@ public final class MediaRepository {
               id, type, title, original_title, artist, album, track_number, year, overview, poster_path, backdrop_path,
               rating, runtime, source_path, parent_id, season_number, episode_number,
               file_path, file_size, video_codec, audio_codec, resolution, video_bitrate, duration,
-              play_position, play_progress, watched, favorite, external_id, metadata_provider, collection_title, created_at, updated_at, last_played_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              loudness_track_gain_db, loudness_album_gain_db, loudness_track_peak, loudness_album_peak,
+              play_count, play_position, play_progress, watched, favorite, watchlist, external_id, metadata_provider, collection_title, created_at, updated_at, last_played_at, genre
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               type = excluded.type,
               title = excluded.title,
@@ -40,13 +41,75 @@ public final class MediaRepository {
               resolution = COALESCE(excluded.resolution, media_items.resolution),
               video_bitrate = COALESCE(excluded.video_bitrate, media_items.video_bitrate),
               duration = COALESCE(excluded.duration, media_items.duration),
+              loudness_track_gain_db = excluded.loudness_track_gain_db,
+              loudness_album_gain_db = excluded.loudness_album_gain_db,
+              loudness_track_peak = excluded.loudness_track_peak,
+              loudness_album_peak = excluded.loudness_album_peak,
+              play_count = media_items.play_count,
               external_id = COALESCE(excluded.external_id, media_items.external_id),
               metadata_provider = COALESCE(excluded.metadata_provider, media_items.metadata_provider),
               collection_title = COALESCE(excluded.collection_title, media_items.collection_title),
+              genre = COALESCE(excluded.genre, media_items.genre),
               updated_at = excluded.updated_at
             """,
             bindings: bindings(for: item)
         )
+    }
+
+    public func replaceRemoteItems(sourcePathPrefix: String, with items: [MediaItem]) throws {
+        let keepIDs = Set(items.map(\.id))
+        try database.transaction {
+            // media_items 上有全局 UNIQUE(file_path) 索引。远端（如 Emby）删除再重连时，
+            // 服务器对持久 DeviceId 常会复用同一 token，导致流地址 file_path 与历史残留行完全一致，
+            // 而新条目 id 因 sourceID 变化而不同——此时 upsert 的 ON CONFLICT(id) 无法吸收 file_path 冲突，
+            // 会抛出唯一约束错误。这里在写入前先清掉与本次导入 file_path 相同但 id 不同的残留行。
+            for item in items {
+                guard let filePath = item.filePath, !filePath.isEmpty else { continue }
+                try database.execute(
+                    "DELETE FROM media_items WHERE file_path = ? AND id != ?",
+                    bindings: [.text(filePath), .text(item.id)]
+                )
+            }
+            for item in items {
+                try upsert(item)
+                try database.execute(
+                    """
+                    UPDATE media_items
+                    SET play_position = ?,
+                        play_progress = ?,
+                        watched = ?,
+                        favorite = ?,
+                        last_played_at = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    bindings: [
+                        .double(item.playPosition),
+                        .double(item.playProgress),
+                        .bool(item.watched),
+                        .bool(item.favorite),
+                        .optionalDate(item.lastPlayedAt),
+                        .optionalDate(item.updatedAt),
+                        .text(item.id)
+                    ]
+                )
+            }
+
+            try database.execute("CREATE TEMP TABLE IF NOT EXISTS remote_keep_ids (id TEXT PRIMARY KEY)")
+            try database.execute("DELETE FROM remote_keep_ids")
+            for id in keepIDs {
+                try database.execute("INSERT OR IGNORE INTO remote_keep_ids (id) VALUES (?)", bindings: [.text(id)])
+            }
+            try database.execute(
+                """
+                DELETE FROM media_items
+                WHERE (source_path = ? OR source_path LIKE ?)
+                  AND id NOT IN (SELECT id FROM remote_keep_ids)
+                """,
+                bindings: [.text(sourcePathPrefix), .text("\(sourcePathPrefix)/%")]
+            )
+            try database.execute("DELETE FROM remote_keep_ids")
+        }
     }
 
     public func fetchAll() throws -> [MediaItem] {
@@ -86,11 +149,71 @@ public final class MediaRepository {
         )
     }
 
+    public func deleteItems(sourcePath: String, excludingIDs ids: Set<String>) throws {
+        guard !ids.isEmpty else {
+            try deleteItems(sourcePath: sourcePath)
+            return
+        }
+        try database.transaction {
+            try database.execute("CREATE TEMP TABLE IF NOT EXISTS scan_keep_ids (id TEXT PRIMARY KEY)")
+            try database.execute("DELETE FROM scan_keep_ids")
+            for id in ids {
+                try database.execute("INSERT OR IGNORE INTO scan_keep_ids (id) VALUES (?)", bindings: [.text(id)])
+            }
+            try database.execute(
+                "DELETE FROM media_items WHERE source_path = ? AND id NOT IN (SELECT id FROM scan_keep_ids)",
+                bindings: [.text(sourcePath)]
+            )
+            try database.execute("DELETE FROM scan_keep_ids")
+        }
+    }
+
     public func deleteItems(filePath: String, excludingID id: String) throws {
         try database.execute(
             "DELETE FROM media_items WHERE file_path = ? AND id != ?",
             bindings: [.text(filePath), .text(id)]
         )
+    }
+
+    public func deleteItems(filePath: String) throws {
+        try database.execute("DELETE FROM media_items WHERE file_path = ?", bindings: [.text(filePath)])
+    }
+
+    public func deleteItems(filePathPrefix: String, sourcePath: String) throws {
+        try database.execute(
+            "DELETE FROM media_items WHERE source_path = ? AND (file_path = ? OR file_path LIKE ?)",
+            bindings: [.text(sourcePath), .text(filePathPrefix), .text("\(filePathPrefix)/%")]
+        )
+    }
+
+    public func deleteOrphanParents(sourcePath: String) throws {
+        try database.execute(
+            """
+            DELETE FROM media_items
+            WHERE source_path = ?
+              AND file_path IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM media_items AS children
+                  WHERE children.parent_id = media_items.id
+              )
+            """,
+            bindings: [.text(sourcePath)]
+        )
+    }
+
+    public func deleteItems(ids: [String]) throws {
+        guard !ids.isEmpty else { return }
+        var startIndex = 0
+        while startIndex < ids.count {
+            let endIndex = Swift.min(startIndex + 400, ids.count)
+            let chunk = ids[startIndex..<endIndex]
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ", ")
+            try database.execute(
+                "DELETE FROM media_items WHERE id IN (\(placeholders))",
+                bindings: chunk.map { .text($0) }
+            )
+            startIndex = endIndex
+        }
     }
 
     public func search(_ query: String) throws -> [MediaItem] {
@@ -132,6 +255,35 @@ public final class MediaRepository {
                 .text(id)
             ]
         )
+    }
+
+    public func incrementPlayCount(id: String) throws {
+        try database.execute(
+            "UPDATE media_items SET play_count = COALESCE(play_count, 0) + 1 WHERE id = ?",
+            bindings: [.text(id)]
+        )
+    }
+
+    public func resetPlayCount(id: String) throws {
+        try database.execute(
+            "UPDATE media_items SET play_count = 0 WHERE id = ?",
+            bindings: [.text(id)]
+        )
+    }
+
+    public func resetPlayCounts(ids: [String]) throws {
+        guard !ids.isEmpty else { return }
+        var startIndex = 0
+        while startIndex < ids.count {
+            let endIndex = Swift.min(startIndex + 400, ids.count)
+            let chunk = ids[startIndex..<endIndex]
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ", ")
+            try database.execute(
+                "UPDATE media_items SET play_count = 0 WHERE id IN (\(placeholders))",
+                bindings: chunk.map { .text($0) }
+            )
+            startIndex = endIndex
+        }
     }
 
     public func clearPlaybackHistory(id: String) throws {
@@ -176,6 +328,13 @@ public final class MediaRepository {
         )
     }
 
+    public func setWatchlist(id: String, watchlist: Bool) throws {
+        try database.execute(
+            "UPDATE media_items SET watchlist = ?, updated_at = ? WHERE id = ?",
+            bindings: [.bool(watchlist), .optionalDate(Date()), .text(id)]
+        )
+    }
+
     public func updateType(id: String, type: MediaType) throws {
         try database.execute(
             "UPDATE media_items SET type = ?, updated_at = ? WHERE id = ?",
@@ -208,6 +367,7 @@ public final class MediaRepository {
                 external_id = COALESCE(?, external_id),
                 metadata_provider = COALESCE(?, metadata_provider),
                 collection_title = COALESCE(?, collection_title),
+                genre = COALESCE(?, genre),
                 updated_at = ?
             WHERE id = ?
             """,
@@ -226,6 +386,7 @@ public final class MediaRepository {
                 .optionalText(metadata.externalID),
                 .optionalText(metadata.metadataProvider),
                 .optionalText(metadata.collectionTitle),
+                .optionalText(metadata.genre),
                 .optionalDate(Date()),
                 .text(id)
             ]
@@ -244,7 +405,8 @@ public final class MediaRepository {
         SELECT id, type, title, original_title, artist, album, track_number, year, overview, poster_path, backdrop_path,
                rating, runtime, source_path, parent_id, season_number, episode_number,
                file_path, file_size, video_codec, audio_codec, resolution, video_bitrate, duration,
-               play_position, play_progress, watched, favorite, external_id, metadata_provider, collection_title, created_at, updated_at, last_played_at
+               loudness_track_gain_db, loudness_album_gain_db, loudness_track_peak, loudness_album_peak,
+               play_count, play_position, play_progress, watched, favorite, watchlist, external_id, metadata_provider, collection_title, created_at, updated_at, last_played_at, genre
         FROM media_items
         """
     }
@@ -275,16 +437,23 @@ public final class MediaRepository {
             .optionalText(item.resolution),
             .optionalInt64(item.videoBitrate),
             .optionalDouble(item.duration),
+            .optionalDouble(item.loudnessTrackGainDB),
+            .optionalDouble(item.loudnessAlbumGainDB),
+            .optionalDouble(item.loudnessTrackPeak),
+            .optionalDouble(item.loudnessAlbumPeak),
+            .optionalInt(item.playCount),
             .double(item.playPosition),
             .double(item.playProgress),
             .bool(item.watched),
             .bool(item.favorite),
+            .bool(item.watchlist),
             .optionalText(item.externalID),
             .optionalText(item.metadataProvider),
             .optionalText(item.collectionTitle),
             .optionalDate(item.createdAt),
             .optionalDate(item.updatedAt),
-            .optionalDate(item.lastPlayedAt)
+            .optionalDate(item.lastPlayedAt),
+            .optionalText(item.genre)
         ]
     }
 
@@ -314,16 +483,23 @@ public final class MediaRepository {
             resolution: row.string(21),
             videoBitrate: row.int64(22),
             duration: row.double(23),
-            playPosition: row.double(24) ?? 0,
-            playProgress: row.double(25) ?? 0,
-            watched: row.bool(26),
-            favorite: row.bool(27),
-            externalID: row.string(28),
-            metadataProvider: row.string(29),
-            collectionTitle: row.string(30),
-            createdAt: row.date(31) ?? Date(),
-            updatedAt: row.date(32) ?? Date(),
-            lastPlayedAt: row.date(33)
+            loudnessTrackGainDB: row.double(24),
+            loudnessAlbumGainDB: row.double(25),
+            loudnessTrackPeak: row.double(26),
+            loudnessAlbumPeak: row.double(27),
+            playCount: row.int(28) ?? 0,
+            playPosition: row.double(29) ?? 0,
+            playProgress: row.double(30) ?? 0,
+            watched: row.bool(31),
+            favorite: row.bool(32),
+            watchlist: row.bool(33),
+            externalID: row.string(34),
+            metadataProvider: row.string(35),
+            collectionTitle: row.string(36),
+            createdAt: row.date(37) ?? Date(),
+            updatedAt: row.date(38) ?? Date(),
+            lastPlayedAt: row.date(39),
+            genre: row.string(40)
         )
     }
 }
@@ -343,6 +519,7 @@ public struct MediaMetadataUpdate: Sendable {
     public var externalID: String?
     public var metadataProvider: String?
     public var collectionTitle: String?
+    public var genre: String?
 
     public init(
         title: String? = nil,
@@ -358,7 +535,8 @@ public struct MediaMetadataUpdate: Sendable {
         runtime: Int? = nil,
         externalID: String? = nil,
         metadataProvider: String? = nil,
-        collectionTitle: String? = nil
+        collectionTitle: String? = nil,
+        genre: String? = nil
     ) {
         self.title = title
         self.originalTitle = originalTitle
@@ -374,5 +552,6 @@ public struct MediaMetadataUpdate: Sendable {
         self.externalID = externalID
         self.metadataProvider = metadataProvider
         self.collectionTitle = collectionTitle
+        self.genre = genre
     }
 }

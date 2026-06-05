@@ -62,15 +62,11 @@ public final class MediaScanner {
 
         let files = mediaFiles(in: source)
         progress(ScanProgress(sourceID: source.id, status: "running", totalFiles: files.count, processedFiles: 0, currentPath: nil, errorMessage: nil))
-        do {
-            try mediaRepository.deleteItems(sourcePath: source.path)
-        } catch {
-            logger?.log("清理旧索引失败：\(error.localizedDescription)", level: .warning)
-        }
 
         var imported = 0
         var skipped = 0
         var errors: [String] = []
+        var importedIDs = Set<String>()
 
         for (index, fileURL) in files.enumerated() {
             if Task.isCancelled { break }
@@ -82,7 +78,8 @@ public final class MediaScanner {
                     skipped += 1
                     continue
                 }
-                try await importFile(fileURL, fileSize: fileSize, source: source, settings: settings)
+                let ids = try await importFile(fileURL, fileSize: fileSize, source: source, settings: settings)
+                importedIDs.formUnion(ids)
                 imported += 1
             } catch {
                 let message = source.mediaType == .privateCollection
@@ -97,11 +94,134 @@ public final class MediaScanner {
             }
         }
 
+        if !Task.isCancelled && errors.isEmpty {
+            do {
+                try mediaRepository.deleteItems(sourcePath: source.path, excludingIDs: importedIDs)
+            } catch {
+                let message = "清理已移除媒体索引失败：\(error.localizedDescription)"
+                errors.append(message)
+                logger?.log(message, level: .warning)
+            }
+        } else if !errors.isEmpty {
+            logger?.log("扫描存在错误，保留旧索引以避免误删。", level: .warning)
+        }
+
         progress(ScanProgress(sourceID: source.id, status: "finished", totalFiles: files.count, processedFiles: files.count, currentPath: nil, errorMessage: errors.first))
         return ScanSummary(scannedFiles: files.count, importedItems: imported, skippedFiles: skipped, errors: errors)
     }
 
-    private func importFile(_ fileURL: URL, fileSize: Int64, source: MediaSource, settings: AppSettings) async throws {
+    public func scanChanges(
+        source: MediaSource,
+        changedPaths: [String],
+        settings: AppSettings,
+        progress: @escaping (ScanProgress) -> Void
+    ) async -> ScanSummary {
+        guard FileAccessService.isReachableDirectory(source.path) else {
+            let message = "媒体源不可访问，已跳过增量更新：\(source.path)"
+            logger?.log(message, level: .warning)
+            progress(ScanProgress(sourceID: source.id, status: "failed", totalFiles: 0, processedFiles: 0, currentPath: nil, errorMessage: message))
+            return ScanSummary(scannedFiles: 0, importedItems: 0, skippedFiles: 0, errors: [message])
+        }
+
+        let sourceRoot = URL(fileURLWithPath: source.path, isDirectory: true).standardizedFileURL.path
+        let normalizedPaths = Set(changedPaths.compactMap { path -> String? in
+            let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+            guard normalized == sourceRoot || normalized.hasPrefix("\(sourceRoot)/") else { return nil }
+            return normalized
+        })
+
+        var importURLs = Set<URL>()
+        var deletedFilePaths = Set<String>()
+        var deletedDirectoryPaths = Set<String>()
+        for path in normalizedPaths {
+            let url = URL(fileURLWithPath: path)
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: path, isDirectory: &isDirectory) {
+                if isDirectory.boolValue {
+                    mediaFiles(at: url, source: source, recursive: source.recursive).forEach { importURLs.insert($0) }
+                } else if parser.isMediaFile(url, preferredType: source.mediaType) {
+                    importURLs.insert(canonicalMediaURL(url))
+                } else if isMetadataSidecar(url) {
+                    mediaFiles(at: url.deletingLastPathComponent(), source: source, recursive: false).forEach { importURLs.insert($0) }
+                }
+            } else if parser.isMediaFile(url, preferredType: source.mediaType) {
+                deletedFilePaths.insert(path)
+                deletedFilePaths.insert(canonicalMediaURL(url).path)
+            } else if isMetadataSidecar(url) {
+                mediaFiles(at: url.deletingLastPathComponent(), source: source, recursive: false).forEach { importURLs.insert($0) }
+            } else if url.pathExtension.isEmpty {
+                deletedDirectoryPaths.insert(path)
+            }
+        }
+
+        let files = importURLs.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        let totalWork = files.count + deletedFilePaths.count + deletedDirectoryPaths.count
+        progress(ScanProgress(sourceID: source.id, status: "running", totalFiles: totalWork, processedFiles: 0, currentPath: nil, errorMessage: nil))
+
+        var imported = 0
+        var skipped = 0
+        var processed = 0
+        var errors: [String] = []
+
+        for path in deletedFilePaths {
+            if Task.isCancelled { break }
+            do {
+                try mediaRepository.deleteItems(filePath: path)
+            } catch {
+                errors.append("移除失效文件索引失败：\(error.localizedDescription)")
+            }
+            processed += 1
+            progress(ScanProgress(sourceID: source.id, status: "running", totalFiles: totalWork, processedFiles: processed, currentPath: source.mediaType == .privateCollection ? nil : path, errorMessage: errors.first))
+        }
+
+        for path in deletedDirectoryPaths {
+            if Task.isCancelled { break }
+            do {
+                try mediaRepository.deleteItems(filePathPrefix: path, sourcePath: source.path)
+            } catch {
+                errors.append("移除失效目录索引失败：\(error.localizedDescription)")
+            }
+            processed += 1
+            progress(ScanProgress(sourceID: source.id, status: "running", totalFiles: totalWork, processedFiles: processed, currentPath: source.mediaType == .privateCollection ? nil : path, errorMessage: errors.first))
+        }
+
+        for fileURL in files {
+            if Task.isCancelled { break }
+            do {
+                let values = try fileURL.resourceValues(forKeys: [.fileSizeKey])
+                let fileSize = Int64(values.fileSize ?? 0)
+                guard fileSize >= minimumFileSize(for: fileURL, source: source) else {
+                    skipped += 1
+                    processed += 1
+                    progress(ScanProgress(sourceID: source.id, status: "running", totalFiles: totalWork, processedFiles: processed, currentPath: source.mediaType == .privateCollection ? nil : fileURL.path, errorMessage: errors.first))
+                    continue
+                }
+                _ = try await importFile(fileURL, fileSize: fileSize, source: source, settings: settings)
+                imported += 1
+            } catch {
+                let message = source.mediaType == .privateCollection
+                    ? "隐私媒体源中有文件增量更新失败。"
+                    : "\(fileURL.lastPathComponent): \(error.localizedDescription)"
+                errors.append(message)
+                logger?.log(message, level: .error)
+            }
+            processed += 1
+            progress(ScanProgress(sourceID: source.id, status: "running", totalFiles: totalWork, processedFiles: processed, currentPath: source.mediaType == .privateCollection ? nil : fileURL.path, errorMessage: errors.first))
+        }
+
+        if !Task.isCancelled {
+            do {
+                try mediaRepository.deleteOrphanParents(sourcePath: source.path)
+            } catch {
+                errors.append("清理空剧集索引失败：\(error.localizedDescription)")
+            }
+        }
+
+        progress(ScanProgress(sourceID: source.id, status: "finished", totalFiles: totalWork, processedFiles: processed, currentPath: nil, errorMessage: errors.first))
+        return ScanSummary(scannedFiles: files.count, importedItems: imported, skippedFiles: skipped, errors: errors)
+    }
+
+    private func importFile(_ fileURL: URL, fileSize: Int64, source: MediaSource, settings: AppSettings) async throws -> Set<String> {
         let parsed = parser.parse(url: fileURL, preferredType: source.mediaType, sourcePath: source.path)
         let isMusicFile = source.mediaType == .music || (source.mediaType == .auto && parser.isAudioFile(fileURL))
         let localMetadata = isMusicFile
@@ -144,11 +264,15 @@ public final class MediaScanner {
                 filePath: canonicalFileURL.path,
                 fileSize: fileSize,
                 duration: audioMetadata.duration ?? mediaInfo?.duration,
+                loudnessTrackGainDB: audioMetadata.loudnessTrackGainDB,
+                loudnessAlbumGainDB: audioMetadata.loudnessAlbumGainDB,
+                loudnessTrackPeak: audioMetadata.loudnessTrackPeak,
+                loudnessAlbumPeak: audioMetadata.loudnessAlbumPeak,
                 metadataProvider: audioMetadata.hasEmbeddedMetadata ? "Embedded" : nil
             )
             try mediaRepository.deleteItems(filePath: canonicalFileURL.path, excludingID: id)
             try mediaRepository.upsert(item)
-            return
+            return [id]
         }
 
         switch parsed.kind {
@@ -184,6 +308,7 @@ public final class MediaScanner {
                 duration: mediaInfo?.duration
             )
             try mediaRepository.upsert(item)
+            return [id]
 
         case .episode:
             let seriesDirectory = parsed.seriesDirectoryPath.map { URL(fileURLWithPath: $0, isDirectory: true) }
@@ -236,6 +361,7 @@ public final class MediaScanner {
                 duration: mediaInfo?.duration
             )
             try mediaRepository.upsert(episode)
+            return [showID, episodeID]
         }
     }
 
@@ -294,7 +420,10 @@ public final class MediaScanner {
     }
 
     private func mediaFiles(in source: MediaSource) -> [URL] {
-        let root = URL(fileURLWithPath: source.path, isDirectory: true)
+        mediaFiles(at: URL(fileURLWithPath: source.path, isDirectory: true), source: source, recursive: source.recursive)
+    }
+
+    private func mediaFiles(at root: URL, source: MediaSource, recursive: Bool) -> [URL] {
         var results: [URL] = []
         var seenPaths = Set<String>()
 
@@ -307,7 +436,7 @@ public final class MediaScanner {
             results.append(canonicalURL)
         }
 
-        if source.recursive {
+        if recursive {
             guard let enumerator = fileManager.enumerator(
                 at: root,
                 includingPropertiesForKeys: [.isRegularFileKey, .isHiddenKey, .fileSizeKey],
@@ -327,6 +456,10 @@ public final class MediaScanner {
         }
 
         return results.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    private func isMetadataSidecar(_ url: URL) -> Bool {
+        ["nfo", "jpg", "jpeg", "png", "webp", "heic"].contains(url.pathExtension.lowercased())
     }
 
     private func canonicalMediaURL(_ url: URL) -> URL {

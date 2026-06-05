@@ -6,6 +6,12 @@ enum AppSpacing {
     static let card: CGFloat = 14
     static let controlGroupHorizontal: CGFloat = 24
     static let controlGroupVertical: CGFloat = 11
+    static let sheetHorizontal: CGFloat = 24
+    static let sheetVertical: CGFloat = 24
+    static let sheetContent: CGFloat = 18
+    static let sheetFooter: CGFloat = 10
+    static let toolbarHorizontal: CGFloat = 10
+    static let toolbarVertical: CGFloat = 9
     /// 统一所有页面：大标题栏与其下方条形卡片（筛选/排序控件栏）之间的间距。
     static let headerToControls: CGFloat = 16
 }
@@ -16,12 +22,39 @@ enum AppRadius {
     static let card: CGFloat = 18
     static let panel: CGFloat = 22
     static let hero: CGFloat = 24
+    static let sheet: CGFloat = 22
+    static let toolbar: CGFloat = 18
+    static let informationNote: CGFloat = 10
 }
 
 enum AppEffect {
     static let defaultGlassThickness = 1.18
     static let staticGlassThickness = 1.02
     static let controlGlassThickness = 1.22
+}
+
+enum AppSheetMetrics {
+    static let compactWidth: CGFloat = 430
+    static let standardWidth: CGFloat = 560
+    static let wideWidth: CGFloat = 620
+    static let headerIconSize: CGFloat = 42
+}
+
+enum AppControlMetrics {
+    static let minMenuWidth: CGFloat = 92
+    static let maxMenuWidth: CGFloat = 360
+    static let minTouchHeight: CGFloat = 30
+    static let defaultButtonHeight: CGFloat = 32
+    static let headerButtonHeight: CGFloat = 34
+}
+
+enum AppDesignStandard {
+    /// 普通页面使用大标题 PageHeader；弹窗使用 AppSheetHeader，避免 sheet 像完整页面一样过重。
+    static let pageHeaderTitleSize: CGFloat = 32
+    /// 重复列表、网格、设置行优先使用静态玻璃，只有少量页头/主操作控件使用更厚玻璃。
+    static let repeatedSurfaceRole = GlassSurfaceRole.repeated
+    /// 会打开面板或新流程的按钮文案保留明确动词，必要时使用省略号；即时动作不使用省略号。
+    static let actionOpensFollowUpShouldUseEllipsis = true
 }
 
 enum GlassPerformanceMode: Equatable {
@@ -39,8 +72,8 @@ enum GlassPerformanceMode: Equatable {
 
     var pointerIntensityScale: Double {
         switch self {
-        case .full: return 1.0
-        case .balanced: return 0.52
+        case .full: return 0.88
+        case .balanced: return 0.36
         case .minimal: return 0
         }
     }
@@ -48,23 +81,23 @@ enum GlassPerformanceMode: Equatable {
     var pointerUpdateInterval: TimeInterval {
         switch self {
         case .full: return 1.0 / 60.0
-        case .balanced: return 1.0 / 30.0  // 底部音乐栏存在时，指针采样降至 30Hz 以减少合成压力
+        case .balanced: return 1.0 / 24.0  // 底部音乐栏存在时，指针采样降至 24Hz 以减少合成压力
         case .minimal: return .infinity
         }
     }
 
     var pointerMinDistance: CGFloat {
         switch self {
-        case .full: return 2.0
-        case .balanced: return 5.0
+        case .full: return 3.0
+        case .balanced: return 8.5
         case .minimal: return .greatestFiniteMagnitude
         }
     }
 
     var tiltScale: Double {
         switch self {
-        case .full: return 1.0
-        case .balanced: return 0.45
+        case .full: return 0.88
+        case .balanced: return 0.28
         case .minimal: return 0
         }
     }

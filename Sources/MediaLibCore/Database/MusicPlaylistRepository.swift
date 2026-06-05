@@ -140,7 +140,39 @@ public final class MusicPlaylistRepository {
     }
 
     public func fetch(id: String) throws -> MusicPlaylist? {
-        try fetchAll().first { $0.id == id }
+        guard var playlist = try database.query(
+            """
+            SELECT id, name, created_at, updated_at
+            FROM music_playlists
+            WHERE id = ?
+            LIMIT 1
+            """,
+            bindings: [.text(id)],
+            map: { row in
+                MusicPlaylist(
+                    id: row.string(0) ?? UUID().uuidString,
+                    name: row.string(1) ?? "新歌单",
+                    itemIDs: [],
+                    createdAt: row.date(2) ?? Date(),
+                    updatedAt: row.date(3) ?? Date()
+                )
+            }
+        ).first else {
+            return nil
+        }
+
+        playlist.itemIDs = try database.query(
+            """
+            SELECT media_id
+            FROM music_playlist_items
+            WHERE playlist_id = ?
+            ORDER BY position ASC
+            """,
+            bindings: [.text(id)]
+        ) { row in
+            row.string(0) ?? ""
+        }.filter { !$0.isEmpty }
+        return playlist
     }
 
     private func appendItems(_ itemIDs: [String], toPlaylistID playlistID: String, updatedAt: Date) throws {

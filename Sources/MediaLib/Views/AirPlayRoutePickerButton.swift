@@ -145,6 +145,7 @@ struct AirPlayRoutePickerButton: NSViewRepresentable {
         configure(nsView)
         guard context.coordinator.activationID != activationID else { return }
         context.coordinator.activationID = activationID
+        onRoutesWillBegin?()
         DispatchQueue.main.async {
             session.presentRoutesWhenReady(from: nsView)
         }
@@ -230,7 +231,6 @@ struct AirPlayRoutePickerControl: View {
             .accessibilityHidden(true)
 
             Button {
-                onRoutesWillBegin?()
                 activationID &+= 1
             } label: {
                 Image(systemName: systemImage)

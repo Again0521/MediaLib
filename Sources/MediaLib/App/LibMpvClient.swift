@@ -112,6 +112,13 @@ final class LibMpvClient {
         try setOptionString("sub-auto", "fuzzy")
         try setOptionString("hwdec", "auto-safe")
         try setOptionString("vo", "libmpv")
+        // 弱网远程视频优先保留更长前向缓存。使用 try? 是为了兼容不同 libmpv 构建的可用选项。
+        try? setOptionString("cache", "yes")
+        try? setOptionString("cache-secs", "35")
+        try? setOptionString("demuxer-readahead-secs", "35")
+        try? setOptionString("demuxer-max-bytes", "160MiB")
+        try? setOptionString("demuxer-max-back-bytes", "48MiB")
+        try? setOptionString("cache-pause", "yes")
         try setOptionString("start", "\(max(startTime, 0))")
         try setOptionString("volume", "\(Int(volume * 100))")
         try setOptionString("speed", "\(speed)")

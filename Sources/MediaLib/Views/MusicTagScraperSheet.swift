@@ -170,7 +170,7 @@ struct MusicTagScraperSheet: View {
             .padding(.horizontal, 26)
             .padding(.vertical, 22)
         }
-        .frame(minWidth: 640, idealWidth: 920, maxWidth: 1040, minHeight: 500, idealHeight: 680, maxHeight: 740)
+        .frame(minWidth: 720, idealWidth: 1040, maxWidth: 1240, minHeight: 560, idealHeight: 800, maxHeight: 920)
         .onAppear {
             guard autoStart, !didHandleAutoStart else { return }
             didHandleAutoStart = true
@@ -295,21 +295,21 @@ struct MusicTagScraperSheet: View {
                     writeFileTags: writeFileTags
                 )
             } else {
-                List {
-                    ForEach($candidates) { $candidate in
-                        MusicTagCandidateRow(
-                            candidate: $candidate,
-                            writeFileTags: writeFileTags,
-                            canWriteFileTags: appState.canWriteMusicFileTags(for: candidate.item)
-                        )
-                        .listRowInsets(EdgeInsets(top: 5, leading: 3, bottom: 5, trailing: 3))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
+                // 滚动抽搐修复：原生 List(NSTableView) 对这种含图片/可编辑草稿的高行做整表布局，滚动时反复重算行高→抖动。
+                // 改为 ScrollView + LazyVStack（本项目已在队列弹层、海报墙用同款方案），按需懒加载、行高稳定、滚动顺滑。
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach($candidates) { $candidate in
+                            MusicTagCandidateRow(
+                                candidate: $candidate,
+                                writeFileTags: writeFileTags,
+                                canWriteFileTags: appState.canWriteMusicFileTags(for: candidate.item)
+                            )
+                            .padding(.horizontal, 3)
+                        }
                     }
+                    .padding(.vertical, 5)
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .environment(\.defaultMinListRowHeight, 0)
                 .transaction { transaction in
                     transaction.animation = nil
                 }
@@ -398,7 +398,7 @@ struct MusicTagScraperSheet: View {
             let query = query(for: track)
             progressText = "\(index + 1)/\(tracks.count) \(track.title)"
             do {
-                if let result = try await service.searchMusic(query: query, provider: appState.settings.musicMetadataProvider).first {
+                if let result = try await service.searchMusic(query: query, provider: appState.settings.musicMetadataProvider, lastfmAPIKey: appState.settings.lastfmAPIKey).first {
                     let update = await service.materializedMetadataUpdate(
                         for: result,
                         itemID: track.id,
