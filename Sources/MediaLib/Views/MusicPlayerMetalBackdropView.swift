@@ -429,7 +429,7 @@ private struct MusicAlbumBackdropUniforms {
         self.glassIntensity = Float(min(max(state.glassIntensity, 0), 1))
         // 背景不再"严格按封面像素位置"直采（那样偏脏、偏写实）。改为只保留极轻的封面纹理做有机变化，
         // 主体颜色交给下方由 基/主/辅/强调色 组成的 Apple Music 式多色网格（overBlend 染色，干净不发白、不偏色相）。
-        self.artworkOpacity = state.artworkReady ? Float(state.colorScheme == .dark ? 0.26 : 0.15) : 0
+        self.artworkOpacity = state.artworkReady ? Float(state.colorScheme == .dark ? 0.24 : 0.10) : 0
         self.isDark = state.colorScheme == .dark ? 1 : 0
     }
 
@@ -462,9 +462,10 @@ private struct MusicAlbumBackdropUniforms {
             cleanedSat = min(max(sat, 0.20), 0.42)
             cleanedBri = min(max(bri, 0.15), 0.30)
         } else {
-            // 饱和度下限 0.18：低饱和/灰度封面也带清晰色调（不发灰）；亮度上限 0.83：不发白。
-            cleanedSat = min(max(sat, 0.18), 0.32)
-            cleanedBri = min(max(bri, 0.72), 0.83)
+            // 更干净通透：饱和度上限 0.32→0.26（淡雅不浓重）、下限 0.16 仍防发灰；
+            // 亮度区间上移到 [0.74, 0.86]，呈现更轻盈干净的浅色调（参考 Apple Music 浅色底）。
+            cleanedSat = min(max(sat, 0.16), 0.26)
+            cleanedBri = min(max(bri, 0.74), 0.86)
         }
         let cleaned = NSColor(calibratedHue: hue, saturation: cleanedSat, brightness: cleanedBri, alpha: 1)
         let rgb = cleaned.usingColorSpace(.deviceRGB) ?? cleaned
@@ -755,13 +756,13 @@ fragment float4 musicAlbumBackdropFragment(
         verticalT
     ));
 
-    // 斜向多色染色（纯专辑色，overBlend，干净保彩度）。
+    // 斜向多色染色（纯专辑色，overBlend，干净保彩度）。浅色染色略降，让底板更通透干净。
     float diagonalT = linearT(uv, float2(0.0, 0.0), float2(1.0, 1.0));
     color = overBlend(color, gradient4(
-        colorWithAlpha(u.primary, isDark * 0.22 + isLight * 0.20),
-        colorWithAlpha(u.secondary, isDark * 0.16 + isLight * 0.15),
-        colorWithAlpha(u.accent, isDark * 0.15 + isLight * 0.14),
-        colorWithAlpha(u.primary, isDark * 0.10 + isLight * 0.10),
+        colorWithAlpha(u.primary, isDark * 0.22 + isLight * 0.155),
+        colorWithAlpha(u.secondary, isDark * 0.16 + isLight * 0.115),
+        colorWithAlpha(u.accent, isDark * 0.15 + isLight * 0.105),
+        colorWithAlpha(u.primary, isDark * 0.10 + isLight * 0.075),
         diagonalT
     ));
 
@@ -770,8 +771,8 @@ fragment float4 musicAlbumBackdropFragment(
         float2(0.28, 0.42) * u.viewportSize,
         28.0,
         720.0,
-        colorWithAlpha(u.primary, isDark * 0.22 + isLight * 0.20),
-        colorWithAlpha(u.accent, isDark * 0.12 + isLight * 0.12),
+        colorWithAlpha(u.primary, isDark * 0.22 + isLight * 0.155),
+        colorWithAlpha(u.accent, isDark * 0.12 + isLight * 0.09),
         float4(0.0)
     ));
 
@@ -850,11 +851,15 @@ fragment float4 musicAlbumBackdropFragment(
     float edgeMask = 1.0 - smoothstep(0.0, 1.0, edgeDistance);
     color = controlledScreen(color, float4(1.0, 1.0, 1.0, (isDark * 0.06 + isLight * 0.09) * strength * edgeMask * wv));
 
-    // ── 出图后处理：曝光 → 高光柔压（保彩度）→ 彩度补偿 → 防纯白 clamp ──
+    // ── 出图后处理：曝光 → 高光柔压（保彩度）→ 彩度补偿 → 抖动去断层 → 防纯白 clamp ──
     color *= kExposure;
     color = softTonemap(color, kHighlightCompression);
     float outL = luminance(color);
-    color = mix(float3(outL), color, kChromaBoost);          // 回补彩度，保持绚丽
+    color = mix(float3(outL), color, 1.07);                  // 回补彩度（略降，更干净）
+    // 抖动(dithering)：大面积平滑渐变在 8bit 输出时会出现可见色彩断层（banding），
+    // 加入幅度约 ±1.2/255 的有序噪声打散量化台阶，肉眼几乎不可见，但能消除断层。
+    float dither = fract(sin(dot(point, float2(12.9898, 78.233))) * 43758.5453);
+    color += (dither - 0.5) * (1.6 / 255.0);
     color = clamp(color, float3(0.0), float3(0.972));         // 上限略低于纯白，杜绝大片洗白
     return float4(color, 1.0);
 }

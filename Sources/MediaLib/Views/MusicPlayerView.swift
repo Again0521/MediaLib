@@ -890,21 +890,33 @@ private struct AlbumBlurredCoverGlowLayer: View {
             let bloomDamp = vib * vib
             Group {
                 if let blurredImage {
-                    // 双层：normal 提供准确专辑色染色 + plusLighter 极轻叠加模拟"自发光"的亮度提升。
-                    // 因图片自带径向 alpha（边缘已透明），plusLighter 只在封面四周的有色区轻微提亮，
-                    // 远处透明不会叠白；近封面处更通透明亮，physical glow 感更强。
+                    // 三层光晕，呈现"近封面更深 → 向外柔和衰减"的物理感：
+                    // ① 外层柔光：大范围、较淡，向外平滑淡出（环境光）。
                     Image(nsImage: blurredImage)
                         .resizable()
                         .interpolation(.high)
                         .scaledToFit()
                         .frame(width: side, height: side)
-                        .opacity((colorScheme == .dark ? 1.0 : 0.92) * glowStrength * normalDamp)
+                        .opacity((colorScheme == .dark ? 0.74 : 0.62) * glowStrength * normalDamp)
+                    // ② 内层深色光晕：贴近封面（缩到 0.66），更饱和、略压暗 → 紧邻封面的颜色更深、更接近
+                    //    该侧专辑高斯模糊色；其自带的径向 alpha 让它向外柔和衰减，与外层无缝衔接。
                     Image(nsImage: blurredImage)
                         .resizable()
                         .interpolation(.high)
                         .scaledToFit()
                         .frame(width: side, height: side)
-                        .opacity((colorScheme == .dark ? 0.22 : 0.16) * glowStrength * bloomDamp)
+                        .scaleEffect(0.64)
+                        .saturation(1.34)
+                        .brightness(-0.05)
+                        .opacity((colorScheme == .dark ? 0.74 : 0.66) * glowStrength * normalDamp)
+                    // ③ 自发光微提亮（仅彩色封面）：近封面有色区轻微提亮，远处透明不叠白。
+                    Image(nsImage: blurredImage)
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .frame(width: side, height: side)
+                        .scaleEffect(0.78)
+                        .opacity((colorScheme == .dark ? 0.20 : 0.15) * glowStrength * bloomDamp)
                         .blendMode(.plusLighter)
                 } else {
                     // 图像未加载前用调色板径向渐变兜底（同样平滑淡出）
@@ -959,13 +971,13 @@ private enum AlbumGlowBlurBake {
         let extent = input.extent
         guard extent.width > 8, extent.height > 8 else { return image }
 
-        // 1) 提升饱和度，让发光颜色更鲜明（避免低饱和专辑发出平淡的灰光），不改变色相
+        // 1) 提升饱和度让发光颜色更鲜明、更深（贴近封面侧的真实色），不改变色相、不提亮（保持"深"）
         let saturated: CIImage
         if let colorFilter = CIFilter(name: "CIColorControls") {
             colorFilter.setValue(input, forKey: kCIInputImageKey)
-            colorFilter.setValue(1.46, forKey: kCIInputSaturationKey)
-            colorFilter.setValue(0.02, forKey: kCIInputBrightnessKey)
-            colorFilter.setValue(1.0, forKey: kCIInputContrastKey)
+            colorFilter.setValue(1.55, forKey: kCIInputSaturationKey)
+            colorFilter.setValue(0.0, forKey: kCIInputBrightnessKey)
+            colorFilter.setValue(1.02, forKey: kCIInputContrastKey)
             saturated = colorFilter.outputImage ?? input
         } else {
             saturated = input
@@ -986,9 +998,11 @@ private enum AlbumGlowBlurBake {
         let masked: CIImage
         if let gradient = CIFilter(name: "CIRadialGradient"),
            let blend = CIFilter(name: "CIBlendWithMask") {
+            // radius0 提高到 0.18：贴近封面的核心区保持更高不透明度（颜色更深）；
+            // radius1 提高到 0.60：向外的渐隐尾巴更长更柔，亮度/颜色由内到外平滑衰减。
             gradient.setValue(CIVector(x: extent.midX, y: extent.midY), forKey: "inputCenter")
-            gradient.setValue(Double(extent.width) * 0.12, forKey: "inputRadius0")
-            gradient.setValue(Double(extent.width) * 0.54, forKey: "inputRadius1")
+            gradient.setValue(Double(extent.width) * 0.18, forKey: "inputRadius0")
+            gradient.setValue(Double(extent.width) * 0.60, forKey: "inputRadius1")
             gradient.setValue(CIColor(red: 1, green: 1, blue: 1, alpha: 1), forKey: "inputColor0")
             gradient.setValue(CIColor(red: 0, green: 0, blue: 0, alpha: 1), forKey: "inputColor1")
             let mask = (gradient.outputImage ?? CIImage(color: .white)).cropped(to: extent)
@@ -1236,8 +1250,9 @@ private struct MusicExpandedArtwork: View {
                 .background {
                     if glowStrength > 0.01 {
                         // 高斯模糊封面 + 烘焙径向 alpha 渐隐：颜色天然准确、向四周平滑淡出，无断层。
-                        // 白色封面（vibrancy 低）缩短传播距离（2.7×→3.4×）并在层内调暗，避免白光过曝。
-                        let reach = CGFloat(2.7 + palette.vibrancy * 0.7)
+                        // 适度收紧传播距离（2.4×→3.0×），让光晕更集中在封面四周（参考 Apple Music），
+                        // 白色封面（vibrancy 低）进一步缩短并在层内调暗，避免白光过曝。
+                        let reach = CGFloat(2.4 + palette.vibrancy * 0.6)
                         AlbumBlurredCoverGlowLayer(
                             posterPath: item.posterPath,
                             palette: palette,
@@ -5011,7 +5026,8 @@ private struct MusicChromeButtonContent: View {
         }
         .foregroundStyle(Color.primary.opacity(0.82))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .modifier(FloatingLyricsGlass(palette: palette, cornerRadius: 23, tintStrength: 1.0))
+        // 与歌词卡片统一材质（isLyricsCard: true）。
+        .modifier(FloatingLyricsGlass(palette: palette, cornerRadius: 23, tintStrength: 1.0, isLyricsCard: true))
         .pointerLiquidEdge(cornerRadius: 23, tint: palette.primary.color, intensity: 1.1)
     }
 }
@@ -5076,9 +5092,10 @@ private struct MusicExpandedLayout {
         )
         lyricsRect = lyricsFrame
 
-        let reservedForTitleAndControls = compactWidth ? 252.0 : 274.0
+        // 适当增大封面（参考 Apple Music）：放宽宽度/高度占比与上限。
+        let reservedForTitleAndControls = compactWidth ? 244.0 : 264.0
         let heightBoundedPoster = max(174.0, availableHeight - reservedForTitleAndControls)
-        let resolvedPosterSize = min(leftWidth - 64.0, heightBoundedPoster, availableHeight * 0.43, compactWidth ? 390.0 : 440.0)
+        let resolvedPosterSize = min(leftWidth - 48.0, heightBoundedPoster, availableHeight * 0.50, compactWidth ? 430.0 : 500.0)
         posterSize = resolvedPosterSize
 
         let controlsEstimate = compactWidth ? 132.0 : 142.0
@@ -5513,7 +5530,10 @@ private struct FloatingLyricsGlass: ViewModifier {
         let albumTint = palette.albumGlassBaseColor(for: colorScheme)
             .opacity((colorScheme == .dark ? 0.18 : 0.105) * tintStrength)
 
+        // 稍微增加一点磨砂白质感：在 material 之上铺一层很淡的白色磨砂（在内容之后、文字之前，文字仍清晰）。
+        let frostWhite = colorScheme == .dark ? 0.05 : 0.13
         return content
+            .background(shape.fill(Color.white.opacity(frostWhite)))
             .background {
                 // 统一玻璃面板：歌词卡与控制栏/收起按钮用同一份真实 material（.hudWindow/.withinWindow），
                 // 颜色与质感完全一致——之前歌词卡用静态白色磨砂 fill 会比控制栏更灰更平，故回归 material 统一。
@@ -5744,7 +5764,8 @@ private struct MusicControlGlass: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .modifier(FloatingLyricsGlass(palette: palette, cornerRadius: cornerRadius, tintStrength: tintStrength))
+            // 控制栏与歌词卡片统一材质（isLyricsCard: true）。
+            .modifier(FloatingLyricsGlass(palette: palette, cornerRadius: cornerRadius, tintStrength: tintStrength, isLyricsCard: true))
     }
 }
 
@@ -6796,9 +6817,11 @@ enum AlbumPaletteCache {
             secondaryHue.flatMap {
                 weightedAverage(samples, dominantHue: $0, maxHueDistance: 0.12, includeNeutrals: false, minSaturation: 0.12, minBrightness: 0.14)
             } ?? primaryBase.shiftedHue(
-                by: 0.05,
-                saturationMultiplier: 0.92,
-                brightnessMultiplier: 1.06,
+                // 单色封面（无第二主色）合成 secondary：色相只微移 0.02（约 7°），保持同一色族，
+                // 避免蓝色封面凭空合成出偏紫/偏青的 secondary（这是"发光偏紫"的根因）。差异交给亮度/饱和度。
+                by: 0.02,
+                saturationMultiplier: 0.90,
+                brightnessMultiplier: 1.10,
                 minSaturation: 0.16,
                 maxSaturation: 0.62,
                 minBrightness: 0.42,
@@ -6816,13 +6839,14 @@ enum AlbumPaletteCache {
             accentHue.flatMap {
                 weightedAverage(samples, dominantHue: $0, maxHueDistance: 0.13, includeNeutrals: false, minSaturation: 0.14, minBrightness: 0.12)
             } ?? primaryBase.shiftedHue(
-                by: -0.05,
-                saturationMultiplier: 1.06,
-                brightnessMultiplier: 1.02,
+                // 同理 accent 只微移 −0.02，保持同色族（更深一点的同色）。
+                by: -0.02,
+                saturationMultiplier: 1.08,
+                brightnessMultiplier: 0.94,
                 minSaturation: 0.20,
                 maxSaturation: 0.78,
-                minBrightness: 0.38,
-                maxBrightness: 0.94
+                minBrightness: 0.34,
+                maxBrightness: 0.90
             )
         ).adjustedPreservingHue(
             saturationMultiplier: 1.04,
