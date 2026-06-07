@@ -145,7 +145,7 @@ struct MediaLibApp: App {
                 .keyboardShortcut("r", modifiers: [.command, .shift])
             }
             CommandMenu("媒体库") {
-                Button(appState.isFetchingMusicMetadata ? "正在获取音乐封面和歌词" : "获取音乐封面和歌词") {
+                Button(appState.isFetchingMusicMetadata ? "正在补充音乐信息" : "增量补充音乐信息") {
                     Task { await appState.fetchAllMusicMetadata() }
                 }
                 .keyboardShortcut("m", modifiers: [.command, .option])

@@ -12,6 +12,7 @@ private enum SettingsControlMetrics {
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
     @State private var showingMusicTagSheet = false
+    @State private var showingAboutSoftware = false
     @State private var autoStartMusicMetadataConsole = false
 
     var body: some View {
@@ -29,6 +30,7 @@ struct SettingsView: View {
             settingsRow { traktSettings }
             settingsRow { privacySettings }
             settingsRow { advancedSettings }
+            settingsRow { aboutSettings }
             Color.clear
                 .frame(height: 18)
                 .listRowInsets(EdgeInsets())
@@ -50,6 +52,9 @@ struct SettingsView: View {
                 includeLyrics: autoStartMusicMetadataConsole
             )
                 .environmentObject(appState)
+        }
+        .sheet(isPresented: $showingAboutSoftware) {
+            AboutMediaLIBSheet()
         }
     }
 
@@ -108,6 +113,27 @@ struct SettingsView: View {
                 }
             }
 
+            SettingsRow(title: "视频缓存位置", systemImage: "externaldrive.badge.arrow.down") {
+                SettingsPathText(text: appState.videoCacheDirectoryDisplayPath)
+                Button {
+                    chooseVideoCacheDirectory()
+                } label: {
+                    Label("选择…", systemImage: "folder")
+                }
+                .settingsActionButton(width: 82)
+
+                if appState.settings.videoCacheDirectoryPath != nil {
+                    Button {
+                        appState.chooseVideoCacheDirectory(url: nil)
+                    } label: {
+                        Label("默认", systemImage: "arrow.uturn.backward")
+                    }
+                    .settingsActionButton(width: 82)
+                }
+            }
+
+            SettingsDescription(text: "离线视频会保存到该位置的 VideoCache 子目录。删除缓存只会移除 MediaLIB 记录的缓存文件，不会改动媒体源。")
+
             if usesBuiltInVideo {
                 SettingsRow(title: "视频窗口宽度", systemImage: "arrow.left.and.right") {
                     Slider(
@@ -163,6 +189,9 @@ struct SettingsView: View {
             SettingsDescription(text: appState.settings.lyricSyncAlgorithm.description)
 
             if appState.settings.musicDefaultPlayer == .builtIn {
+                SettingsToggleRow(title: "封面发光", systemImage: "sparkles", isOn: binding(\.musicAlbumCoverGlowEnabled))
+                SettingsDescription(text: "开启时展开播放器使用封面原图的多层柔光；关闭后只保留主色的浅柔阴影，暂停时同样收起光效。")
+
                 SettingsRow(title: "音乐响度均衡", systemImage: "waveform.badge.magnifyingglass") {
                     Picker("音乐响度均衡", selection: binding(\.musicLoudnessNormalization)) {
                         ForEach(MusicLoudnessNormalization.allCases) { mode in
@@ -353,8 +382,8 @@ struct SettingsView: View {
                 .settingsTextInput(text: appState.settings.tmdbLanguage, maxWidth: SettingsControlMetrics.compactControlWidth)
             }
 
-            SettingsRow(title: "匹配宽容度", systemImage: "scope") {
-                Picker("匹配宽容度", selection: binding(\.metadataMatchTolerance)) {
+            SettingsRow(title: "影视匹配宽容度", systemImage: "scope") {
+                Picker("影视匹配宽容度", selection: binding(\.metadataMatchTolerance)) {
                     ForEach(MetadataMatchTolerance.allCases) { mode in
                         Text(mode.displayName).tag(mode)
                     }
@@ -363,7 +392,7 @@ struct SettingsView: View {
                 .settingsMenuControl(selectedTitle: appState.settings.metadataMatchTolerance.displayName)
             }
 
-            SettingsDescription(text: "宽容度决定自动套用所需的置信度：\(appState.settings.metadataMatchTolerance.summary)。低于阈值的会留待“片库健康 → 补充”手动复核。")
+            SettingsDescription(text: "影视宽容度决定剧集 TMDB 自动套用所需置信度：\(appState.settings.metadataMatchTolerance.summary)。宽松模式会使用清洗后的剧名、原名和目录名变体搜索。")
 
             SettingsRow(title: "剧集一键匹配", systemImage: "wand.and.stars") {
                 Button {
@@ -420,14 +449,26 @@ struct SettingsView: View {
 
             SettingsDescription(text: "网易云音乐、QQ 音乐和 Deezer 可直接使用；Last.fm 需要 API Key。可在音乐元数据工作台或歌曲详情中补全信息。")
 
-            SettingsRow(title: "音乐自动匹配", systemImage: "sparkles") {
+            SettingsRow(title: "音乐匹配宽容度", systemImage: "scope") {
+                Picker("音乐匹配宽容度", selection: binding(\.musicMetadataMatchTolerance)) {
+                    ForEach(MetadataMatchTolerance.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .labelsHidden()
+                .settingsMenuControl(selectedTitle: appState.settings.musicMetadataMatchTolerance.displayName)
+            }
+
+            SettingsDescription(text: "音乐宽容度仅影响自动补充和音乐工作台的候选置信度：\(appState.settings.musicMetadataMatchTolerance.summary)。")
+
+            SettingsRow(title: "音乐增量补充", systemImage: "sparkles") {
                 if !appState.musicMetadataFetchProgress.isEmpty {
                     Text(appState.musicMetadataFetchProgress)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
-                Button("一键获取封面和歌词") {
+                Button("补充缺失信息") {
                     autoStartMusicMetadataConsole = true
                     showingMusicTagSheet = true
                 }
@@ -586,15 +627,15 @@ struct SettingsView: View {
 
             if appState.settings.themePreset.isCustom {
                 SettingsRow(title: "底色 / 卡片", systemImage: "rectangle.fill") {
-                    ColorPicker("", selection: customThemeBinding(\.themeBaseHex, fallback: "F5F7FB", apply: { appState.setCustomThemeColor(base: $0) }), supportsOpacity: false)
+                    ColorPicker("", selection: customThemeBinding(\.themeBaseHex, fallback: "F6F8FC", apply: { appState.setCustomThemeColor(base: $0) }), supportsOpacity: false)
                         .labelsHidden()
                 }
                 SettingsRow(title: "高亮色", systemImage: "sparkle") {
-                    ColorPicker("", selection: customThemeBinding(\.themeHighlightHex, fallback: "007AFF", apply: { appState.setCustomThemeColor(highlight: $0) }), supportsOpacity: false)
+                    ColorPicker("", selection: customThemeBinding(\.themeHighlightHex, fallback: "2F7DE1", apply: { appState.setCustomThemeColor(highlight: $0) }), supportsOpacity: false)
                         .labelsHidden()
                 }
                 SettingsRow(title: "左上角光线", systemImage: "sun.max") {
-                    ColorPicker("", selection: customThemeBinding(\.themeLightHex, fallback: "EAF4FF", apply: { appState.setCustomThemeColor(light: $0) }), supportsOpacity: false)
+                    ColorPicker("", selection: customThemeBinding(\.themeLightHex, fallback: "F1F7FF", apply: { appState.setCustomThemeColor(light: $0) }), supportsOpacity: false)
                         .labelsHidden()
                 }
             }
@@ -726,6 +767,28 @@ struct SettingsView: View {
                 SettingsRow(title: "缓存位置", systemImage: "externaldrive.connected.to.line.below") {
                     SettingsPathText(text: directories.cache.path)
                 }
+                SettingsRow(title: "空间整理", systemImage: "sparkles") {
+                    Button {
+                        appState.runOneClickCleanup()
+                    } label: {
+                        Label("一键清理", systemImage: "sparkles")
+                    }
+                    .settingsActionButton(width: 126, prominent: true)
+                }
+                SettingsDescription(text: "清理失效缓存记录、已不存在条目的离线缓存、无引用的缓存文件和过旧任务历史；不会删除、移动或改名媒体源里的文件。")
+            }
+        }
+    }
+
+    private var aboutSettings: some View {
+        SettingsSection(title: "关于软件", subtitle: "查看项目地址、作者和联系方式。", systemImage: "info.circle") {
+            SettingsRow(title: "MediaLIB", systemImage: "app.badge") {
+                Button {
+                    showingAboutSoftware = true
+                } label: {
+                    Label("查看关于…", systemImage: "info.circle")
+                }
+                .settingsActionButton(width: 142, prominent: true)
             }
         }
     }
@@ -748,6 +811,23 @@ struct SettingsView: View {
         panel.message = "请选择 IINA、VLC、Movist Pro 等 .app 播放器。"
         if panel.runModal() == .OK, let url = panel.url {
             appState.chooseExternalPlayer(url: url, forMusic: forMusic)
+        }
+    }
+
+    private func chooseVideoCacheDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = appState.settings.videoCacheDirectoryPath.map {
+            URL(fileURLWithPath: $0, isDirectory: true)
+        } ?? appState.directories?.cache
+        panel.prompt = "选择"
+        panel.message = "请选择离线视频缓存的保存位置。MediaLIB 会在其中创建 VideoCache 子目录。"
+        if panel.runModal() == .OK, let url = panel.url {
+            appState.chooseVideoCacheDirectory(url: url)
         }
     }
 
@@ -791,7 +871,7 @@ struct SettingsView: View {
         Binding(
             get: {
                 let hex = appState.settings[keyPath: keyPath] ?? fallback
-                return Color(nsColor: NSColor(appThemeHex: hex) ?? .systemBlue)
+                return Color(nsColor: NSColor(appThemeHex: hex) ?? NSColor(appThemeHex: fallback) ?? NSColor(calibratedRed: 0.184, green: 0.490, blue: 0.882, alpha: 1))
             },
             set: { newColor in
                 let ns = NSColor(newColor).usingColorSpace(.deviceRGB) ?? NSColor(newColor)
@@ -800,6 +880,87 @@ struct SettingsView: View {
         )
     }
 
+}
+
+private struct AboutMediaLIBSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    private let githubURL = URL(string: "https://github.com/Again0521/MediaLib")!
+    private let emailURL = URL(string: "mailto:zonn.l@foxmail.com")!
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.sheetContent) {
+            HStack(alignment: .center, spacing: 16) {
+                PlayfulSymbolIcon(systemImage: "play.rectangle.on.rectangle", size: 62)
+                    .frame(width: 72, height: 72, alignment: .center)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("关于 MediaLIB")
+                        .font(.title3.weight(.semibold))
+                    Text("MediaLIB 是一款面向 macOS 的个人影音媒体库应用，帮助你整理、播放和管理本地、Emby 与网络来源的视频和音乐收藏。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 10) {
+                AboutInfoRow(title: "GitHub", systemImage: "link") {
+                    Link("Again0521/MediaLib", destination: githubURL)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(AppColors.selectedGlassTint)
+                }
+                AboutInfoRow(title: "作者", systemImage: "person.crop.circle") {
+                    Text("ZonnL")
+                }
+                AboutInfoRow(title: "QQ群", systemImage: "bubble.left.and.bubble.right") {
+                    Text("977808370")
+                }
+                AboutInfoRow(title: "Email", systemImage: "envelope") {
+                    Link("zonn.l@foxmail.com", destination: emailURL)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(AppColors.selectedGlassTint)
+                }
+            }
+            .padding(14)
+            .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 0.94)
+
+            AppSheetActionFooter {
+                Button {
+                    dismiss()
+                } label: {
+                    Label("关闭", systemImage: "xmark")
+                }
+                .settingsActionButton(width: 104, prominent: true)
+            }
+        }
+        .appSheetChrome(width: AppSheetMetrics.compactWidth)
+    }
+}
+
+private struct AboutInfoRow<Content: View>: View {
+    let title: String
+    let systemImage: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Label(title, systemImage: systemImage)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 92, alignment: .leading)
+
+            content
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
 }
 
 struct SettingsSection<Content: View>: View {
@@ -1144,8 +1305,8 @@ private extension View {
     func settingsMenuControl(selectedTitle: String) -> some View {
         adaptiveMenuControl(
             selectedTitle: selectedTitle,
-            minWidth: AppControlMetrics.minMenuWidth,
-            maxWidth: 320
+            minWidth: 86,
+            maxWidth: 260
         )
     }
 

@@ -21,6 +21,7 @@ struct EmptyStateView: View {
 }
 
 struct AppLoadingView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let title: String
     let systemImage: String
     var rowCount = 5
@@ -51,6 +52,17 @@ struct AppLoadingView: View {
         .frame(maxWidth: .infinity, minHeight: 320, alignment: .topLeading)
         .staticSurfaceBackground(cornerRadius: 22)
         .onAppear {
+            guard !reduceMotion else {
+                shimmerX = 0.28
+                return
+            }
+            withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
+                shimmerX = 1.4
+            }
+        }
+        .onChange(of: reduceMotion) { reduced in
+            shimmerX = reduced ? 0.28 : -0.4
+            guard !reduced else { return }
             withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
                 shimmerX = 1.4
             }

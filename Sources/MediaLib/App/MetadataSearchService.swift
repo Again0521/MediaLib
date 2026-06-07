@@ -5,6 +5,7 @@ struct MetadataSearchResult: Identifiable, Hashable {
     var id: String
     var provider: String
     var title: String
+    var originalTitle: String? = nil
     var subtitle: String?
     var year: Int?
     var overview: String?
@@ -20,6 +21,7 @@ struct MetadataSearchResult: Identifiable, Hashable {
     var metadataUpdate: MediaMetadataUpdate {
         MediaMetadataUpdate(
             title: title,
+            originalTitle: originalTitle,
             artist: artist,
             album: album,
             trackNumber: trackNumber,
@@ -39,17 +41,23 @@ struct MetadataSearchResult: Identifiable, Hashable {
 /// 自动匹配置信度评分：对候选结果按标题相似度（+年份/艺人）打分，挑最佳并给出 0–1 置信度，
 /// 供一键匹配/自动拉取据此决定"高置信自动应用 vs 低置信跳过待复核"，避免盲取首条造成错配。
 enum MetadataMatchScorer {
-    /// 视频候选阈值：标题相似度为主，年份做加成/惩罚。
-    static let videoThreshold: Double = 0.60
-    /// 音乐候选阈值：标题为主、艺人加权；音乐标题更杂，阈值略低。
-    static let musicThreshold: Double = 0.52
-
-    static func bestVideoMatch(for item: MediaItem, in results: [MetadataSearchResult]) -> (result: MetadataSearchResult, confidence: Double)? {
-        scoredBest(in: results) { videoConfidence(item: item, result: $0) }
+    static func bestVideoMatch(
+        for item: MediaItem,
+        in results: [MetadataSearchResult],
+        matchedQueries: [String: [String]] = [:]
+    ) -> (result: MetadataSearchResult, confidence: Double)? {
+        scoredBest(in: results) { result in
+            videoConfidence(item: item, result: result, matchedQueries: matchedQueries[result.id] ?? [])
+        }
     }
 
     static func bestMusicMatch(for item: MediaItem, in results: [MetadataSearchResult]) -> (result: MetadataSearchResult, confidence: Double)? {
         scoredBest(in: results) { musicConfidence(item: item, result: $0) }
+    }
+
+    static func videoSearchQueries(for item: MediaItem) -> [String] {
+        let rawTitles = [item.title, item.originalTitle, item.collectionTitle].compactMap { $0 }
+        return uniqueQueries(from: rawTitles.flatMap { searchVariants(for: $0) })
     }
 
     private static func scoredBest(
@@ -68,47 +76,173 @@ enum MetadataMatchScorer {
         return (best.0, best.1)
     }
 
-    private static func videoConfidence(item: MediaItem, result: MetadataSearchResult) -> Double {
-        let titleSim = bestTitleSimilarity(localTitles: [item.title, item.originalTitle], resultTitle: result.title)
-        var score = titleSim
+    private static func videoConfidence(
+        item: MediaItem,
+        result: MetadataSearchResult,
+        matchedQueries: [String] = []
+    ) -> Double {
+        let localTitles = [item.title, item.originalTitle, item.collectionTitle]
+            .compactMap { $0 }
+            .flatMap { titleVariants(for: $0) }
+        let resultTitles = [result.title, result.originalTitle]
+            .compactMap { $0 }
+            .flatMap { titleVariants(for: $0) }
+        let titleSim = bestTitleSimilarity(localTitles: localTitles, resultTitles: resultTitles)
+        let queryTitles = matchedQueries.flatMap { titleVariants(for: $0) }
+        let querySim = bestTitleSimilarity(localTitles: queryTitles, resultTitles: resultTitles)
+        // TMDB 已经按查询词召回候选；宽松匹配需要认可“清洗剧名命中”的证据，
+        // 避免原始文件名里的季集号、发布组、分辨率把可手动搜到的剧集候选压到阈值下。
+        var score = max(titleSim, querySim * 0.98)
         if let localYear = item.year, let resultYear = result.year {
-            if localYear == resultYear { score += 0.08 }
-            else if abs(localYear - resultYear) > 1 { score -= 0.12 }
+            if localYear == resultYear { score += 0.075 }
+            else if abs(localYear - resultYear) > 1 { score -= 0.16 }
         }
         return clamp(score)
     }
 
     private static func musicConfidence(item: MediaItem, result: MetadataSearchResult) -> Double {
-        let titleSim = similarity(normalized(item.title), normalized(result.title))
+        let titleSim = titleSimilarity(normalized(item.title), normalized(result.title))
         guard let localArtist = item.artist, !localArtist.isEmpty,
               let resultArtist = result.artist, !resultArtist.isEmpty else {
             return clamp(titleSim)
         }
-        let artistSim = similarity(normalized(localArtist), normalized(resultArtist))
+        let artistSim = titleSimilarity(normalized(localArtist), normalized(resultArtist))
         return clamp(titleSim * 0.65 + artistSim * 0.35)
     }
 
-    private static func bestTitleSimilarity(localTitles: [String?], resultTitle: String) -> Double {
-        let normalizedResult = normalized(resultTitle)
-        return localTitles
-            .compactMap { $0 }
-            .map { similarity(normalized($0), normalizedResult) }
+    private static func bestTitleSimilarity(localTitles: [String], resultTitles: [String]) -> Double {
+        localTitles
+            .flatMap { local in resultTitles.map { titleSimilarity(local, $0) } }
             .max() ?? 0
     }
 
     /// 标题归一化：小写、去括号标签、去季集/分辨率/来源等发布噪声、分隔符与标点→空格、折叠空白。
     /// 保留 CJK 与拉丁字母数字（CharacterSet.alphanumerics 含各脚本字母，含中日韩）。
     static func normalized(_ raw: String) -> String {
-        var text = raw.lowercased()
-        text = text.replacingOccurrences(of: "\\([^)]*\\)", with: " ", options: .regularExpression)
-        text = text.replacingOccurrences(of: "\\[[^\\]]*\\]", with: " ", options: .regularExpression)
-        let noise = "s\\d{1,2}e\\d{1,3}|season\\s*\\d+|episode\\s*\\d+|\\b\\d{3,4}p\\b|\\b(4k|2160p|1080p|720p|480p)\\b|\\b(bluray|blu-ray|webrip|web-dl|hdtv|x264|x265|h264|h265|hevc|aac|flac|dts|remux)\\b"
-        text = text.replacingOccurrences(of: noise, with: " ", options: [.regularExpression, .caseInsensitive])
-        text = text.replacingOccurrences(of: "[._/\\-]", with: " ", options: .regularExpression)
+        var text = raw
+            .lowercased()
+            .replacingOccurrences(of: "\\.[a-z0-9]{2,5}$", with: " ", options: .regularExpression)
+        text = removeBracketedSegments(from: text)
+        text = removeVideoNoise(from: text)
+        text = text.replacingOccurrences(of: "[._/\\-]+", with: " ", options: .regularExpression)
         let keep = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " "))
         text = String(text.unicodeScalars.map { keep.contains($0) ? Character($0) : " " })
         text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
         return text.trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func titleVariants(for raw: String) -> [String] {
+        var variants = [normalized(raw), seriesTitleCandidate(from: raw)]
+        let deSeasoned = variants[0]
+            .replacingOccurrences(of: "\\b\\d{4}\\b", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        variants.append(deSeasoned)
+        variants.append(contentsOf: raw.components(separatedBy: CharacterSet(charactersIn: "|｜:："))
+            .map(normalized))
+        return uniqueQueries(from: variants)
+    }
+
+    private static func searchVariants(for raw: String) -> [String] {
+        let cleaned = normalized(raw)
+        let series = seriesTitleCandidate(from: raw)
+        var variants = [series, cleaned]
+        variants.append(cleaned.replacingOccurrences(of: "\\b\\d{4}\\b", with: " ", options: .regularExpression))
+        variants.append(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        variants.append(cleaned)
+        variants.append(contentsOf: raw.components(separatedBy: CharacterSet(charactersIn: "|｜:："))
+            .map { normalized($0) })
+        return variants
+            .map { $0.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+
+    private static func seriesTitleCandidate(from raw: String) -> String {
+        var text = raw
+            .lowercased()
+            .replacingOccurrences(of: "\\.[a-z0-9]{2,5}$", with: " ", options: .regularExpression)
+        text = removeBracketedSegments(from: text)
+        let cutPatterns = [
+            "(?i)\\bs\\d{1,2}\\s*e\\d{1,3}\\b",
+            "(?i)[\\s._-]+s\\d{1,2}\\b.*",
+            "(?i)\\bseason\\s*\\d+\\b",
+            "(?i)\\b(?:ep|episode|e)\\s*\\d{1,3}\\b",
+            "第\\s*[0-9一二三四五六七八九十百千万两]+\\s*[季部].*",
+            "第\\s*[0-9一二三四五六七八九十百千万两]+\\s*[集话話].*",
+            "[\\s._-]+\\d{1,4}\\s*(?:v\\d+)?$",
+            "[\\s._-]+\\d{1,4}\\s*[集话話].*"
+        ]
+        for pattern in cutPatterns {
+            if let range = text.range(of: pattern, options: .regularExpression) {
+                text = String(text[..<range.lowerBound])
+                break
+            }
+        }
+        text = removeVideoNoise(from: text)
+        text = text.replacingOccurrences(of: "\\b(19\\d{2}|20\\d{2})\\b", with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "[._/\\-]+", with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func removeBracketedSegments(from raw: String) -> String {
+        raw
+            .replacingOccurrences(of: "\\([^)]*\\)", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\[[^\\]]*\\]", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "【[^】]*】", with: " ", options: .regularExpression)
+    }
+
+    private static func removeVideoNoise(from raw: String) -> String {
+        let chineseNumber = "[0-9一二三四五六七八九十百千万两]+"
+        let noise = [
+            "(?i)\\bs\\d{1,2}\\s*e\\d{1,3}\\b",
+            "(?i)\\bs\\d{1,2}\\b",
+            "(?i)\\bseason\\s*\\d+\\b",
+            "(?i)\\b(?:ep|episode|e)\\s*\\d{1,3}\\b",
+            "第\\s*\(chineseNumber)\\s*[季部集话話]",
+            "全\\s*\(chineseNumber)\\s*[集话話]",
+            "全集|完结|完結|更新至\\s*\(chineseNumber)\\s*[集话話]?",
+            "(?i)\\b(part|pt)\\s*\\d+\\b",
+            "\\b\\d{3,4}p\\b",
+            "(?i)\\b(4k|8k|2160p|1080p|720p|480p|bluray|blu-ray|webrip|web-dl|webdl|hdtv|bdrip|dvdrip|x264|x265|h264|h265|hevc|avc|aac|flac|dts|truehd|atmos|remux|proper|repack|complete|hdr|hdr10|dv|dolby|chs|cht|jpn|kor|eng|multi|netflix|nf|amzn|amazon|hulu|disney|dsnp|bilibili|bglobal)\\b"
+        ].joined(separator: "|")
+        return raw.replacingOccurrences(of: noise, with: " ", options: [.regularExpression, .caseInsensitive])
+    }
+
+    private static func titleSimilarity(_ a: String, _ b: String) -> Double {
+        if a.isEmpty || b.isEmpty { return 0 }
+        if a == b { return 1 }
+        let compactA = a.replacingOccurrences(of: " ", with: "")
+        let compactB = b.replacingOccurrences(of: " ", with: "")
+        let edit = max(similarity(a, b), similarity(compactA, compactB))
+        let containment: Double
+        if compactA.contains(compactB) || compactB.contains(compactA) {
+            let shorter = Double(min(compactA.count, compactB.count))
+            let longer = Double(max(compactA.count, compactB.count))
+            containment = 0.72 + 0.22 * (shorter / max(longer, 1))
+        } else {
+            containment = 0
+        }
+        return max(edit, containment, tokenDice(a, b))
+    }
+
+    private static func tokenDice(_ a: String, _ b: String) -> Double {
+        let lhs = Set(a.split(separator: " ").map(String.init).filter { $0.count > 1 })
+        let rhs = Set(b.split(separator: " ").map(String.init).filter { $0.count > 1 })
+        guard !lhs.isEmpty, !rhs.isEmpty else { return 0 }
+        let hit = lhs.intersection(rhs).count
+        return Double(hit * 2) / Double(lhs.count + rhs.count)
+    }
+
+    private static func uniqueQueries(from values: [String]) -> [String] {
+        var seen: Set<String> = []
+        var result: [String] = []
+        for value in values {
+            let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard cleaned.count >= 2, !seen.contains(cleaned.lowercased()) else { continue }
+            seen.insert(cleaned.lowercased())
+            result.append(cleaned)
+        }
+        return result
     }
 
     /// 基于字符级 Levenshtein 的 0–1 相似度（对 CJK 与英文均适用）。
@@ -171,6 +305,20 @@ enum MetadataSearchError: LocalizedError {
 }
 
 struct MetadataSearchService {
+    static func tmdbProviderName(language: String) -> String {
+        let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "TMDB[\(trimmed.isEmpty ? "zh-CN" : trimmed)]"
+    }
+
+    static func tmdbSearchesTVEndpoint(for itemType: MediaType) -> Bool {
+        switch itemType {
+        case .tvShow, .anime, .documentary, .variety, .episode:
+            return true
+        default:
+            return false
+        }
+    }
+
     func materializedMetadataUpdate(
         for result: MetadataSearchResult,
         itemID: String,
@@ -206,7 +354,7 @@ struct MetadataSearchService {
         let token = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !token.isEmpty else { throw MetadataSearchError.missingTMDBKey }
 
-        let endpoint = itemType == .tvShow || itemType == .anime || itemType == .documentary || itemType == .variety
+        let endpoint = Self.tmdbSearchesTVEndpoint(for: itemType)
             ? "https://api.themoviedb.org/3/search/tv"
             : "https://api.themoviedb.org/3/search/movie"
         var components = URLComponents(string: endpoint)
@@ -236,12 +384,16 @@ struct MetadataSearchService {
         return decoded.results.prefix(12).map { result in
             let isTV = endpoint.hasSuffix("/tv")
             let title = result.title ?? result.name ?? "未命名"
+            let originalTitle = [result.originalTitle, result.originalName]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty && $0 != title }
             let date = result.releaseDate ?? result.firstAirDate
             let genreNames = (result.genreIDs ?? []).compactMap { TMDBGenres.name(for: $0, isTV: isTV) }
             return MetadataSearchResult(
                 id: "tmdb:\(isTV ? "tv" : "movie"):\(result.id)",
-                provider: "TMDB",
+                provider: Self.tmdbProviderName(language: language),
                 title: title,
+                originalTitle: originalTitle,
                 subtitle: date,
                 year: year(from: date),
                 overview: result.overview,
@@ -528,6 +680,8 @@ private struct TMDBSearchResult: Decodable {
     var id: Int
     var title: String?
     var name: String?
+    var originalTitle: String?
+    var originalName: String?
     var overview: String?
     var posterPath: String?
     var backdropPath: String?
@@ -538,6 +692,8 @@ private struct TMDBSearchResult: Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case id, title, name, overview
+        case originalTitle = "original_title"
+        case originalName = "original_name"
         case posterPath = "poster_path"
         case backdropPath = "backdrop_path"
         case releaseDate = "release_date"

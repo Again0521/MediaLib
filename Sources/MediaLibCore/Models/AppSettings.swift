@@ -183,15 +183,15 @@ public enum AppThemePreset: String, Codable, CaseIterable, Identifiable, Sendabl
     public var seedHex: (base: String, highlight: String, light: String) {
         switch self {
         case .classic, .ocean, .indigo, .purple, .rose, .mint, .green, .frosted, .custom:
-            return ("F5F7FB", "007AFF", "EAF4FF")
+            return ("F6F8FC", "327FDB", "F3F8FF")
         case .coral:
-            return ("FFF5F2", "FF6B5A", "FFE7DF")
+            return ("FAF5F3", "D95F54", "FFF1EC")
         case .lime:
-            return ("F5FAEF", "7CB342", "ECF8D8")
+            return ("F6F8F2", "6F9A48", "F1F7E9")
         case .orange, .warm, .apricot:
-            return ("FBF4EA", "E08A3E", "FFE8C7")
+            return ("FAF5EC", "D17D42", "FFF1DF")
         case .graphite, .oled:
-            return ("F0F2F7", "3D5AFE", "E0E7FF")
+            return ("F3F5F9", "596FD8", "E9EEFF")
         }
     }
 
@@ -200,15 +200,15 @@ public enum AppThemePreset: String, Codable, CaseIterable, Identifiable, Sendabl
     public var darkSeedHex: (base: String, highlight: String, light: String) {
         switch self {
         case .classic, .ocean, .indigo, .purple, .rose, .mint, .green, .frosted, .custom:
-            return ("111821", "0A84FF", "14283A")
+            return ("121820", "5B9FEA", "1A2936")
         case .coral:
-            return ("1A1112", "FF7A68", "3A1F1A")
+            return ("1A1112", "EA766A", "3A211E")
         case .lime:
-            return ("10170F", "A7D85A", "233512")
+            return ("10170F", "93C75F", "243416")
         case .orange, .warm, .apricot:
-            return ("19120D", "F0A45A", "33200F")
+            return ("19130E", "E79B58", "342213")
         case .graphite, .oled:
-            return ("0B0D10", "6C8CFF", "151E34")
+            return ("0C0E12", "7D92EE", "182039")
         }
     }
 }
@@ -283,8 +283,8 @@ public enum MetadataMatchTolerance: String, Codable, CaseIterable, Identifiable 
     /// 视频自动匹配置信度阈值（标题相似度为主，年份加成）。
     public var videoThreshold: Double {
         switch self {
-        case .loose: return 0.48
-        case .standard: return 0.60
+        case .loose: return 0.42
+        case .standard: return 0.58
         case .strict: return 0.74
         }
     }
@@ -422,10 +422,15 @@ public struct AppSettings: Codable, Hashable {
     /// TMDB / 元数据自动匹配的置信度宽容度（宽松/标准/严格）。
     public var metadataMatchTolerance: MetadataMatchTolerance
     public var musicMetadataProvider: MusicMetadataProvider
+    /// 音乐元数据自动匹配宽容度；独立于影视，避免不同命名习惯互相牵连。
+    public var musicMetadataMatchTolerance: MetadataMatchTolerance
     public var lyricSyncAlgorithm: LyricSyncAlgorithm
     public var musicLoudnessNormalization: MusicLoudnessNormalization
     public var musicTransitionMode: MusicTransitionMode
     public var musicSoftFadeDuration: Double
+    public var musicAlbumCoverGlowEnabled: Bool
+    /// 用户选择的视频缓存根目录；nil 时使用系统 Caches/MediaLib。
+    public var videoCacheDirectoryPath: String?
     /// 音乐均衡器开关与预设。
     public var musicEqualizerEnabled: Bool
     public var musicEqualizerPreset: MusicEqualizerPreset
@@ -496,10 +501,13 @@ public struct AppSettings: Codable, Hashable {
         tmdbLanguage: String = "zh-CN",
         metadataMatchTolerance: MetadataMatchTolerance = .standard,
         musicMetadataProvider: MusicMetadataProvider = .musicBrainz,
+        musicMetadataMatchTolerance: MetadataMatchTolerance = .standard,
         lyricSyncAlgorithm: LyricSyncAlgorithm = .audioEnergy,
         musicLoudnessNormalization: MusicLoudnessNormalization = .track,
         musicTransitionMode: MusicTransitionMode = .immediate,
         musicSoftFadeDuration: Double = 0.8,
+        musicAlbumCoverGlowEnabled: Bool = true,
+        videoCacheDirectoryPath: String? = nil,
         musicEqualizerEnabled: Bool = false,
         musicEqualizerPreset: MusicEqualizerPreset = .flat,
         automaticScanInterval: AutomaticScanInterval = .disabled,
@@ -559,10 +567,13 @@ public struct AppSettings: Codable, Hashable {
         self.tmdbLanguage = tmdbLanguage
         self.metadataMatchTolerance = metadataMatchTolerance
         self.musicMetadataProvider = musicMetadataProvider
+        self.musicMetadataMatchTolerance = musicMetadataMatchTolerance
         self.lyricSyncAlgorithm = lyricSyncAlgorithm
         self.musicLoudnessNormalization = musicLoudnessNormalization
         self.musicTransitionMode = musicTransitionMode
         self.musicSoftFadeDuration = min(max(musicSoftFadeDuration, 0.3), 2)
+        self.musicAlbumCoverGlowEnabled = musicAlbumCoverGlowEnabled
+        self.videoCacheDirectoryPath = videoCacheDirectoryPath
         self.musicEqualizerEnabled = musicEqualizerEnabled
         self.musicEqualizerPreset = musicEqualizerPreset
         self.automaticScanInterval = automaticScanInterval
@@ -624,10 +635,13 @@ public struct AppSettings: Codable, Hashable {
         case tmdbLanguage
         case metadataMatchTolerance
         case musicMetadataProvider
+        case musicMetadataMatchTolerance
         case lyricSyncAlgorithm
         case musicLoudnessNormalization
         case musicTransitionMode
         case musicSoftFadeDuration
+        case musicAlbumCoverGlowEnabled
+        case videoCacheDirectoryPath
         case musicEqualizerEnabled
         case musicEqualizerPreset
         case automaticScanInterval
@@ -700,10 +714,14 @@ public struct AppSettings: Codable, Hashable {
             tmdbLanguage: try container.decodeIfPresent(String.self, forKey: .tmdbLanguage) ?? defaults.tmdbLanguage,
             metadataMatchTolerance: try container.decodeIfPresent(MetadataMatchTolerance.self, forKey: .metadataMatchTolerance) ?? defaults.metadataMatchTolerance,
             musicMetadataProvider: try container.decodeIfPresent(MusicMetadataProvider.self, forKey: .musicMetadataProvider) ?? defaults.musicMetadataProvider,
+            musicMetadataMatchTolerance: try container.decodeIfPresent(MetadataMatchTolerance.self, forKey: .musicMetadataMatchTolerance)
+                ?? (try container.decodeIfPresent(MetadataMatchTolerance.self, forKey: .metadataMatchTolerance) ?? defaults.musicMetadataMatchTolerance),
             lyricSyncAlgorithm: try container.decodeIfPresent(LyricSyncAlgorithm.self, forKey: .lyricSyncAlgorithm) ?? defaults.lyricSyncAlgorithm,
             musicLoudnessNormalization: try container.decodeIfPresent(MusicLoudnessNormalization.self, forKey: .musicLoudnessNormalization) ?? defaults.musicLoudnessNormalization,
             musicTransitionMode: try container.decodeIfPresent(MusicTransitionMode.self, forKey: .musicTransitionMode) ?? defaults.musicTransitionMode,
             musicSoftFadeDuration: try container.decodeIfPresent(Double.self, forKey: .musicSoftFadeDuration) ?? defaults.musicSoftFadeDuration,
+            musicAlbumCoverGlowEnabled: try container.decodeIfPresent(Bool.self, forKey: .musicAlbumCoverGlowEnabled) ?? defaults.musicAlbumCoverGlowEnabled,
+            videoCacheDirectoryPath: try container.decodeIfPresent(String.self, forKey: .videoCacheDirectoryPath) ?? defaults.videoCacheDirectoryPath,
             musicEqualizerEnabled: try container.decodeIfPresent(Bool.self, forKey: .musicEqualizerEnabled) ?? defaults.musicEqualizerEnabled,
             musicEqualizerPreset: try container.decodeIfPresent(MusicEqualizerPreset.self, forKey: .musicEqualizerPreset) ?? defaults.musicEqualizerPreset,
             automaticScanInterval: try container.decodeIfPresent(AutomaticScanInterval.self, forKey: .automaticScanInterval) ?? defaults.automaticScanInterval,

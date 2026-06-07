@@ -179,23 +179,31 @@ let videoSmartCollectionRepository = VideoSmartCollectionRepository(database: da
 let playbackMarkerRepository = PlaybackMarkerRepository(database: database)
 let initialSchemaVersion = try database.schemaVersion()
 check(initialSchemaVersion == DatabaseManager.currentSchemaVersion, "Database should migrate to current schema version")
+let mediaSourceColumns = try database.query("PRAGMA table_info(media_sources)") { row in row.string(1) ?? "" }
+let mediaItemColumns = try database.query("PRAGMA table_info(media_items)") { row in row.string(1) ?? "" }
+check(mediaSourceColumns.contains("remote_trace_sync_mode"), "Schema v10 should include Emby trace sync mode")
+check(mediaItemColumns.contains("user_rating"), "Schema v10 should include user rating")
 
 let source = MediaSource(
     name: "测试媒体源",
     path: "/Volumes/Media",
     mediaType: .auto,
     includeInMetadataFetch: false,
-    includeInHealthCheck: false
+    preferMetadataWriteToSource: true,
+    includeInHealthCheck: false,
+    remoteTraceSyncMode: .importOnly
 )
 try sourceRepository.save(source)
 let sources = try sourceRepository.fetchAll()
 check(sources.count == 1, "Source should be saved")
 check(sources.first?.path == "/Volumes/Media", "Source path should round-trip")
 check(sources.first?.includeInMetadataFetch == false, "Source metadata participation should round-trip")
+check(sources.first?.preferMetadataWriteToSource == true, "Source metadata write-back preference should round-trip")
 check(sources.first?.includeInHealthCheck == false, "Source health participation should round-trip")
+check(sources.first?.remoteTraceSyncMode == .importOnly, "Source Emby trace sync mode should round-trip")
 
 let showID = StableID.make(prefix: "show", value: "Breaking Bad")
-let show = MediaItem(id: showID, type: .tvShow, title: "Breaking Bad", sourcePath: source.path)
+let show = MediaItem(id: showID, type: .tvShow, title: "Breaking Bad", rating: 8.4, sourcePath: source.path)
 let episode = MediaItem(
     id: StableID.make(prefix: "episode", value: "/Volumes/Media/Breaking Bad - S01E01.mkv"),
     type: .episode,
@@ -224,6 +232,16 @@ let shows = try mediaRepository.fetchTopLevel(type: .tvShow)
 let episodes = try mediaRepository.fetchChildren(parentID: showID)
 check(shows.count == 1, "Show should be fetched")
 check(episodes.first?.episodeNumber == 1, "Episode should be linked")
+check(shows.first?.rating == 8.4, "Provider score should persist separately from user rating")
+check(shows.first?.userRating == nil, "User rating should remain nil until the user rates")
+try mediaRepository.updateRating(id: show.id, rating: 4)
+let ratedShow = try mediaRepository.fetchTopLevel(type: .tvShow).first
+check(ratedShow?.rating == 8.4, "Updating user rating should not overwrite provider score")
+check(ratedShow?.userRating == 4, "User rating should persist separately from provider score")
+try mediaRepository.updateMetadata(id: show.id, metadata: MediaMetadataUpdate(rating: 9.2))
+let metadataRatedShow = try mediaRepository.fetchTopLevel(type: .tvShow).first
+check(metadataRatedShow?.rating == 9.2, "Metadata update should refresh provider score")
+check(metadataRatedShow?.userRating == 4, "Metadata update should not overwrite existing user rating")
 let persistedLoudnessTrack = try mediaRepository.fetchTopLevel(type: .music).first
 check(persistedLoudnessTrack?.loudnessTrackGainDB == -7.25, "Track loudness gain should persist")
 check(persistedLoudnessTrack?.loudnessAlbumPeak == 0.99, "Album loudness peak should persist")

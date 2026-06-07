@@ -54,7 +54,7 @@ struct GlobalSearchView: View {
         VStack(alignment: .leading, spacing: 16) {
             Label(
                 total == 0
-                    ? "没有匹配“\(trimmedQuery)”的影片或音乐"
+                    ? "未找到“\(trimmedQuery)”"
                     : "搜索“\(trimmedQuery)” · 共 \(total) 个结果",
                 systemImage: "magnifyingglass"
             )
@@ -66,7 +66,7 @@ struct GlobalSearchView: View {
                 EmptyStateView(
                     title: "无匹配结果",
                     systemImage: "magnifyingglass",
-                    message: "可尝试中文、拼音全拼或首字母。"
+                    message: "支持标题、拼音全拼、首字母和艺术家关键词。"
                 )
                 .staticSurfaceBackground(cornerRadius: 22)
             } else {
@@ -92,6 +92,7 @@ struct GlobalSearchView: View {
 
     private func resultRow(_ item: MediaItem) -> some View {
         GlobalSearchResultRow(item: item, subtitle: subtitle(for: item), onSelect: onSelect)
+            .id(item.id)
     }
 
     private func subtitle(for item: MediaItem) -> String {

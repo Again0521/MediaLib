@@ -51,6 +51,15 @@ private enum HomeContentSnapshotBuilder {
     }
 }
 
+private struct HomeOverviewBoardModel: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let items: [MediaItem]
+    let emptyMessage: String
+}
+
 struct HomeView: View {
     @EnvironmentObject private var appState: AppState
     let onOpenHealthCenter: () -> Void
@@ -60,6 +69,7 @@ struct HomeView: View {
     @State private var isPreparingHomeItems = false
     @State private var homeContentRefreshTask: Task<Void, Never>?
     @State private var homeSearchRefreshTask: Task<Void, Never>?
+    @State private var restoredOverviewAnchorID: String?
     @AppStorage("MediaLib.home.selectedTab") private var selectedTabRaw = HomeTab.overview.rawValue
 
     init(onOpenHealthCenter: @escaping () -> Void = {}) {
@@ -80,7 +90,13 @@ struct HomeView: View {
         Group {
             if !isSearching, !appState.sources.isEmpty, isPosterTab(tab), !gridItems.isEmpty {
                 // P1：首页海报型 tab 走原生 List 虚拟化；页头/扫描进度/标签栏/分区标题作为前导行随内容滚动。
-                PosterGridList(items: gridItems, bottomInset: gridBottomInset, showsDeletePlaybackHistory: tab == .continueWatching || tab == .nextUp) {
+                PosterGridList(
+                    items: gridItems,
+                    bottomInset: gridBottomInset,
+                    showsDeletePlaybackHistory: tab == .continueWatching || tab == .nextUp,
+                    restoreAnchorID: appState.selectedItemReturnAnchorID,
+                    onDidRestoreAnchor: { appState.selectedItemReturnAnchorID = nil }
+                ) {
                     VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
                         header
                         if let progress = appState.scanProgress, appState.isScanning {
@@ -92,33 +108,46 @@ struct HomeView: View {
                     }
                 }
             } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
-                        header
+                ScrollViewReader { scrollProxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
+                            header
 
-                        if let progress = appState.scanProgress, appState.isScanning {
-                            ScanProgressView(progress: progress)
-                        }
-
-                        if appState.sources.isEmpty {
-                            EmptyLibraryView()
-                        } else if isSearching {
-                            GlobalSearchView(query: searchText) { item in
-                                if item.type == .music {
-                                    appState.play(item)
-                                } else {
-                                    appState.selectedItem = item
-                                }
+                            if let progress = appState.scanProgress, appState.isScanning {
+                                ScanProgressView(progress: progress)
                             }
-                            .environmentObject(appState)
-                        } else {
-                            HomeTabBar(tabs: enabledTabs, selection: tabSelection)
-                            homeContent(for: tab)
+
+                            if appState.sources.isEmpty {
+                                EmptyLibraryView()
+                            } else if isSearching {
+                                GlobalSearchView(query: searchText) { item in
+                                    if item.type == .music {
+                                        appState.play(item)
+                                    } else {
+                                        appState.selectedItemReturnAnchorID = item.id
+                                        appState.selectedItem = item
+                                    }
+                                }
+                                .environmentObject(appState)
+                            } else {
+                                HomeTabBar(tabs: enabledTabs, selection: tabSelection)
+                                homeContent(for: tab)
+                            }
                         }
+                        .pageContainer()
                     }
-                    .pageContainer()
+                    .suppressHoverEffectsDuringScroll()
+                    .onAppear {
+                        restoreHomeInlineAnchorIfNeeded(
+                            appState.selectedItemReturnAnchorID,
+                            isSearching: isSearching,
+                            scrollProxy: scrollProxy
+                        )
+                    }
+                    .onChange(of: appState.selectedItemReturnAnchorID) { anchorID in
+                        restoreHomeInlineAnchorIfNeeded(anchorID, isSearching: isSearching, scrollProxy: scrollProxy)
+                    }
                 }
-                .suppressHoverEffectsDuringScroll()
             }
         }
         .background(AppPageBackground())
@@ -126,6 +155,10 @@ struct HomeView: View {
         .onAppear {
             normalizeSelectedTab()
             refreshHomeItems(for: currentTab)
+            appState.showInterfaceTipOnce(
+                key: "home.overview.boards",
+                message: "想接着看时，可以先看看总览里的继续观看、下一集和今日推荐。"
+            )
         }
         .onChange(of: selectedTabRaw) { _ in
             homeSearchRefreshTask?.cancel()
@@ -180,7 +213,7 @@ struct HomeView: View {
                 }
                 .disabled(homePlaybackTraceItems.isEmpty)
             }
-            GlassSearchField(placeholder: "搜索全部媒体", text: $searchText)
+            GlassSearchField(placeholder: "搜索全部媒体", text: $searchText, minWidth: 178, maxWidth: 236)
             Button {
                 appState.scanSources(for: currentTab)
             } label: {
@@ -210,6 +243,23 @@ struct HomeView: View {
         switch tab {
         case .overview:
             HomeStatsView()
+            ForEach(overviewBoards) { board in
+                HomeOverviewBoard(
+                    title: board.title,
+                    subtitle: board.subtitle,
+                    systemImage: board.systemImage,
+                    items: board.items,
+                    emptyMessage: board.emptyMessage,
+                    metadata: overviewMetadata(for:),
+                    onSelect: { item in
+                        appState.selectedItemReturnAnchorID = item.id
+                        appState.selectedItem = item
+                    },
+                    restoreAnchorID: appState.selectedItemReturnAnchorID,
+                    onDidRestoreAnchor: { appState.selectedItemReturnAnchorID = nil }
+                )
+                .id("overview-board-\(board.id)")
+            }
             LibraryHealthView(onOpen: onOpenHealthCenter)
         case .privacy where !appState.privacyPINConfigured || !appState.privacyUnlocked:
             PrivacyLockView()
@@ -219,11 +269,11 @@ struct HomeView: View {
             if (isPreparingHomeItems || visibleHomeItemsAreOutOfDate(for: tab)) && items.isEmpty {
                 AppLoadingView(title: "正在载入\(displayName(for: tab))", systemImage: tab.systemImage, rowCount: 4)
             } else if items.isEmpty {
-                EmptyStateView(
-                    title: "暂无\(displayName(for: tab))",
-                    systemImage: tab.systemImage,
-                    message: tab == .privacy ? "解锁后会显示保险库内容。" : "添加媒体源并扫描后，这里会显示内容。"
-                )
+	                EmptyStateView(
+	                    title: "暂无\(displayName(for: tab))",
+	                    systemImage: tab.systemImage,
+	                    message: tab == .privacy ? "解锁后展示保险库内容。" : "接入媒体源并完成扫描后，内容会自动归入此页。"
+	                )
                 .frame(maxWidth: .infinity, minHeight: 360)
             } else {
                 // 有内容的海报型 tab 已在 body 中走 PosterGridList 虚拟化，此分支不会到达。
@@ -245,25 +295,25 @@ struct HomeView: View {
         case .continueWatching:
             return Array(appState.continueWatchingItems.prefix(48))
         case .recent:
-            return appState.topLevelItems
+            return appState.homeVideoItems
         case .movies:
-            return appState.topLevelItems
+            return appState.homeVideoItems
         case .tvShows:
-            return appState.topLevelItems
+            return appState.homeVideoItems
         case .anime:
-            return appState.topLevelItems
+            return appState.homeVideoItems
         case .documentaries:
-            return appState.topLevelItems
+            return appState.homeVideoItems
         case .variety:
-            return appState.topLevelItems
+            return appState.homeVideoItems
         case .music:
             return appState.musicTracks
         case .other:
-            return appState.topLevelItems
+            return appState.homeVideoItems
         case .favorites:
-            return appState.topLevelItems
+            return appState.homeVideoItems
         case .unwatched:
-            return appState.topLevelItems
+            return appState.homeVideoItems
         case .privacy:
             return appState.privateTopLevelItems
         }
@@ -382,7 +432,7 @@ struct HomeView: View {
 
     private var homePlaybackTraceItems: [MediaItem] {
         switch currentTab {
-        case .continueWatching, .recent:
+        case .continueWatching:
             return displayedHomeItems(for: currentTab).filter(\.hasPlaybackTrace)
         default:
             return []
@@ -391,16 +441,144 @@ struct HomeView: View {
 
     private var showsPlaybackHistoryAction: Bool {
         switch currentTab {
-        case .continueWatching, .recent:
+        case .continueWatching:
             return true
         default:
             return false
         }
     }
 
+    private var recommendedOverviewItems: [MediaItem] {
+        let visibleVideos = appState.homeVideoItems.filter { item in
+            item.type != .music && item.type != .episode && item.type != .privateCollection
+        }
+        let seriesTypes: Set<MediaType> = [.tvShow, .anime, .documentary, .variety]
+        let highRatedSeries = visibleVideos.filter { item in
+            seriesTypes.contains(item.type) && normalizedProviderScore(item.rating) >= 7.5
+        }
+        let highRatedVideos = visibleVideos.filter { normalizedProviderScore($0.rating) >= 7.5 }
+        let fallbackVideos = visibleVideos.filter { ($0.rating ?? 0) > 0 }
+
+        var seen = Set<String>()
+        let merged = (highRatedSeries + highRatedVideos + fallbackVideos).filter { seen.insert($0.id).inserted }
+        return Array(merged.sorted(by: overviewRecommendationSort).prefix(12))
+    }
+
+    private var overviewBoards: [HomeOverviewBoardModel] {
+        let boards = [
+            HomeOverviewBoardModel(
+                id: "continue",
+                title: "继续观看",
+                subtitle: "上次停下的地方还在这里。",
+                systemImage: "play.circle",
+                items: Array(appState.continueWatchingItems.prefix(10)),
+                emptyMessage: "开始播放后，这里会留下继续观看的入口。"
+            ),
+            HomeOverviewBoardModel(
+                id: "nextUp",
+                title: "下一集",
+                subtitle: "把故事接着往下看。",
+                systemImage: "forward.end.circle",
+                items: Array(appState.nextUpItems.prefix(10)),
+                emptyMessage: "看过系列剧集后，下一集会自动出现在这里。"
+            ),
+            HomeOverviewBoardModel(
+                id: "recommend",
+                title: "今日推荐",
+                subtitle: "从库内高分系列里挑一些今天适合看的。",
+                systemImage: "sparkles.tv",
+                items: recommendedOverviewItems,
+                emptyMessage: "给条目标上评分后，推荐会更有方向。"
+            )
+        ]
+        return boards.enumerated()
+            .sorted { lhs, rhs in
+                let leftHasContent = !lhs.element.items.isEmpty
+                let rightHasContent = !rhs.element.items.isEmpty
+                if leftHasContent != rightHasContent { return leftHasContent }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
+
+    private func overviewRecommendationSort(_ lhs: MediaItem, _ rhs: MediaItem) -> Bool {
+        let daySeed = Calendar.current.ordinality(of: .day, in: .era, for: Date()) ?? 0
+        let left = stableRecommendationScore(for: lhs, daySeed: daySeed)
+        let right = stableRecommendationScore(for: rhs, daySeed: daySeed)
+        if left != right { return left > right }
+        return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+    }
+
+    private func stableRecommendationScore(for item: MediaItem, daySeed: Int) -> Double {
+        let ratingBoost = normalizedProviderScore(item.rating) * 500
+        let recencyPenalty = item.lastPlayedAt == nil ? 220 : 0
+        let hash = (item.id + "-\(daySeed)").unicodeScalars.reduce(UInt64(5381)) { partial, scalar in
+            ((partial &* 33) &+ UInt64(scalar.value))
+        }
+        return ratingBoost + Double(recencyPenalty) + Double(hash % 997)
+    }
+
+    private func normalizedProviderScore(_ rating: Double?) -> Double {
+        guard let rating, rating.isFinite, rating > 0 else { return 0 }
+        return rating <= 5 ? rating * 2 : min(rating, 10)
+    }
+
+    private func overviewMetadata(for item: MediaItem) -> String {
+        var parts: [String] = []
+        if item.type == .episode {
+            parts.append(item.episodeLabel)
+        } else {
+            parts.append(item.type.displayName)
+        }
+        if item.year != nil {
+            parts.append(item.displayYear)
+        }
+        if let rating = item.rating, rating > 0 {
+            parts.append("★ \(String(format: "%.1f", rating))")
+        }
+        if item.playProgress > 0, item.playProgress < 0.98 {
+            parts.append("已看 \(Int((item.playProgress * 100).rounded()))%")
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private func normalizeSelectedTab() {
         if !enabledTabs.contains(selectedTab) {
             selectedTab = enabledTabs.first ?? .overview
+        }
+    }
+
+    private func restoreOverviewAnchorIfNeeded(_ anchorID: String?, scrollProxy: ScrollViewProxy) {
+        guard currentTab == .overview,
+              let anchorID,
+              restoredOverviewAnchorID != anchorID,
+              let board = overviewBoards.first(where: { $0.items.contains(where: { $0.id == anchorID }) }) else { return }
+        restoredOverviewAnchorID = anchorID
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(AppMotion.page) {
+                scrollProxy.scrollTo("overview-board-\(board.id)", anchor: .center)
+            }
+        }
+    }
+
+    private func restoreHomeInlineAnchorIfNeeded(
+        _ anchorID: String?,
+        isSearching: Bool,
+        scrollProxy: ScrollViewProxy
+    ) {
+        if isSearching {
+            guard let anchorID, restoredOverviewAnchorID != anchorID else { return }
+            restoredOverviewAnchorID = anchorID
+            Task { @MainActor in
+                await Task.yield()
+                withAnimation(AppMotion.page) {
+                    scrollProxy.scrollTo(anchorID, anchor: .center)
+                }
+                appState.selectedItemReturnAnchorID = nil
+            }
+        } else {
+            restoreOverviewAnchorIfNeeded(anchorID, scrollProxy: scrollProxy)
         }
     }
 }
@@ -501,6 +679,181 @@ struct HomeStatsView: View {
     }
 }
 
+struct HomeOverviewBoard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let items: [MediaItem]
+    let emptyMessage: String
+    let metadata: (MediaItem) -> String
+    let onSelect: (MediaItem) -> Void
+    var restoreAnchorID: String? = nil
+    var onDidRestoreAnchor: (() -> Void)? = nil
+    @State private var autoScrollIndex = 0
+    @State private var isHoveringStrip = false
+    @State private var isDraggingStrip = false
+    @State private var restoredAnchorID: String?
+
+    private var autoScrollKey: String {
+        items.map(\.id).joined(separator: "|")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                PlayfulSymbolIcon(systemImage: systemImage, size: 34)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.headline)
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            if items.isEmpty {
+                Text(emptyMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: 12) {
+                            ForEach(items) { item in
+                                HomeOverviewPosterCard(
+                                    item: item,
+                                    metadata: metadata(item),
+                                    onSelect: { onSelect(item) }
+                                )
+                                .id(item.id)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .horizontalMouseDragScroll { dragging in
+                        isDraggingStrip = dragging
+                    }
+                    .onHover { hovering in
+                        isHoveringStrip = hovering
+                    }
+                    .onAppear {
+                        restoreAnchorIfNeeded(restoreAnchorID, scrollProxy: proxy)
+                    }
+                    .onChange(of: restoreAnchorID) { anchorID in
+                        restoreAnchorIfNeeded(anchorID, scrollProxy: proxy)
+                    }
+                    .task(id: autoScrollKey) {
+                        autoScrollIndex = 0
+                        guard items.count > 1, !reduceMotion else { return }
+                        while !Task.isCancelled {
+                            do {
+                                try await Task.sleep(nanoseconds: 5_200_000_000)
+                            } catch {
+                                return
+                            }
+                            guard !Task.isCancelled, !isHoveringStrip, !isDraggingStrip, !items.isEmpty else { continue }
+                            autoScrollIndex = (autoScrollIndex + 1) % items.count
+                            let targetID = items[autoScrollIndex].id
+                            withAnimation(AppMotion.page) {
+                                proxy.scrollTo(targetID, anchor: .leading)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .staticSurfaceBackground(cornerRadius: 20, thickness: 1.02)
+    }
+
+    private func restoreAnchorIfNeeded(_ anchorID: String?, scrollProxy: ScrollViewProxy) {
+        guard let anchorID,
+              restoredAnchorID != anchorID,
+              let index = items.firstIndex(where: { $0.id == anchorID }) else { return }
+        restoredAnchorID = anchorID
+        autoScrollIndex = index
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(AppMotion.page) {
+                scrollProxy.scrollTo(anchorID, anchor: .center)
+            }
+            onDidRestoreAnchor?()
+        }
+    }
+}
+
+private struct HomeOverviewPosterCard: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
+    let item: MediaItem
+    let metadata: String
+    let onSelect: () -> Void
+    @State private var isHovering = false
+
+    private var active: Bool {
+        isHovering && !suppressHoverDuringScroll
+    }
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: 8) {
+                ZStack(alignment: .bottomLeading) {
+                    PosterImage(
+                        path: item.posterPath,
+                        title: item.cardTitle,
+                        mediaType: item.type,
+                        cacheTargetSize: CGSize(width: 180, height: 270)
+                    )
+                    .aspectRatio(2.0 / 3.0, contentMode: .fill)
+                    .frame(width: 96, height: 144)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    if item.playProgress > 0, item.playProgress < 0.98 {
+                        ProgressView(value: item.playProgress)
+                            .tint(AppColors.selectedGlassTint)
+                            .controlSize(.small)
+                            .padding(.horizontal, 7)
+                            .padding(.bottom, 7)
+                    }
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(.white.opacity(active ? 0.56 : 0.26), lineWidth: active ? 1.1 : 0.7)
+                }
+
+                Text(item.cardTitle)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .frame(width: 96, alignment: .leading)
+                Text(metadata)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(width: 96, alignment: .leading)
+            }
+            .padding(8)
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .staticSurfaceBackground(cornerRadius: 16, thickness: active ? 1.08 : 0.92)
+            .repeatedSurfaceHover(active, cornerRadius: 16, intensity: 0.62)
+            .scaleEffect(active && !reduceMotion ? 1.018 : 1)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHovering = suppressHoverDuringScroll ? false : hovering
+        }
+        .onChange(of: suppressHoverDuringScroll) { suppressing in
+            if suppressing {
+                isHovering = false
+            }
+        }
+        .animation(reduceMotion ? nil : AppMotion.listHover, value: active)
+    }
+}
+
 struct StatTile: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
@@ -516,10 +869,14 @@ struct StatTile: View {
                 Text(value)
                     .font(.title2.weight(.semibold))
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.58)
+                    .allowsTightening(true)
                 Text(title)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             Spacer()
         }
         .padding(14)
@@ -556,13 +913,13 @@ struct LibraryHealthView: View {
         let missingMetadata = appState.missingMetadataItems
 
         if !offline.isEmpty || !missingFiles.isEmpty || !duplicateGroups.isEmpty || !missingMetadata.isEmpty {
-            let tipBlue = Color(red: 0.22, green: 0.52, blue: 0.92)
+            let tint = AppColors.selectedGlassTint
             let active = isHovering && !suppressHoverDuringScroll
             Button(action: onOpen) {
                 HStack(spacing: 12) {
                     Image(systemName: "externaldrive.badge.exclamationmark")
                         .font(.title2)
-                        .foregroundStyle(active ? AppColors.selectedGlassTint.opacity(0.92) : tipBlue)
+                        .foregroundStyle(active ? tint.opacity(0.96) : tint.opacity(0.82))
                     VStack(alignment: .leading, spacing: 4) {
                         Text("媒体库需要处理")
                             .font(.headline)
@@ -579,20 +936,28 @@ struct LibraryHealthView: View {
             .padding(14)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(tipBlue.opacity(colorScheme == .dark ? 0.12 : 0.09))
+                    .fill(tint.opacity(colorScheme == .dark ? 0.14 : 0.08))
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(AppColors.cleanPanelFill.opacity(colorScheme == .dark ? 0.56 : 0.74))
             )
             .overlay {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(
                         LinearGradient(
-                            colors: [tipBlue.opacity(colorScheme == .dark ? 0.40 : 0.32), tipBlue.opacity(0.10)],
+                            colors: [
+                                Color.white.opacity(colorScheme == .dark ? 0.34 : 0.70),
+                                tint.opacity(colorScheme == .dark ? 0.34 : 0.24),
+                                tint.opacity(0.10)
+                            ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
                         lineWidth: 1
                     )
             }
-            .repeatedSurfaceHover(active, cornerRadius: 14, tint: tipBlue, intensity: 0.78)
+            .repeatedSurfaceHover(active, cornerRadius: 14, tint: tint, intensity: 0.78)
             .brightness(active ? 0.006 : 0)
             .onHover { hovering in
                 isHovering = suppressHoverDuringScroll ? false : hovering
@@ -620,9 +985,9 @@ struct EmptyLibraryView: View {
                     reduceMotion ? nil : .easeInOut(duration: 2.2).repeatForever(autoreverses: true),
                     value: breathe
                 )
-            Text("还没有媒体源")
-                .font(.title2.weight(.semibold))
-            Text("添加本地文件夹、移动硬盘、网络挂载或 Emby 媒体库后即可开始扫描。")
+	            Text("媒体源待添加")
+	                .font(.title2.weight(.semibold))
+	            Text("接入本地文件夹、移动硬盘、网络挂载或 Emby 媒体库后，MediaLIB 会整理索引。")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 380)

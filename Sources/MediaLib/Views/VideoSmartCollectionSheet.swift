@@ -60,7 +60,7 @@ struct VideoSmartCollectionSheet: View {
                         .textFieldStyle(.plain)
                         .multilineTextAlignment(.center)
                         .glassFormField()
-                        .frame(width: Self.optionMenuWidth, alignment: .trailing)
+                        .frame(width: adaptiveFieldWidth(text: name, placeholder: "智能集合"), alignment: .trailing)
                 }
                 SettingsRow(title: "媒体类型", systemImage: "film.stack") {
                     picker(selection: $mediaScope, selectedTitle: mediaScope.displayName) {
@@ -117,11 +117,11 @@ struct VideoSmartCollectionSheet: View {
         Picker("", selection: selection, content: content)
             .labelsHidden()
             .pickerStyle(.menu)
-            // 固定统一宽度：三个选项框边界一致。
-            .adaptiveMenuControl(selectedTitle: selectedTitle, minWidth: Self.optionMenuWidth, maxWidth: Self.optionMenuWidth)
+            .adaptiveMenuControl(selectedTitle: selectedTitle, minWidth: Self.optionMenuMinWidth, maxWidth: Self.optionMenuMaxWidth)
     }
 
-    private static let optionMenuWidth: CGFloat = 150
+    private static let optionMenuMinWidth: CGFloat = 108
+    private static let optionMenuMaxWidth: CGFloat = 176
 
     private var trimmedName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)

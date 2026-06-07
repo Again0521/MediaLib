@@ -7,32 +7,47 @@ struct LibraryHealthCenterView: View {
     @State private var duplicateMergeRequest: DuplicateMergeRequest?
     // 任务4：点击“补充”直接弹出信息搜索弹窗（与详情页/音乐库同一套 MetadataSearchView，支持剧集 TMDB 与音乐源补全）。
     @State private var metadataItem: MediaItem?
+    @State private var restoredReturnAnchorID: String?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                header
-                summary
+        ScrollViewReader { scrollProxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    header
+                    summary
 
-                if hasIssues {
-                    offlineSourcesSection
-                    missingFilesSection
-                    duplicateGroupsSection
-                    missingMetadataSection
-                } else {
-                    EmptyStateView(
-                        title: "片库状态良好",
-                        systemImage: "checkmark.seal",
-                        message: "未发现离线来源、失效路径、疑似重复项或关键信息缺失。"
-                    )
-                    .frame(minHeight: 340)
+                    if hasIssues {
+                        offlineSourcesSection
+                        missingFilesSection
+                        duplicateGroupsSection
+                        missingMetadataSection
+                    } else {
+                        EmptyStateView(
+                            title: "片库状态良好",
+                            systemImage: "checkmark.seal",
+                            message: "未发现离线来源、失效路径、疑似重复项或关键信息缺失。"
+                        )
+                        .frame(minHeight: 340)
+                    }
                 }
+                .pageContainer()
             }
-            .pageContainer()
+            .onAppear {
+                restoreReturnAnchorIfNeeded(appState.selectedItemReturnAnchorID, scrollProxy: scrollProxy)
+            }
+            .onChange(of: appState.selectedItemReturnAnchorID) { anchorID in
+                restoreReturnAnchorIfNeeded(anchorID, scrollProxy: scrollProxy)
+            }
         }
         .suppressHoverEffectsDuringScroll()
         .background(AppPageBackground())
         .navigationTitle("片库健康")
+        .onAppear {
+            appState.showInterfaceTipOnce(
+                key: "health.supplement.metadata",
+                message: "一键补充只填空缺，不会覆盖已有信息。"
+            )
+        }
         .confirmationDialog(
             removalRequest?.title ?? "确认从索引移除？",
             isPresented: Binding(
@@ -92,6 +107,14 @@ struct LibraryHealthCenterView: View {
                     Label("清理失效索引", systemImage: "trash")
                         .foregroundStyle(.red)
                 }
+            }
+            if !appState.missingMetadataItems.isEmpty {
+                Button {
+                    appState.supplementMissingMetadataFromHealth()
+                } label: {
+                    Label(appState.isSupplementingMetadata ? "补充中…" : "一键补充", systemImage: "tag.badge.plus")
+                }
+                .disabled(appState.isSupplementingMetadata)
             }
             Button {
                 appState.scanAllSources()
@@ -175,9 +198,9 @@ struct LibraryHealthCenterView: View {
         if !appState.missingFileItems.isEmpty {
             healthSection(title: "失效文件路径", subtitle: "确认文件已不存在后，可仅从内部索引移除。离线来源中的路径会保留。", systemImage: "doc.badge.ellipsis") {
                 ForEach(appState.missingFileItems) { item in
-                    healthItemRow(item, detail: item.filePath ?? "没有文件路径") {
+                    healthItemRow(item, detail: item.filePath ?? "路径未记录") {
                         Button {
-                            appState.selectedItem = item
+                            openDetail(item)
                         } label: {
                             Label("查看", systemImage: "info.circle")
                         }
@@ -190,6 +213,7 @@ struct LibraryHealthCenterView: View {
                             }
                         }
                     }
+                    .id(item.id)
                 }
             }
         }
@@ -212,7 +236,7 @@ struct LibraryHealthCenterView: View {
                         ForEach(group) { item in
                             healthItemRow(item, detail: duplicateDetail(item)) {
                                 Button {
-                                    appState.selectedItem = item
+                                    openDetail(item)
                                 } label: {
                                     Label("核对", systemImage: "arrow.up.forward.square")
                                 }
@@ -224,6 +248,7 @@ struct LibraryHealthCenterView: View {
                                     }
                                 }
                             }
+                            .id(item.id)
                         }
                     }
                     .padding(14)
@@ -245,6 +270,7 @@ struct LibraryHealthCenterView: View {
                             Label("补充", systemImage: "magnifyingglass")
                         }
                     }
+                    .id(item.id)
                 }
             }
         }
@@ -317,6 +343,23 @@ struct LibraryHealthCenterView: View {
             if item.overview?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false { missing.append("简介") }
         }
         return "缺少：\(missing.joined(separator: "、"))"
+    }
+
+    private func openDetail(_ item: MediaItem) {
+        appState.selectedItemReturnAnchorID = item.id
+        appState.selectedItem = item
+    }
+
+    private func restoreReturnAnchorIfNeeded(_ anchorID: String?, scrollProxy: ScrollViewProxy) {
+        guard let anchorID, restoredReturnAnchorID != anchorID else { return }
+        restoredReturnAnchorID = anchorID
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(AppMotion.page) {
+                scrollProxy.scrollTo(anchorID, anchor: .center)
+            }
+            appState.selectedItemReturnAnchorID = nil
+        }
     }
 }
 

@@ -6,10 +6,12 @@ import SwiftUI
 // 此文件现仅保留单行视图 EpisodeRowView 供 List 行复用。
 
 struct EpisodeRowView: View {
+    @EnvironmentObject private var appState: AppState
     let episode: MediaItem
     let selected: Bool
 
     var body: some View {
+        let cached = appState.isVideoCached(episode)
         HStack(spacing: 14) {
             PosterImage(path: episode.posterPath, title: episode.episodeLabel, mediaType: episode.type)
                 .frame(width: 120, height: 68)
@@ -28,10 +30,14 @@ struct EpisodeRowView: View {
                         Text(resolution)
                     }
                     if episode.filePath == nil {
-                        Text("没有文件路径")
+                        Text("路径未记录")
                             .foregroundStyle(.orange)
                     } else if episode.isRemoteResource {
                         Text(episode.metadataProvider == "Emby" ? "Emby 流媒体" : "远程资源")
+                    }
+                    if cached {
+                        Text("已缓存")
+                            .foregroundStyle(AppColors.selectedGlassTint.opacity(0.92))
                     }
                 }
                 .font(.caption)

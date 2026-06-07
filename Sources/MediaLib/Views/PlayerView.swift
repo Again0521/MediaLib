@@ -36,6 +36,28 @@ enum VideoWindowSizing {
         let targetScreen = screen ?? NSScreen.main ?? NSScreen.screens.first
         return targetScreen?.visibleFrame.width ?? 1440
     }
+
+    static func usesFullScreenWidth(_ preferredWidth: Double, on screen: NSScreen? = nil) -> Bool {
+        screenWidthRatio(for: preferredWidth, on: screen) >= maximumScreenWidthRatio - 0.001
+    }
+}
+
+enum PerceptualVolumeScale {
+    private static let exponent: Double = 1.65
+
+    static func sliderValue(fromLinear volume: Double) -> Double {
+        pow(min(max(volume, 0), 1), 1 / exponent)
+    }
+
+    static func linearVolume(fromSlider value: Double) -> Double {
+        pow(min(max(value, 0), 1), exponent)
+    }
+
+    static func adjustedVolume(_ volume: Float, direction: Int, sliderStep: Double = 0.055) -> Float {
+        let slider = sliderValue(fromLinear: Double(volume))
+        let nextSlider = min(max(slider + Double(direction) * sliderStep, 0), 1)
+        return Float(linearVolume(fromSlider: nextSlider))
+    }
 }
 
 private struct PendingTimelineSeek {
@@ -121,7 +143,7 @@ struct VideoStreamQualityOption: Identifiable, Hashable, Sendable {
     }
 }
 
-private enum RemoteVideoQualityPlanner {
+enum RemoteVideoQualityPlanner {
     private static let minimum1080pVideoBitrate: Double = 5_800_000
     private static let targetAudioBitrate: Int64 = 192_000
     private static let minimumMeaningfulReduction = 0.88
@@ -413,6 +435,93 @@ private struct PlayerAuxiliaryPlaybackMetadata: Sendable {
     let qualityOptions: [VideoStreamQualityOption]
 }
 
+private struct VideoControlPalette {
+    var usesLightContent: Bool
+
+    static let lightContent = VideoControlPalette(usesLightContent: true)
+    static let darkContent = VideoControlPalette(usesLightContent: false)
+
+    var primary: Color {
+        usesLightContent ? .white.opacity(0.95) : .black.opacity(0.82)
+    }
+
+    var secondary: Color {
+        usesLightContent ? .white.opacity(0.72) : .black.opacity(0.58)
+    }
+
+    var subdued: Color {
+        usesLightContent ? .white.opacity(0.48) : .black.opacity(0.38)
+    }
+
+    var trackBase: Color {
+        usesLightContent ? .white.opacity(0.18) : .black.opacity(0.16)
+    }
+
+    var trackProgress: Color {
+        usesLightContent ? .white.opacity(0.82) : .black.opacity(0.68)
+    }
+
+    var materialFill: [Color] {
+        usesLightContent
+            ? [.white.opacity(0.30), .white.opacity(0.12), .black.opacity(0.12)]
+            : [.white.opacity(0.70), .white.opacity(0.42), .black.opacity(0.035)]
+    }
+
+    var border: [Color] {
+        usesLightContent
+            ? [.white.opacity(0.36), .white.opacity(0.10)]
+            : [.white.opacity(0.78), .black.opacity(0.10)]
+    }
+
+    var shadow: Color {
+        usesLightContent ? .black.opacity(0.08) : .black.opacity(0.10)
+    }
+
+    static func resolved(for item: MediaItem) async -> VideoControlPalette {
+        guard let brightness = await VideoControlBrightnessSampler.posterBrightness(path: item.posterPath) else {
+            return .darkContent
+        }
+        return brightness < 0.46 ? .lightContent : .darkContent
+    }
+}
+
+private enum VideoControlBrightnessSampler {
+    static func posterBrightness(path: String?) async -> Double? {
+        guard let path, !path.isEmpty else { return nil }
+        return await Task.detached(priority: .utility) {
+            guard let image = ArtworkImageCache.image(path: path, targetSize: CGSize(width: 36, height: 36)) else {
+                return nil
+            }
+            return averageBrightness(of: image)
+        }.value
+    }
+
+    private static func averageBrightness(of image: NSImage) -> Double? {
+        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let bitmap = NSBitmapImageRep(cgImage: cgImage)
+        let width = max(bitmap.pixelsWide, 1)
+        let height = max(bitmap.pixelsHigh, 1)
+        let samples = min(72, width * height)
+        guard samples > 0 else { return nil }
+
+        var total = 0.0
+        var count = 0
+        for index in 0..<samples {
+            let x = (index * 37) % width
+            let y = (index * 53) % height
+            guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB),
+                  color.alphaComponent > 0.08 else { continue }
+            let luminance = 0.2126 * Double(color.redComponent)
+                + 0.7152 * Double(color.greenComponent)
+                + 0.0722 * Double(color.blueComponent)
+            total += luminance
+            count += 1
+        }
+        guard count > 0 else { return nil }
+        return total / Double(count)
+    }
+}
+
 struct PlayerView: View {
     @EnvironmentObject private var appState: AppState
     let item: MediaItem
@@ -436,6 +545,7 @@ struct PlayerView: View {
     @State private var previewLoadTask: Task<Void, Never>?
     @State private var auxiliaryMetadataTask: Task<Void, Never>?
     @State private var playbackMarkers: [PlaybackMarker] = []
+    @State private var controlPalette = VideoControlPalette.darkContent
 
     var body: some View {
         ZStack {
@@ -472,6 +582,7 @@ struct PlayerView: View {
                     previewImage: previewImage,
                     previewIsLoading: previewIsLoading,
                     markers: playbackMarkers,
+                    palette: controlPalette,
                     onSetMarkerBoundary: setMarkerBoundary,
                     onAddChapter: addManualChapter,
                     onDeleteMarker: deleteMarker,
@@ -514,11 +625,11 @@ struct PlayerView: View {
                 } label: {
                     Image(systemName: controlsLocked ? "lock.fill" : "lock.open")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white.opacity(controlsLocked ? 0.92 : 0.72))
+                        .foregroundStyle(controlsLocked ? controlPalette.primary : controlPalette.secondary)
                         .frame(width: 38, height: 38)
                 }
                 .buttonStyle(.plain)
-                .playerGlass(cornerRadius: 19)
+                .playerGlass(cornerRadius: 19, palette: controlPalette)
                 .opacity(controlsVisible || controlsLocked ? 1 : 0)
                 .allowsHitTesting(controlsVisible || controlsLocked)
                 .padding(.trailing, 18)
@@ -556,6 +667,9 @@ struct PlayerView: View {
         }
         .onChange(of: previewRequestKey) { _ in
             loadPreviewImage()
+        }
+        .task(id: item.posterPath ?? item.id) {
+            controlPalette = await VideoControlPalette.resolved(for: item)
         }
         .onChange(of: appState.playbackCommandRequest?.id) { _ in
             handlePlaybackCommand()
@@ -595,7 +709,7 @@ struct PlayerView: View {
             )
             RadialGradient(
                 colors: [
-                    Color(nsColor: NSColor.systemBlue).opacity(0.18),
+                    AppColors.selectedGlassTint.opacity(0.16),
                     .clear
                 ],
                 center: .topTrailing,
@@ -834,11 +948,11 @@ struct PlayerView: View {
         case .l:
             controller.seek(by: 10)
         case .upArrow:
-            controller.setVolume(controller.volume + 0.05)
+            controller.setVolume(PerceptualVolumeScale.adjustedVolume(controller.volume, direction: 1))
             showVolumeHUD()
             shouldShowControls = false
         case .downArrow:
-            controller.setVolume(controller.volume - 0.05)
+            controller.setVolume(PerceptualVolumeScale.adjustedVolume(controller.volume, direction: -1))
             showVolumeHUD()
             shouldShowControls = false
         case .mute:
@@ -1164,6 +1278,7 @@ private struct PlayerControlsBar: View {
     let previewImage: NSImage?
     let previewIsLoading: Bool
     let markers: [PlaybackMarker]
+    let palette: VideoControlPalette
     let onSetMarkerBoundary: (PlaybackMarker.Kind, Bool, Double) -> Void
     let onAddChapter: (Double) -> Void
     let onDeleteMarker: (PlaybackMarker) -> Void
@@ -1188,6 +1303,7 @@ private struct PlayerControlsBar: View {
         previewImage: NSImage?,
         previewIsLoading: Bool,
         markers: [PlaybackMarker],
+        palette: VideoControlPalette,
         onSetMarkerBoundary: @escaping (PlaybackMarker.Kind, Bool, Double) -> Void,
         onAddChapter: @escaping (Double) -> Void,
         onDeleteMarker: @escaping (PlaybackMarker) -> Void,
@@ -1203,6 +1319,7 @@ private struct PlayerControlsBar: View {
         self.previewImage = previewImage
         self.previewIsLoading = previewIsLoading
         self.markers = markers
+        self.palette = palette
         self.onSetMarkerBoundary = onSetMarkerBoundary
         self.onAddChapter = onAddChapter
         self.onDeleteMarker = onDeleteMarker
@@ -1218,7 +1335,7 @@ private struct PlayerControlsBar: View {
             HStack(spacing: 7) {
                 Text(timelineState.formattedCurrentTime)
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(palette.secondary)
                     .frame(width: 42, alignment: .trailing)
 
                 VideoProgressScrubber(
@@ -1230,17 +1347,18 @@ private struct PlayerControlsBar: View {
                     previewImage: previewImage,
                     previewIsLoading: previewIsLoading,
                     markers: markers,
+                    palette: palette,
                     onSeek: { controller.seek(to: $0) }
                 )
 
                 Text(timelineState.formattedDuration)
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(palette.secondary)
                     .frame(width: 42, alignment: .leading)
             }
 
             HStack(spacing: 0) {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     // 视频隔空播放按钮已移除：内置视频经 libmpv 渲染到自有 OpenGL 视图，
                     // AVRoutePicker 仅能驱动音频代理播放器，无法把画面投到外部设备，
                     // 点击只会在本机播放、造成误导。系统级整窗投屏可由 macOS“屏幕镜像”承担。
@@ -1255,16 +1373,16 @@ private struct PlayerControlsBar: View {
                     markerButton(currentTime: timelineState.currentTime, duration: timelineState.duration)
                         .disabled(!transportState.canControl)
                 }
-                .frame(width: 180, alignment: .leading)
+                .frame(width: 168, alignment: .leading)
 
                 Spacer(minLength: 4)
 
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     Button {
                         onPlayAdjacent(-1)
                     } label: {
                         Image(systemName: "backward.end.fill")
-                            .playerControlIcon(width: 29, height: 28)
+                            .playerControlIcon(width: 27, height: 27, palette: palette)
                     }
                     .help("上一集")
 
@@ -1272,10 +1390,10 @@ private struct PlayerControlsBar: View {
                         controller.togglePlay()
                     } label: {
                         Image(systemName: transportState.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 18, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 48, height: 32)
-                            .playerCapsuleControl(cornerRadius: 16)
+                            .font(.system(size: 17, weight: .bold))
+                            .foregroundStyle(palette.primary)
+                            .frame(width: 44, height: 30)
+                            .playerCapsuleControl(cornerRadius: 15, palette: palette)
                     }
                     .keyboardShortcut(.space, modifiers: [])
                     .help("播放/暂停")
@@ -1285,14 +1403,14 @@ private struct PlayerControlsBar: View {
                         onPlayAdjacent(1)
                     } label: {
                         Image(systemName: "forward.end.fill")
-                            .playerControlIcon(width: 29, height: 28)
+                            .playerControlIcon(width: 27, height: 27, palette: palette)
                     }
                     .help("下一集")
                 }
 
                 Spacer(minLength: 4)
 
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     volumeButton(volume: transportState.volume)
                         .disabled(!transportState.canControl)
                     speedButton(playbackRate: transportState.playbackRate)
@@ -1301,20 +1419,20 @@ private struct PlayerControlsBar: View {
                         controller.toggleFullscreen()
                     } label: {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .playerControlIcon()
+                            .playerControlIcon(palette: palette)
                     }
                     .help("全屏")
                 }
-                .frame(width: 180, alignment: .trailing)
+                .frame(width: 168, alignment: .trailing)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.white)
+            .foregroundStyle(palette.primary)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
-        .frame(maxWidth: 596)
-        .playerGlass(cornerRadius: 15)
-        .padding(.bottom, 7)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .frame(maxWidth: 568)
+        .playerGlass(cornerRadius: 14, palette: palette)
+        .padding(.bottom, 5)
     }
 
     private var subtitleButton: some View {
@@ -1324,7 +1442,7 @@ private struct PlayerControlsBar: View {
             }
         } label: {
             Image(systemName: "captions.bubble")
-                .playerControlIcon()
+                .playerControlIcon(palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingSubtitlePopover, arrowEdge: .bottom) {
@@ -1344,7 +1462,7 @@ private struct PlayerControlsBar: View {
             }
         } label: {
             Image(systemName: "waveform.circle")
-                .playerControlIcon()
+                .playerControlIcon(palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingAudioPopover, arrowEdge: .bottom) {
@@ -1360,7 +1478,7 @@ private struct PlayerControlsBar: View {
             }
         } label: {
             Image(systemName: volume == 0 ? "speaker.slash" : "speaker.wave.2")
-                .playerControlIcon()
+                .playerControlIcon(palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingVolumePopover, arrowEdge: .bottom) {
@@ -1377,9 +1495,9 @@ private struct PlayerControlsBar: View {
         } label: {
             Text(String(format: "%.2fx", playbackRate))
                 .font(.caption2.monospacedDigit().weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(palette.primary)
                 .frame(width: 48, height: 28)
-                .playerCapsuleControl(cornerRadius: 14)
+                .playerCapsuleControl(cornerRadius: 14, palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingSpeedPopover, arrowEdge: .bottom) {
@@ -1401,9 +1519,9 @@ private struct PlayerControlsBar: View {
                     .font(.caption2.weight(.bold))
                     .lineLimit(1)
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(palette.primary)
             .frame(width: 58, height: 28)
-            .playerCapsuleControl(cornerRadius: 14)
+            .playerCapsuleControl(cornerRadius: 14, palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingQualityPopover, arrowEdge: .bottom) {
@@ -1428,7 +1546,7 @@ private struct PlayerControlsBar: View {
             }
         } label: {
             Image(systemName: "bookmark")
-                .playerControlIcon()
+                .playerControlIcon(palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingMarkerPopover, arrowEdge: .bottom) {
@@ -1732,6 +1850,7 @@ private struct PlayerBufferingSpinner: View {
 
 private struct PlayerGlassModifier: ViewModifier {
     let cornerRadius: CGFloat
+    let palette: VideoControlPalette
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -1740,11 +1859,7 @@ private struct PlayerGlassModifier: ViewModifier {
             .background(
                 shape.fill(
                     LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.32),
-                            Color.white.opacity(0.14),
-                            Color.black.opacity(0.13)
-                        ],
+                        colors: palette.materialFill,
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
@@ -1759,14 +1874,14 @@ private struct PlayerGlassModifier: ViewModifier {
             .overlay {
                 shape.strokeBorder(
                     LinearGradient(
-                        colors: [.white.opacity(0.26), .white.opacity(0.09)],
+                        colors: palette.border,
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
                     lineWidth: 0.9
                 )
             }
-            .shadow(color: .black.opacity(0.08), radius: 8, y: 3)
+            .shadow(color: palette.shadow, radius: 8, y: 3)
             .shadow(color: .white.opacity(0.07), radius: 1, y: -0.5)
     }
 }
@@ -1777,7 +1892,7 @@ private struct PlayerVolumePopover: View {
     @State private var isEditing = false
 
     private var visibleVolume: Double {
-        isEditing ? draftVolume : Double(controller.volume)
+        isEditing ? draftVolume : PerceptualVolumeScale.sliderValue(fromLinear: Double(controller.volume))
     }
 
     var body: some View {
@@ -1790,9 +1905,9 @@ private struct PlayerVolumePopover: View {
                 visibleVolume
             }, set: { value in
                 draftVolume = value
-                controller.setVolume(Float(value), remember: false)
+                controller.setVolume(Float(PerceptualVolumeScale.linearVolume(fromSlider: value)), remember: false)
             }), range: 0...1, isEditing: $isEditing) {
-                controller.setVolume(Float(draftVolume), remember: true)
+                controller.setVolume(Float(PerceptualVolumeScale.linearVolume(fromSlider: draftVolume)), remember: true)
             }
             .frame(width: 282, height: 26)
         }
@@ -1802,11 +1917,11 @@ private struct PlayerVolumePopover: View {
         .fixedSize(horizontal: true, vertical: true)
         .playerPopoverGlass()
         .onAppear {
-            draftVolume = Double(controller.volume)
+            draftVolume = PerceptualVolumeScale.sliderValue(fromLinear: Double(controller.volume))
         }
         .onChange(of: controller.volume) { volume in
             if !isEditing {
-                draftVolume = Double(volume)
+                draftVolume = PerceptualVolumeScale.sliderValue(fromLinear: Double(volume))
             }
         }
     }
@@ -2624,6 +2739,7 @@ private struct VideoProgressScrubber: View {
     let previewImage: NSImage?
     let previewIsLoading: Bool
     let markers: [PlaybackMarker]
+    let palette: VideoControlPalette
     let onSeek: (Double) -> Void
     @State private var isDragging = false
     @State private var draftTime: Double?
@@ -2640,10 +2756,10 @@ private struct VideoProgressScrubber: View {
 
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(.white.opacity(0.18))
+                    .fill(palette.trackBase)
                     .frame(height: 6)
                 Capsule()
-                    .fill(.white.opacity(enabled ? 0.78 : 0.34))
+                    .fill(enabled ? palette.trackProgress : palette.subdued)
                     .frame(width: progressWidth, height: 6)
                 ForEach(markers.filter { ($0.kind == .intro || $0.kind == .credits) && $0.isCompleteRange }) { marker in
                     let startFraction = duration > 0 ? min(max(marker.startTime / duration, 0), 1) : 0
@@ -2656,14 +2772,14 @@ private struct VideoProgressScrubber: View {
                 ForEach(markers) { marker in
                     let markerFraction = duration > 0 ? min(max(marker.startTime / duration, 0), 1) : 0
                     RoundedRectangle(cornerRadius: 1)
-                        .fill(.white.opacity(marker.kind == .chapter ? 0.82 : 0.96))
+                        .fill(palette.primary.opacity(marker.kind == .chapter ? 0.82 : 0.96))
                         .frame(width: 2, height: marker.kind == .chapter ? 9 : 11)
                         .offset(x: min(max(width * CGFloat(markerFraction) - 1, 0), max(width - 2, 0)))
                 }
                 Circle()
-                    .fill(.white)
+                    .fill(palette.primary)
                     .frame(width: isDragging ? 13 : 10, height: isDragging ? 13 : 10)
-                    .shadow(color: .black.opacity(0.11), radius: 3, y: 1)
+                    .shadow(color: palette.shadow, radius: 3, y: 1)
                     .offset(x: min(max(progressWidth - 5, 0), max(width - 10, 0)))
                     .opacity(enabled ? 1 : 0)
             }
@@ -3139,11 +3255,11 @@ private extension View {
 }
 
 private extension View {
-    func playerGlass(cornerRadius: CGFloat) -> some View {
-        modifier(PlayerGlassModifier(cornerRadius: cornerRadius))
+    func playerGlass(cornerRadius: CGFloat, palette: VideoControlPalette = .lightContent) -> some View {
+        modifier(PlayerGlassModifier(cornerRadius: cornerRadius, palette: palette))
     }
 
-    func playerControlIcon(width: CGFloat = 28, height: CGFloat = 28) -> some View {
+    func playerControlIcon(width: CGFloat = 28, height: CGFloat = 28, palette: VideoControlPalette = .lightContent) -> some View {
         self
             .font(.system(size: 13, weight: .semibold))
             .frame(width: width, height: height)
@@ -3152,7 +3268,7 @@ private extension View {
                     Circle().fill(.thinMaterial)
                     Circle().fill(
                         LinearGradient(
-                            colors: [.white.opacity(0.30), .white.opacity(0.11), .black.opacity(0.08)],
+                            colors: palette.materialFill,
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -3162,17 +3278,17 @@ private extension View {
             .overlay {
                 Circle().strokeBorder(
                     LinearGradient(
-                        colors: [.white.opacity(0.36), .white.opacity(0.10)],
+                        colors: palette.border,
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
                     lineWidth: 0.9
                 )
             }
-            .shadow(color: .black.opacity(0.045), radius: 2, y: 1)
+            .shadow(color: palette.shadow, radius: 2, y: 1)
     }
 
-    func playerCapsuleControl(cornerRadius: CGFloat) -> some View {
+    func playerCapsuleControl(cornerRadius: CGFloat, palette: VideoControlPalette = .lightContent) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         return self
             .background {
@@ -3180,7 +3296,7 @@ private extension View {
                     shape.fill(.thinMaterial)
                     shape.fill(
                         LinearGradient(
-                            colors: [.white.opacity(0.31), .white.opacity(0.12), .black.opacity(0.08)],
+                            colors: palette.materialFill,
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
@@ -3190,14 +3306,14 @@ private extension View {
             .overlay {
                 shape.strokeBorder(
                     LinearGradient(
-                        colors: [.white.opacity(0.38), .white.opacity(0.12)],
+                        colors: palette.border,
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
                     lineWidth: 0.9
                 )
             }
-            .shadow(color: .black.opacity(0.055), radius: 3, y: 1)
+            .shadow(color: palette.shadow, radius: 3, y: 1)
     }
 }
 
@@ -5963,7 +6079,11 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
             let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame
             let visibleWidth = visibleFrame?.width ?? 1440
             let visibleHeight = visibleFrame?.height ?? 900
-            let maxSize = NSSize(width: visibleWidth * 0.985, height: visibleHeight * 0.94)
+            let widthIsFullScreen = VideoWindowSizing.usesFullScreenWidth(settings.videoPlayerPreferredWidth, on: screen)
+            let maxSize = NSSize(
+                width: visibleWidth * (widthIsFullScreen ? 1.0 : 0.985),
+                height: visibleHeight * 0.94
+            )
             var finalSize = NSSize(width: width, height: width / aspect)
             let scale = min(1, maxSize.width / finalSize.width, maxSize.height / finalSize.height)
             if scale < 1 {

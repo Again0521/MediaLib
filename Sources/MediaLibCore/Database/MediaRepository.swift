@@ -12,11 +12,11 @@ public final class MediaRepository {
             """
             INSERT INTO media_items (
               id, type, title, original_title, artist, album, track_number, year, overview, poster_path, backdrop_path,
-              rating, runtime, source_path, parent_id, season_number, episode_number,
+              rating, user_rating, runtime, source_path, parent_id, season_number, episode_number,
               file_path, file_size, video_codec, audio_codec, resolution, video_bitrate, duration,
               loudness_track_gain_db, loudness_album_gain_db, loudness_track_peak, loudness_album_peak,
               play_count, play_position, play_progress, watched, favorite, watchlist, external_id, metadata_provider, collection_title, created_at, updated_at, last_played_at, genre
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               type = excluded.type,
               title = excluded.title,
@@ -29,6 +29,7 @@ public final class MediaRepository {
               poster_path = COALESCE(excluded.poster_path, media_items.poster_path),
               backdrop_path = COALESCE(excluded.backdrop_path, media_items.backdrop_path),
               rating = COALESCE(excluded.rating, media_items.rating),
+              user_rating = COALESCE(media_items.user_rating, excluded.user_rating),
               runtime = COALESCE(excluded.runtime, media_items.runtime),
               source_path = excluded.source_path,
               parent_id = excluded.parent_id,
@@ -344,7 +345,7 @@ public final class MediaRepository {
 
     public func updateRating(id: String, rating: Double?) throws {
         try database.execute(
-            "UPDATE media_items SET rating = ?, updated_at = ? WHERE id = ?",
+            "UPDATE media_items SET user_rating = ?, updated_at = ? WHERE id = ?",
             bindings: [.optionalDouble(rating), .optionalDate(Date()), .text(id)]
         )
     }
@@ -363,6 +364,7 @@ public final class MediaRepository {
                 poster_path = COALESCE(?, poster_path),
                 backdrop_path = COALESCE(?, backdrop_path),
                 rating = COALESCE(?, rating),
+                user_rating = COALESCE(user_rating, ?),
                 runtime = COALESCE(?, runtime),
                 external_id = COALESCE(?, external_id),
                 metadata_provider = COALESCE(?, metadata_provider),
@@ -382,6 +384,7 @@ public final class MediaRepository {
                 .optionalText(metadata.posterPath),
                 .optionalText(metadata.backdropPath),
                 .optionalDouble(metadata.rating),
+                .optionalDouble(Self.seedUserRating(from: metadata.rating)),
                 .optionalInt(metadata.runtime),
                 .optionalText(metadata.externalID),
                 .optionalText(metadata.metadataProvider),
@@ -403,7 +406,7 @@ public final class MediaRepository {
     private var selectSQL: String {
         """
         SELECT id, type, title, original_title, artist, album, track_number, year, overview, poster_path, backdrop_path,
-               rating, runtime, source_path, parent_id, season_number, episode_number,
+               rating, user_rating, runtime, source_path, parent_id, season_number, episode_number,
                file_path, file_size, video_codec, audio_codec, resolution, video_bitrate, duration,
                loudness_track_gain_db, loudness_album_gain_db, loudness_track_peak, loudness_album_peak,
                play_count, play_position, play_progress, watched, favorite, watchlist, external_id, metadata_provider, collection_title, created_at, updated_at, last_played_at, genre
@@ -425,6 +428,7 @@ public final class MediaRepository {
             .optionalText(item.posterPath),
             .optionalText(item.backdropPath),
             .optionalDouble(item.rating),
+            .optionalDouble(item.userRating),
             .optionalInt(item.runtime),
             .optionalText(item.sourcePath),
             .optionalText(item.parentID),
@@ -471,36 +475,42 @@ public final class MediaRepository {
             posterPath: row.string(9),
             backdropPath: row.string(10),
             rating: row.double(11),
-            runtime: row.int(12),
-            sourcePath: row.string(13),
-            parentID: row.string(14),
-            seasonNumber: row.int(15),
-            episodeNumber: row.int(16),
-            filePath: row.string(17),
-            fileSize: row.int64(18),
-            videoCodec: row.string(19),
-            audioCodec: row.string(20),
-            resolution: row.string(21),
-            videoBitrate: row.int64(22),
-            duration: row.double(23),
-            loudnessTrackGainDB: row.double(24),
-            loudnessAlbumGainDB: row.double(25),
-            loudnessTrackPeak: row.double(26),
-            loudnessAlbumPeak: row.double(27),
-            playCount: row.int(28) ?? 0,
-            playPosition: row.double(29) ?? 0,
-            playProgress: row.double(30) ?? 0,
-            watched: row.bool(31),
-            favorite: row.bool(32),
-            watchlist: row.bool(33),
-            externalID: row.string(34),
-            metadataProvider: row.string(35),
-            collectionTitle: row.string(36),
-            createdAt: row.date(37) ?? Date(),
-            updatedAt: row.date(38) ?? Date(),
-            lastPlayedAt: row.date(39),
-            genre: row.string(40)
+            userRating: row.double(12),
+            runtime: row.int(13),
+            sourcePath: row.string(14),
+            parentID: row.string(15),
+            seasonNumber: row.int(16),
+            episodeNumber: row.int(17),
+            filePath: row.string(18),
+            fileSize: row.int64(19),
+            videoCodec: row.string(20),
+            audioCodec: row.string(21),
+            resolution: row.string(22),
+            videoBitrate: row.int64(23),
+            duration: row.double(24),
+            loudnessTrackGainDB: row.double(25),
+            loudnessAlbumGainDB: row.double(26),
+            loudnessTrackPeak: row.double(27),
+            loudnessAlbumPeak: row.double(28),
+            playCount: row.int(29) ?? 0,
+            playPosition: row.double(30) ?? 0,
+            playProgress: row.double(31) ?? 0,
+            watched: row.bool(32),
+            favorite: row.bool(33),
+            watchlist: row.bool(34),
+            externalID: row.string(35),
+            metadataProvider: row.string(36),
+            collectionTitle: row.string(37),
+            createdAt: row.date(38) ?? Date(),
+            updatedAt: row.date(39) ?? Date(),
+            lastPlayedAt: row.date(40),
+            genre: row.string(41)
         )
+    }
+
+    private static func seedUserRating(from providerRating: Double?) -> Double? {
+        guard let providerRating, providerRating.isFinite, providerRating > 0 else { return nil }
+        return min(max((providerRating / 2).rounded(), 1), 5)
     }
 }
 

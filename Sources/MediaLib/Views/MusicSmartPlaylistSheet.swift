@@ -58,7 +58,7 @@ struct MusicSmartPlaylistSheet: View {
                         .textFieldStyle(.plain)
                         .multilineTextAlignment(.center)
                         .glassFormField()
-                        .frame(width: Self.optionMenuWidth, alignment: .trailing)
+                        .frame(width: adaptiveFieldWidth(text: name, placeholder: "智能歌单"), alignment: .trailing)
                 }
                 SettingsRow(title: "筛选条件", systemImage: "line.3.horizontal.decrease.circle") {
                     picker(selection: $filter, selectedTitle: filter.displayName) {
@@ -123,11 +123,11 @@ struct MusicSmartPlaylistSheet: View {
         Picker("", selection: selection, content: content)
             .labelsHidden()
             .pickerStyle(.menu)
-            // 固定统一宽度：各选项框边界一致。
-            .adaptiveMenuControl(selectedTitle: selectedTitle, minWidth: Self.optionMenuWidth, maxWidth: Self.optionMenuWidth)
+            .adaptiveMenuControl(selectedTitle: selectedTitle, minWidth: Self.optionMenuMinWidth, maxWidth: Self.optionMenuMaxWidth)
     }
 
-    private static let optionMenuWidth: CGFloat = 150
+    private static let optionMenuMinWidth: CGFloat = 108
+    private static let optionMenuMaxWidth: CGFloat = 176
 
     private var trimmedName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)

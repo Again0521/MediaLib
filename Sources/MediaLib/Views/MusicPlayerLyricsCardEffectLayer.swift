@@ -6,6 +6,11 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
     let intensity: Double
     let colorScheme: ColorScheme
     let isEnabled: Bool
+    var edgeDepth: Double = 1
+    // 玻璃边缘染色：指针扫过卡片时的方向性边缘高光不再是死白，而是混入专辑主色，
+    // 与展开播放器整体的 Liquid Glass 染边语言一致（spec：边缘不要死白，要混入专辑主色）。
+    var tintColor: NSColor = .white
+    var centerClarity = false
 
     func makeNSView(context: Context) -> EffectView {
         let view = EffectView(frame: .zero)
@@ -13,7 +18,10 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
             cornerRadius: cornerRadius,
             intensity: intensity,
             colorScheme: colorScheme,
-            isEnabled: isEnabled
+            isEnabled: isEnabled,
+            edgeDepth: edgeDepth,
+            tintColor: tintColor,
+            centerClarity: centerClarity
         )
         return view
     }
@@ -23,7 +31,10 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
             cornerRadius: cornerRadius,
             intensity: intensity,
             colorScheme: colorScheme,
-            isEnabled: isEnabled
+            isEnabled: isEnabled,
+            edgeDepth: edgeDepth,
+            tintColor: tintColor,
+            centerClarity: centerClarity
         )
     }
 
@@ -91,12 +102,18 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
             cornerRadius: CGFloat,
             intensity: Double,
             colorScheme: ColorScheme,
-            isEnabled: Bool
+            isEnabled: Bool,
+            edgeDepth: Double,
+            tintColor: NSColor,
+            centerClarity: Bool
         ) {
             effectLayer.cornerRadiusValue = cornerRadius
             effectLayer.intensity = min(max(intensity, 0), 1.45)
             effectLayer.isDark = colorScheme == .dark
             effectLayer.isEffectEnabled = isEnabled
+            effectLayer.edgeDepth = min(max(edgeDepth, 0), 1.6)
+            effectLayer.tintColor = tintColor.usingColorSpace(.deviceRGB) ?? tintColor
+            effectLayer.centerClarity = centerClarity
             if !isEnabled {
                 lastPointerLocation = nil
                 effectLayer.pointer = nil
@@ -109,7 +126,6 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
             layer?.masksToBounds = false
             effectLayer.masksToBounds = false
             effectLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2
-            effectLayer.compositingFilter = "screenBlendMode"
             layer?.addSublayer(effectLayer)
         }
 
@@ -145,6 +161,9 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
         var intensity: Double = 1
         var isDark = false
         var isEffectEnabled = true
+        var edgeDepth: Double = 1
+        var tintColor: NSColor = .white
+        var centerClarity = false
 
         override init() {
             super.init()
@@ -160,7 +179,20 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
                 intensity = layer.intensity
                 isDark = layer.isDark
                 isEffectEnabled = layer.isEffectEnabled
+                edgeDepth = layer.edgeDepth
+                tintColor = layer.tintColor
+                centerClarity = layer.centerClarity
             }
+        }
+
+        /// 把白色高光按 amount 比例向专辑主色混合：amount=0 纯白，amount=1 纯专辑色。
+        /// 中心扫光仍偏白（保留磨砂玻璃的通透高光），方向性边缘描边混入更多专辑色（不死白）。
+        private func tinted(_ amount: CGFloat, alpha: CGFloat) -> CGColor {
+            let t = min(max(amount, 0), 1)
+            let red = 1 - (1 - tintColor.redComponent) * t
+            let green = 1 - (1 - tintColor.greenComponent) * t
+            let blue = 1 - (1 - tintColor.blueComponent) * t
+            return NSColor(deviceRed: red, green: green, blue: blue, alpha: min(max(alpha, 0), 1)).cgColor
         }
 
         required init?(coder: NSCoder) {
@@ -170,9 +202,7 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
         }
 
         override func draw(in context: CGContext) {
-            guard isEffectEnabled,
-                  let pointer,
-                  bounds.width > 0,
+            guard bounds.width > 0,
                   bounds.height > 0 else { return }
 
             context.saveGState()
@@ -185,13 +215,22 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
             context.addPath(roundedPath)
             context.clip()
 
-            let radius = max(max(bounds.width, bounds.height) * 0.42, 1)
             let strength = CGFloat(min(max(intensity, 0), 1.45))
+            let depth = CGFloat(min(max(edgeDepth, 0), 1.6))
+            drawStaticGlass(in: context, path: roundedPath, strength: strength, depth: depth)
+
+            guard isEffectEnabled, let pointer else {
+                context.restoreGState()
+                return
+            }
+
+            let radius = max(max(bounds.width, bounds.height) * 0.42, 1)
             let firstAlpha = (isDark ? 0.20 : 0.48) * strength
             let secondAlpha = (isDark ? 0.06 : 0.15) * strength
+            // 中心扫光保持偏白通透（仅外圈微染专辑色），避免高光发灰、发脏。
             let colors = [
-                NSColor.white.withAlphaComponent(firstAlpha).cgColor,
-                NSColor.white.withAlphaComponent(secondAlpha).cgColor,
+                tinted(0.05, alpha: firstAlpha),
+                tinted(0.22, alpha: secondAlpha),
                 NSColor.white.withAlphaComponent(0).cgColor
             ] as CFArray
             let locations: [CGFloat] = [0, 0.46, 1]
@@ -213,9 +252,10 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
 
             let edgeAlpha = (isDark ? 0.30 : 0.66) * strength
             let edgeFadeAlpha = (isDark ? 0.08 : 0.18) * strength
+            // 方向性边缘描边混入更多专辑主色（近指针端染色更明显），让玻璃边沿不死白、带专辑色折射感。
             let edgeColors = [
-                NSColor.white.withAlphaComponent(edgeAlpha).cgColor,
-                NSColor.white.withAlphaComponent(edgeFadeAlpha).cgColor,
+                tinted(0.42, alpha: edgeAlpha),
+                tinted(0.58, alpha: edgeFadeAlpha),
                 NSColor.white.withAlphaComponent(0).cgColor
             ] as CFArray
             let opposite = CGPoint(x: bounds.width - pointer.x, y: bounds.height - pointer.y)
@@ -233,6 +273,88 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
             }
 
             context.restoreGState()
+        }
+
+        private func drawStaticGlass(in context: CGContext, path roundedPath: CGPath, strength: CGFloat, depth: CGFloat) {
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let middleClarity = centerClarity ? CGFloat(0.72) : CGFloat(1.0)
+            let middleShade = centerClarity ? CGFloat(0.70) : CGFloat(1.0)
+            let upperTransition = centerClarity ? CGFloat(0.22) : CGFloat(0.16)
+            let clearStart = centerClarity ? CGFloat(0.42) : CGFloat(0.36)
+            let clearEnd = centerClarity ? CGFloat(0.58) : CGFloat(0.62)
+            let lowerTransition = centerClarity ? CGFloat(0.78) : CGFloat(0.82)
+
+            context.setBlendMode(.screen)
+            let verticalColors = [
+                tinted(0.18, alpha: (isDark ? 0.050 : 0.088) * strength * depth),
+                tinted(0.10, alpha: (isDark ? 0.026 : 0.050) * strength * depth * middleClarity),
+                NSColor.white.withAlphaComponent(0).cgColor,
+                NSColor.white.withAlphaComponent(0).cgColor,
+                tinted(0.16, alpha: (isDark ? 0.030 : 0.050) * strength * depth * middleClarity),
+                tinted(0.22, alpha: (isDark ? 0.048 : 0.078) * strength * depth)
+            ] as CFArray
+            if let gradient = CGGradient(
+                colorsSpace: colorSpace,
+                colors: verticalColors,
+                locations: [0.0, upperTransition, clearStart, clearEnd, lowerTransition, 1.0]
+            ) {
+                context.drawLinearGradient(
+                    gradient,
+                    start: CGPoint(x: bounds.midX, y: bounds.minY),
+                    end: CGPoint(x: bounds.midX, y: bounds.maxY),
+                    options: []
+                )
+            }
+
+            let leftColors = [
+                tinted(0.70, alpha: (isDark ? 0.135 : 0.115) * strength * depth),
+                tinted(0.48, alpha: (isDark ? 0.052 : 0.044) * strength * depth),
+                NSColor.clear.cgColor
+            ] as CFArray
+            if let gradient = CGGradient(colorsSpace: colorSpace, colors: leftColors, locations: [0.0, 0.18, 1.0]) {
+                context.drawLinearGradient(
+                    gradient,
+                    start: CGPoint(x: bounds.minX, y: bounds.midY),
+                    end: CGPoint(x: bounds.minX + bounds.width * 0.42, y: bounds.midY),
+                    options: [.drawsAfterEndLocation]
+                )
+            }
+
+            context.setBlendMode(.normal)
+            let innerShadeColors = [
+                NSColor.clear.cgColor,
+                NSColor.black.withAlphaComponent((isDark ? 0.030 : 0.018) * strength * depth * middleShade).cgColor,
+                NSColor.black.withAlphaComponent((isDark ? 0.085 : 0.040) * strength * depth).cgColor
+            ] as CFArray
+            if let gradient = CGGradient(colorsSpace: colorSpace, colors: innerShadeColors, locations: [0.0, 0.70, 1.0]) {
+                context.drawLinearGradient(
+                    gradient,
+                    start: CGPoint(x: bounds.midX, y: bounds.minY),
+                    end: CGPoint(x: bounds.midX, y: bounds.maxY),
+                    options: []
+                )
+            }
+
+            context.setBlendMode(.screen)
+            let strokeColors = [
+                tinted(0.26, alpha: (isDark ? 0.30 : 0.48) * strength),
+                tinted(0.56, alpha: (isDark ? 0.16 : 0.20) * strength),
+                NSColor.white.withAlphaComponent((isDark ? 0.08 : 0.16) * strength).cgColor
+            ] as CFArray
+            if let gradient = CGGradient(colorsSpace: colorSpace, colors: strokeColors, locations: [0.0, 0.48, 1.0]) {
+                context.saveGState()
+                context.setLineWidth(1.0)
+                context.addPath(roundedPath)
+                context.replacePathWithStrokedPath()
+                context.clip()
+                context.drawLinearGradient(
+                    gradient,
+                    start: CGPoint(x: bounds.minX, y: bounds.minY),
+                    end: CGPoint(x: bounds.maxX, y: bounds.maxY),
+                    options: []
+                )
+                context.restoreGState()
+            }
         }
     }
 }

@@ -13,8 +13,9 @@ public final class SourceRepository {
             INSERT INTO media_sources (
               id, name, path, media_type, recursive, auto_scan, minimum_file_size,
               ignore_hidden_files, read_nfo, prefer_local_artwork, network_scraping_enabled,
-              screenshot_fallback_enabled, include_in_metadata_fetch, include_in_health_check, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              screenshot_fallback_enabled, include_in_metadata_fetch, prefer_metadata_write_to_source,
+              include_in_health_check, remote_trace_sync_mode, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               name = excluded.name,
               path = excluded.path,
@@ -28,7 +29,9 @@ public final class SourceRepository {
               network_scraping_enabled = excluded.network_scraping_enabled,
               screenshot_fallback_enabled = excluded.screenshot_fallback_enabled,
               include_in_metadata_fetch = excluded.include_in_metadata_fetch,
+              prefer_metadata_write_to_source = excluded.prefer_metadata_write_to_source,
               include_in_health_check = excluded.include_in_health_check,
+              remote_trace_sync_mode = excluded.remote_trace_sync_mode,
               updated_at = excluded.updated_at
             """,
             bindings: bindings(for: source)
@@ -44,7 +47,8 @@ public final class SourceRepository {
             """
             SELECT id, name, path, media_type, recursive, auto_scan, minimum_file_size,
                    ignore_hidden_files, read_nfo, prefer_local_artwork, network_scraping_enabled,
-                   screenshot_fallback_enabled, include_in_metadata_fetch, include_in_health_check, created_at, updated_at
+                   screenshot_fallback_enabled, include_in_metadata_fetch, prefer_metadata_write_to_source,
+                   include_in_health_check, remote_trace_sync_mode, created_at, updated_at
             FROM media_sources
             ORDER BY created_at ASC
             """
@@ -63,9 +67,11 @@ public final class SourceRepository {
                 networkScrapingEnabled: row.bool(10),
                 screenshotFallbackEnabled: row.bool(11),
                 includeInMetadataFetch: row.bool(12),
-                includeInHealthCheck: row.bool(13),
-                createdAt: row.date(14) ?? Date(),
-                updatedAt: row.date(15) ?? Date()
+                preferMetadataWriteToSource: row.bool(13),
+                includeInHealthCheck: row.bool(14),
+                remoteTraceSyncMode: RemoteTraceSyncMode(rawValue: row.string(15) ?? "") ?? .bidirectional,
+                createdAt: row.date(16) ?? Date(),
+                updatedAt: row.date(17) ?? Date()
             )
         }
     }
@@ -85,7 +91,9 @@ public final class SourceRepository {
             .bool(source.networkScrapingEnabled),
             .bool(source.screenshotFallbackEnabled),
             .bool(source.includeInMetadataFetch),
+            .bool(source.preferMetadataWriteToSource),
             .bool(source.includeInHealthCheck),
+            .text(source.remoteTraceSyncMode.rawValue),
             .optionalDate(source.createdAt),
             .optionalDate(source.updatedAt)
         ]

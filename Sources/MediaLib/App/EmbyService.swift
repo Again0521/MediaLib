@@ -67,6 +67,20 @@ struct EmbyLibrarySummary: Identifiable, Hashable, Sendable {
     }
 }
 
+struct EmbySubtitleStream: Identifiable, Hashable, Sendable {
+    var itemID: String
+    var mediaSourceID: String?
+    var index: Int
+    var language: String?
+    var displayTitle: String?
+    var fileExtension: String
+    var deliveryURLString: String?
+
+    var id: String {
+        "\(itemID)-\(mediaSourceID ?? "default")-\(index)"
+    }
+}
+
 struct EmbyService {
     private let clientName = "MediaLIB"
     private let deviceName = Host.current().localizedName ?? "Mac"
@@ -232,6 +246,43 @@ struct EmbyService {
             pathComponents: ["Users", session.userID],
             method: "GET"
         )
+    }
+
+    func subtitleStreams(session: EmbySession, itemID: String, mediaSourceID: String?) async throws -> [EmbySubtitleStream] {
+        let item = try await fetchItemDetail(session: session, itemID: itemID)
+        let mediaSource = mediaSourceID.flatMap { requestedID in
+            item.MediaSources?.first { $0.Id == requestedID }
+        } ?? item.MediaSources?.first
+        guard let mediaSource else { return [] }
+
+        return (mediaSource.MediaStreams ?? []).compactMap { stream in
+            guard stream.streamType.caseInsensitiveCompare("Subtitle") == .orderedSame,
+                  let index = stream.Index,
+                  let fileExtension = Self.subtitleFileExtension(for: stream) else {
+                return nil
+            }
+            return EmbySubtitleStream(
+                itemID: itemID,
+                mediaSourceID: mediaSource.Id,
+                index: index,
+                language: stream.Language,
+                displayTitle: stream.DisplayTitle,
+                fileExtension: fileExtension,
+                deliveryURLString: stream.DeliveryUrl
+            )
+        }
+    }
+
+    func downloadSubtitle(session: EmbySession, stream: EmbySubtitleStream) async throws -> Data {
+        guard let url = subtitleDownloadURL(session: session, stream: stream) else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.setValue(authorizationHeader(accessToken: session.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return data
     }
 
     func refreshedResourceURLString(_ value: String?, session: EmbySession) -> String? {
@@ -400,6 +451,7 @@ struct EmbyService {
             overview: dto.Overview,
             posterPath: posterURL(for: dto, session: session)?.absoluteString,
             rating: dto.CommunityRating,
+            userRating: Self.seedUserRating(from: dto.CommunityRating),
             runtime: duration.map { Int($0 / 60) },
             sourcePath: sourcePath,
             parentID: type == .episode ? parentID : nil,
@@ -468,9 +520,12 @@ struct EmbyService {
                 year: episodeDTO.ProductionYear,
                 overview: nil,
                 posterPath: imageURL(itemID: seriesID, session: session)?.absoluteString,
+                rating: episodeDTO.CommunityRating,
+                userRating: Self.seedUserRating(from: episodeDTO.CommunityRating),
                 sourcePath: sourcePath,
                 externalID: seriesID,
-                metadataProvider: "Emby"
+                metadataProvider: "Emby",
+                genre: (episodeDTO.Genres?.isEmpty == false) ? episodeDTO.Genres?.joined(separator: ", ") : nil
             )
         }
         .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
@@ -484,10 +539,11 @@ struct EmbyService {
         let container = mediaSource?.Container?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
+        let streamPath = container?.isEmpty == false ? "stream.\(container ?? "")" : "stream"
         let streamURL = session.serverURL
             .appendingPathComponent(item.type.lowercased() == "audio" ? "Audio" : "Videos")
             .appendingPathComponent(item.Id)
-            .appendingPathComponent(container?.isEmpty == false ? "stream.\(container!)" : "stream")
+            .appendingPathComponent(streamPath)
         var components = URLComponents(url: streamURL, resolvingAgainstBaseURL: false)
         var queryItems = [
             URLQueryItem(name: "Static", value: "true"),
@@ -521,6 +577,29 @@ struct EmbyService {
         return components?.url
     }
 
+    private func fetchItemDetail(session: EmbySession, itemID: String) async throws -> EmbyItemDTO {
+        let itemURL = session.serverURL
+            .appendingPathComponent("Users")
+            .appendingPathComponent(session.userID)
+            .appendingPathComponent("Items")
+            .appendingPathComponent(itemID)
+        var components = URLComponents(url: itemURL, resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "Fields", value: "MediaSources,MediaStreams"),
+            URLQueryItem(name: "api_key", value: session.accessToken)
+        ]
+        guard let url = components?.url else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.setValue(authorizationHeader(accessToken: session.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try validate(response: response, data: data)
+        return try JSONDecoder().decode(EmbyItemDTO.self, from: data)
+    }
+
     private func sendAuthenticated(
         session: EmbySession,
         pathComponents: [String],
@@ -548,15 +627,66 @@ struct EmbyService {
         try validate(response: response, data: data)
     }
 
+    private func subtitleDownloadURL(session: EmbySession, stream: EmbySubtitleStream) -> URL? {
+        if let deliveryURLString = stream.deliveryURLString,
+           !deliveryURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let url = URL(string: deliveryURLString, relativeTo: session.serverURL)?.absoluteURL
+            return Self.urlByRefreshingAPIKey(url, accessToken: session.accessToken)
+        }
+        guard let mediaSourceID = stream.mediaSourceID else { return nil }
+        let url = session.serverURL
+            .appendingPathComponent("Videos")
+            .appendingPathComponent(stream.itemID)
+            .appendingPathComponent(mediaSourceID)
+            .appendingPathComponent("Subtitles")
+            .appendingPathComponent("\(stream.index)")
+            .appendingPathComponent("Stream.\(stream.fileExtension)")
+        return Self.urlByRefreshingAPIKey(url, accessToken: session.accessToken)
+    }
+
+    private static func urlByRefreshingAPIKey(_ url: URL?, accessToken: String) -> URL? {
+        guard let url,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        var queryItems = components.queryItems ?? []
+        queryItems.removeAll { $0.name.caseInsensitiveCompare("api_key") == .orderedSame }
+        queryItems.append(URLQueryItem(name: "api_key", value: accessToken))
+        components.queryItems = queryItems
+        return components.url
+    }
+
     private func mediaSourceID(from filePath: String?) -> String? {
         guard let filePath,
               let components = URLComponents(string: filePath) else { return nil }
         return components.queryItems?.first(where: { $0.name == "MediaSourceId" })?.value
     }
 
+    private static func subtitleFileExtension(for stream: EmbyMediaStreamDTO) -> String? {
+        let deliveryExtension = stream.DeliveryUrl.flatMap { URL(string: $0)?.pathExtension.lowercased() }
+        for value in [deliveryExtension, stream.Codec?.lowercased()] {
+            switch value {
+            case "srt", "subrip":
+                return "srt"
+            case "ass":
+                return "ass"
+            case "ssa":
+                return "ssa"
+            case "vtt", "webvtt":
+                return "vtt"
+            default:
+                continue
+            }
+        }
+        return stream.IsTextSubtitleStream == true ? "srt" : nil
+    }
+
     static func ticks(from seconds: Double) -> Int64 {
         guard seconds.isFinite, seconds > 0 else { return 0 }
         return Int64((seconds * 10_000_000).rounded())
+    }
+
+    private static func seedUserRating(from providerRating: Double?) -> Double? {
+        guard let providerRating, providerRating.isFinite, providerRating > 0 else { return nil }
+        return min(max((providerRating / 2).rounded(), 1), 5)
     }
 
     private func normalizedServerURL(_ url: URL) -> URL {
@@ -744,18 +874,32 @@ private struct EmbyMediaSourceDTO: Decodable {
 
 private struct EmbyMediaStreamDTO: Decodable {
     let streamType: String
+    let Index: Int?
     let Codec: String?
     let Width: Int?
     let Height: Int?
     let BitRate: Int64?
     let Bitrate: Int64?
+    let Language: String?
+    let DisplayTitle: String?
+    let IsExternal: Bool?
+    let IsTextSubtitleStream: Bool?
+    let DeliveryUrl: String?
+    let DeliveryMethod: String?
 
     private enum CodingKeys: String, CodingKey {
         case streamType = "Type"
+        case Index
         case Codec
         case Width
         case Height
         case BitRate
         case Bitrate
+        case Language
+        case DisplayTitle
+        case IsExternal
+        case IsTextSubtitleStream
+        case DeliveryUrl
+        case DeliveryMethod
     }
 }

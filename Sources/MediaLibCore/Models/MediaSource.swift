@@ -15,8 +15,12 @@ public struct MediaSource: Identifiable, Codable, Hashable {
     public var screenshotFallbackEnabled: Bool
     /// 是否参与"一键拉取元数据"（剧集 TMDB / 音乐补全）。
     public var includeInMetadataFetch: Bool
+    /// 一键补充时是否优先把可写字段写回媒体源目录或媒体文件；不可写/远程来源会回落到 MediaLIB 索引。
+    public var preferMetadataWriteToSource: Bool
     /// 是否参与"片库健康"检查（离线/失效/重复/元数据缺口）。
     public var includeInHealthCheck: Bool
+    /// Emby 痕迹数据同步策略：控制播放记录、收藏和已观看状态是否与服务端互写。
+    public var remoteTraceSyncMode: RemoteTraceSyncMode
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -34,7 +38,9 @@ public struct MediaSource: Identifiable, Codable, Hashable {
         networkScrapingEnabled: Bool = true,
         screenshotFallbackEnabled: Bool = true,
         includeInMetadataFetch: Bool = true,
+        preferMetadataWriteToSource: Bool = false,
         includeInHealthCheck: Bool = true,
+        remoteTraceSyncMode: RemoteTraceSyncMode = .bidirectional,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -51,9 +57,56 @@ public struct MediaSource: Identifiable, Codable, Hashable {
         self.networkScrapingEnabled = networkScrapingEnabled
         self.screenshotFallbackEnabled = screenshotFallbackEnabled
         self.includeInMetadataFetch = includeInMetadataFetch
+        self.preferMetadataWriteToSource = preferMetadataWriteToSource
         self.includeInHealthCheck = includeInHealthCheck
+        self.remoteTraceSyncMode = remoteTraceSyncMode
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case path
+        case mediaType
+        case recursive
+        case autoScan
+        case minimumFileSize
+        case ignoreHiddenFiles
+        case readNFO
+        case preferLocalArtwork
+        case networkScrapingEnabled
+        case screenshotFallbackEnabled
+        case includeInMetadataFetch
+        case preferMetadataWriteToSource
+        case includeInHealthCheck
+        case remoteTraceSyncMode
+        case createdAt
+        case updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString,
+            name: try container.decode(String.self, forKey: .name),
+            path: try container.decode(String.self, forKey: .path),
+            mediaType: try container.decodeIfPresent(MediaType.self, forKey: .mediaType) ?? .auto,
+            recursive: try container.decodeIfPresent(Bool.self, forKey: .recursive) ?? true,
+            autoScan: try container.decodeIfPresent(Bool.self, forKey: .autoScan) ?? true,
+            minimumFileSize: try container.decodeIfPresent(Int64.self, forKey: .minimumFileSize) ?? 50 * 1024 * 1024,
+            ignoreHiddenFiles: try container.decodeIfPresent(Bool.self, forKey: .ignoreHiddenFiles) ?? true,
+            readNFO: try container.decodeIfPresent(Bool.self, forKey: .readNFO) ?? true,
+            preferLocalArtwork: try container.decodeIfPresent(Bool.self, forKey: .preferLocalArtwork) ?? true,
+            networkScrapingEnabled: try container.decodeIfPresent(Bool.self, forKey: .networkScrapingEnabled) ?? true,
+            screenshotFallbackEnabled: try container.decodeIfPresent(Bool.self, forKey: .screenshotFallbackEnabled) ?? true,
+            includeInMetadataFetch: try container.decodeIfPresent(Bool.self, forKey: .includeInMetadataFetch) ?? true,
+            preferMetadataWriteToSource: try container.decodeIfPresent(Bool.self, forKey: .preferMetadataWriteToSource) ?? false,
+            includeInHealthCheck: try container.decodeIfPresent(Bool.self, forKey: .includeInHealthCheck) ?? true,
+            remoteTraceSyncMode: try container.decodeIfPresent(RemoteTraceSyncMode.self, forKey: .remoteTraceSyncMode) ?? .bidirectional,
+            createdAt: try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(),
+            updatedAt: try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        )
     }
 
     public var url: URL {
@@ -104,4 +157,39 @@ public enum MediaSourceKind: String, Codable, Hashable {
     case emby
     case smb
     case ftp
+}
+
+public enum RemoteTraceSyncMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case bidirectional
+    case importOnly
+    case disabled
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .bidirectional: return "数据双向同步"
+        case .importOnly: return "仅从 Emby 同步"
+        case .disabled: return "数据不同步"
+        }
+    }
+
+    public var shortTitle: String {
+        switch self {
+        case .bidirectional: return "双向同步"
+        case .importOnly: return "单向同步"
+        case .disabled: return "不同步"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .bidirectional:
+            return "本地播放记录、收藏和已观看状态会与 Emby 互相更新。"
+        case .importOnly:
+            return "只接收 Emby 状态，不把本机痕迹写回服务器。"
+        case .disabled:
+            return "本机痕迹完全保留在 MediaLIB，不受 Emby 多人使用影响。"
+        }
+    }
 }

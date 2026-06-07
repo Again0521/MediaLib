@@ -1,15 +1,23 @@
 import Foundation
 
-enum BackgroundTaskKind: String, Sendable {
+enum BackgroundTaskKind: String, Codable, Sendable {
     case fullScan
     case incrementalScan
     case embySync
+    case artworkWarmup
+    case cleanup
+    case videoCache
+    case metadataSupplement
 
     var title: String {
         switch self {
         case .fullScan: return "完整扫描"
         case .incrementalScan: return "增量扫描"
         case .embySync: return "Emby 同步"
+        case .artworkWarmup: return "封面预热"
+        case .cleanup: return "一键清理"
+        case .videoCache: return "视频缓存"
+        case .metadataSupplement: return "元数据补充"
         }
     }
 
@@ -18,13 +26,19 @@ enum BackgroundTaskKind: String, Sendable {
         case .fullScan: return "arrow.triangle.2.circlepath"
         case .incrementalScan: return "bolt.horizontal.circle"
         case .embySync: return "server.rack"
+        case .artworkWarmup: return "photo.stack"
+        case .cleanup: return "sparkles"
+        case .videoCache: return "arrow.down.circle"
+        case .metadataSupplement: return "tag.badge.plus"
         }
     }
 }
 
-enum BackgroundTaskState: String, Sendable {
+enum BackgroundTaskState: String, Codable, Sendable {
     case queued
     case running
+    case pausing
+    case paused
     case completed
     case failed
     case cancelled
@@ -33,6 +47,8 @@ enum BackgroundTaskState: String, Sendable {
         switch self {
         case .queued: return "等待中"
         case .running: return "进行中"
+        case .pausing: return "暂停中"
+        case .paused: return "已暂停"
         case .completed: return "已完成"
         case .failed: return "有错误"
         case .cancelled: return "已取消"
@@ -40,11 +56,11 @@ enum BackgroundTaskState: String, Sendable {
     }
 
     var isActive: Bool {
-        self == .queued || self == .running
+        self == .queued || self == .running || self == .pausing || self == .paused
     }
 }
 
-struct BackgroundTaskSnapshot: Identifiable, Sendable {
+struct BackgroundTaskSnapshot: Identifiable, Codable, Sendable {
     let id: UUID
     var kind: BackgroundTaskKind
     var state: BackgroundTaskState

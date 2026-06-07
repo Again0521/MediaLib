@@ -14,7 +14,10 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
     public var genre: String?
     public var posterPath: String?
     public var backdropPath: String?
+    /// 服务端 / TMDB 等资料源评分，按 0-10 口径保存；用户五角星评级单独写入 userRating。
     public var rating: Double?
+    /// 用户手动评级，按 1-5 星口径保存。nil 表示用户尚未评级。
+    public var userRating: Double?
     public var runtime: Int?
     public var sourcePath: String?
     public var parentID: String?
@@ -57,6 +60,7 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
         posterPath: String? = nil,
         backdropPath: String? = nil,
         rating: Double? = nil,
+        userRating: Double? = nil,
         runtime: Int? = nil,
         sourcePath: String? = nil,
         parentID: String? = nil,
@@ -99,6 +103,7 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
         self.posterPath = posterPath
         self.backdropPath = backdropPath
         self.rating = rating
+        self.userRating = userRating
         self.runtime = runtime
         self.sourcePath = sourcePath
         self.parentID = parentID

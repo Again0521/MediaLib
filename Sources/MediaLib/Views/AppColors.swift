@@ -111,13 +111,29 @@ enum AppColors {
             cardAquaWash = AppColors.dynamic(
                 light: theme.lightLight.appThemeWithAlpha(0.13),
                 dark:  theme.lightDark.appThemeAdjustingBrightness(by: 0.5).appThemeWithAlpha(0.16))
-            pointerLightTint = AppColors.dynamic(light: theme.lightLight, dark: theme.lightDark)
+            // Hover / pointer light is part of the selected theme, not a fixed blue wash.
+            // Start from the user-controlled top-left light, then gently fold in the
+            // highlight color so coral/lime/apricot/night presets keep their own hover tone.
+            let pointerLight = theme.lightLight
+                .appThemeBlended(toward: theme.highlightLight.appThemeLightened(by: 0.42), fraction: 0.24)
+                .appThemeSaturated(by: 0.72)
+                .appThemeLightened(by: 0.08)
+            let pointerDark = theme.lightDark
+                .appThemeBlended(toward: theme.highlightDark.appThemeLightened(by: 0.12), fraction: 0.34)
+                .appThemeSaturated(by: 0.96)
+                .appThemeAdjustingBrightness(by: 1.08)
+            pointerLightTint = AppColors.dynamic(light: pointerLight, dark: pointerDark)
             solarLightTint = AppColors.dynamic(
-                light: theme.lightLight.appThemeLightened(by: 0.35),
-                dark:  theme.lightDark.appThemeLightened(by: 0.10))
+                light: pointerLight.appThemeLightened(by: 0.18),
+                dark:  pointerDark.appThemeLightened(by: 0.08))
             solarEdgeTint = AppColors.dynamic(
-                light: theme.lightLight.appThemeSaturated(by: 1.25).appThemeAdjustingBrightness(by: 0.96),
-                dark:  theme.lightDark.appThemeSaturated(by: 1.22))
+                light: pointerLight
+                    .appThemeBlended(toward: theme.highlightLight, fraction: 0.18)
+                    .appThemeSaturated(by: 0.98)
+                    .appThemeAdjustingBrightness(by: 0.96),
+                dark:  pointerDark
+                    .appThemeBlended(toward: theme.highlightDark, fraction: 0.18)
+                    .appThemeSaturated(by: 1.06))
             selectedGlassTint = AppColors.dynamic(light: theme.highlightLight, dark: theme.highlightDark)
             primary = AppColors.dynamic(light: theme.tokens.primary.light, dark: theme.tokens.primary.dark)
             secondary = AppColors.dynamic(light: theme.tokens.secondary.light, dark: theme.tokens.secondary.dark)
@@ -190,6 +206,7 @@ enum AppMotion {
     static let standard = Animation.spring(response: 0.38, dampingFraction: 0.88)
     static let page = Animation.spring(response: 0.48, dampingFraction: 0.89)
     static let panel = Animation.spring(response: 0.46, dampingFraction: 0.88, blendDuration: 0.06)
+    static let notice = Animation.spring(response: 0.42, dampingFraction: 0.84, blendDuration: 0.04)
     static let sidebar = Animation.spring(response: 0.46, dampingFraction: 0.90)
     static let sidebarSelection = Animation.easeOut(duration: 0.001)
     // #4 音乐展开/收起是重点：把弹簧调得更紧凑（response 0.56→0.46），缩短重合成阶段的时长，
@@ -983,18 +1000,15 @@ private struct PointerInspectTiltModifier: ViewModifier {
 
 private struct PointerScrollActivityMonitor: NSViewRepresentable {
     let onScroll: () -> Void
-    let onPointerMove: () -> Void
 
     func makeNSView(context: Context) -> MonitorView {
         let view = MonitorView(frame: .zero)
         view.onScroll = onScroll
-        view.onPointerMove = onPointerMove
         return view
     }
 
     func updateNSView(_ nsView: MonitorView, context: Context) {
         nsView.onScroll = onScroll
-        nsView.onPointerMove = onPointerMove
     }
 
     static func dismantleNSView(_ nsView: MonitorView, coordinator: ()) {
@@ -1003,9 +1017,7 @@ private struct PointerScrollActivityMonitor: NSViewRepresentable {
 
     final class MonitorView: NSView {
         var onScroll: (() -> Void)?
-        var onPointerMove: (() -> Void)?
         private var scrollMonitor: Any?
-        private var pointerMonitor: Any?
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -1021,14 +1033,10 @@ private struct PointerScrollActivityMonitor: NSViewRepresentable {
                 NSEvent.removeMonitor(scrollMonitor)
                 self.scrollMonitor = nil
             }
-            if let pointerMonitor {
-                NSEvent.removeMonitor(pointerMonitor)
-                self.pointerMonitor = nil
-            }
         }
 
         private func startMonitoring() {
-            guard scrollMonitor == nil, pointerMonitor == nil else { return }
+            guard scrollMonitor == nil else { return }
             scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
                 guard let self,
                       let window,
@@ -1041,18 +1049,133 @@ private struct PointerScrollActivityMonitor: NSViewRepresentable {
                 }
                 return event
             }
-            pointerMonitor = NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { [weak self] event in
-                guard let self,
-                      let window,
-                      event.window === window else {
-                    return event
-                }
-                let point = convert(event.locationInWindow, from: nil)
-                if bounds.contains(point) {
-                    onPointerMove?()
-                }
+        }
+
+        deinit {
+            stopMonitoring()
+        }
+    }
+}
+
+private struct HorizontalMouseDragScrollMonitor: NSViewRepresentable {
+    let onDraggingChanged: (Bool) -> Void
+
+    func makeNSView(context: Context) -> MonitorView {
+        let view = MonitorView(frame: .zero)
+        view.onDraggingChanged = onDraggingChanged
+        return view
+    }
+
+    func updateNSView(_ nsView: MonitorView, context: Context) {
+        nsView.onDraggingChanged = onDraggingChanged
+    }
+
+    static func dismantleNSView(_ nsView: MonitorView, coordinator: ()) {
+        nsView.stopMonitoring()
+    }
+
+    final class MonitorView: NSView {
+        var onDraggingChanged: ((Bool) -> Void)?
+        private var mouseDownMonitor: Any?
+        private var mouseDraggedMonitor: Any?
+        private var mouseUpMonitor: Any?
+        private weak var activeScrollView: NSScrollView?
+        private var dragStartLocation: CGPoint?
+        private var dragStartOrigin: CGPoint = .zero
+        private var didCrossDragThreshold = false
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil {
+                stopMonitoring()
+            } else {
+                startMonitoring()
+            }
+        }
+
+        func stopMonitoring() {
+            for monitor in [mouseDownMonitor, mouseDraggedMonitor, mouseUpMonitor].compactMap({ $0 }) {
+                NSEvent.removeMonitor(monitor)
+            }
+            mouseDownMonitor = nil
+            mouseDraggedMonitor = nil
+            mouseUpMonitor = nil
+            finishDrag()
+        }
+
+        private func startMonitoring() {
+            guard mouseDownMonitor == nil else { return }
+            mouseDownMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
+                self?.beginDragIfNeeded(with: event)
                 return event
             }
+            mouseDraggedMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged]) { [weak self] event in
+                let consumed = self?.updateDrag(with: event) ?? false
+                return consumed ? nil : event
+            }
+            mouseUpMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
+                let consumed = self?.finishDrag() ?? false
+                return consumed ? nil : event
+            }
+        }
+
+        private func beginDragIfNeeded(with event: NSEvent) {
+            guard let window,
+                  event.window === window,
+                  bounds.width > 1,
+                  bounds.height > 1 else { return }
+            let localPoint = convert(event.locationInWindow, from: nil)
+            guard bounds.contains(localPoint),
+                  let scrollView = enclosingHorizontalScrollView(),
+                  scrollView.documentView != nil else { return }
+            activeScrollView = scrollView
+            dragStartLocation = event.locationInWindow
+            dragStartOrigin = scrollView.contentView.bounds.origin
+            didCrossDragThreshold = false
+        }
+
+        private func updateDrag(with event: NSEvent) -> Bool {
+            guard let scrollView = activeScrollView,
+                  let dragStartLocation else { return false }
+            let deltaX = event.locationInWindow.x - dragStartLocation.x
+            guard abs(deltaX) > 1 else { return false }
+            if !didCrossDragThreshold, abs(deltaX) > 4 {
+                didCrossDragThreshold = true
+                onDraggingChanged?(true)
+            }
+
+            let documentWidth = scrollView.documentView?.bounds.width ?? 0
+            let visibleWidth = scrollView.contentView.bounds.width
+            let maxX = max(documentWidth - visibleWidth, 0)
+            let nextX = min(max(dragStartOrigin.x - deltaX, 0), maxX)
+            guard nextX != scrollView.contentView.bounds.origin.x else { return didCrossDragThreshold }
+            scrollView.contentView.scroll(to: CGPoint(x: nextX, y: scrollView.contentView.bounds.origin.y))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            return didCrossDragThreshold
+        }
+
+        @discardableResult
+        private func finishDrag() -> Bool {
+            let consumed = didCrossDragThreshold
+            if didCrossDragThreshold {
+                onDraggingChanged?(false)
+            }
+            activeScrollView = nil
+            dragStartLocation = nil
+            didCrossDragThreshold = false
+            return consumed
+        }
+
+        private func enclosingHorizontalScrollView() -> NSScrollView? {
+            var view: NSView? = self
+            while let current = view {
+                if let scrollView = current as? NSScrollView,
+                   scrollView.hasHorizontalScroller || scrollView.horizontalScroller != nil || (scrollView.documentView?.bounds.width ?? 0) > scrollView.contentView.bounds.width {
+                    return scrollView
+                }
+                view = current.superview
+            }
+            return enclosingScrollView
         }
 
         deinit {
@@ -1137,8 +1260,6 @@ private struct SuppressHoverDuringScrollModifier: ViewModifier {
             .background {
                 PointerScrollActivityMonitor {
                     markScrolling()
-                } onPointerMove: {
-                    finishScrollingSoon()
                 }
                 .allowsHitTesting(false)
             }
@@ -1155,20 +1276,13 @@ private struct SuppressHoverDuringScrollModifier: ViewModifier {
         resetTask?.cancel()
         resetTask = Task { @MainActor in
             do {
-                try await Task.sleep(nanoseconds: 90_000_000)
+                try await Task.sleep(nanoseconds: 220_000_000)
             } catch {
                 return
             }
             isScrolling = false
             resetTask = nil
         }
-    }
-
-    private func finishScrollingSoon() {
-        guard isScrolling else { return }
-        resetTask?.cancel()
-        isScrolling = false
-        resetTask = nil
     }
 }
 
@@ -1255,6 +1369,13 @@ extension View {
 
     func suppressHoverEffectsDuringScroll() -> some View {
         modifier(SuppressHoverDuringScrollModifier())
+    }
+
+    func horizontalMouseDragScroll(onDraggingChanged: @escaping (Bool) -> Void = { _ in }) -> some View {
+        background {
+            HorizontalMouseDragScrollMonitor(onDraggingChanged: onDraggingChanged)
+                .allowsHitTesting(false)
+        }
     }
 
     func suppressListHighlight() -> some View {
@@ -2409,25 +2530,30 @@ private struct MediaIconVisual {
     private enum Palette { case video, music, source, vault, settings, metadata, status, warm, gold }
 
     private static func palette(_ palette: Palette) -> [Color] {
+        let themed = AppColors.themedIconColors
+        let primary = themed.first ?? AppColors.selectedGlassTint
+        let secondary = themed.dropFirst().first ?? AppColors.solarEdgeTint
+        let tertiary = themed.dropFirst(2).first ?? AppColors.solarLightTint
+
         switch palette {
         case .video:
-            return [Color(nsColor: .systemCyan), Color(nsColor: .systemBlue), Color(nsColor: .systemIndigo)]
+            return [secondary, primary, tertiary]
         case .music:
-            return [Color(nsColor: .systemBlue), Color(nsColor: .systemCyan), Color(nsColor: .systemTeal)]
+            return [primary, secondary, AppColors.solarLightTint]
         case .source:
-            return [Color(nsColor: .systemTeal), Color(nsColor: .systemBlue), Color(nsColor: .systemGreen)]
+            return [secondary, AppColors.solarEdgeTint, tertiary]
         case .vault:
-            return [Color(nsColor: .systemIndigo), Color(nsColor: .systemBlue), Color(nsColor: .systemTeal)]
+            return [tertiary, primary, secondary]
         case .settings:
-            return [Color(nsColor: .systemBlue), Color(nsColor: .systemCyan), Color(nsColor: .systemTeal)]
+            return [primary, AppColors.solarEdgeTint, secondary]
         case .metadata:
-            return [Color(nsColor: .systemCyan), Color(nsColor: .systemTeal), Color(nsColor: .systemMint)]
+            return [secondary, AppColors.solarLightTint, tertiary]
         case .status:
-            return [Color(nsColor: .systemBlue), Color(nsColor: .systemCyan), Color(nsColor: .systemTeal)]
+            return [primary, secondary, tertiary]
         case .warm:
-            return [Color(nsColor: .systemCyan), Color(nsColor: .systemBlue), Color(nsColor: .systemMint)]
+            return [AppColors.solarLightTint, secondary, primary]
         case .gold:
-            return [Color(nsColor: .systemCyan), Color(nsColor: .systemTeal), Color(nsColor: .systemBlue)]
+            return [AppColors.solarLightTint, tertiary, secondary]
         }
     }
 }
@@ -2609,9 +2735,12 @@ struct GlassSearchField: View {
     let placeholder: String
     @Binding var text: String
     var thickness: Double = 1.28
+    var minWidth: CGFloat = 170
+    var maxWidth: CGFloat = 260
 
     var body: some View {
         let depth = min(max(thickness, 0.8), 2.0)
+        let width = adaptiveSearchWidth
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(Color.primary.opacity(0.56))
@@ -2630,7 +2759,7 @@ struct GlassSearchField: View {
         }
         .padding(.horizontal, 13)
         .padding(.vertical, 9)
-        .frame(width: 260)
+        .frame(width: width)
         .modifier(HeaderControlGlassBackground(
             cornerRadius: 18,
             focused: isFocused,
@@ -2639,6 +2768,13 @@ struct GlassSearchField: View {
         ))
         .pointerLiquidEdge(cornerRadius: 18, intensity: (isFocused ? 1.22 : 1.04) * depth)
         .animation(AppMotion.fast, value: isFocused)
+    }
+
+    private var adaptiveSearchWidth: CGFloat {
+        let displayText = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? placeholder : text
+        let font = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        let measured = (displayText as NSString).size(withAttributes: [.font: font]).width + 86
+        return min(max(ceil(measured), minWidth), maxWidth)
     }
 }
 
@@ -2958,6 +3094,11 @@ enum ArtworkImageCache {
             return nil
         }
         return image
+    }
+
+    @discardableResult
+    static func prewarmRemoteImage(url: URL, targetSize: CGSize? = nil) async -> Bool {
+        await remoteImageAsync(url: url, targetSize: targetSize) != nil
     }
 
     static func invalidateMissing(path: String?) {

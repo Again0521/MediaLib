@@ -97,6 +97,7 @@ enum EmbyLibrarySection: String, CaseIterable, Identifiable, Sendable {
     case videos
     case music
     case recent
+    case watchlist
     case favorites
 
     var id: String { rawValue }
@@ -106,6 +107,7 @@ enum EmbyLibrarySection: String, CaseIterable, Identifiable, Sendable {
         case .videos: return "视频"
         case .music: return "音乐"
         case .recent: return "最近播放"
+        case .watchlist: return "想看"
         case .favorites: return "收藏"
         }
     }
@@ -115,6 +117,7 @@ enum EmbyLibrarySection: String, CaseIterable, Identifiable, Sendable {
         case .videos: return "play.tv"
         case .music: return "music.note"
         case .recent: return "clock.arrow.circlepath"
+        case .watchlist: return "bookmark"
         case .favorites: return "heart"
         }
     }
@@ -375,6 +378,22 @@ struct ContentView: View {
                     .zIndex(60)
             }
         }
+        .overlay(alignment: .topLeading) {
+            GeometryReader { noticeGeometry in
+                let leadingInset = floatingNoticeContentLeadingInset(for: noticeGeometry.size.width)
+                let contentWidth = max(noticeGeometry.size.width - leadingInset, 0)
+                FloatingNoticeStack(
+                    availableWidth: contentWidth,
+                    notices: appState.floatingNotices,
+                    onDismiss: { appState.dismissFloatingNotice(id: $0) }
+                )
+                .frame(width: contentWidth, alignment: .top)
+                .padding(.leading, leadingInset)
+                .padding(.top, 14)
+                .zIndex(90)
+            }
+            .allowsHitTesting(!appState.floatingNotices.isEmpty)
+        }
         .animation(.easeOut(duration: 0.4), value: appState.sakuraEasterEggActive)
         .background {
             VideoPlayerWindowPresenter(item: videoPlayerBinding)
@@ -559,11 +578,20 @@ struct ContentView: View {
                         }
                         .buttonStyle(SidebarInlineActionButtonStyle())
                     } label: {
-                        HStack(spacing: 10) {
-                            PlayfulSymbolIcon(systemImage: "film", size: 22)
-                            Text("视频")
-                        }
+                        Button {
+                            withAnimation(AppMotion.sidebar) {
+                                isVideoExpanded.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 10) {
+                                PlayfulSymbolIcon(systemImage: "film", size: 22)
+                                Text("视频")
+                                Spacer(minLength: 0)
+                            }
                             .font(.callout.weight(.semibold))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
 
                     sidebarGroupSpacer
@@ -581,11 +609,20 @@ struct ContentView: View {
                             }
                         }
                     } label: {
-                        HStack(spacing: 10) {
-                            PlayfulSymbolIcon(systemImage: "music.note", size: 22)
-                            Text("音乐")
-                        }
+                        Button {
+                            withAnimation(AppMotion.sidebar) {
+                                isMusicExpanded.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 10) {
+                                PlayfulSymbolIcon(systemImage: "music.note", size: 22)
+                                Text("音乐")
+                                Spacer(minLength: 0)
+                            }
                             .font(.callout.weight(.semibold))
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
 
                     // 每个 Emby 来源各自一个一级目录（可重命名），内含该源的分区与媒体库。
@@ -614,13 +651,19 @@ struct ContentView: View {
             .onChange(of: selection) { _ in
                 storedSelectionID = selection?.id ?? "home"
                 appState.selectedItem = nil
+                appState.selectedItemReturnAnchorID = nil
             }
         } detail: {
             ZStack {
                 if let startupError = appState.startupError {
                     StartupErrorView(message: startupError)
                 } else if let selectedItem = appState.selectedItem {
-                    DetailView(item: selectedItem)
+                    let destination = selection ?? .home
+                    DetailView(
+                        item: selectedItem,
+                        sourceTitle: title(for: destination),
+                        sourceSystemImage: destination.systemImage
+                    )
                 } else {
                     detailView(for: selection ?? .home)
                 }
@@ -678,6 +721,13 @@ struct ContentView: View {
         return .full
     }
 
+    private func floatingNoticeContentLeadingInset(for width: CGFloat) -> CGFloat {
+        guard !musicExpandedOverlayActive, width >= 900, columnVisibility != .detailOnly else {
+            return 0
+        }
+        return 240
+    }
+
     private func handleMusicMiniPlayerScroll(_ direction: MusicMiniPlayerScrollDirection) {
         guard appState.activePlayerItem?.type == .music, !musicPlayerExpanded else { return }
         if !musicMiniPlayerCollapsed {
@@ -711,7 +761,10 @@ struct ContentView: View {
         }
         musicTransitionTask = Task { @MainActor in
             await Task.yield()
-            guard appState.activePlayerItem?.type == .music, musicPlayerExpanded else { return }
+            guard appState.activePlayerItem?.type == .music, musicPlayerExpanded else {
+                finishInterruptedMusicTransition(expanded: false)
+                return
+            }
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
@@ -725,7 +778,10 @@ struct ContentView: View {
             // 系统掉帧的高峰窗口。收紧到 0.80s（仍在稳定点之后留 ~0.1–0.25s 安全余量，不触发白条），
             // 把双挂载峰值时长压掉约 30%，更早释放背后海报显存。
             do { try await Task.sleep(nanoseconds: 800_000_000) } catch { return }
-            guard appState.activePlayerItem?.type == .music, musicPlayerExpanded, musicImmersive else { return }
+            guard appState.activePlayerItem?.type == .music, musicPlayerExpanded, musicImmersive else {
+                finishInterruptedMusicTransition(expanded: appState.activePlayerItem?.type == .music && musicPlayerExpanded)
+                return
+            }
             withTransaction(transaction) {
                 musicBackgroundRootSuspended = true
                 musicTransitionShieldActive = false
@@ -767,13 +823,19 @@ struct ContentView: View {
                 // 先给背后的列表/海报墙一小段预热时间，再让全屏播放器退场。
                 do { try await Task.sleep(nanoseconds: 70_000_000) } catch { return }
             }
-            guard appState.activePlayerItem?.type == .music, musicPlayerExpanded else { return }
+            guard appState.activePlayerItem?.type == .music, musicPlayerExpanded else {
+                finishInterruptedMusicTransition(expanded: false)
+                return
+            }
             withAnimation(AppMotion.musicPlayer) {
                 musicPlayerExpanded = false
             }
             // 配合更紧凑的 musicPlayer 弹簧，缩短收起时 overlay 与 chrome 恢复的重合窗口。
             do { try await Task.sleep(nanoseconds: 400_000_000) } catch { return }
-            guard appState.activePlayerItem?.type == .music, !musicPlayerExpanded else { return }
+            guard appState.activePlayerItem?.type == .music, !musicPlayerExpanded else {
+                finishInterruptedMusicTransition(expanded: appState.activePlayerItem?.type == .music && musicPlayerExpanded)
+                return
+            }
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
@@ -782,6 +844,19 @@ struct ContentView: View {
             }
             musicTransitionSuppressesBackground = false
         }
+    }
+
+    private func finishInterruptedMusicTransition(expanded: Bool) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            musicBackgroundRootSuspended = expanded
+            musicPlayerExpanded = expanded
+            musicImmersive = expanded
+            musicTransitionShieldActive = false
+            musicMiniPlayerCollapsed = false
+        }
+        musicTransitionSuppressesBackground = false
     }
 
     private func restoreSidebarAfterMusic() {
@@ -910,14 +985,18 @@ struct ContentView: View {
         }
         .tag(SidebarDestination.smartCollection(collection.id))
         .contextMenu {
-            Button("编辑") {
+            Button {
                 smartCollectionEditor = .edit(collection)
+            } label: {
+                Label("编辑", systemImage: "pencil")
             }
-            Button("删除", role: .destructive) {
+            Button(role: .destructive) {
                 if selection == .smartCollection(collection.id) {
                     selection = .home
                 }
                 appState.deleteVideoSmartCollection(collection)
+            } label: {
+                Label("删除", systemImage: "trash")
             }
         }
     }
@@ -936,14 +1015,26 @@ struct ContentView: View {
                 sidebarRow(.embyLibrary(library.id))
             }
         } label: {
-            HStack(spacing: 10) {
-                PlayfulSymbolIcon(systemImage: "server.rack", size: 22)
-                Text(source.name)
+            Button {
+                let binding = embyExpansionBinding(source.id)
+                withAnimation(AppMotion.sidebar) {
+                    binding.wrappedValue.toggle()
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    PlayfulSymbolIcon(systemImage: "server.rack", size: 22)
+                    Text(source.name)
+                    Spacer(minLength: 0)
+                }
+                .font(.callout.weight(.semibold))
+                .contentShape(Rectangle())
             }
-            .font(.callout.weight(.semibold))
+            .buttonStyle(.plain)
             .contextMenu {
-                Button("重命名") {
+                Button {
                     embyRenameRequest = EmbyRenameRequest(sourceID: source.id, name: source.name)
+                } label: {
+                    Label("重命名", systemImage: "pencil")
                 }
             }
         }
@@ -969,14 +1060,18 @@ struct ContentView: View {
         }
         .tag(SidebarDestination.musicSmartPlaylist(playlist.id))
         .contextMenu {
-            Button("编辑") {
+            Button {
                 musicSmartPlaylistEditor = .edit(playlist)
+            } label: {
+                Label("编辑", systemImage: "pencil")
             }
-            Button("删除", role: .destructive) {
+            Button(role: .destructive) {
                 if selection == .musicSmartPlaylist(playlist.id) {
                     selection = .home
                 }
                 appState.deleteMusicSmartPlaylist(playlist)
+            } label: {
+                Label("删除", systemImage: "trash")
             }
         }
     }
@@ -1320,7 +1415,7 @@ private struct MusicExpansionWindowBackdropGuard: NSViewRepresentable {
 private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
     let hiddenForMusicOverlay: Bool
     let hideSidebarToggleForMusicOverlay: Bool
-    private static let minimumContentSize = NSSize(width: 1080, height: 700)
+    private static let minimumContentSize = NSSize(width: 1180, height: 740)
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -1833,5 +1928,164 @@ struct EmbySourceRenameSheet: View {
             }
         }
         .appSheetChrome(width: 460)
+    }
+}
+
+private struct FloatingNoticeStack: View {
+    let availableWidth: CGFloat
+    let notices: [AppFloatingNotice]
+    let onDismiss: (UUID) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let stackHorizontalPadding: CGFloat = 20
+        let capsuleMaxWidth = min(max(availableWidth - stackHorizontalPadding * 2, 180), 560)
+        VStack(spacing: 8) {
+            ForEach(notices) { notice in
+                FloatingNoticeCapsule(
+                    notice: notice,
+                    maxWidth: capsuleMaxWidth
+                ) {
+                    onDismiss(notice.id)
+                }
+                .transition(
+                    .move(edge: .top)
+                        .combined(with: .opacity)
+                        .combined(with: .scale(scale: 0.96, anchor: .top))
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .top)
+        .padding(.horizontal, stackHorizontalPadding)
+        .animation(reduceMotion ? nil : AppMotion.notice, value: notices)
+        .allowsHitTesting(!notices.isEmpty)
+    }
+}
+
+private struct FloatingNoticeCapsule: View {
+    let notice: AppFloatingNotice
+    let maxWidth: CGFloat
+    let onDismiss: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovering = false
+
+    var body: some View {
+        let active = isHovering
+        let capsuleWidth = resolvedWidth
+        let textWidth = max(capsuleWidth - Self.horizontalChromeWidth, Self.minimumTextWidth)
+        HStack(spacing: 10) {
+            Image(systemName: notice.kind.systemImage)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(kindTint.opacity(colorScheme == .dark ? 0.98 : 0.94))
+                .symbolRenderingMode(.monochrome)
+                .frame(width: Self.sideSlotWidth, height: Self.sideSlotWidth)
+
+            VStack(alignment: .center, spacing: 1) {
+                Text(notice.title)
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(notice.message == nil ? 2 : 1)
+                    .truncationMode(.middle)
+                if let message = notice.message, !message.isEmpty {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+            }
+            .multilineTextAlignment(.center)
+            .frame(width: textWidth, alignment: .center)
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .frame(width: Self.sideSlotWidth, height: Self.sideSlotWidth)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("关闭")
+        }
+        .padding(.horizontal, Self.horizontalPadding)
+        .padding(.vertical, notice.message == nil ? 8 : 9)
+        .frame(width: capsuleWidth, alignment: .center)
+        .fixedSize(horizontal: false, vertical: true)
+        .background {
+            Capsule(style: .continuous)
+                .fill(.thinMaterial)
+        }
+        .background {
+            Capsule(style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(colorScheme == .dark ? 0.20 : 0.70),
+                            AppColors.cleanPanelFill.opacity(colorScheme == .dark ? 0.62 : 0.84),
+                            kindTint.opacity(colorScheme == .dark ? 0.16 : 0.12)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        }
+        .overlay {
+            Capsule(style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(colorScheme == .dark ? 0.42 : 0.92),
+                            AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.18 : 0.28),
+                            kindTint.opacity(colorScheme == .dark ? 0.26 : 0.20),
+                            Color.black.opacity(colorScheme == .dark ? 0.12 : 0.045)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 0.9
+                )
+        }
+        .shadow(color: kindTint.opacity(colorScheme == .dark ? 0.18 : 0.12), radius: active ? 18 : 12, x: 0, y: active ? 9 : 6)
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: active ? 20 : 14, x: 0, y: active ? 12 : 8)
+        .scaleEffect(active ? 1.012 : 1)
+        .onHover { hovering in
+            isHovering = hovering
+        }
+        .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
+    }
+
+    private static let sideSlotWidth: CGFloat = 24
+    private static let horizontalPadding: CGFloat = 8
+    private static let textSpacing: CGFloat = 20
+    private static let horizontalChromeWidth = sideSlotWidth * 2 + horizontalPadding * 2 + textSpacing
+    private static let minimumTextWidth: CGFloat = 48
+    private static let minimumWidth: CGFloat = horizontalChromeWidth + minimumTextWidth
+
+    private var resolvedWidth: CGFloat {
+        let titleWidth = measuredTextWidth(for: notice.title, font: .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold))
+        let messageWidth = measuredTextWidth(for: notice.message ?? "", font: .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular))
+        let maximumTextWidth = max(maxWidth - Self.horizontalChromeWidth, Self.minimumTextWidth)
+        let contentWidth = min(max(titleWidth, messageWidth), maximumTextWidth)
+        return min(max(ceil(contentWidth) + Self.horizontalChromeWidth, Self.minimumWidth), maxWidth)
+    }
+
+    private func measuredTextWidth(for text: String, font: NSFont) -> CGFloat {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return 0 }
+        return (trimmed as NSString).size(withAttributes: [.font: font]).width
+    }
+
+    private var kindTint: Color {
+        switch notice.kind {
+        case .info:
+            return AppColors.selectedGlassTint
+        case .success:
+            return AppColors.success
+        case .warning:
+            return AppColors.warning
+        case .error:
+            return AppColors.error
+        case .tip:
+            return AppColors.selectedGlassTint
+        }
     }
 }

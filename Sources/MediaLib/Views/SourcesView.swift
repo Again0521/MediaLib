@@ -26,9 +26,9 @@ struct SourcesView: View {
 
                 if appState.sources.isEmpty {
                     EmptyStateView(
-                        title: "还没有媒体源",
+                        title: "媒体源待添加",
                         systemImage: "externaldrive.badge.plus",
-                        message: "添加本地文件夹、移动硬盘、网络挂载或 Emby 媒体库后即可开始扫描。"
+                        message: "接入本地文件夹、移动硬盘、网络挂载或 Emby 媒体库后，MediaLIB 会整理索引。"
                     )
                     .frame(minHeight: 320)
                 } else {
@@ -44,6 +44,16 @@ struct SourcesView: View {
         .suppressHoverEffectsDuringScroll()
         .background(AppPageBackground())
         .navigationTitle("媒体源")
+        .onAppear {
+            appState.showInterfaceTipOnce(
+                key: "sources.health.metadata.toggles",
+                message: "每个媒体源都可以单独决定是否参与元数据拉取和健康检查。"
+            )
+            appState.showInterfaceTipOnce(
+                key: "sources.emby.rename.context",
+                message: "EMBY 来源名称不合适时，可以在左侧栏右键它来重命名。"
+            )
+        }
         .sheet(item: $typeSelectionRequest, onDismiss: {
             pendingSourceURLs = []
         }) { request in
@@ -228,7 +238,7 @@ private struct NetworkMediaSourceSheet: View {
 
     private func connectAndPickDirectory() {
         guard let url = credentialURL else {
-            appState.alert = AppAlert(title: "网络地址无效", message: "请输入 smb://、ftp:// 或 ftps:// 开头的地址。")
+            appState.alert = AppAlert(title: "网络地址无效", message: "地址需以 smb://、ftp:// 或 ftps:// 开头。")
             return
         }
         NSWorkspace.shared.open(url)
@@ -482,6 +492,9 @@ struct SourceRowView: View {
                         set: { newValue in
                             var updated = source
                             updated.includeInMetadataFetch = newValue
+                            if !newValue {
+                                updated.preferMetadataWriteToSource = false
+                            }
                             appState.updateSource(updated)
                         }
                     ))
@@ -493,6 +506,34 @@ struct SourceRowView: View {
                             appState.updateSource(updated)
                         }
                     ))
+                    if source.sourceKind != .emby {
+                        Toggle("元数据优先写入源目录", isOn: Binding(
+                            get: { source.preferMetadataWriteToSource },
+                            set: { newValue in
+                                var updated = source
+                                updated.preferMetadataWriteToSource = newValue
+                                appState.updateSource(updated)
+                            }
+                        ))
+                        .disabled(!source.includeInMetadataFetch)
+                    } else {
+                        Divider()
+                        Picker("痕迹数据同步", selection: Binding(
+                            get: { source.remoteTraceSyncMode },
+                            set: { mode in
+                                var updated = source
+                                updated.remoteTraceSyncMode = mode
+                                appState.updateSource(updated)
+                            }
+                        )) {
+                            ForEach(RemoteTraceSyncMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                        Text(source.remoteTraceSyncMode.detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 if !isReachable {
@@ -567,6 +608,12 @@ struct SourceRowView: View {
     }
 
     private var participationTitle: String {
+        if source.includeInMetadataFetch, source.preferMetadataWriteToSource, source.sourceKind != .emby {
+            return "元数据写回优先"
+        }
+        if source.sourceKind == .emby {
+            return source.remoteTraceSyncMode.shortTitle
+        }
         switch (source.includeInMetadataFetch, source.includeInHealthCheck) {
         case (true, true): return "元数据与健康检查"
         case (true, false): return "仅元数据拉取"

@@ -137,7 +137,10 @@ struct PosterGridList<Leading: View>: View {
     var bottomInset: CGFloat = 16
     var showsDeletePlaybackHistory: Bool = false
     var selectionEnabled: Bool = false
+    var restoreAnchorID: String? = nil
+    var onDidRestoreAnchor: (() -> Void)? = nil
     @ViewBuilder var leading: () -> Leading
+    @State private var restoredAnchorID: String?
 
     private let interItemSpacing: CGFloat = 20
     private let rowSpacing: CGFloat = 30
@@ -169,6 +172,7 @@ struct PosterGridList<Leading: View>: View {
                         LazyVGrid(columns: gridItems, alignment: .leading, spacing: rowSpacing) {
                             ForEach(items) { item in
                                 PosterCardView(item: item, cacheTargetSize: cacheSize, showsDeletePlaybackHistory: showsDeletePlaybackHistory, selectionEnabled: selectionEnabled)
+                                    .id(item.id)
                             }
                         }
                         .padding(.horizontal, AppSpacing.pageHorizontal)
@@ -176,8 +180,19 @@ struct PosterGridList<Leading: View>: View {
                         Color.clear.frame(height: bottomInset)
                     }
                 }
-                .animation(AppMotion.standard, value: columns)
+                // 列数变化通常来自窗口缩放；避免把整棵 LazyVGrid 卷入显式动画事务，
+                // 滚动和筛选刷新时能少一次大范围布局合成压力。
+                .animation(nil, value: columns)
                 .suppressListHighlight()
+                .onAppear {
+                    restoreAnchorIfNeeded(restoreAnchorID, scrollProxy: scrollProxy)
+                }
+                .onChange(of: restoreAnchorID) { anchorID in
+                    restoreAnchorIfNeeded(anchorID, scrollProxy: scrollProxy)
+                }
+                .onChange(of: items.map(\.id)) { _ in
+                    restoreAnchorIfNeeded(restoreAnchorID, scrollProxy: scrollProxy)
+                }
                 .overlay(alignment: .bottomTrailing) {
                     Button {
                         withAnimation(AppMotion.fast) {
@@ -213,6 +228,20 @@ struct PosterGridList<Leading: View>: View {
     private func cacheTargetSize(itemWidth: CGFloat) -> CGSize {
         let targetWidth = min(max(itemWidth * 1.6, 180), 460)
         return CGSize(width: targetWidth, height: targetWidth * 1.5)
+    }
+
+    private func restoreAnchorIfNeeded(_ anchorID: String?, scrollProxy: ScrollViewProxy) {
+        guard let anchorID,
+              restoredAnchorID != anchorID,
+              items.contains(where: { $0.id == anchorID }) else { return }
+        restoredAnchorID = anchorID
+        Task { @MainActor in
+            await Task.yield()
+            withAnimation(AppMotion.page) {
+                scrollProxy.scrollTo(anchorID, anchor: .center)
+            }
+            onDidRestoreAnchor?()
+        }
     }
 }
 
@@ -374,7 +403,7 @@ struct PosterCardView: View {
 
                 if hoverActive && !isSelectionActive {
                     VStack(alignment: .leading, spacing: 7) {
-                        RatingStars(value: item.rating, onRate: { rating in
+                        RatingStars(value: item.userRating, onRate: { rating in
                             appState.updateRating(item, rating: rating)
                         })
                         if let artistAlbum = item.artistAlbumLine {
@@ -440,22 +469,30 @@ struct PosterCardView: View {
         }
         .contextMenu {
             if item.type != .episode {
-                Button("播放") {
+                Button {
                     appState.play(item)
+                } label: {
+                    Label("播放", systemImage: "play.fill")
                 }
                 .disabled(item.filePath == nil && appState.children(for: item).isEmpty)
             }
 
+            VideoCacheMenuItems(item: item)
+
             if item.type == .music, item.filePath != nil {
-                Button("开始电台") {
+                Button {
                     appState.startRadio(seed: item)
+                } label: {
+                    Label("开始电台", systemImage: "dot.radiowaves.left.and.right")
                 }
             }
 
             // 播放痕迹页和已解锁保险库允许直接清除当前条目的播放记录。
             if showsDeletePlaybackHistory, item.hasPlaybackTrace {
-                Button("删除播放记录", role: .destructive) {
+                Button(role: .destructive) {
                     appState.clearPlaybackHistory(item)
+                } label: {
+                    Label("删除播放记录", systemImage: "clock.badge.xmark")
                 }
             }
 
@@ -463,34 +500,48 @@ struct PosterCardView: View {
             // 存在已观看标记时额外提供“清除已观看”。
             markWatchedMenuItems
 
-            Button(item.watchlist ? "移出想看" : "加入想看") {
+            Button {
                 appState.toggleWatchlist(item)
+            } label: {
+                Label(item.watchlist ? "移出想看" : "加入想看", systemImage: item.watchlist ? "bookmark.slash" : "bookmark")
             }
 
-            Button(item.favorite ? "取消喜欢" : "喜欢") {
+            Button {
                 appState.toggleFavorite(item)
+            } label: {
+                Label(item.favorite ? "取消喜欢" : "喜欢", systemImage: item.favorite ? "heart.slash" : "heart")
             }
 
             if item.metadataProvider != "Emby" {
-                Menu("重新分类") {
+                Menu {
                     ForEach(Self.reclassificationTypes, id: \.self) { type in
-                        Button(type.displayName) {
+                        Button {
                             appState.reclassify(item, as: type)
+                        } label: {
+                            Label(type.displayName, systemImage: type.systemImage)
                         }
                     }
+                } label: {
+                    Label("重新分类", systemImage: "tray.and.arrow.down")
                 }
             }
 
-            Menu("评级") {
-                Button("清除评级") {
+            Menu {
+                Button {
                     appState.updateRating(item, rating: nil)
+                } label: {
+                    Label("清除评级", systemImage: "star.slash")
                 }
                 Divider()
                 ForEach(1...5, id: \.self) { rating in
-                    Button(String(repeating: "★", count: rating)) {
+                    Button {
                         appState.updateRating(item, rating: Double(rating))
+                    } label: {
+                        Label(String(repeating: "★", count: rating), systemImage: rating >= 4 ? "star.fill" : "star")
                     }
                 }
+            } label: {
+                Label("评级", systemImage: "star")
             }
         }
     }
@@ -502,6 +553,7 @@ struct PosterCardView: View {
                 appState.toggleItemSelection(item.id)
             }
         } else {
+            appState.selectedItemReturnAnchorID = item.id
             appState.selectedItem = item
         }
     }
@@ -511,18 +563,30 @@ struct PosterCardView: View {
         let episodes = appState.children(for: item)
         if episodes.isEmpty {
             if item.watched {
-                Button("清除已观看") { appState.markWatched(item, watched: false) }
+                Button {
+                    appState.markWatched(item, watched: false)
+                } label: {
+                    Label("清除已观看", systemImage: "eye.slash")
+                }
             } else {
-                Button("标记为已观看") { appState.markWatched(item, watched: true) }
+                Button {
+                    appState.markWatched(item, watched: true)
+                } label: {
+                    Label("标记为已观看", systemImage: "eye")
+                }
             }
         } else {
             let hasWatchedMark = item.watched || episodes.contains { $0.watched || $0.playProgress >= 0.9 }
-            Button("标记整个系列为已观看") {
+            Button {
                 appState.markAllWatched(episodes + [item], watched: true)
+            } label: {
+                Label("标记整个系列为已观看", systemImage: "eye.fill")
             }
             if hasWatchedMark {
-                Button("清除已观看") {
+                Button {
                     appState.markAllWatched(episodes + [item], watched: false)
+                } label: {
+                    Label("清除已观看", systemImage: "eye.slash")
                 }
             }
         }
@@ -538,6 +602,14 @@ struct PosterCardView: View {
 
     private var badgeTexts: [String] {
         var texts: [String] = []
+        switch appState.videoCacheState(for: item) {
+        case .complete:
+            texts.append(appState.children(for: item).isEmpty ? "已缓存" : "已全部缓存")
+        case .partial:
+            texts.append("部分已缓存")
+        case .none:
+            break
+        }
         if item.watchlist {
             texts.append("想看")
         }
@@ -601,7 +673,7 @@ struct RatingStars: View {
                 .disabled(onRate == nil)
             }
         }
-        .accessibilityLabel(value.map { "评分 \(String(format: "%.0f", $0)) 星" } ?? "未评分")
+        .accessibilityLabel(value.map { "评级 \(String(format: "%.0f", $0)) 星" } ?? "未评级")
     }
 }
 
@@ -759,15 +831,19 @@ private struct MusicDefaultArtworkView: View {
         GeometryReader { proxy in
             let side = min(proxy.size.width, proxy.size.height)
             let cornerRadius = max(side * 0.12, 8)
+            let artworkColors = AppColors.themedIconColors
+            let primaryTone = artworkColors.first ?? AppColors.selectedGlassTint
+            let secondaryTone = artworkColors.dropFirst().first ?? AppColors.solarEdgeTint
+            let tertiaryTone = artworkColors.dropFirst(2).first ?? AppColors.solarLightTint
 
             ZStack {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(
                         LinearGradient(
                             colors: [
-                                Color(nsColor: .systemBlue).opacity(0.95),
-                                Color(nsColor: .systemCyan).opacity(0.92),
-                                Color(nsColor: .systemTeal).opacity(0.86)
+                                primaryTone.opacity(0.95),
+                                secondaryTone.opacity(0.90),
+                                tertiaryTone.opacity(0.84)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -780,7 +856,7 @@ private struct MusicDefaultArtworkView: View {
                     .offset(x: -side * 0.34, y: -side * 0.34)
 
                 Circle()
-                    .fill(Color(nsColor: .systemCyan).opacity(0.24))
+                    .fill(AppColors.solarLightTint.opacity(0.24))
                     .frame(width: side * 0.58, height: side * 0.58)
                     .offset(x: side * 0.34, y: side * 0.34)
 
@@ -802,7 +878,7 @@ private struct MusicDefaultArtworkView: View {
                         .font(.system(size: side * 0.30, weight: .semibold))
                         .foregroundStyle(
                             LinearGradient(
-                                colors: [Color(nsColor: .systemBlue), Color(nsColor: .systemCyan)],
+                                colors: [primaryTone, secondaryTone],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
@@ -811,7 +887,7 @@ private struct MusicDefaultArtworkView: View {
                     HStack(spacing: max(side * 0.025, 2)) {
                         ForEach(Self.equalizerBarFactors.indices, id: \.self) { index in
                             Capsule()
-                                .fill((index == 3 ? Color(nsColor: .systemBlue) : Color(nsColor: .systemCyan)).opacity(0.72))
+                                .fill((index == 3 ? primaryTone : secondaryTone).opacity(0.72))
                                 .frame(width: max(side * 0.025, 2), height: side * Self.equalizerBarFactors[index] * 0.22)
                         }
                     }

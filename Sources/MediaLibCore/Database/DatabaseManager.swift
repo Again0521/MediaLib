@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public final class DatabaseManager {
-    public static let currentSchemaVersion = 8
+    public static let currentSchemaVersion = 10
 
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
@@ -252,6 +252,20 @@ public final class DatabaseManager {
             }
             version = 8
         }
+        if version < 9 {
+            try transaction {
+                try migrateToVersion9()
+                try execute("PRAGMA user_version = 9")
+            }
+            version = 9
+        }
+        if version < 10 {
+            try transaction {
+                try migrateToVersion10()
+                try execute("PRAGMA user_version = 10")
+            }
+            version = 10
+        }
         guard version == Self.currentSchemaVersion else {
             throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
         }
@@ -272,6 +286,7 @@ public final class DatabaseManager {
           poster_path TEXT,
           backdrop_path TEXT,
           rating REAL,
+          user_rating REAL,
           runtime INTEGER,
           source_path TEXT,
           parent_id TEXT,
@@ -472,6 +487,24 @@ public final class DatabaseManager {
 
     private func migrateToVersion8() throws {
         try addColumnIfMissing(table: "media_items", column: "genre", definition: "genre TEXT")
+    }
+
+    private func migrateToVersion9() throws {
+        try addColumnIfMissing(table: "media_sources", column: "prefer_metadata_write_to_source", definition: "prefer_metadata_write_to_source INTEGER DEFAULT 0")
+    }
+
+    private func migrateToVersion10() throws {
+        try addColumnIfMissing(table: "media_sources", column: "remote_trace_sync_mode", definition: "remote_trace_sync_mode TEXT DEFAULT 'bidirectional'")
+        try addColumnIfMissing(table: "media_items", column: "user_rating", definition: "user_rating REAL")
+        try execute("""
+        UPDATE media_items
+        SET user_rating = CASE
+            WHEN rating IS NULL OR rating <= 0 THEN NULL
+            WHEN rating <= 5 THEN ROUND(rating)
+            ELSE ROUND(rating / 2.0)
+        END
+        WHERE user_rating IS NULL AND rating IS NOT NULL
+        """)
     }
 
     private func validateBackup(at backupURL: URL) throws {

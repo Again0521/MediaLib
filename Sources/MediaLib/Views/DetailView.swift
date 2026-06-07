@@ -6,9 +6,17 @@ import UniformTypeIdentifiers
 struct DetailView: View {
     @EnvironmentObject private var appState: AppState
     let item: MediaItem
+    let sourceTitle: String
+    let sourceSystemImage: String
     @State private var showingMetadataSearch = false
     @State private var fileExists: Bool?
     @State private var fileStatusPath: String?
+
+    init(item: MediaItem, sourceTitle: String = "详情", sourceSystemImage: String = "play.rectangle") {
+        self.item = item
+        self.sourceTitle = sourceTitle
+        self.sourceSystemImage = sourceSystemImage
+    }
 
     private enum ArtworkKind { case poster, backdrop }
 
@@ -126,25 +134,42 @@ struct DetailView: View {
                 selectedEpisodeID = episode.id
             }
             .contextMenu {
-                Button("播放") { appState.play(episode, preserveSelection: true) }
-                Button("快速预览") { appState.quickPreviewItem = episode }
-                Button("外部打开") { appState.openExternally(episode) }
+                Button {
+                    appState.play(episode, preserveSelection: true)
+                } label: {
+                    Label("播放", systemImage: "play.fill")
+                }
+                Button {
+                    appState.quickPreviewItem = episode
+                } label: {
+                    Label("快速预览", systemImage: "eye")
+                }
+                Button {
+                    appState.openExternally(episode)
+                } label: {
+                    Label("外部打开", systemImage: "arrow.up.forward.app")
+                }
+                VideoCacheMenuItems(item: episode)
                 Divider()
                 // #10 右键具体剧集只标记该集；已看完时提供“清除已观看”。
                 if episode.watched {
-                    Button("清除已观看") {
+                    Button {
                         appState.markWatched(episode, watched: false)
+                    } label: {
+                        Label("清除已观看", systemImage: "eye.slash")
                     }
                 } else {
-                    Button("标记为已观看") {
+                    Button {
                         appState.markWatched(episode, watched: true)
+                    } label: {
+                        Label("标记为已观看", systemImage: "eye")
                     }
                 }
             }
     }
 
     private var topBar: some View {
-        PageHeader(title: item.title, subtitle: item.originalTitle, systemImage: item.type == .music ? "music.note" : "play.rectangle") {
+        PageHeader(title: sourceTitle, subtitle: nil, systemImage: sourceSystemImage) {
             Button {
                 withAnimation(AppMotion.page) {
                     appState.selectedItem = nil
@@ -173,6 +198,10 @@ struct DetailView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .pointerInspectTilt(enabled: item.type != .music, cornerRadius: 12)
                 .contextMenu {
+                    if !appState.videoCacheQualityChoices(for: item).isEmpty {
+                        VideoCacheMenuItems(item: item)
+                        Divider()
+                    }
                     Button {
                         chooseCustomArtwork(kind: .poster)
                     } label: {
@@ -244,6 +273,10 @@ struct DetailView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(6)
 
+                if !genreTags.isEmpty {
+                    DetailGenreTagFlow(genres: genreTags)
+                }
+
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 10) {
                         Button {
@@ -292,9 +325,25 @@ struct DetailView: View {
         .surfaceBackground(cornerRadius: 24)
     }
 
-    // 评级控件：与海报右键菜单「评级」共用同一份数据（item.rating，1–5 星，经 appState.updateRating 写回）。
+    private var genreTags: [String] {
+        guard item.type != .music,
+              let genre = item.genre,
+              !genre.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return []
+        }
+        var seen = Set<String>()
+        return genre
+            .components(separatedBy: CharacterSet(charactersIn: ",，/、"))
+            .compactMap { raw in
+                let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !value.isEmpty else { return nil }
+                return seen.insert(value).inserted ? value : nil
+            }
+    }
+
+    // 评级控件：与海报右键菜单「评级」共用同一份用户评级（item.userRating，1–5 星）。
     private var ratingControl: some View {
-        let current = min(item.rating.map { Int($0.rounded()) } ?? 0, 5)
+        let current = min(item.userRating.map { Int($0.rounded()) } ?? 0, 5)
         return HStack(spacing: 8) {
             Text("评级")
                 .font(.caption)
@@ -358,7 +407,7 @@ struct DetailView: View {
                 .foregroundStyle(exists ? Color.secondary : Color.orange)
                 .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 11, horizontalPadding: 10, minHeight: 30))
             } else {
-                Text("没有文件路径。")
+                Text("路径未记录。")
                     .foregroundStyle(.secondary)
             }
         }
@@ -441,6 +490,27 @@ struct DetailView: View {
             guard fileStatusPath == filePath else { return }
             fileExists = exists
         }
+    }
+}
+
+private struct DetailGenreTagFlow: View {
+    let genres: [String]
+
+    var body: some View {
+        PosterBadgeFlowLayout(horizontalSpacing: 8, verticalSpacing: 7) {
+            ForEach(genres, id: \.self) { genre in
+                Text(genre)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppColors.selectedGlassTint.opacity(0.92))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(AppColors.selectedGlassTint.opacity(0.10), in: Capsule())
+                    .overlay {
+                        Capsule().stroke(AppColors.cleanPanelBorder, lineWidth: 0.75)
+                    }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -562,7 +632,7 @@ struct MetadataSearchView: View {
                 ProgressView("正在搜索")
                     .frame(maxWidth: .infinity, minHeight: 220)
             } else if let message {
-                EmptyStateView(title: "没有可显示结果", systemImage: "magnifyingglass", message: message)
+                EmptyStateView(title: "暂无可用结果", systemImage: "magnifyingglass", message: message)
                     .frame(maxWidth: .infinity, minHeight: 220)
             } else {
                 List {
@@ -624,7 +694,7 @@ struct MetadataSearchView: View {
                 )
             }
             if results.isEmpty {
-                message = "没有找到匹配结果，可以换一个关键词。"
+                message = "未找到匹配结果，可调整关键词后重新搜索。"
             }
         } catch {
             results = []
@@ -772,7 +842,7 @@ struct SubtitleSearchSheet: View {
             if appState.settings.openSubtitlesAPIKey?.isEmpty != false {
                 HStack(spacing: 8) {
                     Image(systemName: "key.horizontal").foregroundStyle(.orange)
-                    Text("需要 OpenSubtitles API Key，请在设置 → 元数据中填写。").font(.caption)
+                    Text("OpenSubtitles API Key 可在设置 → 元数据中配置。").font(.caption)
                 }
                 .padding(10)
                 .staticSurfaceBackground(cornerRadius: 10)

@@ -276,7 +276,7 @@ struct MusicTagScraperSheet: View {
     }
 
     private var metadataSearchField: some View {
-        GlassSearchField(placeholder: "过滤歌曲", text: $queryText, thickness: 1.02)
+        GlassSearchField(placeholder: "过滤歌曲", text: $queryText, thickness: 1.02, minWidth: 150, maxWidth: 220)
     }
 
     private var metadataToggleGroup: some View {
@@ -373,7 +373,7 @@ struct MusicTagScraperSheet: View {
     @MainActor
     private func matchTracks() async {
         guard appState.settings.musicMetadataProvider != .disabled else {
-            appState.alert = AppAlert(title: "音乐数据源未启用", message: "请先在设置中选择 MusicBrainz 或 iTunes Search。")
+            appState.alert = AppAlert(title: "音乐数据源未启用", message: "可在设置中选择 MusicBrainz 或 iTunes Search。")
             return
         }
 

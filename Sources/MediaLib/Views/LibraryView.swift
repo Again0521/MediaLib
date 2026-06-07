@@ -12,6 +12,9 @@ private enum LibrarySnapshotCache {
         let revision: Int
         let favoriteRevision: Int
         let watchlistRevision: Int
+        let ratingRevision: Int
+        let videoCacheRevision: Int
+        let cachedOnly: Bool
     }
 
     private static var values: [Key: [MediaItem]] = [:]
@@ -49,6 +52,8 @@ private struct LibrarySnapshotBuildInput: Sendable {
     let sortOrder: LibrarySortOrder
     let watchFilter: LibraryWatchFilter
     let genreFilter: String
+    let cachedOnly: Bool
+    let cachedScopeIDs: Set<String>
 }
 
 private enum LibrarySnapshotBuilder {
@@ -88,7 +93,11 @@ private enum LibrarySnapshotBuilder {
             }
         }
 
-        return genreScoped.sorted { lhs, rhs in
+        let cacheScoped = input.cachedOnly
+            ? genreScoped.filter { input.cachedScopeIDs.contains($0.id) }
+            : genreScoped
+
+        return cacheScoped.sorted { lhs, rhs in
             let primary: Bool
             switch input.sortMode {
             case .recentlyUpdated:
@@ -103,8 +112,10 @@ private enum LibrarySnapshotBuilder {
                 primary = (lhs.runtime ?? 0) > (rhs.runtime ?? 0)
             case .progress:
                 primary = lhs.playProgress > rhs.playProgress
-            case .rating:
+            case .score:
                 primary = (lhs.rating ?? 0) > (rhs.rating ?? 0)
+            case .rating:
+                primary = (lhs.userRating ?? 0) > (rhs.userRating ?? 0)
             }
             if primary { return input.sortOrder == .primary }
             let reversePrimary: Bool
@@ -121,8 +132,10 @@ private enum LibrarySnapshotBuilder {
                 reversePrimary = (lhs.runtime ?? 0) < (rhs.runtime ?? 0)
             case .progress:
                 reversePrimary = lhs.playProgress < rhs.playProgress
-            case .rating:
+            case .score:
                 reversePrimary = (lhs.rating ?? 0) < (rhs.rating ?? 0)
+            case .rating:
+                reversePrimary = (lhs.userRating ?? 0) < (rhs.userRating ?? 0)
             }
             if reversePrimary { return input.sortOrder == .reverse }
             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
@@ -155,6 +168,7 @@ struct LibraryView: View {
     @State private var sortOrder: LibrarySortOrder = .primary
     @State private var watchFilter: LibraryWatchFilter = .all
     @State private var genreFilter: String = ""
+    @State private var cachedOnly = false
     @State private var didLoadViewState = false
     @State private var visibleItems: [MediaItem] = []
     @State private var visibleItemsDestinationID = ""
@@ -177,7 +191,7 @@ struct LibraryView: View {
                     EmptyStateView(
                         title: "暂无\(title)",
                         systemImage: destination.systemImage,
-                        message: "添加媒体源并扫描后，这里会显示内容。"
+                        message: "接入媒体源并完成扫描后，内容会自动归入此页。"
                     )
                     .frame(maxWidth: .infinity, minHeight: 420)
                 }
@@ -188,7 +202,9 @@ struct LibraryView: View {
                     items: displayedItems,
                     bottomInset: selectionBarBottomInset,
                     showsDeletePlaybackHistory: showsDeletePlaybackHistoryContextAction,
-                    selectionEnabled: true
+                    selectionEnabled: true,
+                    restoreAnchorID: appState.selectedItemReturnAnchorID,
+                    onDidRestoreAnchor: { appState.selectedItemReturnAnchorID = nil }
                 ) {
                     VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
                         libraryHeader
@@ -211,6 +227,7 @@ struct LibraryView: View {
         .onAppear {
             loadViewState()
             refreshVisibleItems(for: destination)
+            presentContextTipsIfNeeded()
         }
         .onChange(of: searchText) { _ in
             scheduleSearchRefresh()
@@ -218,6 +235,7 @@ struct LibraryView: View {
         .onChange(of: destination) { newDestination in
             searchRefreshTask?.cancel()
             appState.exitSelectionMode()
+            cachedOnly = false
             loadViewState(reset: true)
             refreshVisibleItems(for: newDestination, deferred: true)
         }
@@ -240,6 +258,10 @@ struct LibraryView: View {
             searchRefreshTask?.cancel()
             refreshVisibleItems(for: destination, deferred: true)
         }
+        .onChange(of: cachedOnly) { _ in
+            searchRefreshTask?.cancel()
+            refreshVisibleItems(for: destination, deferred: true)
+        }
         .onChange(of: appState.libraryRevision) { _ in
             searchRefreshTask?.cancel()
             refreshVisibleItems(for: destination, deferred: true)
@@ -251,6 +273,14 @@ struct LibraryView: View {
             refreshVisibleItems(for: destination, deferred: true)
         }
         .onChange(of: appState.watchlistRevision) { _ in
+            searchRefreshTask?.cancel()
+            refreshVisibleItems(for: destination, deferred: true)
+        }
+        .onChange(of: appState.ratingRevision) { _ in
+            searchRefreshTask?.cancel()
+            refreshVisibleItems(for: destination, deferred: true)
+        }
+        .onChange(of: appState.videoCacheRevision) { _ in
             searchRefreshTask?.cancel()
             refreshVisibleItems(for: destination, deferred: true)
         }
@@ -293,7 +323,7 @@ struct LibraryView: View {
                 }
             }
 
-            GlassSearchField(placeholder: "搜索\(title)", text: $searchText)
+            GlassSearchField(placeholder: "搜索\(title)", text: $searchText, minWidth: 158, maxWidth: 226)
             Button {
                 appState.scanSources(for: destination)
             } label: {
@@ -321,11 +351,23 @@ struct LibraryView: View {
         }
     }
 
+    private func presentContextTipsIfNeeded() {
+        switch destination {
+        case .video, .embySection, .embyLibrary, .smartCollection:
+            appState.showInterfaceTipOnce(
+                key: "library.video.context.cache",
+                message: "想离线观看时，可以右键海报或单集选择缓存。"
+            )
+        default:
+            break
+        }
+    }
+
     private var selectionBarBottomInset: CGFloat {
         appState.isSelectionModeActive ? scrollTopButtonBottomPadding + 64 : scrollTopButtonBottomPadding
     }
 
-    /// C2 批量操作浮动栏：全选、标记已看/取消、想看、评分、清除记录、移出媒体库。
+    /// C2 批量操作浮动栏：全选、标记已看/取消、想看、评级、清除记录、移出媒体库。
     @ViewBuilder
     private func batchActionBar(for displayedItems: [MediaItem]) -> some View {
         let selectedCount = appState.selectedItemIDs.count
@@ -362,9 +404,9 @@ struct LibraryView: View {
                         Button("\(star) 星") { appState.batchUpdateRating(Double(star)) }
                     }
                     Divider()
-                    Button("清除评分") { appState.batchUpdateRating(nil) }
+                    Button("清除评级") { appState.batchUpdateRating(nil) }
                 } label: {
-                    Label("评分", systemImage: "star.fill")
+                    Label("评级", systemImage: "star.fill")
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
@@ -455,7 +497,10 @@ struct LibraryView: View {
             genreFilter: genreFilter,
             revision: appState.libraryRevision,
             favoriteRevision: appState.favoriteRevision,
-            watchlistRevision: appState.watchlistRevision
+            watchlistRevision: appState.watchlistRevision,
+            ratingRevision: appState.ratingRevision,
+            videoCacheRevision: appState.videoCacheRevision,
+            cachedOnly: cachedOnly
         )
     }
 
@@ -488,13 +533,16 @@ struct LibraryView: View {
         guard key == snapshotKey(for: targetDestination) else { return }
 
         let baseItems = appState.items(for: targetDestination, searchText: "")
+        let cachedScopeIDs = key.cachedOnly ? appState.cachedVideoScopeIDs(in: baseItems) : []
         let input = LibrarySnapshotBuildInput(
             items: baseItems,
             searchText: key.searchText,
             sortMode: key.sortMode,
             sortOrder: key.sortOrder,
             watchFilter: key.watchFilter,
-            genreFilter: key.genreFilter
+            genreFilter: key.genreFilter,
+            cachedOnly: key.cachedOnly,
+            cachedScopeIDs: cachedScopeIDs
         )
         let sorted = await Task.detached(priority: .userInitiated) {
             LibrarySnapshotBuilder.visibleItems(from: input)
@@ -546,10 +594,25 @@ struct LibraryView: View {
 
     private var libraryControls: some View {
         let genres = availableGenres
+        let hasCachedVideos = appState.hasCachedVideos(in: appState.items(for: destination, searchText: ""))
         return HStack(spacing: 12) {
             LibraryWatchFilterCapsules(selection: $watchFilter)
 
             Spacer(minLength: 18)
+
+            if hasCachedVideos {
+                Button {
+                    withAnimation(AppMotion.fast) {
+                        cachedOnly.toggle()
+                    }
+                } label: {
+                    GlassCapsuleControl(isSelected: cachedOnly, enablePointerEdge: false) {
+                        Label("已缓存", systemImage: "arrow.down.circle.fill")
+                    }
+                }
+                .buttonStyle(.plain)
+                .help(cachedOnly ? "显示全部内容" : "只查看已缓存内容")
+            }
 
             if !genres.isEmpty {
                 GlassMenuButton(title: genreFilter.isEmpty ? "全部类型" : genreFilter) {
@@ -596,11 +659,16 @@ struct LibraryView: View {
             sortOrder = .primary
             watchFilter = .all
             genreFilter = ""
+            cachedOnly = false
         }
         guard !didLoadViewState else { return }
         didLoadViewState = true
         sortMode = UserDefaults.standard.string(forKey: "\(stateKeyPrefix).sort")
             .flatMap(LibrarySortMode.init(rawValue:)) ?? .recentlyUpdated
+        let items = appState.items(for: destination, searchText: "")
+        if sortMode.rawValue == "rating", !items.contains(where: { $0.userRating != nil }) && items.contains(where: { $0.rating != nil }) {
+            sortMode = .score
+        }
         if !availableSortModes.contains(sortMode) {
             sortMode = .recentlyUpdated
         }
@@ -630,10 +698,12 @@ struct LibraryView: View {
 
     private var availableSortModes: [LibrarySortMode] {
         let items = appState.items(for: destination, searchText: "")
-        let hasRating = items.contains { $0.rating != nil }
+        let hasScore = items.contains { $0.rating != nil }
+        let hasRating = items.contains { $0.userRating != nil }
         let hasRuntime = items.contains { ($0.runtime ?? 0) > 0 }
         return LibrarySortMode.allCases.filter { mode in
             switch mode {
+            case .score: return hasScore
             case .rating: return hasRating
             case .runtime: return hasRuntime
             default: return true
@@ -682,6 +752,7 @@ enum LibrarySortMode: String, CaseIterable, Identifiable, Sendable {
     case year
     case runtime
     case progress
+    case score
     case rating
 
     var id: String { rawValue }
@@ -694,6 +765,7 @@ enum LibrarySortMode: String, CaseIterable, Identifiable, Sendable {
         case .year: return "年份"
         case .runtime: return "时长"
         case .progress: return "观看进度"
+        case .score: return "评分"
         case .rating: return "评级"
         }
     }

@@ -387,6 +387,7 @@ struct MusicLibraryView: View {
         .onAppear {
             loadViewState(for: section)
             refreshVisibleContent(for: section)
+            presentSectionTipIfNeeded(section)
         }
         .onChange(of: searchText) { _ in
             drilldown = nil
@@ -399,6 +400,7 @@ struct MusicLibraryView: View {
             drilldown = nil
             loadViewState(for: newSection, reset: true)
             refreshVisibleContent(for: newSection, deferred: true)
+            presentSectionTipIfNeeded(newSection)
         }
         .onChange(of: sortMode) { _ in
             saveViewState(for: section)
@@ -499,6 +501,14 @@ struct MusicLibraryView: View {
         }
     }
 
+    private func presentSectionTipIfNeeded(_ targetSection: MusicLibrarySection) {
+        guard targetSection == .songs else { return }
+        appState.showInterfaceTipOnce(
+            key: "music.songs.headerTop",
+            message: "歌曲很多时，轻点列名行就可以回到顶部。"
+        )
+    }
+
     private var scrollingBody: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -544,7 +554,7 @@ struct MusicLibraryView: View {
 
     private var pageHeader: some View {
         PageHeader(title: section.title, subtitle: subtitle, systemImage: section.systemImage) {
-            GlassSearchField(placeholder: "搜索音乐", text: $searchText)
+            GlassSearchField(placeholder: "搜索音乐", text: $searchText, minWidth: 158, maxWidth: 226)
             if section == .playlists {
                 Button {
                     onCreateSmartPlaylist()
@@ -946,7 +956,7 @@ struct MusicLibraryView: View {
             switch section {
             case .songs, .recent, .favorites, .unmatched:
                 if displayedTrackRows.isEmpty {
-                    EmptyStateView(title: "暂无\(section.title)", systemImage: section.systemImage, message: "添加音乐媒体源并扫描后，这里会显示歌曲。")
+                    EmptyStateView(title: "暂无\(section.title)", systemImage: section.systemImage, message: "接入音乐媒体源并完成扫描后，歌曲会自动归档。")
                         .staticSurfaceBackground(cornerRadius: 22)
                 } else {
                     MusicSongListView(
@@ -989,7 +999,7 @@ struct MusicLibraryView: View {
                 }
             case .playlists:
                 if filteredPlaylists.isEmpty {
-                    EmptyStateView(title: "没有匹配的歌单", systemImage: "magnifyingglass", message: "换个关键词试试。")
+                    EmptyStateView(title: "未找到匹配歌单", systemImage: "magnifyingglass", message: "可使用歌单名、艺术家或歌曲关键词继续筛选。")
                         .staticSurfaceBackground(cornerRadius: 22)
                 } else {
                     MusicPlaylistsOverview(playlists: filteredPlaylists) { playlist in
@@ -1739,34 +1749,72 @@ private struct MusicSongRow: View {
             playRow()
         }
         .contextMenu {
-            Button("播放") { playRow() }
-            Button("开始电台") { appState.startRadio(seed: row.track) }
-            Button("加入播放队列") { appState.addToMusicQueue(row.track) }
-            Button("下一首播放") { appState.playNextInMusicQueue(row.track) }
+            Button {
+                playRow()
+            } label: {
+                Label("播放", systemImage: "play.fill")
+            }
+            Button {
+                appState.startRadio(seed: row.track)
+            } label: {
+                Label("开始电台", systemImage: "dot.radiowaves.left.and.right")
+            }
+            Button {
+                appState.addToMusicQueue(row.track)
+            } label: {
+                Label("加入播放队列", systemImage: "text.badge.plus")
+            }
+            Button {
+                appState.playNextInMusicQueue(row.track)
+            } label: {
+                Label("下一首播放", systemImage: "text.line.first.and.arrowtriangle.forward")
+            }
             MusicPlaylistActionsMenu(
                 tracks: [row.track],
                 suggestedName: row.track.title,
                 onCreateNew: onCreatePlaylist
             )
             if showsHistoryAction && row.track.hasPlaybackTrace {
-                Button("删除播放记录", role: .destructive) { appState.clearPlaybackHistory(row.track) }
+                Button(role: .destructive) {
+                    appState.clearPlaybackHistory(row.track)
+                } label: {
+                    Label("删除播放记录", systemImage: "clock.badge.xmark")
+                }
             }
             if showsResetPlayCountAction, (row.track.playCount ?? 0) > 0 {
-                Button("重置播放次数") { appState.resetMusicPlayCount(row.track) }
+                Button {
+                    appState.resetMusicPlayCount(row.track)
+                } label: {
+                    Label("重置播放次数", systemImage: "arrow.counterclockwise")
+                }
             }
             if let onRemoveFromPlaylist {
-                Button("从歌单移出", role: .destructive) {
+                Button(role: .destructive) {
                     onRemoveFromPlaylist(row.track)
+                } label: {
+                    Label("从歌单移出", systemImage: "minus.circle")
                 }
             }
-            Button("获取音乐信息") { onSearchMetadata(row.track) }
-            Button(row.track.favorite ? "取消收藏" : "收藏") { appState.toggleFavorite(row.track) }
-            Menu("重新分类") {
+            Button {
+                onSearchMetadata(row.track)
+            } label: {
+                Label("获取音乐信息", systemImage: "tag.circle")
+            }
+            Button {
+                appState.toggleFavorite(row.track)
+            } label: {
+                Label(row.track.favorite ? "取消收藏" : "收藏", systemImage: row.track.favorite ? "heart.slash" : "heart")
+            }
+            Menu {
                 ForEach([MediaType.movie, .tvShow, .anime, .documentary, .variety, .other, .privateCollection], id: \.self) { type in
-                    Button(type.displayName) {
+                    Button {
                         appState.reclassify(row.track, as: type)
+                    } label: {
+                        Label(type.displayName, systemImage: type.systemImage)
                     }
                 }
+            } label: {
+                Label("重新分类", systemImage: "tray.and.arrow.down")
             }
         }
     }
@@ -1857,10 +1905,22 @@ private struct MusicAlbumCard: View {
             onOpen()
         }
         .contextMenu {
-            Button("查看歌曲") { onOpen() }
-            Button("播放") { onPlay() }
+            Button {
+                onOpen()
+            } label: {
+                Label("查看歌曲", systemImage: "music.note.list")
+            }
+            Button {
+                onPlay()
+            } label: {
+                Label("播放", systemImage: "play.fill")
+            }
             if showsResetPlayCountAction, album.playCount > 0 {
-                Button("重置播放次数") { onResetPlayCounts() }
+                Button {
+                    onResetPlayCounts()
+                } label: {
+                    Label("重置播放次数", systemImage: "arrow.counterclockwise")
+                }
             }
             MusicPlaylistActionsMenu(
                 tracks: album.tracks,
@@ -1941,10 +2001,22 @@ private struct MusicArtistRow: View {
             onOpen()
         }
         .contextMenu {
-            Button("查看歌曲") { onOpen() }
-            Button("播放") { onPlay() }
+            Button {
+                onOpen()
+            } label: {
+                Label("查看歌曲", systemImage: "music.note.list")
+            }
+            Button {
+                onPlay()
+            } label: {
+                Label("播放", systemImage: "play.fill")
+            }
             if showsResetPlayCountAction, artist.playCount > 0 {
-                Button("重置播放次数") { onResetPlayCounts() }
+                Button {
+                    onResetPlayCounts()
+                } label: {
+                    Label("重置播放次数", systemImage: "arrow.counterclockwise")
+                }
             }
             MusicPlaylistActionsMenu(
                 tracks: artist.tracks,
@@ -2157,8 +2229,16 @@ private struct MusicPlaylistCard: View {
 
             if !isPinnedFavorite {
                 Menu {
-                    Button("重命名") { onRename() }
-                    Button("删除", role: .destructive) { onDelete() }
+                    Button {
+                        onRename()
+                    } label: {
+                        Label("重命名", systemImage: "pencil")
+                    }
+                    Button(role: .destructive) {
+                        onDelete()
+                    } label: {
+                        Label("删除", systemImage: "trash")
+                    }
                 } label: {
                     Image(systemName: "ellipsis")
                         .frame(width: 30, height: 30)
@@ -2190,12 +2270,28 @@ private struct MusicPlaylistCard: View {
             onOpen()
         }
         .contextMenu {
-            Button("查看歌曲") { onOpen() }
-            Button("播放") { onPlay() }
-                .disabled(tracks.isEmpty)
+            Button {
+                onOpen()
+            } label: {
+                Label("查看歌曲", systemImage: "music.note.list")
+            }
+            Button {
+                onPlay()
+            } label: {
+                Label("播放", systemImage: "play.fill")
+            }
+            .disabled(tracks.isEmpty)
             if !isPinnedFavorite {
-                Button("重命名") { onRename() }
-                Button("删除", role: .destructive) { onDelete() }
+                Button {
+                    onRename()
+                } label: {
+                    Label("重命名", systemImage: "pencil")
+                }
+                Button(role: .destructive) {
+                    onDelete()
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
             }
         }
     }

@@ -28,4 +28,19 @@ public enum MediaType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .episode: return "剧集"
         }
     }
+
+    public var systemImage: String {
+        switch self {
+        case .auto: return "wand.and.stars"
+        case .movie: return "film"
+        case .tvShow: return "tv"
+        case .anime: return "sparkles.tv"
+        case .documentary: return "books.vertical"
+        case .variety: return "music.mic"
+        case .music: return "music.note"
+        case .other: return "tray"
+        case .privateCollection: return "lock.rectangle.stack"
+        case .episode: return "play.rectangle"
+        }
+    }
 }
