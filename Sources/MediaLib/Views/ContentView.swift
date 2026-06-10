@@ -136,6 +136,7 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
     case embySection(String, EmbyLibrarySection)
     case embyLibrary(String)
     case smartCollection(String)
+    case manualCollection(String)
     case musicSmartPlaylist(String)
     case health
     case tasks
@@ -150,6 +151,7 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
         case .embySection(let sourceID, let section): return "emby-section-\(sourceID)__\(section.rawValue)"
         case .embyLibrary(let libraryID): return "emby-library-\(libraryID)"
         case .smartCollection(let collectionID): return "smart-collection-\(collectionID)"
+        case .manualCollection(let collectionID): return "manual-collection-\(collectionID)"
         case .musicSmartPlaylist(let playlistID): return "music-smart-playlist-\(playlistID)"
         case .health: return "health"
         case .tasks: return "tasks"
@@ -214,6 +216,10 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
             let collectionID = String(storedID.dropFirst("smart-collection-".count))
             guard !collectionID.isEmpty else { return nil }
             self = .smartCollection(collectionID)
+        } else if storedID.hasPrefix("manual-collection-") {
+            let collectionID = String(storedID.dropFirst("manual-collection-".count))
+            guard !collectionID.isEmpty else { return nil }
+            self = .manualCollection(collectionID)
         } else {
             return nil
         }
@@ -225,8 +231,9 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
         case .video(let section): return section.title
         case .music(let section): return section.title
         case .embySection(_, let section): return section.title
-        case .embyLibrary: return "EMBY 分类"
+        case .embyLibrary: return "远程分类"
         case .smartCollection: return "智能集合"
+        case .manualCollection: return "集合"
         case .musicSmartPlaylist: return "智能歌单"
         case .health: return "片库健康"
         case .tasks: return "任务中心"
@@ -243,6 +250,7 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
         case .embySection(_, let section): return section.systemImage
         case .embyLibrary: return "rectangle.stack"
         case .smartCollection: return "sparkles.rectangle.stack"
+        case .manualCollection: return "rectangle.stack"
         case .musicSmartPlaylist: return "music.note.list"
         case .health: return "stethoscope"
         case .tasks: return "checklist"
@@ -276,7 +284,10 @@ struct ContentView: View {
     @State private var musicMiniPlayerCollapsed = false
     @State private var musicWindowPalette = AlbumColorPalette.fallback
     @State private var musicWindowPaletteTask: Task<Void, Never>?
+    @State private var mainLayoutTransitionActive = false
+    @State private var mainLayoutTransitionResetTask: Task<Void, Never>?
     @State private var smartCollectionEditor: VideoSmartCollectionEditorRequest?
+    @State private var manualCollectionEditor: VideoManualCollectionEditorRequest?
     @State private var musicSmartPlaylistEditor: MusicSmartPlaylistEditorRequest?
     @State private var showOnboarding = false
     @State private var themeSwitching = false
@@ -298,6 +309,7 @@ struct ContentView: View {
                         .tint(AppColors.selectedGlassTint)
                         .allowsHitTesting(!musicExpandedOverlayActive)
                         .environment(\.suppressPointerHoverDuringScroll, musicExpandedOverlayActive)
+                        .environment(\.mainLayoutTransitionActive, mainLayoutTransitionActive)
                         .glassPerformanceMode(backgroundGlassPerformanceMode)
                         // 全屏音乐播放器已完全盖住窗口时，把背后的整库界面从树上卸掉，
                         // 释放列表、海报墙和筛选结果的视图资源；收起时重新挂回。
@@ -337,6 +349,16 @@ struct ContentView: View {
         }
         .background {
             AppPageBackground(includeDirectionalLight: false)
+        }
+        .background {
+            MainLayoutActivityMonitor { active in
+                if active {
+                    beginMainLayoutTransition()
+                } else {
+                    finishMainLayoutTransition(after: 160_000_000)
+                }
+            }
+            .frame(width: 0, height: 0)
         }
         .background {
             if appState.activePlayerItem?.type == .music && !musicPlayerExpanded {
@@ -407,12 +429,65 @@ struct ContentView: View {
             VideoSmartCollectionSheet(
                 request: request,
                 onSave: { collection in
-                    appState.saveVideoSmartCollection(collection)
                     smartCollectionEditor = nil
-                    selection = .smartCollection(collection.id)
+                    Task { @MainActor in
+                        await Task.yield()
+                        if let saved = appState.saveVideoSmartCollection(collection) {
+                            selection = .smartCollection(saved.id)
+                        }
+                    }
                 },
                 onCancel: {
                     smartCollectionEditor = nil
+                }
+            )
+        }
+        .sheet(item: $manualCollectionEditor) { request in
+            VideoManualCollectionSheet(
+                request: request,
+                onSave: { collection in
+                    manualCollectionEditor = nil
+                    Task { @MainActor in
+                        await Task.yield()
+                        if let saved = appState.saveVideoManualCollection(collection) {
+                            selection = .manualCollection(saved.id)
+                        }
+                    }
+                },
+                onCancel: {
+                    manualCollectionEditor = nil
+                }
+            )
+        }
+        .sheet(item: $appState.videoManualCollectionCreationRequest) { request in
+            VideoManualCollectionSheet(
+                request: .create(),
+                onSave: { draft in
+                    appState.videoManualCollectionCreationRequest = nil
+                    Task { @MainActor in
+                        await Task.yield()
+                        if let collection = appState.createVideoManualCollectionAndNotify(
+                            name: draft.name,
+                            itemIDs: request.itemIDs,
+                            successTitle: "已创建集合并加入"
+                        ) {
+                            selection = .manualCollection(collection.id)
+                        }
+                    }
+                },
+                onCancel: {
+                    appState.cancelVideoManualCollectionCreation(request)
+                }
+            )
+        }
+        .sheet(item: $appState.videoOfflineSubscriptionLimitRequest) { request in
+            VideoOfflineSubscriptionLimitSheet(
+                request: request,
+                onSave: { limit in
+                    appState.saveCustomVideoOfflineSubscriptionLimit(request, episodeLimit: limit)
+                },
+                onCancel: {
+                    appState.videoOfflineSubscriptionLimitRequest = nil
                 }
             )
         }
@@ -433,9 +508,13 @@ struct ContentView: View {
             MusicSmartPlaylistSheet(
                 request: request,
                 onSave: { playlist in
-                    appState.saveMusicSmartPlaylist(playlist)
                     musicSmartPlaylistEditor = nil
-                    selection = .musicSmartPlaylist(playlist.id)
+                    Task { @MainActor in
+                        await Task.yield()
+                        if let saved = appState.saveMusicSmartPlaylist(playlist) {
+                            selection = .musicSmartPlaylist(saved.id)
+                        }
+                    }
                 },
                 onCancel: {
                     musicSmartPlaylistEditor = nil
@@ -535,9 +614,40 @@ struct ContentView: View {
                 withAnimation(.easeIn(duration: 0.10)) { themeSwitching = false }
             }
         }
+        .onChange(of: columnVisibility) { _ in
+            markMainLayoutTransition()
+        }
         .onDisappear {
             musicWindowPaletteTask?.cancel()
             themeSwitchTask?.cancel()
+            mainLayoutTransitionResetTask?.cancel()
+        }
+    }
+
+    private func markMainLayoutTransition(after nanoseconds: UInt64 = 520_000_000) {
+        beginMainLayoutTransition()
+        finishMainLayoutTransition(after: nanoseconds)
+    }
+
+    private func beginMainLayoutTransition() {
+        mainLayoutTransitionResetTask?.cancel()
+        mainLayoutTransitionResetTask = nil
+        if !mainLayoutTransitionActive {
+            mainLayoutTransitionActive = true
+        }
+    }
+
+    private func finishMainLayoutTransition(after nanoseconds: UInt64) {
+        mainLayoutTransitionResetTask?.cancel()
+        mainLayoutTransitionResetTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: nanoseconds)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            mainLayoutTransitionActive = false
+            mainLayoutTransitionResetTask = nil
         }
     }
 
@@ -566,6 +676,12 @@ struct ContentView: View {
                         ForEach(appState.videoSmartCollections) { collection in
                             smartCollectionSidebarRow(collection)
                         }
+                        if !appState.videoManualCollections.isEmpty {
+                            let previewItemsByCollectionID = appState.videoManualCollectionPreviewItemsByCollectionID(limit: 1)
+                            ForEach(appState.videoManualCollections) { collection in
+                                manualCollectionSidebarRow(collection, previewItems: previewItemsByCollectionID[collection.id] ?? [])
+                            }
+                        }
                         Button {
                             smartCollectionEditor = .create()
                         } label: {
@@ -573,6 +689,16 @@ struct ContentView: View {
                                 PlayfulSymbolIcon(systemImage: "plus", size: 22)
                                 Text("新建智能集合")
                                     // 与其它目录行字体保持一致。
+                                    .font(.body)
+                            }
+                        }
+                        .buttonStyle(SidebarInlineActionButtonStyle())
+                        Button {
+                            manualCollectionEditor = .create()
+                        } label: {
+                            HStack(spacing: 10) {
+                                PlayfulSymbolIcon(systemImage: "rectangle.stack.badge.plus", size: 22)
+                                Text("新建集合")
                                     .font(.body)
                             }
                         }
@@ -601,7 +727,7 @@ struct ContentView: View {
                             sidebarRow(.music(section))
                         }
                         // 仅在有智能歌单时才显示分隔线 + 列表；空列表下不再多出一条分割线，
-                        // 否则会让「音乐↔EMBY」的间距大于「视频↔音乐」，造成不统一。
+                        // 否则会让「音乐↔远程媒体库」的间距大于「视频↔音乐」，造成不统一。
                         if !appState.musicSmartPlaylists.isEmpty {
                             Divider()
                             ForEach(appState.musicSmartPlaylists) { playlist in
@@ -625,7 +751,7 @@ struct ContentView: View {
                         .buttonStyle(.plain)
                     }
 
-                    // 每个 Emby 来源各自一个一级目录（可重命名），内含该源的分区与媒体库。
+                    // 每个远程媒体库来源各自一个一级目录（可重命名），内含该源的分区与媒体库。
                     ForEach(appState.embySources) { source in
                         sidebarGroupSpacer
                         embySourceGroup(for: source)
@@ -967,7 +1093,7 @@ struct ContentView: View {
             }
     }
 
-    /// 一级目录之间的小间距占位行（首页/视频/音乐/各 Emby 来源之间统一留白）。
+    /// 一级目录之间的小间距占位行（首页/视频/音乐/各远程来源之间统一留白）。
     /// 无 tag 故不可选中，隐藏分隔线，背景透明。
     private var sidebarGroupSpacer: some View {
         Color.clear
@@ -990,11 +1116,52 @@ struct ContentView: View {
             } label: {
                 Label("编辑", systemImage: "pencil")
             }
+            Button {
+                appState.setVideoSmartCollectionHomeVisibility(collection, showOnHome: !collection.showOnHome)
+            } label: {
+                Label(collection.showOnHome ? "从首页移除" : "发布到首页", systemImage: collection.showOnHome ? "house.slash" : "house")
+            }
             Button(role: .destructive) {
                 if selection == .smartCollection(collection.id) {
                     selection = .home
                 }
                 appState.deleteVideoSmartCollection(collection)
+            } label: {
+                Label("删除", systemImage: "trash")
+            }
+        }
+    }
+
+    private func manualCollectionSidebarRow(_ collection: VideoManualCollection, previewItems: [MediaItem]) -> some View {
+        let selected = selection == .manualCollection(collection.id)
+        return HStack(spacing: 10) {
+            VideoManualCollectionCoverView(
+                items: previewItems,
+                title: collection.name,
+                size: 22,
+                cornerRadius: 6,
+                maxTiles: 1,
+                selected: selected
+            )
+            Text(collection.name)
+        }
+        .tag(SidebarDestination.manualCollection(collection.id))
+        .contextMenu {
+            Button {
+                manualCollectionEditor = .edit(collection)
+            } label: {
+                Label("重命名", systemImage: "pencil")
+            }
+            Button {
+                appState.setVideoManualCollectionHomeVisibility(collection, showOnHome: !collection.showOnHome)
+            } label: {
+                Label(collection.showOnHome ? "从首页移除" : "发布到首页", systemImage: collection.showOnHome ? "house.slash" : "house")
+            }
+            Button(role: .destructive) {
+                if selection == .manualCollection(collection.id) {
+                    selection = .home
+                }
+                appState.deleteVideoManualCollection(collection)
             } label: {
                 Label("删除", systemImage: "trash")
             }
@@ -1086,6 +1253,9 @@ struct ContentView: View {
         if case .smartCollection(let collectionID) = destination {
             return appState.videoSmartCollection(id: collectionID)?.name ?? "智能集合"
         }
+        if case .manualCollection(let collectionID) = destination {
+            return appState.videoManualCollection(id: collectionID)?.name ?? "集合"
+        }
         if case .musicSmartPlaylist(let playlistID) = destination {
             return appState.musicSmartPlaylist(id: playlistID)?.name ?? "智能歌单"
         }
@@ -1117,7 +1287,7 @@ struct ContentView: View {
                 selection = .health
             }
         case .video(.privacy):
-            if appState.privacyPINConfigured && appState.privacyUnlocked {
+            if appState.canDisplayPrivateItems {
                 LibraryView(destination: destination)
             } else {
                 PrivacyLockView()
@@ -1136,7 +1306,7 @@ struct ContentView: View {
             } else {
                 EmptyStateView(title: "智能歌单不存在", systemImage: "music.note.list", message: "该智能歌单可能已被删除。")
             }
-        case .embySection, .embyLibrary, .smartCollection:
+        case .embySection, .embyLibrary, .smartCollection, .manualCollection:
             LibraryView(destination: destination)
         case .health:
             LibraryHealthCenterView()
@@ -1184,6 +1354,74 @@ struct StartupErrorView: View {
 private enum MusicMiniPlayerScrollDirection {
     case down
     case up
+}
+
+private struct MainLayoutActivityMonitor: NSViewRepresentable {
+    let onActivityChanged: (Bool) -> Void
+
+    func makeNSView(context: Context) -> MonitorView {
+        let view = MonitorView(frame: .zero)
+        view.onActivityChanged = onActivityChanged
+        return view
+    }
+
+    func updateNSView(_ nsView: MonitorView, context: Context) {
+        nsView.onActivityChanged = onActivityChanged
+        nsView.refreshObservation()
+    }
+
+    static func dismantleNSView(_ nsView: MonitorView, coordinator: ()) {
+        nsView.stopObserving()
+    }
+
+    final class MonitorView: NSView {
+        var onActivityChanged: ((Bool) -> Void)?
+        private weak var observedWindow: NSWindow?
+        private var observers: [NSObjectProtocol] = []
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            refreshObservation()
+        }
+
+        func refreshObservation() {
+            guard observedWindow !== window else { return }
+            stopObserving()
+            guard let window else { return }
+            observedWindow = window
+            let center = NotificationCenter.default
+            observers.append(
+                center.addObserver(
+                    forName: NSWindow.willStartLiveResizeNotification,
+                    object: window,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.onActivityChanged?(true)
+                }
+            )
+            observers.append(
+                center.addObserver(
+                    forName: NSWindow.didEndLiveResizeNotification,
+                    object: window,
+                    queue: .main
+                ) { [weak self] _ in
+                    self?.onActivityChanged?(false)
+                }
+            )
+        }
+
+        func stopObserving() {
+            for observer in observers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            observers.removeAll()
+            observedWindow = nil
+        }
+
+        deinit {
+            stopObserving()
+        }
+    }
 }
 
 private struct MusicMiniPlayerCollapseScrollMonitor: NSViewRepresentable {
@@ -1415,7 +1653,7 @@ private struct MusicExpansionWindowBackdropGuard: NSViewRepresentable {
 private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
     let hiddenForMusicOverlay: Bool
     let hideSidebarToggleForMusicOverlay: Bool
-    private static let minimumContentSize = NSSize(width: 1180, height: 740)
+    private static let minimumContentSize = NSSize(width: 1088, height: 720)
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -1496,8 +1734,8 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
                     nextWindow.styleMask.insert(.fullSizeContentView)
                     didEnableFullSizeContent = true
                 }
-                // #1 主窗口固定最小内容尺寸：侧栏最小 220 + 详情页最小宽度 820 ≈ 1040，取 1080 留出余量；
-                // 高度按详情页最小高 620 + 工具栏/页边距取 700。低于此尺寸时各组件（侧栏/海报墙/详情 hero）
+                // #1 主窗口固定最小内容尺寸：侧栏最小 220 + 主内容安全宽度约 848，取 1088 留出余量；
+                // 高度按详情页最小高 620 + 工具栏/页边距取 720。低于此尺寸时各组件（侧栏/海报墙/详情 hero）
                 // 会发生错位或挤压，因此设为硬下限。fullSizeContentView 已常驻、styleMask 不再切换，
                 // 设固定下限不会再触发以往"反复展开收起撑大窗口"的问题。
                 applyMinimumWindowSize(to: nextWindow)
@@ -1896,14 +2134,14 @@ struct EmbySourceRenameSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             AppSheetHeader(
-                title: "重命名 Emby 来源",
+                title: "重命名远程来源",
                 subtitle: "新名称会同步显示在侧边栏和媒体源列表中。",
                 systemImage: "pencil"
             )
 
             VStack(spacing: 14) {
                 SettingsRow(title: "名称", systemImage: "pencil.line") {
-                    TextField("Emby 来源名称", text: $name)
+                    TextField("远程来源名称", text: $name)
                         .textFieldStyle(.plain)
                         .multilineTextAlignment(.trailing)
                         .glassFormField()
@@ -2075,17 +2313,6 @@ private struct FloatingNoticeCapsule: View {
     }
 
     private var kindTint: Color {
-        switch notice.kind {
-        case .info:
-            return AppColors.selectedGlassTint
-        case .success:
-            return AppColors.success
-        case .warning:
-            return AppColors.warning
-        case .error:
-            return AppColors.error
-        case .tip:
-            return AppColors.selectedGlassTint
-        }
+        AppColors.selectedGlassTint
     }
 }

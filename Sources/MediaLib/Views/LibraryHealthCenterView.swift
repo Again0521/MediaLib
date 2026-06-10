@@ -5,7 +5,7 @@ struct LibraryHealthCenterView: View {
     @EnvironmentObject private var appState: AppState
     @State private var removalRequest: MissingIndexRemovalRequest?
     @State private var duplicateMergeRequest: DuplicateMergeRequest?
-    // 任务4：点击“补充”直接弹出信息搜索弹窗（与详情页/音乐库同一套 MetadataSearchView，支持剧集 TMDB 与音乐源补全）。
+    // 健康中心的“补充”复用详情页/音乐库的 MetadataSearchView，保持匹配和写入策略一致。
     @State private var metadataItem: MediaItem?
     @State private var restoredReturnAnchorID: String?
 
@@ -97,7 +97,7 @@ struct LibraryHealthCenterView: View {
     private var header: some View {
         PageHeader(
             title: "片库健康",
-            subtitle: "检查来源、文件路径、重复项和关键信息。",
+            subtitle: "检查来源、文件/播放路径、重复项和关键信息。",
             systemImage: "stethoscope"
         ) {
             if !safeMissingItems.isEmpty {
@@ -131,7 +131,7 @@ struct LibraryHealthCenterView: View {
     }
 
     private var summary: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 12)], spacing: 12) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 150), spacing: 12), count: 4), spacing: 12) {
             healthMetric(title: "离线媒体源", value: appState.offlineSources.count, systemImage: "externaldrive.badge.exclamationmark")
             healthMetric(title: "失效路径", value: appState.missingFileItems.count, systemImage: "doc.badge.ellipsis")
             healthMetric(title: "疑似重复组", value: appState.duplicateTitleGroups.count, systemImage: "square.on.square")
@@ -164,7 +164,7 @@ struct LibraryHealthCenterView: View {
                     HStack(spacing: 12) {
                         PlayfulSymbolIcon(systemImage: source.sourceKind == .local ? "externaldrive" : "network", size: 28)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(source.name)
+                            Text(hiddenSourceName(source))
                                 .font(.callout.weight(.semibold))
                             Text(hiddenSourcePath(source))
                                 .font(.caption)
@@ -196,9 +196,9 @@ struct LibraryHealthCenterView: View {
     @ViewBuilder
     private var missingFilesSection: some View {
         if !appState.missingFileItems.isEmpty {
-            healthSection(title: "失效文件路径", subtitle: "确认文件已不存在后，可仅从内部索引移除。离线来源中的路径会保留。", systemImage: "doc.badge.ellipsis") {
+            healthSection(title: "失效文件/播放路径", subtitle: "本地文件不存在或远程视频没有可播放路径时会出现在这里。确认失效后可仅从内部索引移除，离线来源中的路径会保留。", systemImage: "doc.badge.ellipsis") {
                 ForEach(appState.missingFileItems) { item in
-                    healthItemRow(item, detail: item.filePath ?? "路径未记录") {
+                    healthItemRow(item, detail: hiddenMissingFileDetail(item)) {
                         Button {
                             openDetail(item)
                         } label: {
@@ -326,8 +326,28 @@ struct LibraryHealthCenterView: View {
         return source.displayPath
     }
 
+    private func hiddenSourceName(_ source: MediaSource) -> String {
+        if source.mediaType == .privateCollection, !appState.privacyUnlocked {
+            return "保险库媒体源"
+        }
+        return source.name
+    }
+
+    private func hiddenMissingFileDetail(_ item: MediaItem) -> String {
+        // 健康检查上游已过滤锁定保险库内容；这里再兜底一次，避免未来入口变更时泄露路径。
+        if appState.isPrivateItem(item), !appState.privacyUnlocked {
+            return "路径已隐藏"
+        }
+        if appState.source(for: item)?.sourceKind.isRemoteMediaServer == true,
+           item.filePath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            return "远程播放路径未记录"
+        }
+        return item.filePath ?? "路径未记录"
+    }
+
     private func duplicateDetail(_ item: MediaItem) -> String {
-        [item.type.displayName, item.displayYear, item.filePath]
+        let path = appState.isPrivateItem(item) && !appState.privacyUnlocked ? "路径已隐藏" : item.filePath
+        return [item.type.displayName, item.displayYear, path]
             .compactMap { $0?.isEmpty == false ? $0 : nil }
             .joined(separator: " · ")
     }
@@ -353,9 +373,16 @@ struct LibraryHealthCenterView: View {
     private func restoreReturnAnchorIfNeeded(_ anchorID: String?, scrollProxy: ScrollViewProxy) {
         guard let anchorID, restoredReturnAnchorID != anchorID else { return }
         restoredReturnAnchorID = anchorID
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollProxy.scrollTo(anchorID, anchor: .center)
+        }
         Task { @MainActor in
             await Task.yield()
-            withAnimation(AppMotion.page) {
+            var retryTransaction = Transaction()
+            retryTransaction.disablesAnimations = true
+            withTransaction(retryTransaction) {
                 scrollProxy.scrollTo(anchorID, anchor: .center)
             }
             appState.selectedItemReturnAnchorID = nil

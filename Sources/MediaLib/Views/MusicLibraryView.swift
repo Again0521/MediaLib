@@ -17,9 +17,9 @@ private enum MusicLyricsPresenceCache {
         return cacheRevision
     }
 
-    static func cachedHasLyrics(filePath: String?, includeGenericNames: Bool) -> Bool? {
+    static func cachedHasLyrics(filePath: String?) -> Bool? {
         guard let filePath else { return false }
-        let cacheKey = key(filePath: filePath, includeGenericNames: includeGenericNames)
+        let cacheKey = key(filePath: filePath)
         lock.lock()
         defer { lock.unlock() }
         guard let cached = values[cacheKey] else { return nil }
@@ -27,30 +27,9 @@ private enum MusicLyricsPresenceCache {
         return cached
     }
 
-    static func hasLyrics(filePath: String?, includeGenericNames: Bool) -> Bool {
-        guard let filePath else { return false }
-        let cacheKey = key(filePath: filePath, includeGenericNames: includeGenericNames)
-        lock.lock()
-        if let cached = values[cacheKey] {
-            markRecentlyUsed(cacheKey)
-            lock.unlock()
-            return cached
-        }
-        lock.unlock()
-
-        let exists = lyricsExist(filePath: filePath)
-        lock.lock()
-        values[cacheKey] = exists
-        markRecentlyUsed(cacheKey)
-        trimIfNeeded()
-        cacheRevision += 1
-        lock.unlock()
-        return exists
-    }
-
-    static func warmCache(filePaths: [String?], includeGenericNames: Bool) async -> Bool {
+    static func warmCache(filePaths: [String?]) async -> Bool {
         let paths = Array(Set(filePaths.compactMap { $0 }))
-        let missing = missingEntries(for: paths, includeGenericNames: includeGenericNames)
+        let missing = missingEntries(for: paths)
         guard !missing.isEmpty else { return false }
 
         let results = await Task.detached(priority: .utility) {
@@ -62,11 +41,11 @@ private enum MusicLyricsPresenceCache {
         return store(results)
     }
 
-    private static func missingEntries(for paths: [String], includeGenericNames: Bool) -> [(path: String, cacheKey: String)] {
+    private static func missingEntries(for paths: [String]) -> [(path: String, cacheKey: String)] {
         lock.lock()
         defer { lock.unlock() }
         return paths
-            .map { (path: $0, cacheKey: key(filePath: $0, includeGenericNames: includeGenericNames)) }
+            .map { (path: $0, cacheKey: key(filePath: $0)) }
             .filter { values[$0.cacheKey] == nil }
     }
 
@@ -86,8 +65,8 @@ private enum MusicLyricsPresenceCache {
         return changed
     }
 
-    private static func key(filePath: String, includeGenericNames: Bool) -> String {
-        "\(filePath)#\(includeGenericNames)"
+    private static func key(filePath: String) -> String {
+        filePath
     }
 
     private static func markRecentlyUsed(_ cacheKey: String) {
@@ -191,6 +170,14 @@ private enum MusicFavoritePlaylist {
     }
 }
 
+private func musicDisplayArtist(_ value: String?) -> String {
+    value.flatMap { $0.isEmpty ? nil : $0 } ?? "未知艺术家"
+}
+
+private func musicDisplayAlbum(_ value: String?) -> String {
+    value.flatMap { $0.isEmpty ? nil : $0 } ?? "未知专辑"
+}
+
 private enum MusicLibrarySnapshotBuilder {
     static func snapshot(from input: MusicLibrarySnapshotBuildInput) -> MusicLibrarySnapshotCache.Snapshot {
         let tracks = resolvedTracks(from: input.tracks, input: input)
@@ -217,7 +204,7 @@ private enum MusicLibrarySnapshotBuilder {
             case .all: return true
             case .favorites: return track.favorite
             case .withLyrics:
-                return MusicLyricsPresenceCache.cachedHasLyrics(filePath: track.filePath, includeGenericNames: false) ?? false
+                return MusicLyricsPresenceCache.cachedHasLyrics(filePath: track.filePath) ?? false
             case .unmatched:
                 return (track.artist?.isEmpty ?? true) || (track.album?.isEmpty ?? true) || track.metadataProvider == nil
             }
@@ -254,9 +241,9 @@ private enum MusicLibrarySnapshotBuilder {
                 track: track,
                 titleText: displayNameWithoutKnownExtension(track.title),
                 fileName: track.filePath.map { displayNameWithoutKnownExtension(URL(fileURLWithPath: $0).lastPathComponent) },
-                artistText: track.artist?.isEmpty == false ? track.artist! : "未知艺术家",
-                albumText: track.album?.isEmpty == false ? track.album! : "未知专辑",
-                hasLocalLyrics: MusicLyricsPresenceCache.cachedHasLyrics(filePath: track.filePath, includeGenericNames: false) ?? false,
+                artistText: musicDisplayArtist(track.artist),
+                albumText: musicDisplayAlbum(track.album),
+                hasLocalLyrics: MusicLyricsPresenceCache.cachedHasLyrics(filePath: track.filePath) ?? false,
                 durationText: durationText(track.duration)
             )
         }
@@ -264,7 +251,7 @@ private enum MusicLibrarySnapshotBuilder {
 
     static func albumGroups(from tracks: [MediaItem], sortMode: MusicSortMode, sortOrder: MusicSortOrder) -> [MusicAlbumGroup] {
         let grouped = Dictionary(grouping: tracks) { item in
-            MusicAlbumKey(title: item.album?.isEmpty == false ? item.album! : "未知专辑", artist: item.artist?.isEmpty == false ? item.artist! : "未知艺术家")
+            MusicAlbumKey(title: musicDisplayAlbum(item.album), artist: musicDisplayArtist(item.artist))
         }
         let groups = grouped.map { key, items in
             MusicAlbumGroup(key: key, tracks: items.sorted { ($0.trackNumber ?? 0, $0.title) < ($1.trackNumber ?? 0, $1.title) })
@@ -291,7 +278,7 @@ private enum MusicLibrarySnapshotBuilder {
 
     static func artistGroups(from tracks: [MediaItem], sortMode: MusicSortMode, sortOrder: MusicSortOrder) -> [MusicArtistGroup] {
         let grouped = Dictionary(grouping: tracks) { item in
-            item.artist?.isEmpty == false ? item.artist! : "未知艺术家"
+            musicDisplayArtist(item.artist)
         }
         let groups = grouped.map { name, items in
             MusicArtistGroup(name: name, tracks: items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending })
@@ -825,7 +812,7 @@ struct MusicLibraryView: View {
         lyricsRefreshTask?.cancel()
         let filePaths = tracks.map(\.filePath)
         lyricsRefreshTask = Task { @MainActor in
-            let changed = await MusicLyricsPresenceCache.warmCache(filePaths: filePaths, includeGenericNames: false)
+            let changed = await MusicLyricsPresenceCache.warmCache(filePaths: filePaths)
             guard changed, !Task.isCancelled, section.id == targetSection.id else { return }
             refreshVisibleContent(for: targetSection)
         }
@@ -2319,7 +2306,7 @@ private struct MusicArtistGroup: Identifiable, Sendable {
     var id: String { name }
     var playCount: Int { tracks.reduce(0) { $0 + $1.playCountValue } }
     var albumCount: Int {
-        Set(tracks.map { $0.album?.isEmpty == false ? $0.album! : "未知专辑" }).count
+        Set(tracks.map { musicDisplayAlbum($0.album) }).count
     }
 }
 

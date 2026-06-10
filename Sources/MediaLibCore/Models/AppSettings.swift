@@ -54,10 +54,592 @@ public enum ArtworkFallbackMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+public enum VideoScrubberPreviewMode: String, Codable, CaseIterable, Identifiable {
+    case off
+    case performance
+    case balanced
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .off: return "关闭"
+        case .performance: return "流畅优先"
+        case .balanced: return "画面优先"
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .off:
+            return "鼠标悬停进度条时只显示时间，不提取帧预览。"
+        case .performance:
+            return "使用更粗的预览分段并延迟抽帧，优先保证播放流畅。"
+        case .balanced:
+            return "保留较细的预览分段并预热邻近帧，适合性能充足的本机视频。"
+        }
+    }
+
+    public var isEnabled: Bool {
+        self != .off
+    }
+
+    public var usesCoarseBuckets: Bool {
+        self == .performance
+    }
+
+    public var allowsPrefetch: Bool {
+        self == .balanced
+    }
+
+    public var requestDelayNanoseconds: UInt64 {
+        switch self {
+        case .off: return 0
+        case .performance: return 120_000_000
+        case .balanced: return 45_000_000
+        }
+    }
+
+    public var hoverMinimumInterval: Double {
+        switch self {
+        case .off: return 0.18
+        case .performance: return 0.11
+        case .balanced: return 1.0 / 24.0
+        }
+    }
+
+    public var hoverMinimumDistance: Double {
+        switch self {
+        case .off: return 22
+        case .performance: return 16
+        case .balanced: return 9
+        }
+    }
+}
+
+public enum VideoAspectOverride: String, Codable, CaseIterable, Identifiable {
+    case source
+    case square
+    case fourByThree
+    case sixteenByNine
+    case sixteenByTen
+    case twentyOneByNine
+    case cinemaScope
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .source: return "跟随片源"
+        case .square: return "1:1"
+        case .fourByThree: return "4:3"
+        case .sixteenByNine: return "16:9"
+        case .sixteenByTen: return "16:10"
+        case .twentyOneByNine: return "21:9"
+        case .cinemaScope: return "2.39:1"
+        }
+    }
+
+    public var mpvValue: String {
+        switch self {
+        case .source: return "no"
+        case .square: return "1:1"
+        case .fourByThree: return "4:3"
+        case .sixteenByNine: return "16:9"
+        case .sixteenByTen: return "16:10"
+        case .twentyOneByNine: return "21:9"
+        case .cinemaScope: return "2.39:1"
+        }
+    }
+}
+
+public enum VideoCropMode: String, Codable, CaseIterable, Identifiable {
+    case none
+    case gentle
+    case balanced
+    case fill
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .none: return "关闭"
+        case .gentle: return "轻微"
+        case .balanced: return "平衡"
+        case .fill: return "填满"
+        }
+    }
+
+    public var panscanValue: Double {
+        switch self {
+        case .none: return 0
+        case .gentle: return 0.18
+        case .balanced: return 0.42
+        case .fill: return 1
+        }
+    }
+}
+
+public enum VideoDeinterlaceMode: String, Codable, CaseIterable, Identifiable {
+    case off
+    case auto
+    case on
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .off: return "关闭"
+        case .auto: return "自动"
+        case .on: return "开启"
+        }
+    }
+
+    public var mpvValue: String {
+        switch self {
+        case .off: return "no"
+        case .auto: return "auto"
+        case .on: return "yes"
+        }
+    }
+}
+
+public enum VideoRotationMode: String, Codable, CaseIterable, Identifiable {
+    case source
+    case clockwise90
+    case rotate180
+    case counterclockwise90
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .source: return "不旋转"
+        case .clockwise90: return "顺时针 90"
+        case .rotate180: return "180"
+        case .counterclockwise90: return "逆时针 90"
+        }
+    }
+
+    public var mpvValue: String {
+        switch self {
+        case .source: return "no"
+        case .clockwise90: return "90"
+        case .rotate180: return "180"
+        case .counterclockwise90: return "270"
+        }
+    }
+}
+
+public enum VideoTrackpadGestureSensitivity: String, Codable, CaseIterable, Identifiable {
+    case gentle
+    case standard
+    case fast
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .gentle: return "轻柔"
+        case .standard: return "标准"
+        case .fast: return "灵敏"
+        }
+    }
+
+    public var seekSecondsPerPoint: Double {
+        switch self {
+        case .gentle: return 0.035
+        case .standard: return 0.055
+        case .fast: return 0.08
+        }
+    }
+
+    public var volumePerPoint: Double {
+        switch self {
+        case .gentle: return 0.0016
+        case .standard: return 0.0023
+        case .fast: return 0.0032
+        }
+    }
+}
+
+public struct VideoShortcutModifiers: OptionSet, Codable, Hashable, Sendable {
+    public let rawValue: Int
+
+    public init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    public static let command = VideoShortcutModifiers(rawValue: 1 << 0)
+    public static let option = VideoShortcutModifiers(rawValue: 1 << 1)
+    public static let control = VideoShortcutModifiers(rawValue: 1 << 2)
+    public static let shift = VideoShortcutModifiers(rawValue: 1 << 3)
+
+    public var displayPrefix: String {
+        var parts: [String] = []
+        if contains(.command) { parts.append("Command") }
+        if contains(.option) { parts.append("Option") }
+        if contains(.control) { parts.append("Control") }
+        if contains(.shift) { parts.append("Shift") }
+        return parts.isEmpty ? "" : parts.joined(separator: "+") + "+"
+    }
+}
+
+public struct VideoKeyboardShortcut: Codable, Hashable, Sendable {
+    public var keyCode: Int
+    public var characters: String
+    public var modifiers: VideoShortcutModifiers
+
+    public init(keyCode: Int, characters: String = "", modifiers: VideoShortcutModifiers = []) {
+        self.keyCode = keyCode
+        self.characters = characters.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self.modifiers = modifiers
+    }
+
+    public var isEnabled: Bool {
+        keyCode >= 0
+    }
+
+    public var displayName: String {
+        guard isEnabled else { return "未设置" }
+        return modifiers.displayPrefix + keyTitle
+    }
+
+    private var keyTitle: String {
+        switch keyCode {
+        case 36, 76: return "Return"
+        case 48: return "Tab"
+        case 49: return "Space"
+        case 51: return "Delete"
+        case 53: return "Esc"
+        case 115: return "Home"
+        case 116: return "Page Up"
+        case 119: return "End"
+        case 121: return "Page Down"
+        case 123: return "Left"
+        case 124: return "Right"
+        case 125: return "Down"
+        case 126: return "Up"
+        default:
+            if !characters.isEmpty {
+                return characters.uppercased()
+            }
+            return "Key \(keyCode)"
+        }
+    }
+}
+
+public enum VideoPlayerShortcutAction: String, Codable, CaseIterable, Identifiable {
+    case playPause
+    case exitFullscreenOrClose
+    case closeWindow
+    case previousEpisode
+    case nextEpisode
+    case restart
+    case captureFrame
+    case openExternal
+    case cycleABLoopPoint
+    case clearABLoop
+    case toggleCurrentLoop
+    case showPlaybackInfo
+    case seekBackward
+    case seekForward
+    case seekBackwardSmall
+    case seekForwardSmall
+    case seekBackwardLarge
+    case seekForwardLarge
+    case seekBackwardTen
+    case seekForwardTen
+    case volumeUp
+    case volumeDown
+    case mute
+    case toggleFullscreen
+    case goToBeginning
+    case goToEnd
+    case speedDown
+    case speedUp
+    case resetSpeed
+    case frameBackward
+    case frameForward
+    case audioDelayDown
+    case audioDelayUp
+    case subtitleDelayDown
+    case subtitleDelayUp
+    case subtitleSizeDown
+    case subtitleSizeUp
+    case subtitleMoveUp
+    case subtitleMoveDown
+    case cycleAspectRatio
+    case cycleCropMode
+    case cycleDeinterlaceMode
+    case rotateVideoLeft
+    case rotateVideoRight
+    case subtitleCycle
+    case subtitleToggle
+    case audioCycle
+    case seekTo0Percent
+    case seekTo10Percent
+    case seekTo20Percent
+    case seekTo30Percent
+    case seekTo40Percent
+    case seekTo50Percent
+    case seekTo60Percent
+    case seekTo70Percent
+    case seekTo80Percent
+    case seekTo90Percent
+    case toggleControlsLock
+    case showAdvancedSettings
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .playPause: return "播放 / 暂停"
+        case .exitFullscreenOrClose: return "退出全屏 / 关闭"
+        case .closeWindow: return "关闭播放器"
+        case .previousEpisode: return "上一集"
+        case .nextEpisode: return "下一集"
+        case .restart: return "从头播放"
+        case .captureFrame: return "保存当前画面"
+        case .openExternal: return "用系统播放器打开"
+        case .cycleABLoopPoint: return "设置 A-B 循环点"
+        case .clearABLoop: return "清除 A-B 循环"
+        case .toggleCurrentLoop: return "单片循环开关"
+        case .showPlaybackInfo: return "打开播放信息"
+        case .seekBackward: return "后退默认间隔"
+        case .seekForward: return "前进默认间隔"
+        case .seekBackwardSmall: return "后退 5 秒"
+        case .seekForwardSmall: return "前进 5 秒"
+        case .seekBackwardLarge: return "后退 60 秒"
+        case .seekForwardLarge: return "前进 60 秒"
+        case .seekBackwardTen: return "后退 10 秒"
+        case .seekForwardTen: return "前进 10 秒"
+        case .volumeUp: return "调高音量"
+        case .volumeDown: return "调低音量"
+        case .mute: return "静音"
+        case .toggleFullscreen: return "切换全屏"
+        case .goToBeginning: return "跳到开头"
+        case .goToEnd: return "跳到结尾"
+        case .speedDown: return "降低倍速"
+        case .speedUp: return "提高倍速"
+        case .resetSpeed: return "恢复 1x 倍速"
+        case .frameBackward: return "上一帧"
+        case .frameForward: return "下一帧"
+        case .audioDelayDown: return "音频提前 0.1 秒"
+        case .audioDelayUp: return "音频延后 0.1 秒"
+        case .subtitleDelayDown: return "字幕提前 0.1 秒"
+        case .subtitleDelayUp: return "字幕延后 0.1 秒"
+        case .subtitleSizeDown: return "缩小字幕"
+        case .subtitleSizeUp: return "放大字幕"
+        case .subtitleMoveUp: return "字幕上移"
+        case .subtitleMoveDown: return "字幕下移"
+        case .cycleAspectRatio: return "切换画面比例"
+        case .cycleCropMode: return "切换黑边裁切"
+        case .cycleDeinterlaceMode: return "切换去隔行"
+        case .rotateVideoLeft: return "画面向左旋转"
+        case .rotateVideoRight: return "画面向右旋转"
+        case .subtitleCycle: return "切换字幕轨道"
+        case .subtitleToggle: return "显示 / 隐藏字幕"
+        case .audioCycle: return "切换音轨"
+        case .seekTo0Percent: return "跳到 0%"
+        case .seekTo10Percent: return "跳到 10%"
+        case .seekTo20Percent: return "跳到 20%"
+        case .seekTo30Percent: return "跳到 30%"
+        case .seekTo40Percent: return "跳到 40%"
+        case .seekTo50Percent: return "跳到 50%"
+        case .seekTo60Percent: return "跳到 60%"
+        case .seekTo70Percent: return "跳到 70%"
+        case .seekTo80Percent: return "跳到 80%"
+        case .seekTo90Percent: return "跳到 90%"
+        case .toggleControlsLock: return "锁定 / 显示控制栏"
+        case .showAdvancedSettings: return "打开更多设置"
+        }
+    }
+
+    public var groupTitle: String {
+        switch self {
+        case .playPause, .exitFullscreenOrClose, .closeWindow, .previousEpisode, .nextEpisode, .restart, .captureFrame, .openExternal,
+             .cycleABLoopPoint, .clearABLoop, .toggleCurrentLoop, .showPlaybackInfo:
+            return "播放"
+        case .seekBackward, .seekForward, .seekBackwardSmall, .seekForwardSmall, .seekBackwardLarge, .seekForwardLarge,
+             .seekBackwardTen, .seekForwardTen, .goToBeginning, .goToEnd,
+             .seekTo0Percent, .seekTo10Percent, .seekTo20Percent, .seekTo30Percent, .seekTo40Percent,
+             .seekTo50Percent, .seekTo60Percent, .seekTo70Percent, .seekTo80Percent, .seekTo90Percent:
+            return "跳转"
+        case .volumeUp, .volumeDown, .mute, .toggleFullscreen, .toggleControlsLock, .showAdvancedSettings:
+            return "窗口与控制"
+        case .speedDown, .speedUp, .resetSpeed, .frameBackward, .frameForward,
+             .cycleAspectRatio, .cycleCropMode, .cycleDeinterlaceMode, .rotateVideoLeft, .rotateVideoRight:
+            return "画面"
+        case .audioDelayDown, .audioDelayUp, .subtitleDelayDown, .subtitleDelayUp,
+             .subtitleSizeDown, .subtitleSizeUp, .subtitleMoveUp, .subtitleMoveDown:
+            return "音画同步"
+        case .subtitleCycle, .subtitleToggle, .audioCycle:
+            return "轨道"
+        }
+    }
+
+    public var defaultShortcuts: [VideoKeyboardShortcut] {
+        switch self {
+        case .playPause:
+            return [
+                VideoKeyboardShortcut(keyCode: 49),
+                VideoKeyboardShortcut(keyCode: 40, characters: "k")
+            ]
+        case .exitFullscreenOrClose:
+            return [VideoKeyboardShortcut(keyCode: 53)]
+        case .closeWindow:
+            return [
+                VideoKeyboardShortcut(keyCode: 13, characters: "w", modifiers: .command),
+                VideoKeyboardShortcut(keyCode: 12, characters: "q")
+            ]
+        case .previousEpisode:
+            return []
+        case .nextEpisode:
+            return []
+        case .restart:
+            return []
+        case .captureFrame:
+            return [VideoKeyboardShortcut(keyCode: 1, characters: "s")]
+        case .openExternal:
+            return []
+        case .cycleABLoopPoint:
+            return [VideoKeyboardShortcut(keyCode: 11, characters: "b")]
+        case .clearABLoop:
+            return [VideoKeyboardShortcut(keyCode: 11, characters: "b", modifiers: .shift)]
+        case .toggleCurrentLoop:
+            return []
+        case .showPlaybackInfo:
+            return [VideoKeyboardShortcut(keyCode: 34, characters: "i")]
+        case .seekBackward:
+            return [VideoKeyboardShortcut(keyCode: 123)]
+        case .seekForward:
+            return [VideoKeyboardShortcut(keyCode: 124)]
+        case .seekBackwardSmall:
+            return [VideoKeyboardShortcut(keyCode: 123, modifiers: .shift)]
+        case .seekForwardSmall:
+            return [VideoKeyboardShortcut(keyCode: 124, modifiers: .shift)]
+        case .seekBackwardLarge:
+            return [
+                VideoKeyboardShortcut(keyCode: 123, modifiers: .option),
+                VideoKeyboardShortcut(keyCode: 121)
+            ]
+        case .seekForwardLarge:
+            return [
+                VideoKeyboardShortcut(keyCode: 124, modifiers: .option),
+                VideoKeyboardShortcut(keyCode: 116)
+            ]
+        case .seekBackwardTen:
+            return [VideoKeyboardShortcut(keyCode: 38, characters: "j")]
+        case .seekForwardTen:
+            return [VideoKeyboardShortcut(keyCode: 37, characters: "l")]
+        case .volumeUp:
+            return [VideoKeyboardShortcut(keyCode: 126)]
+        case .volumeDown:
+            return [VideoKeyboardShortcut(keyCode: 125)]
+        case .mute:
+            return [VideoKeyboardShortcut(keyCode: 46, characters: "m")]
+        case .toggleFullscreen:
+            return [
+                VideoKeyboardShortcut(keyCode: 36),
+                VideoKeyboardShortcut(keyCode: 3, characters: "f"),
+                VideoKeyboardShortcut(keyCode: 3, characters: "f", modifiers: .command)
+            ]
+        case .goToBeginning:
+            return [
+                VideoKeyboardShortcut(keyCode: 115),
+                VideoKeyboardShortcut(keyCode: 123, modifiers: .command)
+            ]
+        case .goToEnd:
+            return [
+                VideoKeyboardShortcut(keyCode: 119),
+                VideoKeyboardShortcut(keyCode: 124, modifiers: .command)
+            ]
+        case .speedDown:
+            return [VideoKeyboardShortcut(keyCode: 33, characters: "[")]
+        case .speedUp:
+            return [VideoKeyboardShortcut(keyCode: 30, characters: "]")]
+        case .resetSpeed:
+            return [VideoKeyboardShortcut(keyCode: 42, characters: "\\")]
+        case .frameBackward:
+            return [VideoKeyboardShortcut(keyCode: 43, characters: ",")]
+        case .frameForward:
+            return [VideoKeyboardShortcut(keyCode: 47, characters: ".")]
+        case .audioDelayDown:
+            return [VideoKeyboardShortcut(keyCode: 27, characters: "-", modifiers: .control)]
+        case .audioDelayUp:
+            return [VideoKeyboardShortcut(keyCode: 24, characters: "=", modifiers: .control)]
+        case .subtitleDelayDown:
+            return [VideoKeyboardShortcut(keyCode: 6, characters: "z")]
+        case .subtitleDelayUp:
+            return [VideoKeyboardShortcut(keyCode: 6, characters: "z", modifiers: .shift)]
+        case .subtitleSizeDown:
+            return [VideoKeyboardShortcut(keyCode: 5, characters: "g")]
+        case .subtitleSizeUp:
+            return [VideoKeyboardShortcut(keyCode: 5, characters: "g", modifiers: .shift)]
+        case .subtitleMoveUp:
+            return [VideoKeyboardShortcut(keyCode: 15, characters: "r")]
+        case .subtitleMoveDown:
+            return [VideoKeyboardShortcut(keyCode: 15, characters: "r", modifiers: .shift)]
+        case .cycleAspectRatio, .cycleCropMode, .rotateVideoLeft, .rotateVideoRight:
+            return []
+        case .cycleDeinterlaceMode:
+            return [VideoKeyboardShortcut(keyCode: 2, characters: "d")]
+        case .subtitleCycle:
+            return [VideoKeyboardShortcut(keyCode: 8, characters: "c")]
+        case .subtitleToggle:
+            return [VideoKeyboardShortcut(keyCode: 9, characters: "v")]
+        case .audioCycle:
+            return [VideoKeyboardShortcut(keyCode: 0, characters: "a")]
+        case .seekTo0Percent:
+            return [VideoKeyboardShortcut(keyCode: 29, characters: "0")]
+        case .seekTo10Percent:
+            return [VideoKeyboardShortcut(keyCode: 18, characters: "1")]
+        case .seekTo20Percent:
+            return [VideoKeyboardShortcut(keyCode: 19, characters: "2")]
+        case .seekTo30Percent:
+            return [VideoKeyboardShortcut(keyCode: 20, characters: "3")]
+        case .seekTo40Percent:
+            return [VideoKeyboardShortcut(keyCode: 21, characters: "4")]
+        case .seekTo50Percent:
+            return [VideoKeyboardShortcut(keyCode: 23, characters: "5")]
+        case .seekTo60Percent:
+            return [VideoKeyboardShortcut(keyCode: 22, characters: "6")]
+        case .seekTo70Percent:
+            return [VideoKeyboardShortcut(keyCode: 26, characters: "7")]
+        case .seekTo80Percent:
+            return [VideoKeyboardShortcut(keyCode: 28, characters: "8")]
+        case .seekTo90Percent:
+            return [VideoKeyboardShortcut(keyCode: 25, characters: "9")]
+        case .toggleControlsLock:
+            return []
+        case .showAdvancedSettings:
+            return [VideoKeyboardShortcut(keyCode: 43, characters: ",", modifiers: .command)]
+        }
+    }
+
+    public var seekPercentValue: Double? {
+        switch self {
+        case .seekTo0Percent: return 0
+        case .seekTo10Percent: return 0.1
+        case .seekTo20Percent: return 0.2
+        case .seekTo30Percent: return 0.3
+        case .seekTo40Percent: return 0.4
+        case .seekTo50Percent: return 0.5
+        case .seekTo60Percent: return 0.6
+        case .seekTo70Percent: return 0.7
+        case .seekTo80Percent: return 0.8
+        case .seekTo90Percent: return 0.9
+        default: return nil
+        }
+    }
+}
+
 public enum HomeTab: String, Codable, CaseIterable, Identifiable {
     case overview
     case nextUp
     case continueWatching
+    case offline
     case recent
     case movies
     case tvShows
@@ -77,6 +659,7 @@ public enum HomeTab: String, Codable, CaseIterable, Identifiable {
         case .overview: return "总览"
         case .nextUp: return "下一集"
         case .continueWatching: return "继续观看"
+        case .offline: return "离线"
         case .recent: return "最近添加"
         case .movies: return "电影"
         case .tvShows: return "电视剧"
@@ -96,6 +679,7 @@ public enum HomeTab: String, Codable, CaseIterable, Identifiable {
         case .overview: return "square.grid.2x2"
         case .nextUp: return "forward.end"
         case .continueWatching: return "play.circle"
+        case .offline: return "arrow.down.circle"
         case .recent: return "clock"
         case .movies: return "film"
         case .tvShows: return "tv"
@@ -368,7 +952,7 @@ public enum AutomaticScanInterval: String, Codable, CaseIterable, Identifiable {
 }
 
 public struct AppSettings: Codable, Hashable {
-    public static let defaultHomeTabs: [HomeTab] = [
+    private static let legacyDefaultHomeTabs: [HomeTab] = [
         .overview,
         .nextUp,
         .continueWatching,
@@ -383,6 +967,28 @@ public struct AppSettings: Codable, Hashable {
         .favorites,
         .unwatched
     ]
+
+    public static let defaultHomeTabs: [HomeTab] = [
+        .overview,
+        .nextUp,
+        .continueWatching,
+        .offline,
+        .recent,
+        .movies,
+        .tvShows,
+        .anime,
+        .documentaries,
+        .variety,
+        .music,
+        .other,
+        .favorites,
+        .unwatched
+    ]
+
+    private static func normalizedEnabledHomeTabs(_ tabs: [HomeTab]) -> [HomeTab] {
+        let configured = tabs.isEmpty ? defaultHomeTabs : tabs
+        return configured == legacyDefaultHomeTabs ? defaultHomeTabs : configured
+    }
 
     public var defaultPlayer: DefaultPlayer
     public var theme: AppTheme
@@ -410,7 +1016,24 @@ public struct AppSettings: Codable, Hashable {
     public var thumbnailConcurrency: Int
     public var posterMinWidth: Double
     public var posterMaxWidth: Double
+    public var videoScrubberPreviewMode: VideoScrubberPreviewMode
     public var videoPlayerPreferredWidth: Double
+    public var videoPlayerAlwaysOnTop: Bool
+    public var videoKeyboardShortcuts: [VideoPlayerShortcutAction: [VideoKeyboardShortcut]]
+    public var videoTrackpadGesturesEnabled: Bool
+    public var videoTrackpadHorizontalSeekEnabled: Bool
+    public var videoTrackpadVerticalVolumeEnabled: Bool
+    public var videoTrackpadPinchFullscreenEnabled: Bool
+    public var videoTrackpadGestureSensitivity: VideoTrackpadGestureSensitivity
+    public var videoDefaultAudioDelay: Double
+    public var videoDefaultSubtitleDelay: Double
+    public var videoDefaultSubtitleScale: Double
+    public var videoDefaultSubtitlePosition: Double
+    public var videoAspectOverride: VideoAspectOverride
+    public var videoCropMode: VideoCropMode
+    public var videoDeinterlaceMode: VideoDeinterlaceMode
+    public var videoRotationMode: VideoRotationMode
+    public var videoLoopCurrentItem: Bool
     public var enabledHomeTabs: [HomeTab]
     public var videoDefaultPlayer: DefaultPlayer
     public var musicDefaultPlayer: DefaultPlayer
@@ -431,6 +1054,8 @@ public struct AppSettings: Codable, Hashable {
     public var musicAlbumCoverGlowEnabled: Bool
     /// 用户选择的视频缓存根目录；nil 时使用系统 Caches/MediaLib。
     public var videoCacheDirectoryPath: String?
+    /// 离线视频缓存容量上限，0 表示不限制。
+    public var videoCacheSizeLimitGB: Double
     /// 音乐均衡器开关与预设。
     public var musicEqualizerEnabled: Bool
     public var musicEqualizerPreset: MusicEqualizerPreset
@@ -490,7 +1115,24 @@ public struct AppSettings: Codable, Hashable {
         thumbnailConcurrency: Int = 2,
         posterMinWidth: Double = 150,
         posterMaxWidth: Double = 240,
+        videoScrubberPreviewMode: VideoScrubberPreviewMode = .performance,
         videoPlayerPreferredWidth: Double = 1120,
+        videoPlayerAlwaysOnTop: Bool = false,
+        videoKeyboardShortcuts: [VideoPlayerShortcutAction: [VideoKeyboardShortcut]] = [:],
+        videoTrackpadGesturesEnabled: Bool = true,
+        videoTrackpadHorizontalSeekEnabled: Bool = true,
+        videoTrackpadVerticalVolumeEnabled: Bool = true,
+        videoTrackpadPinchFullscreenEnabled: Bool = false,
+        videoTrackpadGestureSensitivity: VideoTrackpadGestureSensitivity = .standard,
+        videoDefaultAudioDelay: Double = 0,
+        videoDefaultSubtitleDelay: Double = 0,
+        videoDefaultSubtitleScale: Double = 1,
+        videoDefaultSubtitlePosition: Double = 100,
+        videoAspectOverride: VideoAspectOverride = .source,
+        videoCropMode: VideoCropMode = .none,
+        videoDeinterlaceMode: VideoDeinterlaceMode = .off,
+        videoRotationMode: VideoRotationMode = .source,
+        videoLoopCurrentItem: Bool = false,
         enabledHomeTabs: [HomeTab] = AppSettings.defaultHomeTabs,
         videoDefaultPlayer: DefaultPlayer? = nil,
         musicDefaultPlayer: DefaultPlayer = .builtIn,
@@ -508,6 +1150,7 @@ public struct AppSettings: Codable, Hashable {
         musicSoftFadeDuration: Double = 0.8,
         musicAlbumCoverGlowEnabled: Bool = true,
         videoCacheDirectoryPath: String? = nil,
+        videoCacheSizeLimitGB: Double = 0,
         musicEqualizerEnabled: Bool = false,
         musicEqualizerPreset: MusicEqualizerPreset = .flat,
         automaticScanInterval: AutomaticScanInterval = .disabled,
@@ -556,8 +1199,25 @@ public struct AppSettings: Codable, Hashable {
         self.thumbnailConcurrency = thumbnailConcurrency
         self.posterMinWidth = posterMinWidth
         self.posterMaxWidth = posterMaxWidth
+        self.videoScrubberPreviewMode = videoScrubberPreviewMode
         self.videoPlayerPreferredWidth = videoPlayerPreferredWidth
-        self.enabledHomeTabs = enabledHomeTabs.isEmpty ? AppSettings.defaultHomeTabs : enabledHomeTabs
+        self.videoPlayerAlwaysOnTop = videoPlayerAlwaysOnTop
+        self.videoKeyboardShortcuts = Self.sanitizedVideoKeyboardShortcuts(videoKeyboardShortcuts)
+        self.videoTrackpadGesturesEnabled = videoTrackpadGesturesEnabled
+        self.videoTrackpadHorizontalSeekEnabled = videoTrackpadHorizontalSeekEnabled
+        self.videoTrackpadVerticalVolumeEnabled = videoTrackpadVerticalVolumeEnabled
+        self.videoTrackpadPinchFullscreenEnabled = videoTrackpadPinchFullscreenEnabled
+        self.videoTrackpadGestureSensitivity = videoTrackpadGestureSensitivity
+        self.videoDefaultAudioDelay = Self.clampedVideoSyncDelay(videoDefaultAudioDelay)
+        self.videoDefaultSubtitleDelay = Self.clampedVideoSyncDelay(videoDefaultSubtitleDelay)
+        self.videoDefaultSubtitleScale = Self.clampedVideoSubtitleScale(videoDefaultSubtitleScale)
+        self.videoDefaultSubtitlePosition = Self.clampedVideoSubtitlePosition(videoDefaultSubtitlePosition)
+        self.videoAspectOverride = videoAspectOverride
+        self.videoCropMode = videoCropMode
+        self.videoDeinterlaceMode = videoDeinterlaceMode
+        self.videoRotationMode = videoRotationMode
+        self.videoLoopCurrentItem = videoLoopCurrentItem
+        self.enabledHomeTabs = Self.normalizedEnabledHomeTabs(enabledHomeTabs)
         self.videoDefaultPlayer = videoDefaultPlayer ?? defaultPlayer
         self.musicDefaultPlayer = musicDefaultPlayer
         self.videoExternalPlayerPath = videoExternalPlayerPath
@@ -574,6 +1234,7 @@ public struct AppSettings: Codable, Hashable {
         self.musicSoftFadeDuration = min(max(musicSoftFadeDuration, 0.3), 2)
         self.musicAlbumCoverGlowEnabled = musicAlbumCoverGlowEnabled
         self.videoCacheDirectoryPath = videoCacheDirectoryPath
+        self.videoCacheSizeLimitGB = Self.clampedCacheSizeLimit(videoCacheSizeLimitGB)
         self.musicEqualizerEnabled = musicEqualizerEnabled
         self.musicEqualizerPreset = musicEqualizerPreset
         self.automaticScanInterval = automaticScanInterval
@@ -624,7 +1285,24 @@ public struct AppSettings: Codable, Hashable {
         case thumbnailConcurrency
         case posterMinWidth
         case posterMaxWidth
+        case videoScrubberPreviewMode
         case videoPlayerPreferredWidth
+        case videoPlayerAlwaysOnTop
+        case videoKeyboardShortcuts
+        case videoTrackpadGesturesEnabled
+        case videoTrackpadHorizontalSeekEnabled
+        case videoTrackpadVerticalVolumeEnabled
+        case videoTrackpadPinchFullscreenEnabled
+        case videoTrackpadGestureSensitivity
+        case videoDefaultAudioDelay
+        case videoDefaultSubtitleDelay
+        case videoDefaultSubtitleScale
+        case videoDefaultSubtitlePosition
+        case videoAspectOverride
+        case videoCropMode
+        case videoDeinterlaceMode
+        case videoRotationMode
+        case videoLoopCurrentItem
         case enabledHomeTabs
         case videoDefaultPlayer
         case musicDefaultPlayer
@@ -642,6 +1320,7 @@ public struct AppSettings: Codable, Hashable {
         case musicSoftFadeDuration
         case musicAlbumCoverGlowEnabled
         case videoCacheDirectoryPath
+        case videoCacheSizeLimitGB
         case musicEqualizerEnabled
         case musicEqualizerPreset
         case automaticScanInterval
@@ -703,7 +1382,24 @@ public struct AppSettings: Codable, Hashable {
             thumbnailConcurrency: try container.decodeIfPresent(Int.self, forKey: .thumbnailConcurrency) ?? defaults.thumbnailConcurrency,
             posterMinWidth: try container.decodeIfPresent(Double.self, forKey: .posterMinWidth) ?? defaults.posterMinWidth,
             posterMaxWidth: try container.decodeIfPresent(Double.self, forKey: .posterMaxWidth) ?? defaults.posterMaxWidth,
+            videoScrubberPreviewMode: try container.decodeIfPresent(VideoScrubberPreviewMode.self, forKey: .videoScrubberPreviewMode) ?? defaults.videoScrubberPreviewMode,
             videoPlayerPreferredWidth: try container.decodeIfPresent(Double.self, forKey: .videoPlayerPreferredWidth) ?? defaults.videoPlayerPreferredWidth,
+            videoPlayerAlwaysOnTop: try container.decodeIfPresent(Bool.self, forKey: .videoPlayerAlwaysOnTop) ?? defaults.videoPlayerAlwaysOnTop,
+            videoKeyboardShortcuts: try container.decodeIfPresent([VideoPlayerShortcutAction: [VideoKeyboardShortcut]].self, forKey: .videoKeyboardShortcuts) ?? defaults.videoKeyboardShortcuts,
+            videoTrackpadGesturesEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoTrackpadGesturesEnabled) ?? defaults.videoTrackpadGesturesEnabled,
+            videoTrackpadHorizontalSeekEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoTrackpadHorizontalSeekEnabled) ?? defaults.videoTrackpadHorizontalSeekEnabled,
+            videoTrackpadVerticalVolumeEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoTrackpadVerticalVolumeEnabled) ?? defaults.videoTrackpadVerticalVolumeEnabled,
+            videoTrackpadPinchFullscreenEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoTrackpadPinchFullscreenEnabled) ?? defaults.videoTrackpadPinchFullscreenEnabled,
+            videoTrackpadGestureSensitivity: try container.decodeIfPresent(VideoTrackpadGestureSensitivity.self, forKey: .videoTrackpadGestureSensitivity) ?? defaults.videoTrackpadGestureSensitivity,
+            videoDefaultAudioDelay: try container.decodeIfPresent(Double.self, forKey: .videoDefaultAudioDelay) ?? defaults.videoDefaultAudioDelay,
+            videoDefaultSubtitleDelay: try container.decodeIfPresent(Double.self, forKey: .videoDefaultSubtitleDelay) ?? defaults.videoDefaultSubtitleDelay,
+            videoDefaultSubtitleScale: try container.decodeIfPresent(Double.self, forKey: .videoDefaultSubtitleScale) ?? defaults.videoDefaultSubtitleScale,
+            videoDefaultSubtitlePosition: try container.decodeIfPresent(Double.self, forKey: .videoDefaultSubtitlePosition) ?? defaults.videoDefaultSubtitlePosition,
+            videoAspectOverride: try container.decodeIfPresent(VideoAspectOverride.self, forKey: .videoAspectOverride) ?? defaults.videoAspectOverride,
+            videoCropMode: try container.decodeIfPresent(VideoCropMode.self, forKey: .videoCropMode) ?? defaults.videoCropMode,
+            videoDeinterlaceMode: try container.decodeIfPresent(VideoDeinterlaceMode.self, forKey: .videoDeinterlaceMode) ?? defaults.videoDeinterlaceMode,
+            videoRotationMode: try container.decodeIfPresent(VideoRotationMode.self, forKey: .videoRotationMode) ?? defaults.videoRotationMode,
+            videoLoopCurrentItem: try container.decodeIfPresent(Bool.self, forKey: .videoLoopCurrentItem) ?? defaults.videoLoopCurrentItem,
             enabledHomeTabs: try container.decodeIfPresent([HomeTab].self, forKey: .enabledHomeTabs) ?? defaults.enabledHomeTabs,
             videoDefaultPlayer: decodedVideoDefaultPlayer ?? legacyDefaultPlayer ?? defaults.videoDefaultPlayer,
             musicDefaultPlayer: try container.decodeIfPresent(DefaultPlayer.self, forKey: .musicDefaultPlayer) ?? defaults.musicDefaultPlayer,
@@ -722,6 +1418,7 @@ public struct AppSettings: Codable, Hashable {
             musicSoftFadeDuration: try container.decodeIfPresent(Double.self, forKey: .musicSoftFadeDuration) ?? defaults.musicSoftFadeDuration,
             musicAlbumCoverGlowEnabled: try container.decodeIfPresent(Bool.self, forKey: .musicAlbumCoverGlowEnabled) ?? defaults.musicAlbumCoverGlowEnabled,
             videoCacheDirectoryPath: try container.decodeIfPresent(String.self, forKey: .videoCacheDirectoryPath) ?? defaults.videoCacheDirectoryPath,
+            videoCacheSizeLimitGB: try container.decodeIfPresent(Double.self, forKey: .videoCacheSizeLimitGB) ?? defaults.videoCacheSizeLimitGB,
             musicEqualizerEnabled: try container.decodeIfPresent(Bool.self, forKey: .musicEqualizerEnabled) ?? defaults.musicEqualizerEnabled,
             musicEqualizerPreset: try container.decodeIfPresent(MusicEqualizerPreset.self, forKey: .musicEqualizerPreset) ?? defaults.musicEqualizerPreset,
             automaticScanInterval: try container.decodeIfPresent(AutomaticScanInterval.self, forKey: .automaticScanInterval) ?? defaults.automaticScanInterval,
@@ -747,6 +1444,50 @@ public struct AppSettings: Codable, Hashable {
         )
     }
 
+    public func resolvedVideoKeyboardShortcuts(for action: VideoPlayerShortcutAction) -> [VideoKeyboardShortcut] {
+        if let custom = videoKeyboardShortcuts[action] {
+            return custom.filter(\.isEnabled)
+        }
+        return action.defaultShortcuts
+    }
+
+    public func videoPlayerShortcutAction(for shortcut: VideoKeyboardShortcut) -> VideoPlayerShortcutAction? {
+        guard shortcut.isEnabled else { return nil }
+        return VideoPlayerShortcutAction.allCases.first { action in
+            resolvedVideoKeyboardShortcuts(for: action).contains(shortcut)
+        }
+    }
+
+    public mutating func setVideoKeyboardShortcuts(_ shortcuts: [VideoKeyboardShortcut], for action: VideoPlayerShortcutAction) {
+        let enabledShortcuts = shortcuts
+            .filter(\.isEnabled)
+            .reduce(into: [VideoKeyboardShortcut]()) { result, shortcut in
+                if !result.contains(shortcut) {
+                    result.append(shortcut)
+                }
+            }
+
+        for otherAction in VideoPlayerShortcutAction.allCases where otherAction != action {
+            var existing = resolvedVideoKeyboardShortcuts(for: otherAction)
+            let oldCount = existing.count
+            existing.removeAll { enabledShortcuts.contains($0) }
+            if existing.count != oldCount {
+                videoKeyboardShortcuts[otherAction] = existing
+            }
+        }
+
+        videoKeyboardShortcuts[action] = enabledShortcuts
+        videoKeyboardShortcuts = Self.sanitizedVideoKeyboardShortcuts(videoKeyboardShortcuts)
+    }
+
+    public mutating func resetVideoKeyboardShortcut(for action: VideoPlayerShortcutAction) {
+        videoKeyboardShortcuts.removeValue(forKey: action)
+    }
+
+    public mutating func resetAllVideoKeyboardShortcuts() {
+        videoKeyboardShortcuts = [:]
+    }
+
     public func rememberedVolume(for mediaType: MediaType) -> Double {
         mediaType == .music ? lastMusicVolume : lastVideoVolume
     }
@@ -762,5 +1503,40 @@ public struct AppSettings: Codable, Hashable {
 
     private static func clampedVolume(_ volume: Double) -> Double {
         min(max(volume, 0), 1)
+    }
+
+    public static func clampedVideoSyncDelay(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max((value * 10).rounded() / 10, -3), 3)
+    }
+
+    public static func clampedVideoSubtitleScale(_ value: Double) -> Double {
+        guard value.isFinite else { return 1 }
+        return min(max((value * 20).rounded() / 20, 0.75), 1.5)
+    }
+
+    public static func clampedVideoSubtitlePosition(_ value: Double) -> Double {
+        guard value.isFinite else { return 100 }
+        return min(max(value.rounded(), 70), 100)
+    }
+
+    private static func sanitizedVideoKeyboardShortcuts(_ shortcuts: [VideoPlayerShortcutAction: [VideoKeyboardShortcut]]) -> [VideoPlayerShortcutAction: [VideoKeyboardShortcut]] {
+        shortcuts.reduce(into: [VideoPlayerShortcutAction: [VideoKeyboardShortcut]]()) { result, element in
+            let unique = element.value
+                .filter(\.isEnabled)
+                .reduce(into: [VideoKeyboardShortcut]()) { list, shortcut in
+                    if !list.contains(shortcut) {
+                        list.append(shortcut)
+                    }
+                }
+            if !unique.isEmpty || element.value.isEmpty {
+                result[element.key] = unique
+            }
+        }
+    }
+
+    private static func clampedCacheSizeLimit(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 4096)
     }
 }

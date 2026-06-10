@@ -53,7 +53,7 @@ struct QuickPreviewView: View {
         }
         .frame(minWidth: 760, minHeight: 460)
         .background {
-            KeyCaptureView { key in
+            RawKeyCaptureView { key in
                 if key == .space || key == .escape {
                     dismiss()
                 }

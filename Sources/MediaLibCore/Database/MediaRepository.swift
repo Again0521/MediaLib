@@ -58,6 +58,8 @@ public final class MediaRepository {
     }
 
     public func replaceRemoteItems(sourcePathPrefix: String, with items: [MediaItem]) throws {
+        let sourcePathPrefix = Self.normalizedSourcePathPrefix(sourcePathPrefix)
+        let sourcePathLikePattern = Self.escapedLikeChildPattern(for: sourcePathPrefix)
         let keepIDs = Set(items.map(\.id))
         try database.transaction {
             // media_items 上有全局 UNIQUE(file_path) 索引。远端（如 Emby）删除再重连时，
@@ -104,10 +106,11 @@ public final class MediaRepository {
             try database.execute(
                 """
                 DELETE FROM media_items
-                WHERE (source_path = ? OR source_path LIKE ?)
+                WHERE (source_path = ? OR source_path LIKE ? ESCAPE '\\')
                   AND id NOT IN (SELECT id FROM remote_keep_ids)
                 """,
-                bindings: [.text(sourcePathPrefix), .text("\(sourcePathPrefix)/%")]
+                // The slash boundary keeps `emby://host/source` from deleting `emby://host/source2`.
+                bindings: [.text(sourcePathPrefix), .text(sourcePathLikePattern)]
             )
             try database.execute("DELETE FROM remote_keep_ids")
         }
@@ -115,6 +118,14 @@ public final class MediaRepository {
 
     public func fetchAll() throws -> [MediaItem] {
         try database.query(selectSQL + " ORDER BY title COLLATE NOCASE ASC", map: map(row:))
+    }
+
+    public func fetch(id: String) throws -> MediaItem? {
+        try database.query(
+            selectSQL + " WHERE id = ? LIMIT 1",
+            bindings: [.text(id)],
+            map: map(row:)
+        ).first
     }
 
     public func fetchTopLevel(type: MediaType? = nil) throws -> [MediaItem] {
@@ -144,9 +155,10 @@ public final class MediaRepository {
     }
 
     public func deleteItems(sourcePathPrefix: String) throws {
+        let sourcePathPrefix = Self.normalizedSourcePathPrefix(sourcePathPrefix)
         try database.execute(
-            "DELETE FROM media_items WHERE source_path = ? OR source_path LIKE ?",
-            bindings: [.text(sourcePathPrefix), .text("\(sourcePathPrefix)/%")]
+            "DELETE FROM media_items WHERE source_path = ? OR source_path LIKE ? ESCAPE '\\'",
+            bindings: [.text(sourcePathPrefix), .text(Self.escapedLikeChildPattern(for: sourcePathPrefix))]
         )
     }
 
@@ -182,8 +194,8 @@ public final class MediaRepository {
 
     public func deleteItems(filePathPrefix: String, sourcePath: String) throws {
         try database.execute(
-            "DELETE FROM media_items WHERE source_path = ? AND (file_path = ? OR file_path LIKE ?)",
-            bindings: [.text(sourcePath), .text(filePathPrefix), .text("\(filePathPrefix)/%")]
+            "DELETE FROM media_items WHERE source_path = ? AND (file_path = ? OR file_path LIKE ? ESCAPE '\\')",
+            bindings: [.text(sourcePath), .text(filePathPrefix), .text(Self.escapedLikeChildPattern(for: filePathPrefix))]
         )
     }
 
@@ -210,7 +222,16 @@ public final class MediaRepository {
             let chunk = ids[startIndex..<endIndex]
             let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ", ")
             try database.execute(
-                "DELETE FROM media_items WHERE id IN (\(placeholders))",
+                """
+                WITH RECURSIVE delete_tree(id) AS (
+                    SELECT id FROM media_items WHERE id IN (\(placeholders))
+                    UNION
+                    SELECT child.id
+                    FROM media_items AS child
+                    JOIN delete_tree AS parent ON child.parent_id = parent.id
+                )
+                DELETE FROM media_items WHERE id IN (SELECT id FROM delete_tree)
+                """,
                 bindings: chunk.map { .text($0) }
             )
             startIndex = endIndex
@@ -218,9 +239,9 @@ public final class MediaRepository {
     }
 
     public func search(_ query: String) throws -> [MediaItem] {
-        let token = "%\(query)%"
+        let token = Self.escapedLikeContainsPattern(for: query)
         return try database.query(
-            selectSQL + " WHERE title LIKE ? OR original_title LIKE ? ORDER BY title COLLATE NOCASE ASC LIMIT 200",
+            selectSQL + " WHERE title LIKE ? ESCAPE '\\' OR original_title LIKE ? ESCAPE '\\' ORDER BY title COLLATE NOCASE ASC LIMIT 200",
             bindings: [.text(token), .text(token)],
             map: map(row:)
         )
@@ -350,56 +371,101 @@ public final class MediaRepository {
         )
     }
 
-    public func updateMetadata(id: String, metadata: MediaMetadataUpdate) throws {
+    @discardableResult
+    public func updateMetadata(id: String, metadata: MediaMetadataUpdate) throws -> [MetadataCorrectionFieldChange] {
+        try database.transaction {
+            let before = try fetch(id: id)
+            try database.execute(
+                """
+                UPDATE media_items
+                SET title = COALESCE(?, title),
+                    original_title = COALESCE(?, original_title),
+                    artist = COALESCE(?, artist),
+                    album = COALESCE(?, album),
+                    track_number = COALESCE(?, track_number),
+                    year = COALESCE(?, year),
+                    overview = COALESCE(?, overview),
+                    poster_path = COALESCE(?, poster_path),
+                    backdrop_path = COALESCE(?, backdrop_path),
+                    rating = COALESCE(?, rating),
+                    user_rating = COALESCE(user_rating, ?),
+                    runtime = COALESCE(?, runtime),
+                    external_id = COALESCE(?, external_id),
+                    metadata_provider = COALESCE(?, metadata_provider),
+                    collection_title = COALESCE(?, collection_title),
+                    genre = COALESCE(?, genre),
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                bindings: [
+                    .optionalText(metadata.title),
+                    .optionalText(metadata.originalTitle),
+                    .optionalText(metadata.artist),
+                    .optionalText(metadata.album),
+                    .optionalInt(metadata.trackNumber),
+                    .optionalInt(metadata.year),
+                    .optionalText(metadata.overview),
+                    .optionalText(metadata.posterPath),
+                    .optionalText(metadata.backdropPath),
+                    .optionalDouble(metadata.rating),
+                    .optionalDouble(Self.seedUserRating(from: metadata.rating)),
+                    .optionalInt(metadata.runtime),
+                    .optionalText(metadata.externalID),
+                    .optionalText(metadata.metadataProvider),
+                    .optionalText(metadata.collectionTitle),
+                    .optionalText(metadata.genre),
+                    .optionalDate(Date()),
+                    .text(id)
+                ]
+            )
+            guard let before, let after = try fetch(id: id) else { return [] }
+            return Self.metadataChanges(before: before, after: after)
+        }
+    }
+
+    public func restoreMetadataValues(id: String, values: [MetadataCorrectionField: String?]) throws {
+        guard !values.isEmpty else { return }
+        let ordered = values.sorted { $0.key.rawValue < $1.key.rawValue }
+        let assignments = ordered
+            .map { "\($0.key.databaseColumn) = ?" }
+            .joined(separator: ", ")
         try database.execute(
             """
             UPDATE media_items
-            SET title = COALESCE(?, title),
-                original_title = COALESCE(?, original_title),
-                artist = COALESCE(?, artist),
-                album = COALESCE(?, album),
-                track_number = COALESCE(?, track_number),
-                year = COALESCE(?, year),
-                overview = COALESCE(?, overview),
-                poster_path = COALESCE(?, poster_path),
-                backdrop_path = COALESCE(?, backdrop_path),
-                rating = COALESCE(?, rating),
-                user_rating = COALESCE(user_rating, ?),
-                runtime = COALESCE(?, runtime),
-                external_id = COALESCE(?, external_id),
-                metadata_provider = COALESCE(?, metadata_provider),
-                collection_title = COALESCE(?, collection_title),
-                genre = COALESCE(?, genre),
+            SET \(assignments),
                 updated_at = ?
             WHERE id = ?
             """,
-            bindings: [
-                .optionalText(metadata.title),
-                .optionalText(metadata.originalTitle),
-                .optionalText(metadata.artist),
-                .optionalText(metadata.album),
-                .optionalInt(metadata.trackNumber),
-                .optionalInt(metadata.year),
-                .optionalText(metadata.overview),
-                .optionalText(metadata.posterPath),
-                .optionalText(metadata.backdropPath),
-                .optionalDouble(metadata.rating),
-                .optionalDouble(Self.seedUserRating(from: metadata.rating)),
-                .optionalInt(metadata.runtime),
-                .optionalText(metadata.externalID),
-                .optionalText(metadata.metadataProvider),
-                .optionalText(metadata.collectionTitle),
-                .optionalText(metadata.genre),
+            bindings: ordered.map { Self.sqliteValue(for: $0.key, encodedValue: $0.value) } + [
                 .optionalDate(Date()),
                 .text(id)
             ]
         )
     }
 
-    public func markWatched(id: String, watched: Bool) throws {
+    public func markWatched(id: String, watched: Bool, clearWatchlistWhenWatched: Bool = false) throws {
         try database.execute(
-            "UPDATE media_items SET watched = ?, play_progress = CASE WHEN ? THEN 1 ELSE play_progress END, updated_at = ? WHERE id = ?",
-            bindings: [.bool(watched), .bool(watched), .optionalDate(Date()), .text(id)]
+            """
+            UPDATE media_items
+            SET watched = ?,
+                play_position = CASE WHEN ? THEN play_position ELSE 0 END,
+                play_progress = CASE WHEN ? THEN 1 ELSE 0 END,
+                last_played_at = CASE WHEN ? THEN last_played_at ELSE NULL END,
+                watchlist = CASE WHEN ? AND ? AND type != ? THEN 0 ELSE watchlist END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            bindings: [
+                .bool(watched),
+                .bool(watched),
+                .bool(watched),
+                .bool(watched),
+                .bool(watched),
+                .bool(clearWatchlistWhenWatched),
+                .text(MediaType.music.rawValue),
+                .optionalDate(Date()),
+                .text(id)
+            ]
         )
     }
 
@@ -511,6 +577,60 @@ public final class MediaRepository {
     private static func seedUserRating(from providerRating: Double?) -> Double? {
         guard let providerRating, providerRating.isFinite, providerRating > 0 else { return nil }
         return min(max((providerRating / 2).rounded(), 1), 5)
+    }
+
+    private static func metadataChanges(before: MediaItem, after: MediaItem) -> [MetadataCorrectionFieldChange] {
+        MetadataCorrectionField.allCases.compactMap { field in
+            let oldValue = field.encodedValue(from: before)
+            let newValue = field.encodedValue(from: after)
+            guard oldValue != newValue else { return nil }
+            return MetadataCorrectionFieldChange(field: field, oldValue: oldValue, newValue: newValue)
+        }
+    }
+
+    private static func sqliteValue(for field: MetadataCorrectionField, encodedValue: String?) -> SQLiteValue {
+        guard let encodedValue else { return .null }
+        switch field.storageKind {
+        case .text:
+            return .text(encodedValue)
+        case .integer:
+            return Int64(encodedValue).map(SQLiteValue.int) ?? .null
+        case .real:
+            return Double(encodedValue).map(SQLiteValue.double) ?? .null
+        }
+    }
+
+    private static func normalizedSourcePathPrefix(_ sourcePathPrefix: String) -> String {
+        var normalized = sourcePathPrefix
+        while normalized.count > 1,
+              normalized.hasSuffix("/"),
+              !normalized.hasSuffix("://") {
+            normalized.removeLast()
+        }
+        return normalized
+    }
+
+    private static func escapedLikeChildPattern(for prefix: String) -> String {
+        "\(escapedLikeLiteral(prefix))/%"
+    }
+
+    private static func escapedLikeContainsPattern(for value: String) -> String {
+        "%\(escapedLikeLiteral(value))%"
+    }
+
+    private static func escapedLikeLiteral(_ value: String) -> String {
+        var escaped = ""
+        escaped.reserveCapacity(value.count)
+        for character in value {
+            switch character {
+            case "\\", "%", "_":
+                escaped.append("\\")
+            default:
+                break
+            }
+            escaped.append(character)
+        }
+        return escaped
     }
 }
 

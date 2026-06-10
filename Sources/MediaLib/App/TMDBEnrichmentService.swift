@@ -59,7 +59,7 @@ struct TMDBEnrichmentService {
                 TMDBPerson(
                     id: member.id,
                     name: member.name,
-                    role: member.character?.isEmpty == false ? member.character! : "演员",
+                    role: member.character.flatMap { $0.isEmpty ? nil : $0 } ?? "演员",
                     profileURL: Self.profileURL(member.profilePath)
                 )
             }

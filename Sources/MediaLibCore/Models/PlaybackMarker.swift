@@ -20,6 +20,13 @@ public struct PlaybackMarker: Identifiable, Codable, Hashable, Sendable {
     public enum Origin: String, Codable, Sendable {
         case embedded
         case manual
+        case automatic
+    }
+
+    public enum ReviewStatus: String, Codable, Sendable {
+        case accepted
+        case pending
+        case rejected
     }
 
     public var id: String
@@ -29,6 +36,9 @@ public struct PlaybackMarker: Identifiable, Codable, Hashable, Sendable {
     public var startTime: Double
     public var endTime: Double?
     public var origin: Origin
+    public var reviewStatus: ReviewStatus
+    public var detectorIdentifier: String?
+    public var confidence: Double?
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -40,6 +50,9 @@ public struct PlaybackMarker: Identifiable, Codable, Hashable, Sendable {
         startTime: Double,
         endTime: Double? = nil,
         origin: Origin = .manual,
+        reviewStatus: ReviewStatus = .accepted,
+        detectorIdentifier: String? = nil,
+        confidence: Double? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -50,6 +63,9 @@ public struct PlaybackMarker: Identifiable, Codable, Hashable, Sendable {
         self.startTime = max(startTime, 0)
         self.endTime = endTime.map { max($0, 0) }
         self.origin = origin
+        self.reviewStatus = reviewStatus
+        self.detectorIdentifier = detectorIdentifier
+        self.confidence = confidence
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -62,5 +78,13 @@ public struct PlaybackMarker: Identifiable, Codable, Hashable, Sendable {
     public func contains(_ time: Double) -> Bool {
         guard isCompleteRange, let endTime else { return false }
         return time >= startTime && time < endTime
+    }
+
+    public var isPendingReview: Bool {
+        origin == .automatic && reviewStatus == .pending
+    }
+
+    public var isAcceptedForPlayback: Bool {
+        origin != .automatic || reviewStatus == .accepted
     }
 }

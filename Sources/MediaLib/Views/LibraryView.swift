@@ -15,6 +15,7 @@ private enum LibrarySnapshotCache {
         let ratingRevision: Int
         let videoCacheRevision: Int
         let cachedOnly: Bool
+        let watchedThreshold: Double
     }
 
     private static var values: [Key: [MediaItem]] = [:]
@@ -54,6 +55,7 @@ private struct LibrarySnapshotBuildInput: Sendable {
     let genreFilter: String
     let cachedOnly: Bool
     let cachedScopeIDs: Set<String>
+    let watchedThreshold: Double
 }
 
 private enum LibrarySnapshotBuilder {
@@ -75,9 +77,9 @@ private enum LibrarySnapshotBuilder {
             switch input.watchFilter {
             case .all: return true
             // 正在观看：点开看过、但还没完全看完的（看完的归入“已观看”，不再停留在这里）。
-            case .watching: return item.hasPlaybackTrace && !(item.watched || item.playProgress >= 0.9)
-            case .unwatched: return !item.watched && item.playProgress < 0.9
-            case .watched: return item.watched || item.playProgress >= 0.9
+            case .watching: return item.hasPlaybackTrace && !(item.watched || item.playProgress >= input.watchedThreshold)
+            case .unwatched: return !item.watched && item.playProgress < input.watchedThreshold
+            case .watched: return item.watched || item.playProgress >= input.watchedThreshold
             case .favorites: return item.favorite
             case .watchlist: return item.watchlist
             }
@@ -97,9 +99,15 @@ private enum LibrarySnapshotBuilder {
             ? genreScoped.filter { input.cachedScopeIDs.contains($0.id) }
             : genreScoped
 
+        if input.sortMode == .collectionOrder {
+            return input.sortOrder == .primary ? cacheScoped : Array(cacheScoped.reversed())
+        }
+
         return cacheScoped.sorted { lhs, rhs in
             let primary: Bool
             switch input.sortMode {
+            case .collectionOrder:
+                primary = false
             case .recentlyUpdated:
                 primary = lhs.updatedAt > rhs.updatedAt
             case .dateAdded:
@@ -120,6 +128,8 @@ private enum LibrarySnapshotBuilder {
             if primary { return input.sortOrder == .primary }
             let reversePrimary: Bool
             switch input.sortMode {
+            case .collectionOrder:
+                reversePrimary = false
             case .recentlyUpdated:
                 reversePrimary = lhs.updatedAt < rhs.updatedAt
             case .dateAdded:
@@ -176,6 +186,7 @@ struct LibraryView: View {
     @State private var contentRefreshTask: Task<Void, Never>?
     @State private var searchRefreshTask: Task<Void, Never>?
     @State private var smartCollectionEditor: VideoSmartCollectionEditorRequest?
+    @State private var manualCollectionEditor: VideoManualCollectionEditorRequest?
     @State private var showBatchDeleteConfirm = false
 
     var body: some View {
@@ -196,14 +207,14 @@ struct LibraryView: View {
                     .frame(maxWidth: .infinity, minHeight: 420)
                 }
             } else {
-                // P1：海报墙走原生 List 虚拟化；页头与筛选条作为列表前导行随内容一起滚动，
-                // 返回顶部按钮内置于 PosterGridList。
+                // 海报墙走原生 List 虚拟化；页头与筛选条作为列表前导行随内容一起滚动，返回顶部按钮内置于 PosterGridList。
                 PosterGridList(
                     items: displayedItems,
                     bottomInset: selectionBarBottomInset,
                     showsDeletePlaybackHistory: showsDeletePlaybackHistoryContextAction,
                     selectionEnabled: true,
                     restoreAnchorID: appState.selectedItemReturnAnchorID,
+                    currentManualCollectionID: currentManualCollection?.id,
                     onDidRestoreAnchor: { appState.selectedItemReturnAnchorID = nil }
                 ) {
                     VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
@@ -293,67 +304,119 @@ struct LibraryView: View {
             VideoSmartCollectionSheet(
                 request: request,
                 onSave: { collection in
-                    appState.saveVideoSmartCollection(collection)
                     smartCollectionEditor = nil
+                    Task { @MainActor in
+                        await Task.yield()
+                        appState.saveVideoSmartCollection(collection)
+                    }
                 },
                 onCancel: {
                     smartCollectionEditor = nil
                 }
             )
         }
+        .sheet(item: $manualCollectionEditor) { request in
+            VideoManualCollectionSheet(
+                request: request,
+                onSave: { collection in
+                    manualCollectionEditor = nil
+                    Task { @MainActor in
+                        await Task.yield()
+                        appState.saveVideoManualCollection(collection)
+                    }
+                },
+                onCancel: {
+                    manualCollectionEditor = nil
+                }
+            )
+        }
     }
 
+    @ViewBuilder
     private var libraryHeader: some View {
-        PageHeader(title: title, subtitle: "浏览、筛选和管理当前内容。", systemImage: destination.systemImage) {
-            if showsPlaybackHistoryAction {
-                Button(role: .destructive) {
-                    appState.clearPlaybackHistory(playbackTraceItems)
-                } label: {
-                    Label("清除记录", systemImage: "clock.badge.xmark")
-                        .foregroundStyle(.red)
-                }
-                .disabled(playbackTraceItems.isEmpty)
+        if let currentManualCollection {
+            VideoManualCollectionPageHeader(
+                title: title,
+                subtitle: "按集合顺序整理专题片单。",
+                previewItems: appState.videoManualCollectionPreviewItems(currentManualCollection, limit: 4)
+            ) {
+                libraryHeaderActions
             }
-
-            if let smartCollection {
-                Button {
-                    smartCollectionEditor = .edit(smartCollection)
-                } label: {
-                    Label("编辑规则", systemImage: "slider.horizontal.3")
-                }
+        } else {
+            PageHeader(title: title, subtitle: "浏览、筛选和管理当前内容。", systemImage: destination.systemImage) {
+                libraryHeaderActions
             }
-
-            GlassSearchField(placeholder: "搜索\(title)", text: $searchText, minWidth: 158, maxWidth: 226)
-            Button {
-                appState.scanSources(for: destination)
-            } label: {
-                Label("扫描", systemImage: "arrow.clockwise")
-            }
-            .disabled(appState.sources.isEmpty || appState.isScanning)
-
-            if destination == .video(.privacy) {
-                Button {
-                    appState.lockPrivacy()
-                } label: {
-                    Label("锁定", systemImage: "lock")
-                }
-            }
-
-            Button {
-                withAnimation(AppMotion.fast) {
-                    appState.toggleSelectionMode()
-                }
-            } label: {
-                Label(appState.isSelectionModeActive ? "完成" : "选择",
-                      systemImage: appState.isSelectionModeActive ? "checkmark.circle" : "checklist")
-            }
-            .help("批量选择条目")
         }
+    }
+
+    @ViewBuilder
+    private var libraryHeaderActions: some View {
+        if showsPlaybackHistoryAction {
+            Button(role: .destructive) {
+                appState.clearPlaybackHistory(playbackTraceItems)
+            } label: {
+                Label("清除记录", systemImage: "clock.badge.xmark")
+                    .foregroundStyle(.red)
+            }
+            .disabled(playbackTraceItems.isEmpty)
+        }
+
+        if let smartCollection {
+            Button {
+                smartCollectionEditor = .edit(smartCollection)
+            } label: {
+                Label("编辑规则", systemImage: "slider.horizontal.3")
+            }
+            Button {
+                appState.setVideoSmartCollectionHomeVisibility(smartCollection, showOnHome: !smartCollection.showOnHome)
+            } label: {
+                Label(smartCollection.showOnHome ? "从首页移除" : "发布到首页", systemImage: smartCollection.showOnHome ? "house.slash" : "house")
+            }
+        }
+
+        if let currentManualCollection {
+            Button {
+                manualCollectionEditor = .edit(currentManualCollection)
+            } label: {
+                Label("重命名", systemImage: "pencil")
+            }
+            Button {
+                appState.setVideoManualCollectionHomeVisibility(currentManualCollection, showOnHome: !currentManualCollection.showOnHome)
+            } label: {
+                Label(currentManualCollection.showOnHome ? "从首页移除" : "发布到首页", systemImage: currentManualCollection.showOnHome ? "house.slash" : "house")
+            }
+        }
+
+        GlassSearchField(placeholder: "搜索\(title)", text: $searchText, minWidth: 158, maxWidth: 226)
+        Button {
+            appState.scanSources(for: destination)
+        } label: {
+            Label("扫描", systemImage: "arrow.clockwise")
+        }
+        .disabled(appState.sources.isEmpty || appState.isScanning)
+
+        if destination == .video(.privacy) {
+            Button {
+                appState.lockPrivacy()
+            } label: {
+                Label("锁定", systemImage: "lock")
+            }
+        }
+
+        Button {
+            withAnimation(AppMotion.fast) {
+                appState.toggleSelectionMode()
+            }
+        } label: {
+            Label(appState.isSelectionModeActive ? "完成" : "选择",
+                  systemImage: appState.isSelectionModeActive ? "checkmark.circle" : "checklist")
+        }
+        .help("批量选择条目")
     }
 
     private func presentContextTipsIfNeeded() {
         switch destination {
-        case .video, .embySection, .embyLibrary, .smartCollection:
+        case .video, .embySection, .embyLibrary, .smartCollection, .manualCollection:
             appState.showInterfaceTipOnce(
                 key: "library.video.context.cache",
                 message: "想离线观看时，可以右键海报或单集选择缓存。"
@@ -399,6 +462,16 @@ struct LibraryView: View {
                 Button { appState.batchSetWatchlist(true) } label: {
                     Label("想看", systemImage: "bookmark.fill")
                 }
+                Menu {
+                    VideoManualCollectionMenuItems(
+                        items: appState.resolveSelectedItems(orderedBy: displayedItems),
+                        currentCollectionID: currentManualCollection?.id
+                    )
+                } label: {
+                    Label("集合", systemImage: "rectangle.stack.badge.plus")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
                 Menu {
                     ForEach((1...5).reversed(), id: \.self) { star in
                         Button("\(star) 星") { appState.batchUpdateRating(Double(star)) }
@@ -463,6 +536,8 @@ struct LibraryView: View {
             return section.title
         case .smartCollection(let collectionID):
             return appState.videoSmartCollection(id: collectionID)?.name ?? "智能集合"
+        case .manualCollection(let collectionID):
+            return appState.videoManualCollection(id: collectionID)?.name ?? "集合"
         default:
             return destination.title
         }
@@ -475,6 +550,11 @@ struct LibraryView: View {
     private var smartCollection: VideoSmartCollection? {
         guard case .smartCollection(let collectionID) = destination else { return nil }
         return appState.videoSmartCollection(id: collectionID)
+    }
+
+    private var currentManualCollection: VideoManualCollection? {
+        guard case .manualCollection(let collectionID) = destination else { return nil }
+        return appState.videoManualCollection(id: collectionID)
     }
 
     private var currentItems: [MediaItem] {
@@ -500,7 +580,8 @@ struct LibraryView: View {
             watchlistRevision: appState.watchlistRevision,
             ratingRevision: appState.ratingRevision,
             videoCacheRevision: appState.videoCacheRevision,
-            cachedOnly: cachedOnly
+            cachedOnly: cachedOnly,
+            watchedThreshold: appState.settings.watchedThreshold
         )
     }
 
@@ -542,7 +623,8 @@ struct LibraryView: View {
             watchFilter: key.watchFilter,
             genreFilter: key.genreFilter,
             cachedOnly: key.cachedOnly,
-            cachedScopeIDs: cachedScopeIDs
+            cachedScopeIDs: cachedScopeIDs,
+            watchedThreshold: key.watchedThreshold
         )
         let sorted = await Task.detached(priority: .userInitiated) {
             LibrarySnapshotBuilder.visibleItems(from: input)
@@ -655,7 +737,7 @@ struct LibraryView: View {
     private func loadViewState(reset: Bool = false) {
         if reset {
             didLoadViewState = false
-            sortMode = .recentlyUpdated
+            sortMode = defaultSortMode(for: destination)
             sortOrder = .primary
             watchFilter = .all
             genreFilter = ""
@@ -663,14 +745,15 @@ struct LibraryView: View {
         }
         guard !didLoadViewState else { return }
         didLoadViewState = true
+        let defaultSortMode = defaultSortMode(for: destination)
         sortMode = UserDefaults.standard.string(forKey: "\(stateKeyPrefix).sort")
-            .flatMap(LibrarySortMode.init(rawValue:)) ?? .recentlyUpdated
+            .flatMap(LibrarySortMode.init(rawValue:)) ?? defaultSortMode
         let items = appState.items(for: destination, searchText: "")
         if sortMode.rawValue == "rating", !items.contains(where: { $0.userRating != nil }) && items.contains(where: { $0.rating != nil }) {
             sortMode = .score
         }
         if !availableSortModes.contains(sortMode) {
-            sortMode = .recentlyUpdated
+            sortMode = defaultSortMode
         }
         sortOrder = UserDefaults.standard.string(forKey: "\(stateKeyPrefix).sortOrder")
             .flatMap(LibrarySortOrder.init(rawValue:)) ?? .primary
@@ -701,14 +784,28 @@ struct LibraryView: View {
         let hasScore = items.contains { $0.rating != nil }
         let hasRating = items.contains { $0.userRating != nil }
         let hasRuntime = items.contains { ($0.runtime ?? 0) > 0 }
+        let isManualCollection: Bool
+        if case .manualCollection = destination {
+            isManualCollection = true
+        } else {
+            isManualCollection = false
+        }
         return LibrarySortMode.allCases.filter { mode in
             switch mode {
+            case .collectionOrder: return isManualCollection
             case .score: return hasScore
             case .rating: return hasRating
             case .runtime: return hasRuntime
             default: return true
             }
         }
+    }
+
+    private func defaultSortMode(for targetDestination: SidebarDestination) -> LibrarySortMode {
+        if case .manualCollection = targetDestination {
+            return .collectionOrder
+        }
+        return .recentlyUpdated
     }
 
     private func selectSortMode(_ mode: LibrarySortMode) {
@@ -746,6 +843,7 @@ private struct LibraryWatchFilterCapsules: View {
 
 
 enum LibrarySortMode: String, CaseIterable, Identifiable, Sendable {
+    case collectionOrder
     case recentlyUpdated
     case dateAdded
     case title
@@ -759,6 +857,7 @@ enum LibrarySortMode: String, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
+        case .collectionOrder: return "集合顺序"
         case .recentlyUpdated: return "最近更新"
         case .dateAdded: return "最近添加"
         case .title: return "标题"

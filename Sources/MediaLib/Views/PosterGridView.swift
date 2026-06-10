@@ -138,6 +138,7 @@ struct PosterGridList<Leading: View>: View {
     var showsDeletePlaybackHistory: Bool = false
     var selectionEnabled: Bool = false
     var restoreAnchorID: String? = nil
+    var currentManualCollectionID: String? = nil
     var onDidRestoreAnchor: (() -> Void)? = nil
     @ViewBuilder var leading: () -> Leading
     @State private var restoredAnchorID: String?
@@ -171,7 +172,13 @@ struct PosterGridList<Leading: View>: View {
 
                         LazyVGrid(columns: gridItems, alignment: .leading, spacing: rowSpacing) {
                             ForEach(items) { item in
-                                PosterCardView(item: item, cacheTargetSize: cacheSize, showsDeletePlaybackHistory: showsDeletePlaybackHistory, selectionEnabled: selectionEnabled)
+                                PosterCardView(
+                                    item: item,
+                                    cacheTargetSize: cacheSize,
+                                    showsDeletePlaybackHistory: showsDeletePlaybackHistory,
+                                    selectionEnabled: selectionEnabled,
+                                    currentManualCollectionID: currentManualCollectionID
+                                )
                                     .id(item.id)
                             }
                         }
@@ -235,9 +242,16 @@ struct PosterGridList<Leading: View>: View {
               restoredAnchorID != anchorID,
               items.contains(where: { $0.id == anchorID }) else { return }
         restoredAnchorID = anchorID
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollProxy.scrollTo(anchorID, anchor: .center)
+        }
         Task { @MainActor in
             await Task.yield()
-            withAnimation(AppMotion.page) {
+            var retryTransaction = Transaction()
+            retryTransaction.disablesAnimations = true
+            withTransaction(retryTransaction) {
                 scrollProxy.scrollTo(anchorID, anchor: .center)
             }
             onDidRestoreAnchor?()
@@ -352,6 +366,7 @@ struct PosterCardView: View {
     var cacheTargetSize: CGSize? = nil
     var showsDeletePlaybackHistory: Bool = false
     var selectionEnabled: Bool = false
+    var currentManualCollectionID: String? = nil
     @State private var isHovering = false
 
     private var isSelectionActive: Bool { selectionEnabled && appState.isSelectionModeActive }
@@ -468,81 +483,11 @@ struct PosterCardView: View {
             }
         }
         .contextMenu {
-            if item.type != .episode {
-                Button {
-                    appState.play(item)
-                } label: {
-                    Label("播放", systemImage: "play.fill")
-                }
-                .disabled(item.filePath == nil && appState.children(for: item).isEmpty)
-            }
-
-            VideoCacheMenuItems(item: item)
-
-            if item.type == .music, item.filePath != nil {
-                Button {
-                    appState.startRadio(seed: item)
-                } label: {
-                    Label("开始电台", systemImage: "dot.radiowaves.left.and.right")
-                }
-            }
-
-            // 播放痕迹页和已解锁保险库允许直接清除当前条目的播放记录。
-            if showsDeletePlaybackHistory, item.hasPlaybackTrace {
-                Button(role: .destructive) {
-                    appState.clearPlaybackHistory(item)
-                } label: {
-                    Label("删除播放记录", systemImage: "clock.badge.xmark")
-                }
-            }
-
-            // #10 标记已观看：系列海报标记整个系列（含系列本身），单片只标记自身；
-            // 存在已观看标记时额外提供“清除已观看”。
-            markWatchedMenuItems
-
-            Button {
-                appState.toggleWatchlist(item)
-            } label: {
-                Label(item.watchlist ? "移出想看" : "加入想看", systemImage: item.watchlist ? "bookmark.slash" : "bookmark")
-            }
-
-            Button {
-                appState.toggleFavorite(item)
-            } label: {
-                Label(item.favorite ? "取消喜欢" : "喜欢", systemImage: item.favorite ? "heart.slash" : "heart")
-            }
-
-            if item.metadataProvider != "Emby" {
-                Menu {
-                    ForEach(Self.reclassificationTypes, id: \.self) { type in
-                        Button {
-                            appState.reclassify(item, as: type)
-                        } label: {
-                            Label(type.displayName, systemImage: type.systemImage)
-                        }
-                    }
-                } label: {
-                    Label("重新分类", systemImage: "tray.and.arrow.down")
-                }
-            }
-
-            Menu {
-                Button {
-                    appState.updateRating(item, rating: nil)
-                } label: {
-                    Label("清除评级", systemImage: "star.slash")
-                }
-                Divider()
-                ForEach(1...5, id: \.self) { rating in
-                    Button {
-                        appState.updateRating(item, rating: Double(rating))
-                    } label: {
-                        Label(String(repeating: "★", count: rating), systemImage: rating >= 4 ? "star.fill" : "star")
-                    }
-                }
-            } label: {
-                Label("评级", systemImage: "star")
-            }
+            VideoItemContextMenuItems(
+                item: item,
+                showsDeletePlaybackHistory: showsDeletePlaybackHistory,
+                currentManualCollectionID: currentManualCollectionID
+            )
         }
     }
 
@@ -556,44 +501,6 @@ struct PosterCardView: View {
             appState.selectedItemReturnAnchorID = item.id
             appState.selectedItem = item
         }
-    }
-
-    @ViewBuilder
-    private var markWatchedMenuItems: some View {
-        let episodes = appState.children(for: item)
-        if episodes.isEmpty {
-            if item.watched {
-                Button {
-                    appState.markWatched(item, watched: false)
-                } label: {
-                    Label("清除已观看", systemImage: "eye.slash")
-                }
-            } else {
-                Button {
-                    appState.markWatched(item, watched: true)
-                } label: {
-                    Label("标记为已观看", systemImage: "eye")
-                }
-            }
-        } else {
-            let hasWatchedMark = item.watched || episodes.contains { $0.watched || $0.playProgress >= 0.9 }
-            Button {
-                appState.markAllWatched(episodes + [item], watched: true)
-            } label: {
-                Label("标记整个系列为已观看", systemImage: "eye.fill")
-            }
-            if hasWatchedMark {
-                Button {
-                    appState.markAllWatched(episodes + [item], watched: false)
-                } label: {
-                    Label("清除已观看", systemImage: "eye.slash")
-                }
-            }
-        }
-    }
-
-    private static var reclassificationTypes: [MediaType] {
-        [.movie, .tvShow, .anime, .documentary, .variety, .music, .other, .privateCollection]
     }
 
     private var usesInspectHover: Bool {
@@ -738,8 +645,7 @@ struct PosterImage: View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(AppColors.accentGradient)
-            // P1：去掉 .ultraThinMaterial——placeholder 叠在实色 accentGradient 上，
-            // material 模糊实色 = 视觉无差异；改为白色半透明覆盖层。
+            // 占位图叠在实色渐变上，白色半透明覆盖层即可得到等效的磨砂观感，避免额外 material 通道。
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(.white.opacity(0.52))
             RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -861,7 +767,7 @@ private struct MusicDefaultArtworkView: View {
                     .offset(x: side * 0.34, y: side * 0.34)
 
                 RoundedRectangle(cornerRadius: cornerRadius * 0.78, style: .continuous)
-                    // P1：去掉 .ultraThinMaterial，保留白色半透明覆盖（视觉等效）。
+                    // 实色图形上的白色半透明覆盖能模拟轻磨砂，同时避免为每个占位卡片创建 material。
                     .fill(.white.opacity(0.28))
                     .overlay {
                         RoundedRectangle(cornerRadius: cornerRadius * 0.78, style: .continuous)

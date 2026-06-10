@@ -7,6 +7,7 @@ private struct HomeContentSnapshotInput: Sendable {
     let searchText: String
     let appliesSearch: Bool
     let limit: Int?
+    let watchedThreshold: Double
 }
 
 private enum HomeContentFilter: Sendable {
@@ -19,7 +20,7 @@ private enum HomeContentFilter: Sendable {
 private enum HomeContentSnapshotBuilder {
     static func items(from input: HomeContentSnapshotInput) -> [MediaItem] {
         let trimmedSearch = input.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = filteredItems(input.items, filter: input.filter)
+        let base = filteredItems(from: input)
         let filtered: [MediaItem]
         if input.appliesSearch, !trimmedSearch.isEmpty {
             filtered = base.filter {
@@ -37,16 +38,16 @@ private enum HomeContentSnapshotBuilder {
         return filtered
     }
 
-    private static func filteredItems(_ items: [MediaItem], filter: HomeContentFilter) -> [MediaItem] {
-        switch filter {
+    private static func filteredItems(from input: HomeContentSnapshotInput) -> [MediaItem] {
+        switch input.filter {
         case .none:
-            return items
+            return input.items
         case .mediaType(let type):
-            return items.filter { $0.type == type }
+            return input.items.filter { $0.type == type }
         case .videoFavorites:
-            return items.filter { $0.type != .music && $0.favorite }
+            return input.items.filter { $0.type != .music && $0.favorite }
         case .unwatchedVideos:
-            return items.filter { $0.type != .music && !$0.watched && $0.playProgress < 0.9 }
+            return input.items.filter { $0.type != .music && !$0.watched && $0.playProgress < input.watchedThreshold }
         }
     }
 }
@@ -60,8 +61,43 @@ private struct HomeOverviewBoardModel: Identifiable {
     let emptyMessage: String
 }
 
+private struct HomeRecommendationProfile {
+    var genreWeights: [String: Double] = [:]
+    var genreDisplayNames: [String: String] = [:]
+    var typeWeights: [MediaType: Double] = [:]
+    var signalItemIDs: Set<String> = []
+
+    var hasSignals: Bool {
+        !genreWeights.isEmpty || !typeWeights.isEmpty
+    }
+
+    var strongestGenre: String? {
+        genreWeights
+            .sorted { lhs, rhs in
+                if lhs.value != rhs.value { return lhs.value > rhs.value }
+                return lhs.key.localizedStandardCompare(rhs.key) == .orderedAscending
+            }
+            .first?
+            .key
+    }
+
+    var strongestGenreDisplayName: String? {
+        guard let strongestGenre else { return nil }
+        return genreDisplayNames[strongestGenre] ?? strongestGenre
+    }
+
+    var maxGenreWeight: Double {
+        genreWeights.values.max() ?? 0
+    }
+
+    var maxTypeWeight: Double {
+        typeWeights.values.max() ?? 0
+    }
+}
+
 struct HomeView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.mainLayoutTransitionActive) private var layoutTransitionActive
     let onOpenHealthCenter: () -> Void
     @State private var searchText = ""
     @State private var visibleHomeItems: [MediaItem] = []
@@ -70,6 +106,8 @@ struct HomeView: View {
     @State private var homeContentRefreshTask: Task<Void, Never>?
     @State private var homeSearchRefreshTask: Task<Void, Never>?
     @State private var restoredOverviewAnchorID: String?
+    @State private var overviewBoardsSnapshot: [HomeOverviewBoardModel] = []
+    @State private var overviewBoardsKey = ""
     @AppStorage("MediaLib.home.selectedTab") private var selectedTabRaw = HomeTab.overview.rawValue
 
     init(onOpenHealthCenter: @escaping () -> Void = {}) {
@@ -89,7 +127,7 @@ struct HomeView: View {
 
         Group {
             if !isSearching, !appState.sources.isEmpty, isPosterTab(tab), !gridItems.isEmpty {
-                // P1：首页海报型 tab 走原生 List 虚拟化；页头/扫描进度/标签栏/分区标题作为前导行随内容滚动。
+                // 首页海报型 tab 走原生 List 虚拟化；页头、扫描进度、标签栏和分区标题作为前导行随内容滚动。
                 PosterGridList(
                     items: gridItems,
                     bottomInset: gridBottomInset,
@@ -152,15 +190,27 @@ struct HomeView: View {
         }
         .background(AppPageBackground())
         .navigationTitle("首页")
+        .transaction { transaction in
+            if layoutTransitionActive {
+                transaction.disablesAnimations = true
+                transaction.animation = nil
+            }
+        }
         .onAppear {
             normalizeSelectedTab()
+            refreshOverviewBoardsIfNeeded(force: true)
             refreshHomeItems(for: currentTab)
             appState.showInterfaceTipOnce(
                 key: "home.overview.boards",
-                message: "想接着看时，可以先看看总览里的继续观看、下一集和今日推荐。"
+                message: "总览会把继续观看、下一集、推荐和已发布片单放在一起，适合先找今天要看的内容。"
+            )
+            appState.showInterfaceTipOnce(
+                key: "home.recommendation.preference",
+                message: "推荐会参考你看过、喜欢、想看和标星的题材，优先展示评分较高且还没看完的内容。"
             )
         }
         .onChange(of: selectedTabRaw) { _ in
+            refreshOverviewBoardsIfNeeded()
             homeSearchRefreshTask?.cancel()
             refreshHomeItems(for: currentTab, deferred: true)
         }
@@ -169,15 +219,39 @@ struct HomeView: View {
         }
         .onChange(of: appState.settings.enabledHomeTabs) { _ in
             normalizeSelectedTab()
+            refreshOverviewBoardsIfNeeded()
             refreshHomeItems(for: currentTab, deferred: true)
         }
         .onChange(of: appState.libraryRevision) { _ in
             normalizeSelectedTab()
+            refreshOverviewBoardsIfNeeded(force: true)
             homeSearchRefreshTask?.cancel()
             refreshHomeItems(for: currentTab, deferred: true)
         }
         .onChange(of: appState.favoriteRevision) { _ in
             // 喜欢乐观更新只 bump favoriteRevision；首页“喜欢”标签需据此刷新。
+            refreshOverviewBoardsIfNeeded(force: true)
+            homeSearchRefreshTask?.cancel()
+            refreshHomeItems(for: currentTab, deferred: true)
+        }
+        .onChange(of: appState.watchlistRevision) { _ in
+            refreshOverviewBoardsIfNeeded(force: true)
+            homeSearchRefreshTask?.cancel()
+            refreshHomeItems(for: currentTab, deferred: true)
+        }
+        .onChange(of: appState.ratingRevision) { _ in
+            refreshOverviewBoardsIfNeeded(force: true)
+            homeSearchRefreshTask?.cancel()
+            refreshHomeItems(for: currentTab, deferred: true)
+        }
+        .onChange(of: appState.videoCacheRevision) { _ in
+            normalizeSelectedTab()
+            refreshOverviewBoardsIfNeeded(force: true)
+            homeSearchRefreshTask?.cancel()
+            refreshHomeItems(for: currentTab, deferred: true)
+        }
+        .onChange(of: appState.settings.watchedThreshold) { _ in
+            refreshOverviewBoardsIfNeeded(force: true)
             homeSearchRefreshTask?.cancel()
             refreshHomeItems(for: currentTab, deferred: true)
         }
@@ -251,6 +325,7 @@ struct HomeView: View {
                     items: board.items,
                     emptyMessage: board.emptyMessage,
                     metadata: overviewMetadata(for:),
+                    showsDeletePlaybackHistory: board.id == "continue" || board.id == "nextUp",
                     onSelect: { item in
                         appState.selectedItemReturnAnchorID = item.id
                         appState.selectedItem = item
@@ -272,7 +347,7 @@ struct HomeView: View {
 	                EmptyStateView(
 	                    title: "暂无\(displayName(for: tab))",
 	                    systemImage: tab.systemImage,
-	                    message: tab == .privacy ? "解锁后展示保险库内容。" : "接入媒体源并完成扫描后，内容会自动归入此页。"
+	                    message: emptyMessage(for: tab)
 	                )
                 .frame(maxWidth: .infinity, minHeight: 360)
             } else {
@@ -294,6 +369,8 @@ struct HomeView: View {
             return appState.nextUpItems
         case .continueWatching:
             return Array(appState.continueWatchingItems.prefix(48))
+        case .offline:
+            return appState.homeOfflineVideoItems
         case .recent:
             return appState.homeVideoItems
         case .movies:
@@ -333,7 +410,11 @@ struct HomeView: View {
             searchApplies(to: tab) ? searchText.trimmingCharacters(in: .whitespacesAndNewlines) : "",
             "\(appState.libraryRevision)",
             "\(appState.favoriteRevision)",
-            "\(appState.privacyUnlocked)"
+            "\(appState.watchlistRevision)",
+            "\(appState.ratingRevision)",
+            "\(appState.videoCacheRevision)",
+            "\(appState.privacyUnlocked)",
+            "\(appState.settings.watchedThreshold)"
         ].joined(separator: "|")
     }
 
@@ -378,6 +459,17 @@ struct HomeView: View {
         }
     }
 
+    private func emptyMessage(for tab: HomeTab) -> String {
+        switch tab {
+        case .privacy:
+            return "解锁后展示保险库内容。"
+        case .offline:
+            return "右键视频或单集选择缓存后，离线副本会出现在这里。"
+        default:
+            return "接入媒体源并完成扫描后，内容会自动归入此页。"
+        }
+    }
+
     private func refreshHomeItems(for tab: HomeTab, deferred: Bool = false) {
         homeContentRefreshTask?.cancel()
         guard tab != .overview else {
@@ -399,7 +491,8 @@ struct HomeView: View {
             filter: contentFilter(for: tab),
             searchText: searchText,
             appliesSearch: searchApplies(to: tab),
-            limit: itemLimit(for: tab)
+            limit: itemLimit(for: tab),
+            watchedThreshold: appState.settings.watchedThreshold
         )
         isPreparingHomeItems = true
         homeContentRefreshTask = Task { @MainActor in
@@ -448,24 +541,67 @@ struct HomeView: View {
         }
     }
 
-    private var recommendedOverviewItems: [MediaItem] {
-        let visibleVideos = appState.homeVideoItems.filter { item in
-            item.type != .music && item.type != .episode && item.type != .privateCollection
-        }
-        let seriesTypes: Set<MediaType> = [.tvShow, .anime, .documentary, .variety]
-        let highRatedSeries = visibleVideos.filter { item in
-            seriesTypes.contains(item.type) && normalizedProviderScore(item.rating) >= 7.5
-        }
-        let highRatedVideos = visibleVideos.filter { normalizedProviderScore($0.rating) >= 7.5 }
-        let fallbackVideos = visibleVideos.filter { ($0.rating ?? 0) > 0 }
-
-        var seen = Set<String>()
-        let merged = (highRatedSeries + highRatedVideos + fallbackVideos).filter { seen.insert($0.id).inserted }
-        return Array(merged.sorted(by: overviewRecommendationSort).prefix(12))
+    private var overviewBoards: [HomeOverviewBoardModel] {
+        overviewBoardsKey == overviewSnapshotKey ? overviewBoardsSnapshot : []
     }
 
-    private var overviewBoards: [HomeOverviewBoardModel] {
-        let boards = [
+    private var overviewSnapshotKey: String {
+        [
+            "\(appState.libraryRevision)",
+            "\(appState.favoriteRevision)",
+            "\(appState.watchlistRevision)",
+            "\(appState.ratingRevision)",
+            "\(appState.videoCacheRevision)",
+            "\(appState.settings.watchedThreshold)",
+            "\(overviewDaySeed)"
+        ].joined(separator: "|")
+    }
+
+    private var overviewDaySeed: Int {
+        Calendar.current.ordinality(of: .day, in: .era, for: Date()) ?? 0
+    }
+
+    private func refreshOverviewBoardsIfNeeded(force: Bool = false) {
+        let key = overviewSnapshotKey
+        guard force || overviewBoardsKey != key else { return }
+        overviewBoardsSnapshot = makeOverviewBoards(daySeed: overviewDaySeed)
+        overviewBoardsKey = key
+    }
+
+    private func makeOverviewBoards(daySeed: Int) -> [HomeOverviewBoardModel] {
+        let visibleVideos = overviewCandidateVideos()
+        let profile = recommendationProfile(from: visibleVideos)
+        let recommendedItems = recommendedOverviewItems(
+            daySeed: daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile
+        )
+        let themeItems = themedHighRatedItems(
+            daySeed: daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile
+        )
+        let highRatedSeriesItems = highRatedSeriesOverviewItems(
+            daySeed: daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile
+        )
+        let watchlistItems = watchlistOverviewItems(
+            daySeed: daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile
+        )
+        let recentHighRatedItems = recentHighRatedOverviewItems(
+            daySeed: daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile
+        )
+        let offlineItems = offlineOverviewItems(
+            daySeed: daySeed,
+            profile: profile
+        )
+
+        var defaultBoards = [
             HomeOverviewBoardModel(
                 id: "continue",
                 title: "继续观看",
@@ -484,13 +620,80 @@ struct HomeView: View {
             ),
             HomeOverviewBoardModel(
                 id: "recommend",
-                title: "今日推荐",
-                subtitle: "从库内高分系列里挑一些今天适合看的。",
+                title: "为你精选",
+                subtitle: recommendationSubtitle(for: profile),
                 systemImage: "sparkles.tv",
-                items: recommendedOverviewItems,
-                emptyMessage: "给条目标上评分后，推荐会更有方向。"
+                items: recommendedItems,
+                emptyMessage: "看过、喜欢或标星一些内容后，推荐会更有方向。"
             )
         ]
+
+        if !themeItems.isEmpty, let genreName = profile.strongestGenreDisplayName {
+            defaultBoards.append(
+                HomeOverviewBoardModel(
+                    id: "theme-\(profile.strongestGenre ?? genreName)",
+                    title: "\(genreName)高分",
+                    subtitle: "沿着你最近常看的题材继续挑。",
+                    systemImage: "tag",
+                    items: themeItems,
+                    emptyMessage: ""
+                )
+            )
+        }
+
+        if !highRatedSeriesItems.isEmpty {
+            defaultBoards.append(
+                HomeOverviewBoardModel(
+                    id: "high-rated-series",
+                    title: "高分剧集",
+                    subtitle: "优先展示评分较高、还没看完的系列。",
+                    systemImage: "star.circle",
+                    items: highRatedSeriesItems,
+                    emptyMessage: ""
+                )
+            )
+        }
+
+        if !watchlistItems.isEmpty {
+            defaultBoards.append(
+                HomeOverviewBoardModel(
+                    id: "watchlist",
+                    title: "想看清单",
+                    subtitle: "你之前留意过的内容，按适合度重新排好。",
+                    systemImage: "bookmark.circle",
+                    items: watchlistItems,
+                    emptyMessage: ""
+                )
+            )
+        }
+
+        if !recentHighRatedItems.isEmpty {
+            defaultBoards.append(
+                HomeOverviewBoardModel(
+                    id: "recent-high-rated",
+                    title: "近期高分",
+                    subtitle: "最近入库或更新的高评分内容。",
+                    systemImage: "clock.badge.star",
+                    items: recentHighRatedItems,
+                    emptyMessage: ""
+                )
+            )
+        }
+
+        if !offlineItems.isEmpty {
+            defaultBoards.append(
+                HomeOverviewBoardModel(
+                    id: "offline-ready",
+                    title: "离线可看",
+                    subtitle: "已经缓存好的内容，离线也能打开。",
+                    systemImage: "arrow.down.circle",
+                    items: offlineItems,
+                    emptyMessage: ""
+                )
+            )
+        }
+
+        let boards = defaultBoards + publishedCollectionBoards()
         return boards.enumerated()
             .sorted { lhs, rhs in
                 let leftHasContent = !lhs.element.items.isEmpty
@@ -501,26 +704,304 @@ struct HomeView: View {
             .map(\.element)
     }
 
-    private func overviewRecommendationSort(_ lhs: MediaItem, _ rhs: MediaItem) -> Bool {
-        let daySeed = Calendar.current.ordinality(of: .day, in: .era, for: Date()) ?? 0
-        let left = stableRecommendationScore(for: lhs, daySeed: daySeed)
-        let right = stableRecommendationScore(for: rhs, daySeed: daySeed)
-        if left != right { return left > right }
-        return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+    private func overviewCandidateVideos() -> [MediaItem] {
+        appState.homeVideoItems.filter { item in
+            item.type != .music && item.type != .episode && item.type != .privateCollection
+        }
     }
 
-    private func stableRecommendationScore(for item: MediaItem, daySeed: Int) -> Double {
-        let ratingBoost = normalizedProviderScore(item.rating) * 500
-        let recencyPenalty = item.lastPlayedAt == nil ? 220 : 0
+    private func recommendationSubtitle(for profile: HomeRecommendationProfile) -> String {
+        if let genreName = profile.strongestGenreDisplayName {
+            return "根据你的观看和标星偏好，优先挑 \(genreName) 与高分系列。"
+        }
+        return "先从库内高分系列和近期偏好里挑一些适合看的。"
+    }
+
+    private func recommendationProfile(from visibleVideos: [MediaItem]) -> HomeRecommendationProfile {
+        var profile = HomeRecommendationProfile()
+        let now = Date()
+        let signalItems = visibleVideos + appState.continueWatchingItems + appState.nextUpItems
+        var seen = Set<String>()
+
+        for item in signalItems where seen.insert(item.id).inserted {
+            let signalWeight = recommendationSignalWeight(for: item, now: now)
+            guard signalWeight > 0 else { continue }
+            profile.signalItemIDs.insert(item.id)
+            profile.typeWeights[item.type, default: 0] += signalWeight * (seriesRecommendationTypes.contains(item.type) ? 1.1 : 0.8)
+
+            let genres = overviewGenres(for: item)
+            guard !genres.isEmpty else { continue }
+            let perGenreWeight = signalWeight / Double(genres.count)
+            for genre in genres {
+                profile.genreWeights[genre.key, default: 0] += perGenreWeight
+                if profile.genreDisplayNames[genre.key] == nil {
+                    profile.genreDisplayNames[genre.key] = genre.display
+                }
+            }
+        }
+
+        return profile
+    }
+
+    private func recommendationSignalWeight(for item: MediaItem, now: Date) -> Double {
+        guard item.type != .music, item.type != .privateCollection else { return 0 }
+        var weight = 0.0
+        if item.favorite { weight += 4.2 }
+        if item.watchlist { weight += 1.4 }
+        if let userRating = item.userRating, userRating.isFinite {
+            if userRating >= 4 {
+                weight += userRating * 1.15
+            } else if userRating >= 3 {
+                weight += userRating * 0.65
+            }
+        }
+        if item.watched || item.playProgress >= appState.settings.watchedThreshold {
+            weight += 3.0
+        } else if item.playProgress >= 0.12 {
+            weight += min(item.playProgress, 0.95) * 2.4
+        }
+        if let lastPlayedAt = item.lastPlayedAt {
+            let days = max(0, now.timeIntervalSince(lastPlayedAt) / 86_400)
+            if days <= 120 {
+                weight += max(0, 1.6 - days / 75)
+            }
+        }
+        if normalizedProviderScore(item.rating) >= 8.0 {
+            weight += 0.5
+        }
+        return weight
+    }
+
+    private func recommendedOverviewItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile
+    ) -> [MediaItem] {
+        let preferred = visibleVideos.filter { item in
+            !isFinishedForRecommendation(item) || item.watchlist
+        }
+        let base = preferred.count >= 6 ? preferred : visibleVideos
+        return rankedOverviewItems(from: base, limit: 12) { item in
+            recommendationScore(for: item, profile: profile, daySeed: daySeed)
+        }
+    }
+
+    private func themedHighRatedItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile
+    ) -> [MediaItem] {
+        guard let strongestGenre = profile.strongestGenre else { return [] }
+        let candidates = visibleVideos.filter { item in
+            overviewGenres(for: item).contains { $0.key == strongestGenre } &&
+            isHighRatedForOverview(item) &&
+            !isFinishedForRecommendation(item)
+        }
+        return rankedOverviewItems(from: candidates, limit: 12) { item in
+            recommendationScore(for: item, profile: profile, daySeed: daySeed) + 1.6
+        }
+    }
+
+    private func highRatedSeriesOverviewItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile
+    ) -> [MediaItem] {
+        let candidates = visibleVideos.filter { item in
+            seriesRecommendationTypes.contains(item.type) &&
+            isHighRatedForOverview(item) &&
+            !isFinishedForRecommendation(item)
+        }
+        return rankedOverviewItems(from: candidates, limit: 12) { item in
+            recommendationScore(for: item, profile: profile, daySeed: daySeed) + 1.2
+        }
+    }
+
+    private func watchlistOverviewItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile
+    ) -> [MediaItem] {
+        let candidates = visibleVideos.filter { $0.watchlist }
+        return rankedOverviewItems(from: candidates, limit: 12) { item in
+            recommendationScore(for: item, profile: profile, daySeed: daySeed) + 2.0
+        }
+    }
+
+    private func recentHighRatedOverviewItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile
+    ) -> [MediaItem] {
+        let candidates = visibleVideos.filter { item in
+            isHighRatedForOverview(item) &&
+            !isFinishedForRecommendation(item)
+        }
+        return rankedOverviewItems(from: candidates, limit: 12) { item in
+            recommendationScore(for: item, profile: profile, daySeed: daySeed) +
+            recencyScore(for: item.updatedAt, horizonDays: 180) * 2.2
+        }
+    }
+
+    private func offlineOverviewItems(
+        daySeed: Int,
+        profile: HomeRecommendationProfile
+    ) -> [MediaItem] {
+        let candidates = appState.homeOfflineVideoItems.filter { item in
+            item.type != .music && item.type != .episode && item.type != .privateCollection
+        }
+        return rankedOverviewItems(from: candidates, limit: 12) { item in
+            recommendationScore(for: item, profile: profile, daySeed: daySeed) + 1.4
+        }
+    }
+
+    private func rankedOverviewItems(
+        from candidates: [MediaItem],
+        limit: Int,
+        score: (MediaItem) -> Double
+    ) -> [MediaItem] {
+        var seen = Set<String>()
+        var unique: [MediaItem] = []
+        unique.reserveCapacity(candidates.count)
+        for item in candidates where seen.insert(item.id).inserted {
+            unique.append(item)
+        }
+        let scored = unique.map { item in
+            (item: item, score: score(item))
+        }
+        return Array(scored.sorted { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            return lhs.item.title.localizedCaseInsensitiveCompare(rhs.item.title) == .orderedAscending
+        }.prefix(limit).map(\.item))
+    }
+
+    private func publishedCollectionBoards() -> [HomeOverviewBoardModel] {
+        let manualBoards = appState.videoManualCollections.compactMap { collection -> HomeOverviewBoardModel? in
+            guard collection.showOnHome else { return nil }
+            let items = appState.videoManualCollectionHomeItems(collection)
+            guard !items.isEmpty else { return nil }
+            return HomeOverviewBoardModel(
+                id: "manual-\(collection.id)",
+                title: collection.name,
+                subtitle: "手动整理的专题片单。",
+                systemImage: "rectangle.stack",
+                items: items,
+                emptyMessage: ""
+            )
+        }
+
+        let smartBoards = appState.videoSmartCollections.compactMap { collection -> HomeOverviewBoardModel? in
+            guard collection.showOnHome else { return nil }
+            let items = appState.videoSmartCollectionHomeItems(collection)
+            guard !items.isEmpty else { return nil }
+            return HomeOverviewBoardModel(
+                id: "smart-\(collection.id)",
+                title: collection.name,
+                subtitle: "按规则自动更新。",
+                systemImage: "sparkles.rectangle.stack",
+                items: items,
+                emptyMessage: ""
+            )
+        }
+
+        return manualBoards + smartBoards
+    }
+
+    private var seriesRecommendationTypes: Set<MediaType> {
+        [.tvShow, .anime, .documentary, .variety]
+    }
+
+    private func recommendationScore(
+        for item: MediaItem,
+        profile: HomeRecommendationProfile,
+        daySeed: Int
+    ) -> Double {
+        let providerScore = normalizedProviderScore(item.rating)
+        let userScore = normalizedUserScore(item.userRating)
+        let ratingScore = max(providerScore, userScore)
+        var score = ratingScore * 1.25
+        score += profileAffinityScore(for: item, profile: profile)
+        score += seriesRecommendationTypes.contains(item.type) ? 1.35 : 0.3
+        score += item.watchlist ? 1.0 : 0
+        score += item.favorite ? 0.4 : 0
+        score += item.playProgress <= 0.02 && !item.watched ? 0.75 : 0
+        score += stableDailyVariation(for: item, daySeed: daySeed) * 0.55
+
+        if item.watched || item.playProgress >= appState.settings.watchedThreshold {
+            score -= 3.8
+        } else if item.playProgress > 0.12 {
+            score -= 1.2
+        }
+        if profile.signalItemIDs.contains(item.id), !item.watchlist {
+            score -= 0.7
+        }
+        return score
+    }
+
+    private func profileAffinityScore(for item: MediaItem, profile: HomeRecommendationProfile) -> Double {
+        guard profile.hasSignals else { return 0 }
+        let genres = overviewGenres(for: item)
+        let rawGenreWeight = genres.reduce(0.0) { partial, genre in
+            partial + (profile.genreWeights[genre.key] ?? 0)
+        }
+        let genreScore: Double
+        if profile.maxGenreWeight > 0 {
+            genreScore = min(rawGenreWeight / profile.maxGenreWeight, 2.4) * 2.1
+        } else {
+            genreScore = 0
+        }
+        let typeWeight = profile.typeWeights[item.type] ?? 0
+        let typeScore = profile.maxTypeWeight > 0 ? min(typeWeight / profile.maxTypeWeight, 1.4) * 1.35 : 0
+        return genreScore + typeScore
+    }
+
+    private func stableDailyVariation(for item: MediaItem, daySeed: Int) -> Double {
         let hash = (item.id + "-\(daySeed)").unicodeScalars.reduce(UInt64(5381)) { partial, scalar in
             ((partial &* 33) &+ UInt64(scalar.value))
         }
-        return ratingBoost + Double(recencyPenalty) + Double(hash % 997)
+        return Double(hash % 997) / 997.0
+    }
+
+    private func isHighRatedForOverview(_ item: MediaItem) -> Bool {
+        normalizedProviderScore(item.rating) >= 7.3 || normalizedUserScore(item.userRating) >= 8
+    }
+
+    private func isFinishedForRecommendation(_ item: MediaItem) -> Bool {
+        item.watched || item.playProgress >= appState.settings.watchedThreshold
     }
 
     private func normalizedProviderScore(_ rating: Double?) -> Double {
         guard let rating, rating.isFinite, rating > 0 else { return 0 }
         return rating <= 5 ? rating * 2 : min(rating, 10)
+    }
+
+    private func normalizedUserScore(_ rating: Double?) -> Double {
+        guard let rating, rating.isFinite, rating > 0 else { return 0 }
+        return min(rating, 5) * 2
+    }
+
+    private func recencyScore(for date: Date?, horizonDays: Double) -> Double {
+        guard let date else { return 0 }
+        let days = max(0, Date().timeIntervalSince(date) / 86_400)
+        guard horizonDays > 0 else { return 0 }
+        return max(0, 1 - min(days, horizonDays) / horizonDays)
+    }
+
+    private func overviewGenres(for item: MediaItem) -> [(key: String, display: String)] {
+        guard let genre = item.genre else { return [] }
+        let separators = CharacterSet(charactersIn: ",，、/|;；")
+        var seen = Set<String>()
+        return genre
+            .components(separatedBy: separators)
+            .compactMap { raw -> (key: String, display: String)? in
+                let display = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !display.isEmpty else { return nil }
+                let key = display
+                    .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+                    .lowercased()
+                guard !key.isEmpty, seen.insert(key).inserted else { return nil }
+                return (key, display)
+            }
     }
 
     private func overviewMetadata(for item: MediaItem) -> String {
@@ -554,10 +1035,18 @@ struct HomeView: View {
               restoredOverviewAnchorID != anchorID,
               let board = overviewBoards.first(where: { $0.items.contains(where: { $0.id == anchorID }) }) else { return }
         restoredOverviewAnchorID = anchorID
+        let boardAnchorID = "overview-board-\(board.id)"
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollProxy.scrollTo(boardAnchorID, anchor: .center)
+        }
         Task { @MainActor in
             await Task.yield()
-            withAnimation(AppMotion.page) {
-                scrollProxy.scrollTo("overview-board-\(board.id)", anchor: .center)
+            var retryTransaction = Transaction()
+            retryTransaction.disablesAnimations = true
+            withTransaction(retryTransaction) {
+                scrollProxy.scrollTo(boardAnchorID, anchor: .center)
             }
         }
     }
@@ -570,9 +1059,16 @@ struct HomeView: View {
         if isSearching {
             guard let anchorID, restoredOverviewAnchorID != anchorID else { return }
             restoredOverviewAnchorID = anchorID
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                scrollProxy.scrollTo(anchorID, anchor: .center)
+            }
             Task { @MainActor in
                 await Task.yield()
-                withAnimation(AppMotion.page) {
+                var retryTransaction = Transaction()
+                retryTransaction.disablesAnimations = true
+                withTransaction(retryTransaction) {
                     scrollProxy.scrollTo(anchorID, anchor: .center)
                 }
                 appState.selectedItemReturnAnchorID = nil
@@ -681,12 +1177,14 @@ struct HomeStatsView: View {
 
 struct HomeOverviewBoard: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.mainLayoutTransitionActive) private var layoutTransitionActive
     let title: String
     let subtitle: String
     let systemImage: String
     let items: [MediaItem]
     let emptyMessage: String
     let metadata: (MediaItem) -> String
+    var showsDeletePlaybackHistory = false
     let onSelect: (MediaItem) -> Void
     var restoreAnchorID: String? = nil
     var onDidRestoreAnchor: (() -> Void)? = nil
@@ -726,6 +1224,7 @@ struct HomeOverviewBoard: View {
                                 HomeOverviewPosterCard(
                                     item: item,
                                     metadata: metadata(item),
+                                    showsDeletePlaybackHistory: showsDeletePlaybackHistory,
                                     onSelect: { onSelect(item) }
                                 )
                                 .id(item.id)
@@ -733,11 +1232,11 @@ struct HomeOverviewBoard: View {
                         }
                         .padding(.vertical, 2)
                     }
-                    .horizontalMouseDragScroll { dragging in
+                    .horizontalMouseDragScroll(enabled: !layoutTransitionActive) { dragging in
                         isDraggingStrip = dragging
                     }
                     .onHover { hovering in
-                        isHoveringStrip = hovering
+                        isHoveringStrip = layoutTransitionActive ? false : hovering
                     }
                     .onAppear {
                         restoreAnchorIfNeeded(restoreAnchorID, scrollProxy: proxy)
@@ -745,9 +1244,15 @@ struct HomeOverviewBoard: View {
                     .onChange(of: restoreAnchorID) { anchorID in
                         restoreAnchorIfNeeded(anchorID, scrollProxy: proxy)
                     }
-                    .task(id: autoScrollKey) {
+                    .onChange(of: layoutTransitionActive) { active in
+                        if active {
+                            isHoveringStrip = false
+                            isDraggingStrip = false
+                        }
+                    }
+                    .task(id: "\(autoScrollKey)|\(layoutTransitionActive)") {
                         autoScrollIndex = 0
-                        guard items.count > 1, !reduceMotion else { return }
+                        guard items.count > 1, !reduceMotion, !layoutTransitionActive else { return }
                         while !Task.isCancelled {
                             do {
                                 try await Task.sleep(nanoseconds: 5_200_000_000)
@@ -775,9 +1280,16 @@ struct HomeOverviewBoard: View {
               let index = items.firstIndex(where: { $0.id == anchorID }) else { return }
         restoredAnchorID = anchorID
         autoScrollIndex = index
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            scrollProxy.scrollTo(anchorID, anchor: .center)
+        }
         Task { @MainActor in
             await Task.yield()
-            withAnimation(AppMotion.page) {
+            var retryTransaction = Transaction()
+            retryTransaction.disablesAnimations = true
+            withTransaction(retryTransaction) {
                 scrollProxy.scrollTo(anchorID, anchor: .center)
             }
             onDidRestoreAnchor?()
@@ -788,13 +1300,15 @@ struct HomeOverviewBoard: View {
 private struct HomeOverviewPosterCard: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
+    @Environment(\.mainLayoutTransitionActive) private var layoutTransitionActive
     let item: MediaItem
     let metadata: String
+    var showsDeletePlaybackHistory = false
     let onSelect: () -> Void
     @State private var isHovering = false
 
     private var active: Bool {
-        isHovering && !suppressHoverDuringScroll
+        isHovering && !suppressHoverDuringScroll && !layoutTransitionActive
     }
 
     var body: some View {
@@ -842,11 +1356,22 @@ private struct HomeOverviewPosterCard: View {
             .scaleEffect(active && !reduceMotion ? 1.018 : 1)
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            VideoItemContextMenuItems(
+                item: item,
+                showsDeletePlaybackHistory: showsDeletePlaybackHistory
+            )
+        }
         .onHover { hovering in
-            isHovering = suppressHoverDuringScroll ? false : hovering
+            isHovering = (suppressHoverDuringScroll || layoutTransitionActive) ? false : hovering
         }
         .onChange(of: suppressHoverDuringScroll) { suppressing in
             if suppressing {
+                isHovering = false
+            }
+        }
+        .onChange(of: layoutTransitionActive) { active in
+            if active {
                 isHovering = false
             }
         }
@@ -857,6 +1382,7 @@ private struct HomeOverviewPosterCard: View {
 struct StatTile: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
+    @Environment(\.mainLayoutTransitionActive) private var layoutTransitionActive
     let title: String
     let value: String
     let systemImage: String
@@ -880,11 +1406,12 @@ struct StatTile: View {
             Spacer()
         }
         .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
         .staticSurfaceBackground()
-        .scaleEffect(!reduceMotion && isHovering && !suppressHoverDuringScroll ? 1.022 : 1)
-        .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering && !suppressHoverDuringScroll)
+        .scaleEffect(!reduceMotion && isHovering && !suppressHoverDuringScroll && !layoutTransitionActive ? 1.022 : 1)
+        .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering && !suppressHoverDuringScroll && !layoutTransitionActive)
         .onHover { hovering in
-            guard !suppressHoverDuringScroll else {
+            guard !suppressHoverDuringScroll, !layoutTransitionActive else {
                 isHovering = false
                 return
             }
@@ -892,6 +1419,11 @@ struct StatTile: View {
         }
         .onChange(of: suppressHoverDuringScroll) { suppressing in
             if suppressing {
+                isHovering = false
+            }
+        }
+        .onChange(of: layoutTransitionActive) { active in
+            if active {
                 isHovering = false
             }
         }
@@ -903,6 +1435,7 @@ struct LibraryHealthView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
+    @Environment(\.mainLayoutTransitionActive) private var layoutTransitionActive
     let onOpen: () -> Void
     @State private var isHovering = false
 
@@ -914,7 +1447,7 @@ struct LibraryHealthView: View {
 
         if !offline.isEmpty || !missingFiles.isEmpty || !duplicateGroups.isEmpty || !missingMetadata.isEmpty {
             let tint = AppColors.selectedGlassTint
-            let active = isHovering && !suppressHoverDuringScroll
+            let active = isHovering && !suppressHoverDuringScroll && !layoutTransitionActive
             Button(action: onOpen) {
                 HStack(spacing: 12) {
                     Image(systemName: "externaldrive.badge.exclamationmark")
@@ -923,7 +1456,7 @@ struct LibraryHealthView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("媒体库需要处理")
                             .font(.headline)
-                        Text("\(offline.count) 个媒体源不可访问，\(missingFiles.count) 个文件路径失效，\(duplicateGroups.count) 组疑似重复条目，\(missingMetadata.count) 个条目缺少核心信息。")
+                        Text("\(offline.count) 个媒体源不可访问，\(missingFiles.count) 个文件/播放路径失效，\(duplicateGroups.count) 组疑似重复条目，\(missingMetadata.count) 个条目缺少核心信息。")
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -960,10 +1493,15 @@ struct LibraryHealthView: View {
             .repeatedSurfaceHover(active, cornerRadius: 14, tint: tint, intensity: 0.78)
             .brightness(active ? 0.006 : 0)
             .onHover { hovering in
-                isHovering = suppressHoverDuringScroll ? false : hovering
+                isHovering = (suppressHoverDuringScroll || layoutTransitionActive) ? false : hovering
             }
             .onChange(of: suppressHoverDuringScroll) { suppressing in
                 if suppressing {
+                    isHovering = false
+                }
+            }
+            .onChange(of: layoutTransitionActive) { active in
+                if active {
                     isHovering = false
                 }
             }
@@ -1027,7 +1565,7 @@ struct ScanProgressView: View {
             ProgressView(value: progress.fraction)
                 .tint(AppColors.selectedGlassTint)
             if hidesPath {
-                Text("路径和文件名已隐藏")
+                Text("扫描详情已隐藏")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if let currentPath = progress.currentPath {

@@ -5,6 +5,7 @@ import Combine
 import MediaLibCore
 import OpenGL.GL3
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum VideoWindowSizing {
     static let minimumPreferredWidth: CGFloat = 680
@@ -94,6 +95,12 @@ struct PlaybackSeekState: Equatable {
     var isAwaitingPlaybackClock: Bool {
         phase == .seeking
     }
+}
+
+enum PlayerABLoopSelection: Equatable {
+    case start(Double)
+    case range(Double, Double)
+    case cleared
 }
 
 struct PlayerPlaybackReport {
@@ -391,7 +398,7 @@ enum RemoteVideoQualityPlanner {
     }
 
     private static func originalDetail(item: MediaItem, bitrate: Int64?, suffix: String = "直连") -> String {
-        let resolution = item.resolution?.isEmpty == false ? item.resolution! : "原始分辨率"
+        let resolution = item.resolution.flatMap { $0.isEmpty ? nil : $0 } ?? "原始分辨率"
         if let bitrate {
             return "\(resolution) · \(formatBitrate(bitrate)) · \(suffix)"
         }
@@ -463,18 +470,68 @@ private struct VideoControlPalette {
 
     var materialFill: [Color] {
         usesLightContent
-            ? [.white.opacity(0.30), .white.opacity(0.12), .black.opacity(0.12)]
-            : [.white.opacity(0.70), .white.opacity(0.42), .black.opacity(0.035)]
+            ? [.white.opacity(0.24), .white.opacity(0.20)]
+            : [.white.opacity(0.68), .white.opacity(0.60)]
+    }
+
+    var popoverFill: [Color] {
+        usesLightContent
+            ? [.white.opacity(0.28), .white.opacity(0.23)]
+            : [.white.opacity(0.78), .white.opacity(0.68)]
     }
 
     var border: [Color] {
         usesLightContent
-            ? [.white.opacity(0.36), .white.opacity(0.10)]
-            : [.white.opacity(0.78), .black.opacity(0.10)]
+            ? [.white.opacity(0.34), .white.opacity(0.15)]
+            : [.white.opacity(0.72), .black.opacity(0.16)]
     }
 
     var shadow: Color {
         usesLightContent ? .black.opacity(0.08) : .black.opacity(0.10)
+    }
+
+    var rowFill: Color {
+        usesLightContent ? .white.opacity(0.045) : .black.opacity(0.040)
+    }
+
+    var selectedRowFill: Color {
+        usesLightContent ? .white.opacity(0.16) : .black.opacity(0.11)
+    }
+
+    var rowStroke: Color {
+        usesLightContent ? .white.opacity(0.065) : .black.opacity(0.075)
+    }
+
+    var selectedRowStroke: Color {
+        usesLightContent ? .white.opacity(0.18) : .black.opacity(0.16)
+    }
+
+    var divider: Color {
+        usesLightContent ? .white.opacity(0.14) : .black.opacity(0.12)
+    }
+
+    var choiceFill: Color {
+        usesLightContent ? .white.opacity(0.12) : .black.opacity(0.07)
+    }
+
+    var choiceSelectedFill: Color {
+        usesLightContent ? .white.opacity(0.82) : .black.opacity(0.72)
+    }
+
+    var choiceForeground: Color {
+        usesLightContent ? .white.opacity(0.76) : .black.opacity(0.66)
+    }
+
+    var choiceSelectedForeground: Color {
+        usesLightContent ? .black.opacity(0.78) : .white.opacity(0.94)
+    }
+
+    var controlKnob: Color {
+        usesLightContent ? .white : .black.opacity(0.82)
+    }
+
+    var systemColorScheme: ColorScheme {
+        usesLightContent ? .dark : .light
     }
 
     static func resolved(for item: MediaItem) async -> VideoControlPalette {
@@ -546,6 +603,13 @@ struct PlayerView: View {
     @State private var auxiliaryMetadataTask: Task<Void, Never>?
     @State private var playbackMarkers: [PlaybackMarker] = []
     @State private var controlPalette = VideoControlPalette.darkContent
+    @State private var contextMenuState: PlayerContextMenuState?
+    @State private var playerToastMessage: String?
+    @State private var playerToastTask: Task<Void, Never>?
+    @State private var showingAdvancedSettings = false
+    @State private var showingPlaybackInfo = false
+    @State private var trackpadSeekAccumulator: Double = 0
+    @State private var lastTrackpadPinchFullscreenDate = Date.distantPast
 
     var body: some View {
         ZStack {
@@ -555,19 +619,25 @@ struct PlayerView: View {
                 .ignoresSafeArea()
 
             PlayerInteractionOverlay {
-                if controller.canControl {
+                if contextMenuState != nil {
+                    dismissContextMenu()
+                } else if controller.canControl {
                     controller.togglePlay()
                 }
             } onActivity: {
                 showControlsTemporarily()
-            } onSecondaryClick: {
-                hideControlsImmediately()
+            } onSecondaryClick: { location in
+                showContextMenu(at: location)
+            } onTrackpadScroll: { gesture in
+                handleTrackpadScroll(gesture)
+            } onMagnify: { magnification in
+                handleTrackpadMagnify(magnification)
             }
             .ignoresSafeArea()
 
-            PlayerPlaybackStatusLayer(controller: controller, item: item)
+            PlayerPlaybackStatusLayer(controller: controller, item: item, palette: controlPalette)
 
-            PlayerMarkerSkipLayer(controller: controller, markers: playbackMarkers)
+            PlayerMarkerSkipLayer(controller: controller, markers: playbackMarkers, palette: controlPalette)
 
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
@@ -577,7 +647,8 @@ struct PlayerView: View {
                     sidecarSubtitles: sidecarSubtitles,
                     qualityOptions: qualityOptions,
                     selectedQualityID: $selectedQualityID,
-                    previewPrefersFFmpeg: previewPrefersFFmpeg,
+                    previewMode: appState.settings.videoScrubberPreviewMode,
+                    previewPrefersFFmpeg: previewUsesCoarseBuckets,
                     scrubberPreview: $scrubberPreview,
                     previewImage: previewImage,
                     previewIsLoading: previewIsLoading,
@@ -586,7 +657,10 @@ struct PlayerView: View {
                     onSetMarkerBoundary: setMarkerBoundary,
                     onAddChapter: addManualChapter,
                     onDeleteMarker: deleteMarker,
-                    onPlayAdjacent: playAdjacentVideo
+                    onAcceptMarker: acceptAutomaticMarker,
+                    onRejectMarker: rejectAutomaticMarker,
+                    onPlayAdjacent: playAdjacentVideo,
+                    onOpenAdvancedSettings: showAdvancedSettings
                 )
                 .onHover { hovering in
                     controlsHovered = hovering
@@ -611,7 +685,7 @@ struct PlayerView: View {
             if volumeHUDVisible {
                 VStack {
                     Spacer(minLength: 0)
-                    PlayerVolumeHUDLayer(controller: controller)
+                    PlayerVolumeHUDLayer(controller: controller, palette: controlPalette)
                         .padding(.bottom, 78)
                 }
                 .transition(.opacity)
@@ -636,6 +710,59 @@ struct PlayerView: View {
                 Spacer(minLength: 0).frame(width: 0)
             }
             .frame(maxWidth: .infinity)
+
+            if let playerToastMessage {
+                VStack {
+                    PlayerToastLayer(message: playerToastMessage, palette: controlPalette)
+                        .padding(.top, 58)
+                    Spacer(minLength: 0)
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+                .allowsHitTesting(false)
+            }
+
+            if let contextMenuState {
+                PlayerContextMenuOverlay(
+                    state: contextMenuState,
+                    controller: controller,
+                    item: item,
+                    sidecarSubtitles: sidecarSubtitles,
+                    qualityOptions: qualityOptions,
+                    selectedQualityID: $selectedQualityID,
+                    markers: playbackMarkers,
+                    palette: controlPalette,
+                    onDismiss: dismissContextMenu,
+                    onSetMarkerBoundary: setMarkerBoundary,
+                    onAddChapter: addManualChapter,
+                    onPlayAdjacent: playAdjacentVideo,
+                    onToast: showPlayerToast
+                )
+            }
+
+            if showingAdvancedSettings {
+                PlayerAdvancedSettingsOverlay(
+                    controller: controller,
+                    palette: controlPalette,
+                    onDismiss: hideAdvancedSettings,
+                    onOpenPlaybackInfo: showPlaybackInfo,
+                    onWindowWidthChange: resizeForCurrentWindowWidth
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.985)))
+                .zIndex(20)
+            }
+
+            if showingPlaybackInfo {
+                PlayerPlaybackInfoOverlay(
+                    item: item,
+                    controller: controller,
+                    qualityOptions: qualityOptions,
+                    selectedQualityID: selectedQualityID,
+                    palette: controlPalette,
+                    onDismiss: hidePlaybackInfo
+                )
+                .transition(.opacity.combined(with: .scale(scale: 0.985)))
+                .zIndex(24)
+            }
         }
         .frame(
             idealWidth: preferredSize.width,
@@ -651,6 +778,7 @@ struct PlayerView: View {
                 appState.syncEmbyPlayback(report)
             }
             controller.configure(item: item, settings: appState.settings)
+            PlayerWindowActions.setAlwaysOnTop(appState.settings.videoPlayerAlwaysOnTop)
             loadPlaybackMarkers()
             loadAuxiliaryPlaybackMetadata()
             scheduleControlsAutoHide()
@@ -660,6 +788,7 @@ struct PlayerView: View {
             volumeHUDTask?.cancel()
             previewLoadTask?.cancel()
             auxiliaryMetadataTask?.cancel()
+            playerToastTask?.cancel()
             controller.onVolumeChange = nil
             controller.teardown()
             controller.saveProgress(appState: appState, reloadLibrary: false)
@@ -667,6 +796,12 @@ struct PlayerView: View {
         }
         .onChange(of: previewRequestKey) { _ in
             loadPreviewImage()
+        }
+        .onChange(of: appState.settings.videoScrubberPreviewMode) { _ in
+            resetPreviewState()
+        }
+        .onChange(of: appState.settings.videoPlayerAlwaysOnTop) { enabled in
+            PlayerWindowActions.setAlwaysOnTop(enabled)
         }
         .task(id: item.posterPath ?? item.id) {
             controlPalette = await VideoControlPalette.resolved(for: item)
@@ -688,10 +823,12 @@ struct PlayerView: View {
                 .allowsHitTesting(false)
         }
         .background {
-            KeyCaptureView { key in
-                handleKey(key)
+            if !showingAdvancedSettings {
+                KeyCaptureView(settings: appState.settings) { action in
+                    handleShortcutAction(action)
+                }
+                .frame(width: 0, height: 0)
             }
-            .frame(width: 0, height: 0)
         }
     }
 
@@ -756,9 +893,14 @@ struct PlayerView: View {
     }
 
     private var previewRequestKey: String? {
-        guard let scrubberPreview else { return nil }
-        let bucket = VideoFramePreviewGenerator.bucket(for: scrubberPreview.time, duration: controller.duration, preferCoarse: previewPrefersFFmpeg)
+        guard appState.settings.videoScrubberPreviewMode.isEnabled,
+              let scrubberPreview else { return nil }
+        let bucket = VideoFramePreviewGenerator.bucket(for: scrubberPreview.time, duration: controller.duration, preferCoarse: previewUsesCoarseBuckets)
         return "\(item.id)-\(bucket)"
+    }
+
+    private var previewUsesCoarseBuckets: Bool {
+        previewPrefersFFmpeg || appState.settings.videoScrubberPreviewMode.usesCoarseBuckets
     }
 
     private func close() {
@@ -844,6 +986,18 @@ struct PlayerView: View {
         loadPlaybackMarkers()
     }
 
+    private func acceptAutomaticMarker(_ marker: PlaybackMarker) {
+        guard marker.origin == .automatic else { return }
+        appState.reviewAutomaticPlaybackMarker(marker, accepted: true)
+        loadPlaybackMarkers()
+    }
+
+    private func rejectAutomaticMarker(_ marker: PlaybackMarker) {
+        guard marker.origin == .automatic else { return }
+        appState.reviewAutomaticPlaybackMarker(marker, accepted: false)
+        loadPlaybackMarkers()
+    }
+
     private func handlePlaybackCommand() {
         guard let request = appState.playbackCommandRequest,
               appState.activePlayerItem?.id == item.id,
@@ -896,6 +1050,82 @@ struct PlayerView: View {
         }
     }
 
+    private func showContextMenu(at location: CGPoint) {
+        controlsAutoHide.cancel()
+        if !controlsLocked, !controlsVisible {
+            withAnimation(AppMotion.fast) {
+                controlsVisible = true
+            }
+        }
+        withAnimation(AppMotion.fast) {
+            contextMenuState = PlayerContextMenuState(location: location)
+        }
+    }
+
+    private func dismissContextMenu() {
+        guard contextMenuState != nil else { return }
+        withAnimation(AppMotion.fast) {
+            contextMenuState = nil
+        }
+        scheduleControlsAutoHide()
+    }
+
+    private func showPlayerToast(_ message: String) {
+        playerToastTask?.cancel()
+        withAnimation(AppMotion.fast) {
+            playerToastMessage = message
+        }
+        playerToastTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: 1_800_000_000)
+            } catch {
+                return
+            }
+            withAnimation(AppMotion.standard) {
+                playerToastMessage = nil
+            }
+        }
+    }
+
+    private func showAdvancedSettings() {
+        dismissContextMenu()
+        showingPlaybackInfo = false
+        withAnimation(AppMotion.standard) {
+            showingAdvancedSettings = true
+            controlsVisible = true
+        }
+    }
+
+    private func hideAdvancedSettings() {
+        withAnimation(AppMotion.standard) {
+            showingAdvancedSettings = false
+        }
+        scheduleControlsAutoHide()
+    }
+
+    private func showPlaybackInfo() {
+        dismissContextMenu()
+        withAnimation(AppMotion.standard) {
+            showingAdvancedSettings = false
+            showingPlaybackInfo = true
+            controlsVisible = true
+        }
+    }
+
+    private func hidePlaybackInfo() {
+        withAnimation(AppMotion.standard) {
+            showingPlaybackInfo = false
+        }
+        scheduleControlsAutoHide()
+    }
+
+    private func resizeForCurrentWindowWidth() {
+        let screen = NSApp.keyWindow?.screen
+        let width = VideoWindowSizing.clampedPreferredWidth(appState.settings.videoPlayerPreferredWidth, on: screen)
+        let aspect = controller.videoAspectRatio ?? videoAspectRatio
+        PlayerWindowActions.resizeCurrentWindow(toContentSize: NSSize(width: width, height: width / max(aspect, 0.01)))
+    }
+
     private func hideControlsImmediately() {
         controlsAutoHide.cancel()
         guard !controlsHovered else { return }
@@ -920,38 +1150,70 @@ struct PlayerView: View {
         }
     }
 
-    private func handleKey(_ key: CapturedKey) {
+    private func handleShortcutAction(_ action: VideoPlayerShortcutAction) {
+        if contextMenuState != nil {
+            dismissContextMenu()
+            return
+        }
+        if showingPlaybackInfo {
+            switch action {
+            case .exitFullscreenOrClose, .showPlaybackInfo:
+                hidePlaybackInfo()
+                return
+            default:
+                break
+            }
+        }
+
         var shouldShowControls = true
-        switch key {
-        case .escape:
+        switch action {
+        case .exitFullscreenOrClose:
             if !PlayerWindowActions.exitFullScreenIfNeeded() {
                 close()
             }
         case .closeWindow:
             close()
-        case .space, .k:
+        case .playPause:
             controller.togglePlay()
-        case .leftArrow:
+        case .previousEpisode:
+            playAdjacentVideo(direction: -1)
+        case .nextEpisode:
+            playAdjacentVideo(direction: 1)
+        case .restart:
+            controller.restartFromBeginning()
+        case .captureFrame:
+            captureCurrentFrame()
+        case .openExternal:
+            appState.openExternally(item)
+        case .cycleABLoopPoint:
+            cycleABLoopPoint()
+        case .clearABLoop:
+            clearABLoop()
+        case .toggleCurrentLoop:
+            toggleCurrentLoop()
+        case .showPlaybackInfo:
+            showPlaybackInfo()
+        case .seekBackward:
             controller.seek(by: -appState.settings.skipInterval)
-        case .rightArrow:
+        case .seekForward:
             controller.seek(by: appState.settings.skipInterval)
         case .seekBackwardSmall:
             controller.seek(by: -5)
         case .seekForwardSmall:
             controller.seek(by: 5)
-        case .seekBackwardLarge, .pageDown:
+        case .seekBackwardLarge:
             controller.seek(by: -60)
-        case .seekForwardLarge, .pageUp:
+        case .seekForwardLarge:
             controller.seek(by: 60)
-        case .j:
+        case .seekBackwardTen:
             controller.seek(by: -10)
-        case .l:
+        case .seekForwardTen:
             controller.seek(by: 10)
-        case .upArrow:
+        case .volumeUp:
             controller.setVolume(PerceptualVolumeScale.adjustedVolume(controller.volume, direction: 1))
             showVolumeHUD()
             shouldShowControls = false
-        case .downArrow:
+        case .volumeDown:
             controller.setVolume(PerceptualVolumeScale.adjustedVolume(controller.volume, direction: -1))
             showVolumeHUD()
             shouldShowControls = false
@@ -959,15 +1221,12 @@ struct PlayerView: View {
             controller.toggleMute()
             showVolumeHUD()
             shouldShowControls = false
-        case .returnKey, .fullscreen:
+        case .toggleFullscreen:
             controller.toggleFullscreen()
-        case .beginning:
+        case .goToBeginning:
             controller.seek(to: 0)
-        case .ending:
+        case .goToEnd:
             controller.seek(to: max(controller.duration - 0.5, 0))
-        case .number(let value):
-            guard controller.duration > 0 else { return }
-            controller.seek(to: controller.duration * Double(value) / 10.0)
         case .speedDown:
             controller.changeRate(by: -0.25)
         case .speedUp:
@@ -978,18 +1237,206 @@ struct PlayerView: View {
             controller.stepFrame(backward: true)
         case .frameForward:
             controller.stepFrame(backward: false)
+        case .audioDelayDown:
+            updateVideoAudioDelay(appState.settings.videoDefaultAudioDelay - 0.1)
+        case .audioDelayUp:
+            updateVideoAudioDelay(appState.settings.videoDefaultAudioDelay + 0.1)
+        case .subtitleDelayDown:
+            updateVideoSubtitleDelay(appState.settings.videoDefaultSubtitleDelay - 0.1)
+        case .subtitleDelayUp:
+            updateVideoSubtitleDelay(appState.settings.videoDefaultSubtitleDelay + 0.1)
+        case .subtitleSizeDown:
+            updateVideoSubtitleScale(appState.settings.videoDefaultSubtitleScale - 0.05)
+        case .subtitleSizeUp:
+            updateVideoSubtitleScale(appState.settings.videoDefaultSubtitleScale + 0.05)
+        case .subtitleMoveUp:
+            updateVideoSubtitlePosition(appState.settings.videoDefaultSubtitlePosition - 4)
+        case .subtitleMoveDown:
+            updateVideoSubtitlePosition(appState.settings.videoDefaultSubtitlePosition + 4)
+        case .cycleAspectRatio:
+            cycleVideoAspectOverride()
+        case .cycleCropMode:
+            cycleVideoCropMode()
+        case .cycleDeinterlaceMode:
+            cycleVideoDeinterlaceMode()
+        case .rotateVideoLeft:
+            rotateVideo(clockwise: false)
+        case .rotateVideoRight:
+            rotateVideo(clockwise: true)
         case .subtitleCycle:
             controller.cycleSubtitle()
         case .subtitleToggle:
             controller.toggleSubtitleVisibility()
         case .audioCycle:
             controller.cycleAudioTrack()
-        case .other:
-            break
+        case .toggleControlsLock:
+            toggleControlsLock()
+            shouldShowControls = false
+        case .showAdvancedSettings:
+            showAdvancedSettings()
+        case .seekTo0Percent, .seekTo10Percent, .seekTo20Percent, .seekTo30Percent, .seekTo40Percent,
+             .seekTo50Percent, .seekTo60Percent, .seekTo70Percent, .seekTo80Percent, .seekTo90Percent:
+            guard controller.duration > 0, let percent = action.seekPercentValue else { return }
+            controller.seek(to: controller.duration * percent)
         }
         if shouldShowControls {
             showControlsTemporarily()
         }
+    }
+
+    private func captureCurrentFrame() {
+        do {
+            let url = try controller.captureCurrentVideoFrame(title: item.title)
+            showPlayerToast("截图已保存：\(url.lastPathComponent)")
+        } catch {
+            showPlayerToast("截图失败：\(error.localizedDescription)")
+        }
+    }
+
+    private func cycleABLoopPoint() {
+        let selection = controller.cycleABLoopPoint()
+        switch selection {
+        case .start(let start):
+            showPlayerToast("A-B 循环：A 点 \(formatLoopTime(start))")
+        case .range(let start, let end):
+            showPlayerToast("A-B 循环：\(formatLoopTime(start)) - \(formatLoopTime(end))")
+        case .cleared:
+            showPlayerToast("A-B 循环已清除")
+        }
+    }
+
+    private func clearABLoop() {
+        controller.clearABLoop()
+        showPlayerToast("A-B 循环已清除")
+    }
+
+    private func toggleCurrentLoop() {
+        let enabled = !appState.settings.videoLoopCurrentItem
+        appState.settings.videoLoopCurrentItem = enabled
+        appState.saveSettings()
+        controller.setLoopCurrentItem(enabled)
+        showPlayerToast(enabled ? "已开启单片循环" : "已关闭单片循环")
+    }
+
+    private func updateVideoAudioDelay(_ value: Double) {
+        let clamped = AppSettings.clampedVideoSyncDelay(value)
+        appState.settings.videoDefaultAudioDelay = clamped
+        appState.saveSettings()
+        controller.setAudioDelay(clamped)
+        showPlayerToast("音频延迟：\(syncDelayText(clamped))")
+    }
+
+    private func updateVideoSubtitleDelay(_ value: Double) {
+        let clamped = AppSettings.clampedVideoSyncDelay(value)
+        appState.settings.videoDefaultSubtitleDelay = clamped
+        appState.saveSettings()
+        controller.setSubtitleDelay(clamped)
+        showPlayerToast("字幕延迟：\(syncDelayText(clamped))")
+    }
+
+    private func updateVideoSubtitleScale(_ value: Double) {
+        let clamped = AppSettings.clampedVideoSubtitleScale(value)
+        appState.settings.videoDefaultSubtitleScale = clamped
+        appState.saveSettings()
+        controller.setSubtitleScale(clamped)
+        showPlayerToast("字幕大小：\(Int((clamped * 100).rounded()))%")
+    }
+
+    private func updateVideoSubtitlePosition(_ value: Double) {
+        let clamped = AppSettings.clampedVideoSubtitlePosition(value)
+        appState.settings.videoDefaultSubtitlePosition = clamped
+        appState.saveSettings()
+        controller.setSubtitlePosition(clamped)
+        showPlayerToast("字幕位置：\(Int(clamped.rounded()))%")
+    }
+
+    private func cycleVideoAspectOverride() {
+        let mode = nextMode(after: appState.settings.videoAspectOverride, in: VideoAspectOverride.allCases)
+        appState.settings.videoAspectOverride = mode
+        appState.saveSettings()
+        controller.setAspectOverride(mode)
+        showPlayerToast("画面比例：\(mode.displayName)")
+    }
+
+    private func cycleVideoCropMode() {
+        let mode = nextMode(after: appState.settings.videoCropMode, in: VideoCropMode.allCases)
+        appState.settings.videoCropMode = mode
+        appState.saveSettings()
+        controller.setCropMode(mode)
+        showPlayerToast("黑边裁切：\(mode.displayName)")
+    }
+
+    private func cycleVideoDeinterlaceMode() {
+        let mode = nextMode(after: appState.settings.videoDeinterlaceMode, in: VideoDeinterlaceMode.allCases)
+        appState.settings.videoDeinterlaceMode = mode
+        appState.saveSettings()
+        controller.setDeinterlaceMode(mode)
+        showPlayerToast("去隔行：\(mode.displayName)")
+    }
+
+    private func rotateVideo(clockwise: Bool) {
+        let current = appState.settings.videoRotationMode
+        let modes = VideoRotationMode.allCases
+        guard let index = modes.firstIndex(of: current) else { return }
+        let next = modes[(index + (clockwise ? 1 : modes.count - 1)) % modes.count]
+        appState.settings.videoRotationMode = next
+        appState.saveSettings()
+        controller.setRotationMode(next)
+        showPlayerToast("画面旋转：\(next.displayName)")
+    }
+
+    private func nextMode<T: Equatable>(after current: T, in modes: [T]) -> T {
+        guard !modes.isEmpty,
+              let index = modes.firstIndex(of: current) else {
+            return modes[0]
+        }
+        return modes[(index + 1) % modes.count]
+    }
+
+    private func syncDelayText(_ value: Double) -> String {
+        if abs(value) < 0.001 { return "0.0 秒" }
+        return String(format: "%+.1f 秒", value)
+    }
+
+    private func formatLoopTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
+        let total = Int(seconds.rounded())
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%d:%02d", minutes, seconds)
+    }
+
+    private func handleTrackpadScroll(_ gesture: PlayerTrackpadScrollGesture) {
+        guard appState.settings.videoTrackpadGesturesEnabled else { return }
+        showControlsTemporarily()
+        switch gesture {
+        case .horizontal(let delta):
+            guard appState.settings.videoTrackpadHorizontalSeekEnabled else { return }
+            trackpadSeekAccumulator += -delta * appState.settings.videoTrackpadGestureSensitivity.seekSecondsPerPoint
+            guard abs(trackpadSeekAccumulator) >= 0.65 else { return }
+            let seconds = min(max(trackpadSeekAccumulator, -8), 8)
+            trackpadSeekAccumulator = 0
+            controller.seek(by: seconds)
+        case .vertical(let delta):
+            guard appState.settings.videoTrackpadVerticalVolumeEnabled else { return }
+            let nextVolume = Double(controller.volume) + delta * appState.settings.videoTrackpadGestureSensitivity.volumePerPoint
+            controller.setVolume(Float(min(max(nextVolume, 0), 1)))
+            showVolumeHUD()
+        }
+    }
+
+    private func handleTrackpadMagnify(_ magnification: CGFloat) {
+        guard appState.settings.videoTrackpadGesturesEnabled,
+              appState.settings.videoTrackpadPinchFullscreenEnabled,
+              abs(magnification) >= 0.12 else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastTrackpadPinchFullscreenDate) > 0.85 else { return }
+        lastTrackpadPinchFullscreenDate = now
+        controller.toggleFullscreen()
+        showControlsTemporarily()
     }
 
     private func showVolumeHUD() {
@@ -1011,7 +1458,10 @@ struct PlayerView: View {
 
     private func loadPreviewImage() {
         previewLoadTask?.cancel()
-        guard let scrubberPreview,
+        let previewMode = appState.settings.videoScrubberPreviewMode
+        guard previewMode.isEnabled,
+              let requestKey = previewRequestKey,
+              let scrubberPreview,
               let filePath = item.filePath else {
             previewImage = nil
             previewIsLoading = false
@@ -1019,23 +1469,59 @@ struct PlayerView: View {
         }
         let time = scrubberPreview.time
         let itemID = item.id
-        let prefersFFmpeg = previewPrefersFFmpeg
+        let prefersFFmpeg = previewUsesCoarseBuckets
         let duration = controller.duration
-        if let cached = VideoFramePreviewGenerator.cachedImage(itemID: itemID, time: time, duration: duration, preferFFmpeg: prefersFFmpeg) {
+        if let cached = VideoFramePreviewGenerator.memoryCachedImage(itemID: itemID, time: time, duration: duration, preferFFmpeg: prefersFFmpeg) {
             previewImage = cached
             previewIsLoading = false
-            VideoFramePreviewGenerator.prefetchAround(
-                itemID: itemID,
-                filePath: filePath,
-                time: time,
-                duration: duration,
-                preferFFmpeg: prefersFFmpeg
-            )
+            if previewMode.allowsPrefetch {
+                VideoFramePreviewGenerator.prefetchAround(
+                    itemID: itemID,
+                    filePath: filePath,
+                    time: time,
+                    duration: duration,
+                    preferFFmpeg: prefersFFmpeg
+                )
+            }
             return
         }
         previewImage = nil
         previewIsLoading = true
         previewLoadTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: previewMode.requestDelayNanoseconds)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled,
+                  self.previewRequestKey == requestKey,
+                  self.scrubberPreview != nil,
+                  self.item.id == itemID else { return }
+            for _ in 0..<2 where VideoFramePreviewGenerator.shouldDeferInteractiveRequest(
+                itemID: itemID,
+                time: time,
+                duration: duration,
+                preferFFmpeg: prefersFFmpeg
+            ) {
+                do {
+                    try await Task.sleep(nanoseconds: 180_000_000)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled,
+                      self.previewRequestKey == requestKey,
+                      self.scrubberPreview != nil,
+                      self.item.id == itemID else { return }
+            }
+            guard !VideoFramePreviewGenerator.shouldDeferInteractiveRequest(
+                itemID: itemID,
+                time: time,
+                duration: duration,
+                preferFFmpeg: prefersFFmpeg
+            ) else {
+                self.previewIsLoading = false
+                return
+            }
             let loaded = SendableVideoPreviewImage(await VideoFramePreviewGenerator.image(
                 itemID: itemID,
                 filePath: filePath,
@@ -1044,18 +1530,28 @@ struct PlayerView: View {
                 preferFFmpeg: prefersFFmpeg
             ))
             guard !Task.isCancelled,
+                  self.previewRequestKey == requestKey,
                   self.scrubberPreview != nil,
                   self.item.id == itemID else { return }
             self.previewImage = loaded.image
             self.previewIsLoading = false
-            VideoFramePreviewGenerator.prefetchAround(
-                itemID: itemID,
-                filePath: filePath,
-                time: time,
-                duration: duration,
-                preferFFmpeg: prefersFFmpeg
-            )
+            if previewMode.allowsPrefetch {
+                VideoFramePreviewGenerator.prefetchAround(
+                    itemID: itemID,
+                    filePath: filePath,
+                    time: time,
+                    duration: duration,
+                    preferFFmpeg: prefersFFmpeg
+                )
+            }
         }
+    }
+
+    private func resetPreviewState() {
+        previewLoadTask?.cancel()
+        scrubberPreview = nil
+        previewImage = nil
+        previewIsLoading = false
     }
 }
 
@@ -1186,15 +1682,80 @@ private struct PlayerTransportState: Equatable {
     }
 }
 
+private struct PlayerContextMenuControllerState: Equatable {
+    let canControl: Bool
+    let isPlaying: Bool
+    let playbackRate: Float
+    let currentTime: Double
+    let audioTracks: [MpvTrack]
+    let subtitleTracks: [MpvTrack]
+    let subtitleAutoLoadEnabled: Bool
+    let playbackStatusText: String
+
+    @MainActor
+    init(controller: MpvPlayerController) {
+        let roundedTime = max(controller.currentTime.rounded(.down), 0)
+        self.canControl = controller.canControl
+        self.isPlaying = controller.isPlaying
+        self.playbackRate = controller.playbackRate
+        self.currentTime = roundedTime
+        self.audioTracks = controller.audioTracks
+        self.subtitleTracks = controller.subtitleTracks
+        self.subtitleAutoLoadEnabled = controller.subtitleAutoLoadEnabled
+        if controller.isPreparing {
+            self.playbackStatusText = controller.statusMessage ?? "正在启动 libmpv 核心"
+        } else if controller.errorMessage != nil {
+            self.playbackStatusText = "libmpv 核心不可用"
+        } else if controller.duration > 0 {
+            self.playbackStatusText = "libmpv 内核 · \(Self.formatTime(roundedTime)) / \(Self.formatTime(controller.duration))"
+        } else {
+            self.playbackStatusText = "libmpv 内核"
+        }
+    }
+
+    private static func formatTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
+        let total = Int(seconds.rounded())
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+private struct PlayerAudioTrackListState: Equatable {
+    let audioTracks: [MpvTrack]
+
+    @MainActor
+    init(controller: MpvPlayerController) {
+        self.audioTracks = controller.audioTracks
+    }
+}
+
+private struct PlayerSubtitleTrackListState: Equatable {
+    let subtitleTracks: [MpvTrack]
+    let subtitleAutoLoadEnabled: Bool
+
+    @MainActor
+    init(controller: MpvPlayerController) {
+        self.subtitleTracks = controller.subtitleTracks
+        self.subtitleAutoLoadEnabled = controller.subtitleAutoLoadEnabled
+    }
+}
+
 private struct PlayerPlaybackStatusLayer: View {
     @EnvironmentObject private var appState: AppState
     let controller: MpvPlayerController
     let item: MediaItem
+    let palette: VideoControlPalette
     @StateObject private var status: PlayerControllerProjection<PlayerPlaybackStatusState>
 
-    init(controller: MpvPlayerController, item: MediaItem) {
+    init(controller: MpvPlayerController, item: MediaItem, palette: VideoControlPalette) {
         self.controller = controller
         self.item = item
+        self.palette = palette
         _status = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerPlaybackStatusState.init))
     }
 
@@ -1205,7 +1766,8 @@ private struct PlayerPlaybackStatusLayer: View {
                 title: "内置播放器无法播放",
                 systemImage: "play.slash",
                 message: errorMessage,
-                actionTitle: "用外部播放器打开"
+                actionTitle: "用外部播放器打开",
+                palette: palette
             ) {
                 appState.openExternally(item)
             }
@@ -1213,7 +1775,8 @@ private struct PlayerPlaybackStatusLayer: View {
             PlayerBufferingOverlay(
                 title: state.isBuffering ? "正在缓冲" : "正在加载",
                 progress: state.bufferProgress,
-                message: state.statusMessage
+                message: state.statusMessage,
+                palette: palette
             )
         }
     }
@@ -1256,24 +1819,28 @@ private struct PlayerVideoAspectRatioReporter: View {
 }
 
 private struct PlayerVolumeHUDLayer: View {
+    let palette: VideoControlPalette
     @StateObject private var volume: PlayerControllerProjection<Float>
 
-    init(controller: MpvPlayerController) {
+    init(controller: MpvPlayerController, palette: VideoControlPalette) {
+        self.palette = palette
         _volume = StateObject(wrappedValue: PlayerControllerProjection(controller: controller) { $0.volume })
     }
 
     var body: some View {
-        PlayerVolumeHUD(volume: volume.value)
+        PlayerVolumeHUD(volume: volume.value, palette: palette)
     }
 }
 
 private struct PlayerControlsBar: View {
+    @EnvironmentObject private var appState: AppState
     let controller: MpvPlayerController
     let item: MediaItem
     let sidecarSubtitles: [SidecarSubtitleFile]
     let qualityOptions: [VideoStreamQualityOption]
     @Binding var selectedQualityID: String?
-    let previewPrefersFFmpeg: Bool
+    let previewMode: VideoScrubberPreviewMode
+    let previewUsesCoarseBuckets: Bool
     @Binding var scrubberPreview: VideoScrubberPreview?
     let previewImage: NSImage?
     let previewIsLoading: Bool
@@ -1282,7 +1849,10 @@ private struct PlayerControlsBar: View {
     let onSetMarkerBoundary: (PlaybackMarker.Kind, Bool, Double) -> Void
     let onAddChapter: (Double) -> Void
     let onDeleteMarker: (PlaybackMarker) -> Void
+    let onAcceptMarker: (PlaybackMarker) -> Void
+    let onRejectMarker: (PlaybackMarker) -> Void
     let onPlayAdjacent: (Int) -> Void
+    let onOpenAdvancedSettings: () -> Void
     @StateObject private var timeline: PlayerControllerProjection<PlayerTimelineState>
     @StateObject private var transport: PlayerControllerProjection<PlayerTransportState>
     @State private var showingVolumePopover = false
@@ -1291,6 +1861,7 @@ private struct PlayerControlsBar: View {
     @State private var showingAudioPopover = false
     @State private var showingQualityPopover = false
     @State private var showingMarkerPopover = false
+    @State private var showingSettingsPopover = false
 
     init(
         controller: MpvPlayerController,
@@ -1298,6 +1869,7 @@ private struct PlayerControlsBar: View {
         sidecarSubtitles: [SidecarSubtitleFile],
         qualityOptions: [VideoStreamQualityOption],
         selectedQualityID: Binding<String?>,
+        previewMode: VideoScrubberPreviewMode,
         previewPrefersFFmpeg: Bool,
         scrubberPreview: Binding<VideoScrubberPreview?>,
         previewImage: NSImage?,
@@ -1307,14 +1879,18 @@ private struct PlayerControlsBar: View {
         onSetMarkerBoundary: @escaping (PlaybackMarker.Kind, Bool, Double) -> Void,
         onAddChapter: @escaping (Double) -> Void,
         onDeleteMarker: @escaping (PlaybackMarker) -> Void,
-        onPlayAdjacent: @escaping (Int) -> Void
+        onAcceptMarker: @escaping (PlaybackMarker) -> Void,
+        onRejectMarker: @escaping (PlaybackMarker) -> Void,
+        onPlayAdjacent: @escaping (Int) -> Void,
+        onOpenAdvancedSettings: @escaping () -> Void
     ) {
         self.controller = controller
         self.item = item
         self.sidecarSubtitles = sidecarSubtitles
         self.qualityOptions = qualityOptions
         _selectedQualityID = selectedQualityID
-        self.previewPrefersFFmpeg = previewPrefersFFmpeg
+        self.previewMode = previewMode
+        self.previewUsesCoarseBuckets = previewPrefersFFmpeg
         _scrubberPreview = scrubberPreview
         self.previewImage = previewImage
         self.previewIsLoading = previewIsLoading
@@ -1323,7 +1899,10 @@ private struct PlayerControlsBar: View {
         self.onSetMarkerBoundary = onSetMarkerBoundary
         self.onAddChapter = onAddChapter
         self.onDeleteMarker = onDeleteMarker
+        self.onAcceptMarker = onAcceptMarker
+        self.onRejectMarker = onRejectMarker
         self.onPlayAdjacent = onPlayAdjacent
+        self.onOpenAdvancedSettings = onOpenAdvancedSettings
         _timeline = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTimelineState.init))
         _transport = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTransportState.init))
     }
@@ -1342,7 +1921,8 @@ private struct PlayerControlsBar: View {
                     currentTime: timelineState.currentTime,
                     duration: timelineState.duration,
                     enabled: timelineState.canControl && timelineState.duration > 0,
-                    coarsePreviewBuckets: previewPrefersFFmpeg,
+                    previewMode: previewMode,
+                    coarsePreviewBuckets: previewUsesCoarseBuckets,
                     preview: $scrubberPreview,
                     previewImage: previewImage,
                     previewIsLoading: previewIsLoading,
@@ -1415,6 +1995,7 @@ private struct PlayerControlsBar: View {
                         .disabled(!transportState.canControl)
                     speedButton(playbackRate: transportState.playbackRate)
                         .disabled(!transportState.canControl)
+                    settingsButton
                     Button {
                         controller.toggleFullscreen()
                     } label: {
@@ -1449,7 +2030,8 @@ private struct PlayerControlsBar: View {
             PlayerSubtitlePopover(
                 controller: controller,
                 sidecarSubtitles: sidecarSubtitles,
-                item: item
+                item: item,
+                palette: palette
             )
         }
         .help("字幕")
@@ -1466,7 +2048,7 @@ private struct PlayerControlsBar: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingAudioPopover, arrowEdge: .bottom) {
-            PlayerAudioTrackPopover(controller: controller)
+            PlayerAudioTrackPopover(controller: controller, palette: palette)
         }
         .help("音轨")
     }
@@ -1482,7 +2064,7 @@ private struct PlayerControlsBar: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingVolumePopover, arrowEdge: .bottom) {
-            PlayerVolumePopover(controller: controller)
+            PlayerVolumePopover(controller: controller, palette: palette)
         }
         .help("音量")
     }
@@ -1501,9 +2083,31 @@ private struct PlayerControlsBar: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingSpeedPopover, arrowEdge: .bottom) {
-            PlayerSpeedPopover(controller: controller)
+            PlayerSpeedPopover(controller: controller, palette: palette)
         }
         .help("倍速")
+    }
+
+    private var settingsButton: some View {
+        Button {
+            togglePopover {
+                showingSettingsPopover.toggle()
+            }
+        } label: {
+            Image(systemName: "gearshape")
+                .playerControlIcon(palette: palette)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showingSettingsPopover, arrowEdge: .bottom) {
+            PlayerSettingsPopover(
+                palette: palette,
+                onWindowWidthChange: onWindowWidthChanged
+            ) {
+                showingSettingsPopover = false
+                onOpenAdvancedSettings()
+            }
+        }
+        .help("播放器设置")
     }
 
     private var qualityButton: some View {
@@ -1527,7 +2131,8 @@ private struct PlayerControlsBar: View {
         .popover(isPresented: $showingQualityPopover, arrowEdge: .bottom) {
             PlayerQualityPopover(
                 options: qualityOptions,
-                selectedID: selectedQualityID
+                selectedID: selectedQualityID,
+                palette: palette
             ) { option in
                 togglePopover {
                     selectedQualityID = option.id
@@ -1554,10 +2159,13 @@ private struct PlayerControlsBar: View {
                 currentTime: currentTime,
                 duration: duration,
                 markers: markers,
+                palette: palette,
                 onSeek: { controller.seek(to: $0) },
                 onSetBoundary: onSetMarkerBoundary,
                 onAddChapter: onAddChapter,
-                onDeleteMarker: onDeleteMarker
+                onDeleteMarker: onDeleteMarker,
+                onAcceptMarker: onAcceptMarker,
+                onRejectMarker: onRejectMarker
             )
         }
         .help("章节与播放标记")
@@ -1569,6 +2177,13 @@ private struct PlayerControlsBar: View {
         withTransaction(transaction) {
             action()
         }
+    }
+
+    private func onWindowWidthChanged() {
+        let screen = NSApp.keyWindow?.screen
+        let width = VideoWindowSizing.clampedPreferredWidth(appState.settings.videoPlayerPreferredWidth, on: screen)
+        let aspect = controller.videoAspectRatio ?? VideoAspectRatioResolver.cachedAspectRatio(for: item) ?? 16.0 / 9.0
+        PlayerWindowActions.resizeCurrentWindow(toContentSize: NSSize(width: width, height: width / max(aspect, 0.01)))
     }
 }
 
@@ -1630,16 +2245,25 @@ private struct PlayerWindowChromeVisibility: NSViewRepresentable {
     }
 }
 
+enum PlayerTrackpadScrollGesture: Equatable {
+    case horizontal(Double)
+    case vertical(Double)
+}
+
 struct PlayerInteractionOverlay: NSViewRepresentable {
     let onPrimaryClick: () -> Void
     let onActivity: () -> Void
-    let onSecondaryClick: () -> Void
+    let onSecondaryClick: (CGPoint) -> Void
+    let onTrackpadScroll: (PlayerTrackpadScrollGesture) -> Void
+    let onMagnify: (CGFloat) -> Void
 
     func makeNSView(context: Context) -> InteractionView {
         let view = InteractionView()
         view.onPrimaryClick = onPrimaryClick
         view.onActivity = onActivity
         view.onSecondaryClick = onSecondaryClick
+        view.onTrackpadScroll = onTrackpadScroll
+        view.onMagnify = onMagnify
         return view
     }
 
@@ -1647,12 +2271,16 @@ struct PlayerInteractionOverlay: NSViewRepresentable {
         nsView.onPrimaryClick = onPrimaryClick
         nsView.onActivity = onActivity
         nsView.onSecondaryClick = onSecondaryClick
+        nsView.onTrackpadScroll = onTrackpadScroll
+        nsView.onMagnify = onMagnify
     }
 
     final class InteractionView: NSView {
         var onPrimaryClick: (() -> Void)?
         var onActivity: (() -> Void)?
-        var onSecondaryClick: (() -> Void)?
+        var onSecondaryClick: ((CGPoint) -> Void)?
+        var onTrackpadScroll: ((PlayerTrackpadScrollGesture) -> Void)?
+        var onMagnify: ((CGFloat) -> Void)?
         private var trackingArea: NSTrackingArea?
         private var didDragWindow = false
         private var dragStartEvent: NSEvent?
@@ -1710,35 +2338,64 @@ struct PlayerInteractionOverlay: NSViewRepresentable {
         }
 
         override func rightMouseDown(with event: NSEvent) {
-            onSecondaryClick?()
+            onActivity?()
+            onSecondaryClick?(swiftUILocation(for: event))
         }
 
         override func otherMouseDown(with event: NSEvent) {
-            onSecondaryClick?()
+            onActivity?()
+            onSecondaryClick?(swiftUILocation(for: event))
+        }
+
+        override func scrollWheel(with event: NSEvent) {
+            onActivity?()
+            guard event.hasPreciseScrollingDeltas else {
+                super.scrollWheel(with: event)
+                return
+            }
+
+            let deltaX = Double(event.scrollingDeltaX)
+            let deltaY = Double(event.scrollingDeltaY)
+            if abs(deltaX) > abs(deltaY) * 1.18, abs(deltaX) > 0.35 {
+                onTrackpadScroll?(.horizontal(deltaX))
+            } else if abs(deltaY) > 0.35 {
+                onTrackpadScroll?(.vertical(deltaY))
+            }
+        }
+
+        override func magnify(with event: NSEvent) {
+            onActivity?()
+            onMagnify?(event.magnification)
+        }
+
+        private func swiftUILocation(for event: NSEvent) -> CGPoint {
+            let local = convert(event.locationInWindow, from: nil)
+            return CGPoint(x: local.x, y: bounds.height - local.y)
         }
     }
 }
 
-struct PlayerStatusOverlay: View {
+private struct PlayerStatusOverlay: View {
     let title: String
     let systemImage: String
     let message: String
     let actionTitle: String?
+    let palette: VideoControlPalette
     let action: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: systemImage)
                 .font(.system(size: 46, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.78))
+                .foregroundStyle(palette.secondary)
 
             Text(title)
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(palette.primary)
 
             Text(message)
                 .font(.callout)
-                .foregroundStyle(.white.opacity(0.72))
+                .foregroundStyle(palette.secondary)
                 .multilineTextAlignment(.center)
                 .lineLimit(4)
                 .frame(maxWidth: 520)
@@ -1750,7 +2407,7 @@ struct PlayerStatusOverlay: View {
             }
         }
         .padding(28)
-        .playerGlass(cornerRadius: 22)
+        .playerGlass(cornerRadius: 22, palette: palette)
     }
 }
 
@@ -1758,24 +2415,25 @@ private struct PlayerBufferingOverlay: View {
     let title: String
     let progress: Double?
     let message: String?
+    let palette: VideoControlPalette
 
     var body: some View {
         VStack(spacing: 10) {
-            PlayerBufferingSpinner()
+            PlayerBufferingSpinner(palette: palette)
                 .frame(width: 46, height: 46)
 
             Text(title)
                 .font(.callout.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.94))
+                .foregroundStyle(palette.primary)
 
             Text(progressText)
                 .font(.caption.monospacedDigit().weight(.semibold))
-                .foregroundStyle(.white.opacity(0.76))
+                .foregroundStyle(palette.secondary)
 
             if let message, !message.isEmpty {
                 Text(message)
                     .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.54))
+                    .foregroundStyle(palette.subdued)
                     .lineLimit(2)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 220)
@@ -1783,30 +2441,7 @@ private struct PlayerBufferingOverlay: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 20)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [.white.opacity(0.18), .white.opacity(0.08), .black.opacity(0.18)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [.white.opacity(0.24), .white.opacity(0.09)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.9
-                )
-        }
-        .shadow(color: .black.opacity(0.12), radius: 12, y: 5)
-        .shadow(color: .white.opacity(0.08), radius: 1, y: -0.5)
+        .playerGlass(cornerRadius: 22, palette: palette)
         .allowsHitTesting(false)
     }
 
@@ -1819,20 +2454,21 @@ private struct PlayerBufferingOverlay: View {
 }
 
 private struct PlayerBufferingSpinner: View {
+    let palette: VideoControlPalette
     @State private var rotation: Double = 0
 
     var body: some View {
         ZStack {
             Circle()
-                .stroke(.white.opacity(0.14), lineWidth: 4)
+                .stroke(palette.trackBase, lineWidth: 4)
             Circle()
                 .trim(from: 0.06, to: 0.72)
                 .stroke(
                     AngularGradient(
                         colors: [
-                            .white.opacity(0.12),
-                            .white.opacity(0.92),
-                            .white.opacity(0.46)
+                            palette.subdued.opacity(0.34),
+                            palette.primary,
+                            palette.secondary.opacity(0.62)
                         ],
                         center: .center
                     ),
@@ -1848,6 +2484,455 @@ private struct PlayerBufferingSpinner: View {
     }
 }
 
+private struct PlayerToastLayer: View {
+    let message: String
+    let palette: VideoControlPalette
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(AppColors.selectedGlassTint.opacity(0.96))
+            Text(message)
+                .foregroundStyle(palette.primary)
+                .lineLimit(1)
+        }
+        .font(.caption.weight(.semibold))
+            .padding(.horizontal, 13)
+            .frame(height: 32)
+            .playerGlass(cornerRadius: 16, palette: palette)
+            .shadow(color: .black.opacity(0.16), radius: 12, y: 5)
+    }
+}
+
+private struct PlayerContextMenuState: Equatable {
+    let id = UUID()
+    let location: CGPoint
+}
+
+private enum PlayerContextMenuSection: Hashable {
+    case speed
+    case audio
+    case subtitle
+    case quality
+    case markers
+    case window
+    case settings
+}
+
+private struct PlayerContextMenuOverlay: View {
+    private let menuWidth: CGFloat = 312
+    private let maximumMenuHeight: CGFloat = 540
+
+    let state: PlayerContextMenuState
+    let controller: MpvPlayerController
+    let item: MediaItem
+    let sidecarSubtitles: [SidecarSubtitleFile]
+    let qualityOptions: [VideoStreamQualityOption]
+    @Binding var selectedQualityID: String?
+    let markers: [PlaybackMarker]
+    let palette: VideoControlPalette
+    let onDismiss: () -> Void
+    let onSetMarkerBoundary: (PlaybackMarker.Kind, Bool, Double) -> Void
+    let onAddChapter: (Double) -> Void
+    let onPlayAdjacent: (Int) -> Void
+    let onToast: (String) -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                Color.black.opacity(0.001)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onDismiss)
+
+                PlayerContextMenu(
+                    controller: controller,
+                    item: item,
+                    sidecarSubtitles: sidecarSubtitles,
+                    qualityOptions: qualityOptions,
+                    selectedQualityID: $selectedQualityID,
+                    markers: markers,
+                    palette: palette,
+                    onDismiss: onDismiss,
+                    onSetMarkerBoundary: onSetMarkerBoundary,
+                    onAddChapter: onAddChapter,
+                    onPlayAdjacent: onPlayAdjacent,
+                    onToast: onToast
+                )
+                .frame(width: menuWidth)
+                .frame(maxHeight: menuHeight(for: proxy.size))
+                .position(menuPosition(in: proxy.size))
+            }
+        }
+        .ignoresSafeArea()
+        .transition(.opacity)
+    }
+
+    private func menuHeight(for size: CGSize) -> CGFloat {
+        min(maximumMenuHeight, max(size.height - 24, 240))
+    }
+
+    private func menuPosition(in size: CGSize) -> CGPoint {
+        let menuHeight = menuHeight(for: size)
+        let proposed = CGPoint(
+            x: state.location.x + menuWidth / 2,
+            y: state.location.y + menuHeight / 2
+        )
+        let minX = menuWidth / 2 + 12
+        let maxX = max(minX, size.width - menuWidth / 2 - 12)
+        let minY = menuHeight / 2 + 12
+        let maxY = max(minY, size.height - menuHeight / 2 - 12)
+        return CGPoint(
+            x: min(max(proposed.x, minX), maxX),
+            y: min(max(proposed.y, minY), maxY)
+        )
+    }
+}
+
+private struct PlayerContextMenu: View {
+    @EnvironmentObject private var appState: AppState
+    let controller: MpvPlayerController
+    let item: MediaItem
+    let sidecarSubtitles: [SidecarSubtitleFile]
+    let qualityOptions: [VideoStreamQualityOption]
+    @Binding var selectedQualityID: String?
+    let markers: [PlaybackMarker]
+    let palette: VideoControlPalette
+    let onDismiss: () -> Void
+    let onSetMarkerBoundary: (PlaybackMarker.Kind, Bool, Double) -> Void
+    let onAddChapter: (Double) -> Void
+    let onPlayAdjacent: (Int) -> Void
+    let onToast: (String) -> Void
+
+    @StateObject private var player: PlayerControllerProjection<PlayerContextMenuControllerState>
+    @State private var expandedSection: PlayerContextMenuSection?
+    private let speedOptions: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5]
+
+    init(
+        controller: MpvPlayerController,
+        item: MediaItem,
+        sidecarSubtitles: [SidecarSubtitleFile],
+        qualityOptions: [VideoStreamQualityOption],
+        selectedQualityID: Binding<String?>,
+        markers: [PlaybackMarker],
+        palette: VideoControlPalette,
+        onDismiss: @escaping () -> Void,
+        onSetMarkerBoundary: @escaping (PlaybackMarker.Kind, Bool, Double) -> Void,
+        onAddChapter: @escaping (Double) -> Void,
+        onPlayAdjacent: @escaping (Int) -> Void,
+        onToast: @escaping (String) -> Void
+    ) {
+        self.controller = controller
+        self.item = item
+        self.sidecarSubtitles = sidecarSubtitles
+        self.qualityOptions = qualityOptions
+        _selectedQualityID = selectedQualityID
+        self.markers = markers
+        self.palette = palette
+        self.onDismiss = onDismiss
+        self.onSetMarkerBoundary = onSetMarkerBoundary
+        self.onAddChapter = onAddChapter
+        self.onPlayAdjacent = onPlayAdjacent
+        self.onToast = onToast
+        _player = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerContextMenuControllerState.init))
+    }
+
+    var body: some View {
+        let playerState = player.value
+        ScrollView {
+            VStack(alignment: .leading, spacing: 6) {
+                PlayerContextMenuHeader(title: item.title, subtitle: playerState.playbackStatusText, palette: palette)
+
+                PlayerContextMenuButton(title: "从头播放", systemImage: "backward.end.fill", palette: palette) {
+                    performAndDismiss {
+                        controller.restartFromBeginning()
+                    }
+                }
+                .disabled(!playerState.canControl)
+
+                PlayerContextMenuButton(title: "保存当前画面", systemImage: "camera.fill", value: "图片", palette: palette) {
+                    performAndDismiss {
+                        do {
+                            let url = try controller.captureCurrentVideoFrame(title: item.title)
+                            onToast("截图已保存：\(url.lastPathComponent)")
+                        } catch {
+                            onToast("截图失败：\(error.localizedDescription)")
+                        }
+                    }
+                }
+                .disabled(!playerState.canControl)
+
+                PlayerContextMenuButton(title: "用系统播放器打开", systemImage: "app.badge", palette: palette) {
+                    performAndDismiss {
+                        appState.openExternally(item)
+                    }
+                }
+            }
+            .padding(10)
+        }
+        .scrollIndicators(.never)
+        .playerPopoverGlass(palette: palette)
+    }
+
+    private func selectedAudioTitle(_ state: PlayerContextMenuControllerState) -> String {
+        state.audioTracks.first(where: \.isSelected)?.displayName ?? "自动"
+    }
+
+    private func selectedSubtitleTitle(_ state: PlayerContextMenuControllerState) -> String {
+        state.subtitleTracks.first(where: \.isSelected)?.displayName ?? "关闭"
+    }
+
+    private var selectedQualityTitle: String {
+        qualityOptions.first { $0.id == selectedQualityID }?.label ?? qualityOptions.first?.label ?? "原画"
+    }
+
+    private func performAndDismiss(_ action: () -> Void) {
+        action()
+        onDismiss()
+    }
+
+    private func disclosureButton(
+        section: PlayerContextMenuSection,
+        title: String,
+        systemImage: String,
+        value: String?
+    ) -> some View {
+        PlayerContextMenuDisclosureButton(
+            title: title,
+            systemImage: systemImage,
+            value: value,
+            isExpanded: expandedSection == section,
+            palette: palette
+        ) {
+            withAnimation(AppMotion.fast) {
+                expandedSection = expandedSection == section ? nil : section
+            }
+        }
+    }
+
+    private func contextSubsection<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            content()
+        }
+        .padding(.leading, 12)
+    }
+
+    private func externalSubtitleTrack(for path: String?, tracks: [MpvTrack]) -> MpvTrack? {
+        guard let path else { return nil }
+        let targetURL = URL(fileURLWithPath: path)
+        return tracks.first { track in
+            guard track.isExternal else { return false }
+            if track.externalFilename == path { return true }
+            if let externalFilename = track.externalFilename {
+                return URL(fileURLWithPath: externalFilename).lastPathComponent == targetURL.lastPathComponent
+            }
+            return false
+        }
+    }
+
+    private func speedLabel(_ rate: Float) -> String {
+        if abs(rate - 1.0) < 0.001 { return "1x" }
+        if abs(rate.rounded() - rate) < 0.001 { return String(format: "%.0fx", rate) }
+        return String(format: "%.2fx", rate)
+    }
+
+    private func formatSeconds(_ seconds: Double) -> String {
+        let rounded = Int(seconds.rounded())
+        return "\(rounded)秒"
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
+        let total = Int(seconds.rounded())
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+private struct PlayerContextMenuHeader: View {
+    let title: String
+    let subtitle: String
+    let palette: VideoControlPalette
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(palette.primary)
+                .lineLimit(1)
+            Text(subtitle)
+                .font(.caption2)
+                .foregroundStyle(palette.subdued)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+    }
+}
+
+private struct PlayerContextMenuButton: View {
+    let title: String
+    let systemImage: String
+    var value: String? = nil
+    var selected: Bool = false
+    let palette: VideoControlPalette
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(selected ? palette.primary : palette.secondary)
+                    .frame(width: 18)
+
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(palette.primary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                if let value, !value.isEmpty {
+                    Text(value)
+                        .font(.caption2)
+                        .foregroundStyle(palette.subdued)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                }
+
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(palette.primary)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(minHeight: 30)
+            .background(selected ? palette.selectedRowFill : palette.rowFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(selected ? palette.selectedRowStroke : palette.rowStroke, lineWidth: 0.7)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct PlayerContextMenuDisclosureButton: View {
+    let title: String
+    let systemImage: String
+    let value: String?
+    let isExpanded: Bool
+    let palette: VideoControlPalette
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(palette.secondary)
+                    .frame(width: 18)
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(palette.primary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if let value, !value.isEmpty {
+                    Text(value)
+                        .font(.caption2)
+                        .foregroundStyle(palette.subdued)
+                        .lineLimit(1)
+                }
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(palette.subdued)
+            }
+            .padding(.horizontal, 8)
+            .frame(minHeight: 30)
+            .background(isExpanded ? palette.selectedRowFill : palette.rowFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(isExpanded ? palette.selectedRowStroke : palette.rowStroke, lineWidth: 0.7)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct PlayerContextMenuToggle: View {
+    let title: String
+    let systemImage: String
+    let isOn: Bool
+    let palette: VideoControlPalette
+    let action: () -> Void
+
+    var body: some View {
+        PlayerContextMenuButton(
+            title: title,
+            systemImage: systemImage,
+            value: isOn ? "开" : "关",
+            selected: isOn,
+            palette: palette,
+            action: action
+        )
+    }
+}
+
+private struct PlayerContextMenuDivider: View {
+    let palette: VideoControlPalette
+
+    var body: some View {
+        Rectangle()
+            .fill(palette.divider)
+            .frame(height: 0.7)
+            .padding(.vertical, 3)
+            .padding(.horizontal, 8)
+    }
+}
+
+private struct PlayerContextMenuSectionHeader: View {
+    let title: String
+    let palette: VideoControlPalette
+
+    init(_ title: String, palette: VideoControlPalette) {
+        self.title = title
+        self.palette = palette
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(palette.subdued)
+            .padding(.horizontal, 8)
+            .padding(.top, 3)
+    }
+}
+
+private struct PlayerContextMenuNote: View {
+    let text: String
+    let palette: VideoControlPalette
+
+    init(_ text: String, palette: VideoControlPalette) {
+        self.text = text
+        self.palette = palette
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(palette.subdued)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+    }
+}
+
 private struct PlayerGlassModifier: ViewModifier {
     let cornerRadius: CGFloat
     let palette: VideoControlPalette
@@ -1860,8 +2945,8 @@ private struct PlayerGlassModifier: ViewModifier {
                 shape.fill(
                     LinearGradient(
                         colors: palette.materialFill,
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+                        startPoint: .top,
+                        endPoint: .bottom
                     )
                 )
             )
@@ -1887,26 +2972,34 @@ private struct PlayerGlassModifier: ViewModifier {
 }
 
 private struct PlayerVolumePopover: View {
-    @ObservedObject var controller: MpvPlayerController
+    let controller: MpvPlayerController
+    let palette: VideoControlPalette
+    @StateObject private var volume: PlayerControllerProjection<Float>
     @State private var draftVolume: Double = 0
     @State private var isEditing = false
 
+    init(controller: MpvPlayerController, palette: VideoControlPalette) {
+        self.controller = controller
+        self.palette = palette
+        _volume = StateObject(wrappedValue: PlayerControllerProjection(controller: controller) { $0.volume })
+    }
+
     private var visibleVolume: Double {
-        isEditing ? draftVolume : PerceptualVolumeScale.sliderValue(fromLinear: Double(controller.volume))
+        isEditing ? draftVolume : PerceptualVolumeScale.sliderValue(fromLinear: Double(volume.value))
     }
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: controller.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+            Image(systemName: volume.value == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
                 .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.84))
+                .foregroundStyle(palette.secondary)
                 .frame(width: 22, height: 24)
             PlayerLinearSlider(value: Binding(get: {
                 visibleVolume
             }, set: { value in
                 draftVolume = value
                 controller.setVolume(Float(PerceptualVolumeScale.linearVolume(fromSlider: value)), remember: false)
-            }), range: 0...1, isEditing: $isEditing) {
+            }), range: 0...1, palette: palette, isEditing: $isEditing) {
                 controller.setVolume(Float(PerceptualVolumeScale.linearVolume(fromSlider: draftVolume)), remember: true)
             }
             .frame(width: 282, height: 26)
@@ -1915,11 +3008,11 @@ private struct PlayerVolumePopover: View {
         .padding(.vertical, 11)
         .frame(width: 338)
         .fixedSize(horizontal: true, vertical: true)
-        .playerPopoverGlass()
+        .playerPopoverGlass(palette: palette)
         .onAppear {
-            draftVolume = PerceptualVolumeScale.sliderValue(fromLinear: Double(controller.volume))
+            draftVolume = PerceptualVolumeScale.sliderValue(fromLinear: Double(volume.value))
         }
-        .onChange(of: controller.volume) { volume in
+        .onChange(of: volume.value) { volume in
             if !isEditing {
                 draftVolume = PerceptualVolumeScale.sliderValue(fromLinear: Double(volume))
             }
@@ -1928,13 +3021,21 @@ private struct PlayerVolumePopover: View {
 }
 
 private struct PlayerSpeedPopover: View {
-    @ObservedObject var controller: MpvPlayerController
+    let controller: MpvPlayerController
+    let palette: VideoControlPalette
+    @StateObject private var playbackRate: PlayerControllerProjection<Float>
     @State private var draftRate: Double = 1
     @State private var isEditing = false
     private let snapRates: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5]
 
+    init(controller: MpvPlayerController, palette: VideoControlPalette) {
+        self.controller = controller
+        self.palette = palette
+        _playbackRate = StateObject(wrappedValue: PlayerControllerProjection(controller: controller) { $0.playbackRate })
+    }
+
     private var visibleRate: Double {
-        isEditing ? draftRate : Double(controller.playbackRate)
+        isEditing ? draftRate : Double(playbackRate.value)
     }
 
     var body: some View {
@@ -1942,7 +3043,7 @@ private struct PlayerSpeedPopover: View {
             HStack(spacing: 10) {
                 Image(systemName: "speedometer")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.84))
+                    .foregroundStyle(palette.secondary)
                     .frame(width: 22, height: 24)
 
                 PlayerSnapSlider(
@@ -1955,6 +3056,7 @@ private struct PlayerSpeedPopover: View {
                     }),
                     range: 0.5...2.5,
                     snapValues: snapRates.map(Double.init),
+                    palette: palette,
                     isEditing: $isEditing
                 ) {
                     controller.setPlaybackRate(Float(draftRate), updateExternalState: true)
@@ -1967,7 +3069,8 @@ private struct PlayerSpeedPopover: View {
                 PlayerSpeedTickLabels(
                     currentRate: visibleRate,
                     ticks: [0.5, 0.75, 1.0, 1.5, 2.0, 2.5],
-                    range: 0.5...2.5
+                    range: 0.5...2.5,
+                    palette: palette
                 )
                 .frame(width: 294, height: 16)
             }
@@ -1976,11 +3079,11 @@ private struct PlayerSpeedPopover: View {
         .padding(.vertical, 11)
         .frame(width: 350)
         .fixedSize(horizontal: true, vertical: true)
-        .playerPopoverGlass()
+        .playerPopoverGlass(palette: palette)
         .onAppear {
-            draftRate = Double(controller.playbackRate)
+            draftRate = Double(playbackRate.value)
         }
-        .onChange(of: controller.playbackRate) { rate in
+        .onChange(of: playbackRate.value) { rate in
             if !isEditing {
                 draftRate = Double(rate)
             }
@@ -1996,11 +3099,1332 @@ private struct PlayerSpeedPopover: View {
     }
 }
 
+private struct PlayerPlaybackInfoState: Equatable {
+    let duration: Double
+    let playbackRate: Float
+    let volume: Float
+    let audioTracks: [MpvTrack]
+    let subtitleTracks: [MpvTrack]
+    let loopCurrentItem: Bool
+    let abLoopStart: Double?
+    let abLoopEnd: Double?
+    let aspectOverride: VideoAspectOverride
+    let cropMode: VideoCropMode
+    let deinterlaceMode: VideoDeinterlaceMode
+    let rotationMode: VideoRotationMode
+
+    @MainActor
+    init(controller: MpvPlayerController) {
+        self.duration = controller.duration
+        self.playbackRate = controller.playbackRate
+        self.volume = controller.volume
+        self.audioTracks = controller.audioTracks
+        self.subtitleTracks = controller.subtitleTracks
+        self.loopCurrentItem = controller.loopCurrentItem
+        self.abLoopStart = controller.abLoopStart
+        self.abLoopEnd = controller.abLoopEnd
+        self.aspectOverride = controller.aspectOverride
+        self.cropMode = controller.cropMode
+        self.deinterlaceMode = controller.deinterlaceMode
+        self.rotationMode = controller.rotationMode
+    }
+}
+
+private struct PlayerPlaybackInfoOverlay: View {
+    let item: MediaItem
+    let controller: MpvPlayerController
+    let qualityOptions: [VideoStreamQualityOption]
+    let selectedQualityID: String?
+    let palette: VideoControlPalette
+    let onDismiss: () -> Void
+    @StateObject private var playerState: PlayerControllerProjection<PlayerPlaybackInfoState>
+
+    init(
+        item: MediaItem,
+        controller: MpvPlayerController,
+        qualityOptions: [VideoStreamQualityOption],
+        selectedQualityID: String?,
+        palette: VideoControlPalette,
+        onDismiss: @escaping () -> Void
+    ) {
+        self.item = item
+        self.controller = controller
+        self.qualityOptions = qualityOptions
+        self.selectedQualityID = selectedQualityID
+        self.palette = palette
+        self.onDismiss = onDismiss
+        _playerState = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerPlaybackInfoState.init))
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                Color.black.opacity(0.24)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onDismiss)
+
+                VStack(alignment: .leading, spacing: 14) {
+                    header
+
+                    Divider()
+                        .overlay(palette.rowStroke)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        infoRow("类型", value: item.type.displayName, systemImage: item.type.systemImage)
+                        infoRow("时长", value: durationText, systemImage: "clock")
+                        infoRow("分辨率", value: cleanText(item.resolution, fallback: "未知"), systemImage: "rectangle.inset.filled")
+                        infoRow("视频编码", value: cleanText(item.videoCodec, fallback: "未知"), systemImage: "film")
+                        infoRow("音频编码", value: cleanText(item.audioCodec, fallback: "未知"), systemImage: "waveform")
+                        infoRow("文件大小", value: fileSizeText, systemImage: "externaldrive")
+                        infoRow("当前清晰度", value: qualityText, systemImage: "sparkles.tv")
+                        infoRow("当前音轨", value: selectedAudioTrackText, systemImage: "speaker.wave.2")
+                        infoRow("当前字幕", value: selectedSubtitleTrackText, systemImage: "captions.bubble")
+                        infoRow("播放状态", value: playbackTuningText, systemImage: "slider.horizontal.3")
+                        infoRow("循环", value: loopText, systemImage: "repeat")
+                    }
+                }
+                .padding(18)
+                .frame(width: min(max(proxy.size.width - 96, 520), 640))
+                .playerPopoverGlass(palette: palette)
+                .shadow(color: .black.opacity(0.24), radius: 22, y: 10)
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Label("播放信息", systemImage: "info.circle")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(palette.primary)
+                Text(item.title)
+                    .font(.caption)
+                    .foregroundStyle(palette.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(palette.secondary)
+                    .frame(width: 30, height: 30)
+                    .playerCapsuleControl(cornerRadius: 15, palette: palette)
+            }
+            .buttonStyle(.plain)
+            .help("关闭")
+        }
+    }
+
+    private func infoRow(_ title: String, value: String, systemImage: String) -> some View {
+        HStack(spacing: 10) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(palette.secondary)
+                .frame(width: 104, alignment: .leading)
+
+            Text(value)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(palette.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.76)
+                .frame(maxWidth: .infinity, minHeight: 26, alignment: .leading)
+                .padding(.horizontal, 9)
+                .background {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(palette.choiceFill)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(palette.rowStroke, lineWidth: 0.8)
+                }
+        }
+    }
+
+    private var durationText: String {
+        let duration = playerState.value.duration > 0 ? playerState.value.duration : item.duration ?? 0
+        return formatTime(duration)
+    }
+
+    private var fileSizeText: String {
+        guard let fileSize = item.fileSize, fileSize > 0 else { return "未知" }
+        return ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)
+    }
+
+    private var qualityText: String {
+        if let selectedQualityID,
+           let selected = qualityOptions.first(where: { $0.id == selectedQualityID }) {
+            return selected.label
+        }
+        return qualityOptions.first?.label ?? "当前片源"
+    }
+
+    private var selectedAudioTrackText: String {
+        playerState.value.audioTracks.first(where: \.isSelected)?.displayName ?? "自动"
+    }
+
+    private var selectedSubtitleTrackText: String {
+        playerState.value.subtitleTracks.first(where: \.isSelected)?.displayName ?? "关闭"
+    }
+
+    private var playbackTuningText: String {
+        var parts: [String] = []
+        parts.append(rateText(playerState.value.playbackRate))
+        parts.append("音量 \(Int((playerState.value.volume * 100).rounded()))%")
+        if playerState.value.aspectOverride != .source {
+            parts.append(playerState.value.aspectOverride.displayName)
+        }
+        if playerState.value.cropMode != .none {
+            parts.append("裁切 \(playerState.value.cropMode.displayName)")
+        }
+        if playerState.value.deinterlaceMode != .off {
+            parts.append("去隔行 \(playerState.value.deinterlaceMode.displayName)")
+        }
+        if playerState.value.rotationMode != .source {
+            parts.append("旋转 \(playerState.value.rotationMode.displayName)")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private var loopText: String {
+        var parts: [String] = []
+        if playerState.value.loopCurrentItem {
+            parts.append("单片循环")
+        }
+        if let start = playerState.value.abLoopStart {
+            if let end = playerState.value.abLoopEnd {
+                parts.append("A-B \(formatTime(start)) - \(formatTime(end))")
+            } else {
+                parts.append("A 点 \(formatTime(start))")
+            }
+        }
+        return parts.isEmpty ? "关闭" : parts.joined(separator: " · ")
+    }
+
+    private func cleanText(_ value: String?, fallback: String) -> String {
+        let text = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return text.isEmpty ? fallback : text
+    }
+
+    private func rateText(_ rate: Float) -> String {
+        if abs(rate - 1.0) < 0.001 { return "1x" }
+        if abs(rate.rounded() - rate) < 0.001 { return String(format: "%.0fx", rate) }
+        return String(format: "%.2fx", rate)
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
+        let total = Int(seconds.rounded())
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+private enum PlayerAdvancedSettingsTab: String, CaseIterable, Identifiable {
+    case playback
+    case sync
+    case video
+    case shortcuts
+    case gestures
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .playback: return "播放"
+        case .sync: return "音画同步"
+        case .video: return "画面"
+        case .shortcuts: return "快捷键"
+        case .gestures: return "触控板"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .playback: return "play.rectangle"
+        case .sync: return "waveform.path.ecg"
+        case .video: return "rectangle.inset.filled"
+        case .shortcuts: return "keyboard"
+        case .gestures: return "hand.draw"
+        }
+    }
+}
+
+private struct PlayerAdvancedSettingsOverlay: View {
+    @EnvironmentObject private var appState: AppState
+    let controller: MpvPlayerController
+    let palette: VideoControlPalette
+    let onDismiss: () -> Void
+    let onOpenPlaybackInfo: () -> Void
+    let onWindowWidthChange: () -> Void
+    @State private var selectedTab: PlayerAdvancedSettingsTab = .playback
+    @State private var recordingAction: VideoPlayerShortcutAction?
+    @State private var widthRatioDraft: Double = VideoWindowSizing.minimumScreenWidthRatio
+    @State private var isEditingWidth = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                Color.black.opacity(0.26)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onDismiss)
+
+                VStack(spacing: 0) {
+                    header
+                    Divider()
+                        .overlay(palette.rowStroke)
+                    HStack(alignment: .top, spacing: 0) {
+                        sidebar
+                        Divider()
+                            .overlay(palette.rowStroke)
+                        content
+                    }
+                }
+                .frame(width: min(max(proxy.size.width - 92, 680), 900), height: min(max(proxy.size.height - 92, 500), 660))
+                .playerPopoverGlass(palette: palette)
+                .shadow(color: .black.opacity(0.26), radius: 24, y: 10)
+            }
+        }
+        .onAppear {
+            widthRatioDraft = currentWidthRatio
+        }
+        .onChange(of: appState.settings.videoPlayerPreferredWidth) { _ in
+            if !isEditingWidth {
+                widthRatioDraft = currentWidthRatio
+            }
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            Label("播放器更多设置", systemImage: "slider.horizontal.3")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(palette.primary)
+            Spacer()
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(palette.secondary)
+                    .frame(width: 30, height: 30)
+                    .playerCapsuleControl(cornerRadius: 15, palette: palette)
+            }
+            .buttonStyle(.plain)
+            .help("关闭")
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(PlayerAdvancedSettingsTab.allCases) { tab in
+                Button {
+                    selectedTab = tab
+                    recordingAction = nil
+                } label: {
+                    Label(tab.title, systemImage: tab.systemImage)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(selectedTab == tab ? palette.choiceSelectedForeground : palette.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 11)
+                        .frame(height: 32)
+                        .background {
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(selectedTab == tab ? palette.choiceSelectedFill : Color.clear)
+                        }
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(width: 150)
+    }
+
+    private var content: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                switch selectedTab {
+                case .playback:
+                    playbackSettings
+                case .sync:
+                    syncSettings
+                case .video:
+                    videoSettings
+                case .shortcuts:
+                    shortcutSettings
+                case .gestures:
+                    gestureSettings
+                }
+            }
+            .padding(18)
+        }
+        .scrollIndicators(.automatic)
+    }
+
+    private var playbackSettings: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            PlayerSettingsGroup(title: "视频启动", palette: palette) {
+                PlayerSettingRow(title: "播放方式", systemImage: "play.rectangle", palette: palette) {
+                    PlayerChoiceGroup {
+                        ForEach(DefaultPlayer.allCases) { player in
+                            PlayerChoiceButton(
+                                title: player.displayName,
+                                selected: appState.settings.videoDefaultPlayer == player,
+                                palette: palette
+                            ) {
+                                appState.settings.videoDefaultPlayer = player
+                                appState.saveSettings()
+                            }
+                        }
+                    }
+                }
+
+                if appState.settings.videoDefaultPlayer == .external {
+                    PlayerSettingRow(title: "系统播放器", systemImage: "app.badge", palette: palette) {
+                        HStack(spacing: 7) {
+                            Text(externalPlayerDisplayName)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(palette.secondary)
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                            Button {
+                                chooseExternalPlayer()
+                            } label: {
+                                Image(systemName: "folder")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .frame(width: 28, height: 24)
+                                    .playerCapsuleControl(cornerRadius: 8, palette: palette)
+                            }
+                            .buttonStyle(.plain)
+                            .help("选择系统播放器")
+                        }
+                    }
+                }
+
+                PlayerSettingRow(title: "窗口宽度", systemImage: "arrow.left.and.right", palette: palette) {
+                    HStack(spacing: 9) {
+                        Slider(
+                            value: Binding(get: {
+                                isEditingWidth ? widthRatioDraft : currentWidthRatio
+                            }, set: { ratio in
+                                isEditingWidth = true
+                                widthRatioDraft = min(max(ratio, VideoWindowSizing.minimumScreenWidthRatio), VideoWindowSizing.maximumScreenWidthRatio)
+                                appState.settings.videoPlayerPreferredWidth = VideoWindowSizing.preferredWidth(forScreenWidthRatio: widthRatioDraft, on: NSApp.keyWindow?.screen)
+                                onWindowWidthChange()
+                            }),
+                            in: VideoWindowSizing.minimumScreenWidthRatio...VideoWindowSizing.maximumScreenWidthRatio,
+                            step: 0.01,
+                            onEditingChanged: { editing in
+                                isEditingWidth = editing
+                                if !editing {
+                                    appState.saveSettings()
+                                }
+                            }
+                        )
+                        .tint(palette.trackProgress)
+
+                        Text("\(Int(((isEditingWidth ? widthRatioDraft : currentWidthRatio) * 100).rounded()))%")
+                            .font(.caption2.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(palette.secondary)
+                            .frame(width: 42, alignment: .trailing)
+                    }
+                }
+
+                PlayerSettingToggleRow(
+                    title: "窗口置顶",
+                    systemImage: "pin",
+                    isOn: appState.settings.videoPlayerAlwaysOnTop,
+                    palette: palette
+                ) {
+                    appState.settings.videoPlayerAlwaysOnTop.toggle()
+                    appState.saveSettings()
+                    PlayerWindowActions.setAlwaysOnTop(appState.settings.videoPlayerAlwaysOnTop)
+                }
+            }
+
+            PlayerSettingsGroup(title: "播放行为", palette: palette) {
+                PlayerSettingRow(title: "预览图", systemImage: "photo.on.rectangle.angled", palette: palette) {
+                    PlayerChoiceGroup {
+                        ForEach(VideoScrubberPreviewMode.allCases) { mode in
+                            PlayerChoiceButton(
+                                title: mode.displayName,
+                                selected: appState.settings.videoScrubberPreviewMode == mode,
+                                palette: palette
+                            ) {
+                                appState.settings.videoScrubberPreviewMode = mode
+                                appState.saveSettings()
+                            }
+                        }
+                    }
+                }
+
+                PlayerSettingRow(title: "默认倍速", systemImage: "speedometer", palette: palette) {
+                    PlayerChoiceGroup {
+                        ForEach([0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { rate in
+                            PlayerChoiceButton(
+                                title: settingsRateTitle(rate),
+                                selected: abs(appState.settings.defaultPlaybackRate - rate) < 0.001,
+                                palette: palette
+                            ) {
+                                appState.settings.defaultPlaybackRate = rate
+                                appState.saveSettings()
+                            }
+                        }
+                    }
+                }
+
+                PlayerSettingRow(title: "快进/快退", systemImage: "gobackward.5", palette: palette) {
+                    PlayerChoiceGroup {
+                        ForEach([5.0, 10.0, 15.0, 30.0], id: \.self) { seconds in
+                            PlayerChoiceButton(
+                                title: "\(Int(seconds))秒",
+                                selected: abs(appState.settings.skipInterval - seconds) < 0.001,
+                                palette: palette
+                            ) {
+                                appState.settings.skipInterval = seconds
+                                appState.saveSettings()
+                            }
+                        }
+                    }
+                }
+
+                PlayerSettingToggleRow(
+                    title: "记忆进度",
+                    systemImage: "clock.arrow.circlepath",
+                    isOn: appState.settings.rememberPlaybackPosition,
+                    palette: palette
+                ) {
+                    appState.settings.rememberPlaybackPosition.toggle()
+                    appState.saveSettings()
+                }
+
+                PlayerSettingToggleRow(
+                    title: "自动下一集",
+                    systemImage: "forward.end",
+                    isOn: appState.settings.autoPlayNextEpisode,
+                    palette: palette
+                ) {
+                    appState.settings.autoPlayNextEpisode.toggle()
+                    appState.saveSettings()
+                }
+
+                PlayerSettingToggleRow(
+                    title: "自动标记已看",
+                    systemImage: "checkmark.circle",
+                    isOn: appState.settings.autoMarkWatched,
+                    palette: palette
+                ) {
+                    appState.settings.autoMarkWatched.toggle()
+                    appState.saveSettings()
+                }
+            }
+
+            PlayerLoopAssistSettings(
+                controller: controller,
+                palette: palette,
+                onOpenPlaybackInfo: onOpenPlaybackInfo
+            )
+        }
+    }
+
+    private var shortcutSettings: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            HStack {
+                Text("快捷键会在视频播放器窗口内生效。设置重复组合键时，旧动作会自动让出。")
+                    .font(.caption)
+                    .foregroundStyle(palette.secondary)
+                    .lineLimit(2)
+                Spacer()
+                Button {
+                    appState.settings.resetAllVideoKeyboardShortcuts()
+                    appState.saveSettings()
+                    recordingAction = nil
+                } label: {
+                    Label("恢复全部默认", systemImage: "arrow.counterclockwise")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(palette.primary)
+                        .padding(.horizontal, 10)
+                        .frame(height: 28)
+                        .playerCapsuleControl(cornerRadius: 10, palette: palette)
+                }
+                .buttonStyle(.plain)
+            }
+
+            ForEach(shortcutGroups, id: \.title) { group in
+                PlayerSettingsGroup(title: group.title, palette: palette) {
+                    ForEach(group.actions) { action in
+                        PlayerShortcutSettingRow(
+                            action: action,
+                            shortcuts: appState.settings.resolvedVideoKeyboardShortcuts(for: action),
+                            isRecording: recordingAction == action,
+                            palette: palette,
+                            onRecord: {
+                                recordingAction = action
+                            },
+                            onClear: {
+                                appState.settings.setVideoKeyboardShortcuts([], for: action)
+                                appState.saveSettings()
+                                recordingAction = nil
+                            },
+                            onReset: {
+                                appState.settings.resetVideoKeyboardShortcut(for: action)
+                                appState.saveSettings()
+                                recordingAction = nil
+                            },
+                            onCancel: {
+                                recordingAction = nil
+                            },
+                            onCapture: { shortcut in
+                                appState.settings.setVideoKeyboardShortcuts([shortcut], for: action)
+                                appState.saveSettings()
+                                recordingAction = nil
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private var syncSettings: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            PlayerSettingsGroup(title: "音画同步", palette: palette) {
+                PlayerSettingRow(title: "音频延迟", systemImage: "speaker.wave.2", palette: palette) {
+                    PlayerAdjustmentControls(
+                        valueText: syncDelayText(appState.settings.videoDefaultAudioDelay),
+                        palette: palette,
+                        onDecrement: { setAudioDelay(appState.settings.videoDefaultAudioDelay - 0.1) },
+                        onReset: { setAudioDelay(0) },
+                        onIncrement: { setAudioDelay(appState.settings.videoDefaultAudioDelay + 0.1) }
+                    )
+                }
+
+                PlayerSettingRow(title: "字幕延迟", systemImage: "captions.bubble", palette: palette) {
+                    PlayerAdjustmentControls(
+                        valueText: syncDelayText(appState.settings.videoDefaultSubtitleDelay),
+                        palette: palette,
+                        onDecrement: { setSubtitleDelay(appState.settings.videoDefaultSubtitleDelay - 0.1) },
+                        onReset: { setSubtitleDelay(0) },
+                        onIncrement: { setSubtitleDelay(appState.settings.videoDefaultSubtitleDelay + 0.1) }
+                    )
+                }
+
+                PlayerSettingRow(title: "字幕大小", systemImage: "textformat.size", palette: palette) {
+                    PlayerAdjustmentControls(
+                        valueText: percentText(appState.settings.videoDefaultSubtitleScale),
+                        palette: palette,
+                        onDecrement: { setSubtitleScale(appState.settings.videoDefaultSubtitleScale - 0.05) },
+                        onReset: { setSubtitleScale(1) },
+                        onIncrement: { setSubtitleScale(appState.settings.videoDefaultSubtitleScale + 0.05) }
+                    )
+                }
+
+                PlayerSettingRow(title: "字幕位置", systemImage: "arrow.up.and.down.text.horizontal", palette: palette) {
+                    PlayerAdjustmentControls(
+                        valueText: "\(Int(appState.settings.videoDefaultSubtitlePosition.rounded()))%",
+                        palette: palette,
+                        onDecrement: { setSubtitlePosition(appState.settings.videoDefaultSubtitlePosition - 4) },
+                        onReset: { setSubtitlePosition(100) },
+                        onIncrement: { setSubtitlePosition(appState.settings.videoDefaultSubtitlePosition + 4) }
+                    )
+                }
+            }
+        }
+    }
+
+    private var videoSettings: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            PlayerSettingsGroup(title: "画面显示", palette: palette) {
+                PlayerSettingRow(title: "画面比例", systemImage: "aspectratio", palette: palette) {
+                    PlayerChoiceGroup {
+                        ForEach(VideoAspectOverride.allCases) { mode in
+                            PlayerChoiceButton(
+                                title: mode.displayName,
+                                selected: appState.settings.videoAspectOverride == mode,
+                                palette: palette
+                            ) {
+                                appState.settings.videoAspectOverride = mode
+                                appState.saveSettings()
+                                controller.setAspectOverride(mode)
+                            }
+                        }
+                    }
+                }
+
+                PlayerSettingRow(title: "黑边裁切", systemImage: "crop", palette: palette) {
+                    PlayerChoiceGroup {
+                        ForEach(VideoCropMode.allCases) { mode in
+                            PlayerChoiceButton(
+                                title: mode.displayName,
+                                selected: appState.settings.videoCropMode == mode,
+                                palette: palette
+                            ) {
+                                appState.settings.videoCropMode = mode
+                                appState.saveSettings()
+                                controller.setCropMode(mode)
+                            }
+                        }
+                    }
+                }
+
+                PlayerSettingRow(title: "去隔行", systemImage: "line.3.horizontal.decrease", palette: palette) {
+                    PlayerChoiceGroup {
+                        ForEach(VideoDeinterlaceMode.allCases) { mode in
+                            PlayerChoiceButton(
+                                title: mode.displayName,
+                                selected: appState.settings.videoDeinterlaceMode == mode,
+                                palette: palette
+                            ) {
+                                appState.settings.videoDeinterlaceMode = mode
+                                appState.saveSettings()
+                                controller.setDeinterlaceMode(mode)
+                            }
+                        }
+                    }
+                }
+
+                PlayerSettingRow(title: "画面旋转", systemImage: "rotate.right", palette: palette) {
+                    PlayerChoiceGroup {
+                        ForEach(VideoRotationMode.allCases) { mode in
+                            PlayerChoiceButton(
+                                title: mode.displayName,
+                                selected: appState.settings.videoRotationMode == mode,
+                                palette: palette
+                            ) {
+                                appState.settings.videoRotationMode = mode
+                                appState.saveSettings()
+                                controller.setRotationMode(mode)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var gestureSettings: some View {
+        VStack(alignment: .leading, spacing: 15) {
+            PlayerSettingsGroup(title: "触控板手势", palette: palette) {
+                PlayerSettingToggleRow(
+                    title: "启用手势",
+                    systemImage: "hand.draw",
+                    isOn: appState.settings.videoTrackpadGesturesEnabled,
+                    palette: palette
+                ) {
+                    appState.settings.videoTrackpadGesturesEnabled.toggle()
+                    appState.saveSettings()
+                }
+
+                PlayerSettingToggleRow(
+                    title: "横扫跳转",
+                    systemImage: "arrow.left.and.right",
+                    isOn: appState.settings.videoTrackpadHorizontalSeekEnabled,
+                    palette: palette
+                ) {
+                    appState.settings.videoTrackpadHorizontalSeekEnabled.toggle()
+                    appState.saveSettings()
+                }
+
+                PlayerSettingToggleRow(
+                    title: "竖扫音量",
+                    systemImage: "speaker.wave.2",
+                    isOn: appState.settings.videoTrackpadVerticalVolumeEnabled,
+                    palette: palette
+                ) {
+                    appState.settings.videoTrackpadVerticalVolumeEnabled.toggle()
+                    appState.saveSettings()
+                }
+
+                PlayerSettingToggleRow(
+                    title: "捏合全屏",
+                    systemImage: "arrow.up.left.and.arrow.down.right",
+                    isOn: appState.settings.videoTrackpadPinchFullscreenEnabled,
+                    palette: palette
+                ) {
+                    appState.settings.videoTrackpadPinchFullscreenEnabled.toggle()
+                    appState.saveSettings()
+                }
+
+                PlayerSettingRow(title: "灵敏度", systemImage: "dial.medium", palette: palette) {
+                    PlayerChoiceGroup {
+                        ForEach(VideoTrackpadGestureSensitivity.allCases) { sensitivity in
+                            PlayerChoiceButton(
+                                title: sensitivity.displayName,
+                                selected: appState.settings.videoTrackpadGestureSensitivity == sensitivity,
+                                palette: palette
+                            ) {
+                                appState.settings.videoTrackpadGestureSensitivity = sensitivity
+                                appState.saveSettings()
+                            }
+                        }
+                    }
+                }
+            }
+
+            Text("横扫和竖扫只响应精确滚动事件，普通鼠标滚轮不会改变播放进度。捏合全屏默认关闭，避免误触。")
+                .font(.caption)
+                .foregroundStyle(palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var shortcutGroups: [(title: String, actions: [VideoPlayerShortcutAction])] {
+        ["播放", "跳转", "窗口与控制", "画面", "音画同步", "轨道"].compactMap { title in
+            let actions = VideoPlayerShortcutAction.allCases.filter { $0.groupTitle == title }
+            return actions.isEmpty ? nil : (title, actions)
+        }
+    }
+
+    private var currentWidthRatio: Double {
+        VideoWindowSizing.screenWidthRatio(for: appState.settings.videoPlayerPreferredWidth, on: NSApp.keyWindow?.screen)
+    }
+
+    private var externalPlayerDisplayName: String {
+        guard let path = appState.settings.videoExternalPlayerPath, !path.isEmpty else {
+            return "系统默认"
+        }
+        return URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+    }
+
+    private func chooseExternalPlayer() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        panel.prompt = "选择"
+        if panel.runModal() == .OK, let url = panel.url {
+            appState.chooseExternalPlayer(url: url, forMusic: false)
+        }
+    }
+
+    private func settingsRateTitle(_ rate: Double) -> String {
+        if abs(rate - 1.0) < 0.001 { return "1x" }
+        if abs(rate.rounded() - rate) < 0.001 { return String(format: "%.0fx", rate) }
+        return String(format: "%.2fx", rate)
+    }
+
+    private func setAudioDelay(_ value: Double) {
+        let clamped = AppSettings.clampedVideoSyncDelay(value)
+        appState.settings.videoDefaultAudioDelay = clamped
+        appState.saveSettings()
+        controller.setAudioDelay(clamped)
+    }
+
+    private func setSubtitleDelay(_ value: Double) {
+        let clamped = AppSettings.clampedVideoSyncDelay(value)
+        appState.settings.videoDefaultSubtitleDelay = clamped
+        appState.saveSettings()
+        controller.setSubtitleDelay(clamped)
+    }
+
+    private func setSubtitleScale(_ value: Double) {
+        let clamped = AppSettings.clampedVideoSubtitleScale(value)
+        appState.settings.videoDefaultSubtitleScale = clamped
+        appState.saveSettings()
+        controller.setSubtitleScale(clamped)
+    }
+
+    private func setSubtitlePosition(_ value: Double) {
+        let clamped = AppSettings.clampedVideoSubtitlePosition(value)
+        appState.settings.videoDefaultSubtitlePosition = clamped
+        appState.saveSettings()
+        controller.setSubtitlePosition(clamped)
+    }
+
+    private func syncDelayText(_ value: Double) -> String {
+        if abs(value) < 0.001 { return "0.0 秒" }
+        return String(format: "%+.1f 秒", value)
+    }
+
+    private func percentText(_ value: Double) -> String {
+        "\(Int((value * 100).rounded()))%"
+    }
+}
+
+private struct PlayerAdjustmentControls: View {
+    let valueText: String
+    let palette: VideoControlPalette
+    let onDecrement: () -> Void
+    let onReset: () -> Void
+    let onIncrement: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            adjustmentButton(systemImage: "minus", help: "减少", action: onDecrement)
+
+            Text(valueText)
+                .font(.caption2.monospacedDigit().weight(.semibold))
+                .foregroundStyle(palette.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 76, height: 26)
+                .background {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(palette.choiceFill)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(palette.rowStroke, lineWidth: 0.8)
+                }
+
+            adjustmentButton(systemImage: "arrow.counterclockwise", help: "恢复默认", action: onReset)
+            adjustmentButton(systemImage: "plus", help: "增加", action: onIncrement)
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private func adjustmentButton(systemImage: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(palette.secondary)
+                .frame(width: 28, height: 26)
+                .playerCapsuleControl(cornerRadius: 8, palette: palette)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+}
+
+private struct PlayerLoopAssistState: Equatable {
+    let loopCurrentItem: Bool
+    let abLoopStart: Double?
+    let abLoopEnd: Double?
+
+    @MainActor
+    init(controller: MpvPlayerController) {
+        self.loopCurrentItem = controller.loopCurrentItem
+        self.abLoopStart = controller.abLoopStart
+        self.abLoopEnd = controller.abLoopEnd
+    }
+}
+
+private struct PlayerLoopAssistSettings: View {
+    @EnvironmentObject private var appState: AppState
+    let controller: MpvPlayerController
+    let palette: VideoControlPalette
+    let onOpenPlaybackInfo: () -> Void
+    @StateObject private var loopState: PlayerControllerProjection<PlayerLoopAssistState>
+
+    init(
+        controller: MpvPlayerController,
+        palette: VideoControlPalette,
+        onOpenPlaybackInfo: @escaping () -> Void
+    ) {
+        self.controller = controller
+        self.palette = palette
+        self.onOpenPlaybackInfo = onOpenPlaybackInfo
+        _loopState = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerLoopAssistState.init))
+    }
+
+    var body: some View {
+        PlayerSettingsGroup(title: "播放辅助", palette: palette) {
+            PlayerSettingToggleRow(
+                title: "单片循环",
+                systemImage: "repeat.1",
+                isOn: appState.settings.videoLoopCurrentItem,
+                palette: palette
+            ) {
+                let enabled = !appState.settings.videoLoopCurrentItem
+                appState.settings.videoLoopCurrentItem = enabled
+                appState.saveSettings()
+                controller.setLoopCurrentItem(enabled)
+            }
+
+            PlayerSettingRow(title: "A-B 循环", systemImage: "arrow.triangle.2.circlepath", palette: palette) {
+                HStack(spacing: 7) {
+                    Text(abLoopText)
+                        .font(.caption2.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(loopState.value.abLoopStart == nil ? palette.subdued : palette.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                        .padding(.horizontal, 9)
+                        .frame(maxWidth: .infinity, minHeight: 26, alignment: .leading)
+                        .background {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(palette.choiceFill)
+                        }
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(palette.rowStroke, lineWidth: 0.8)
+                        }
+
+                    loopButton(title: "设置", systemImage: "arrow.triangle.2.circlepath") {
+                        _ = controller.cycleABLoopPoint()
+                    }
+                    loopButton(title: "清除", systemImage: "xmark") {
+                        controller.clearABLoop()
+                    }
+                }
+            }
+
+            PlayerSettingRow(title: "播放信息", systemImage: "info.circle", palette: palette) {
+                Button {
+                    onOpenPlaybackInfo()
+                } label: {
+                    Label("查看当前视频信息", systemImage: "arrow.up.right.square")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(palette.primary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 28)
+                        .playerCapsuleControl(cornerRadius: 10, palette: palette)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var abLoopText: String {
+        guard let start = loopState.value.abLoopStart else { return "未设置" }
+        if let end = loopState.value.abLoopEnd {
+            return "\(formatLoopTime(start)) - \(formatLoopTime(end))"
+        }
+        return "A 点 \(formatLoopTime(start))"
+    }
+
+    private func loopButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(palette.secondary)
+                .frame(width: 28, height: 26)
+                .playerCapsuleControl(cornerRadius: 8, palette: palette)
+        }
+        .buttonStyle(.plain)
+        .help(title)
+    }
+
+    private func formatLoopTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
+        let total = Int(seconds.rounded())
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+private struct PlayerShortcutSettingRow: View {
+    let action: VideoPlayerShortcutAction
+    let shortcuts: [VideoKeyboardShortcut]
+    let isRecording: Bool
+    let palette: VideoControlPalette
+    let onRecord: () -> Void
+    let onClear: () -> Void
+    let onReset: () -> Void
+    let onCancel: () -> Void
+    let onCapture: (VideoKeyboardShortcut) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Text(action.displayName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(palette.secondary)
+                    .frame(width: 142, alignment: .leading)
+
+                Text(shortcutText)
+                    .font(.caption2.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(shortcuts.isEmpty ? palette.subdued : palette.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .padding(.horizontal, 9)
+                    .frame(maxWidth: .infinity, minHeight: 26, alignment: .leading)
+                    .background {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(palette.choiceFill)
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(palette.rowStroke, lineWidth: 0.8)
+                    }
+
+                HStack(spacing: 5) {
+                    shortcutButton(title: isRecording ? "等待" : "记录", systemImage: "keyboard", action: onRecord)
+                    shortcutButton(title: "清除", systemImage: "xmark", action: onClear)
+                    shortcutButton(title: "默认", systemImage: "arrow.counterclockwise", action: onReset)
+                }
+            }
+
+            if isRecording {
+                HStack(spacing: 8) {
+                    Label("按下新的组合键", systemImage: "keyboard")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(palette.primary)
+                    Spacer()
+                    Button("取消", action: onCancel)
+                        .font(.caption2.weight(.semibold))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(palette.secondary)
+                }
+                .padding(.horizontal, 10)
+                .frame(height: 28)
+                .background {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(palette.choiceSelectedFill.opacity(0.72))
+                }
+                .overlay {
+                    VideoShortcutRecorderView(onCapture: onCapture)
+                        .frame(width: 0, height: 0)
+                }
+            }
+        }
+    }
+
+    private var shortcutText: String {
+        let text = shortcuts.map(\.displayName).joined(separator: " / ")
+        return text.isEmpty ? "未设置" : text
+    }
+
+    private func shortcutButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundStyle(palette.secondary)
+                .frame(width: 26, height: 24)
+                .playerCapsuleControl(cornerRadius: 8, palette: palette)
+        }
+        .buttonStyle(.plain)
+        .help(title)
+    }
+}
+
+private struct PlayerSettingsPopover: View {
+    @EnvironmentObject private var appState: AppState
+    let palette: VideoControlPalette
+    let onWindowWidthChange: () -> Void
+    let onOpenAdvancedSettings: () -> Void
+    @State private var widthRatioDraft: Double = VideoWindowSizing.minimumScreenWidthRatio
+    @State private var isEditingWidth = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 13) {
+                Label("播放器设置", systemImage: "gearshape")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(palette.primary)
+
+                PlayerSettingsGroup(title: "临场设置", palette: palette) {
+                    PlayerSettingRow(title: "窗口宽度", systemImage: "arrow.left.and.right", palette: palette) {
+                        HStack(spacing: 9) {
+                            Slider(
+                                value: Binding(get: {
+                                    isEditingWidth ? widthRatioDraft : currentWidthRatio
+                                }, set: { ratio in
+                                    isEditingWidth = true
+                                    widthRatioDraft = min(max(ratio, VideoWindowSizing.minimumScreenWidthRatio), VideoWindowSizing.maximumScreenWidthRatio)
+                                    appState.settings.videoPlayerPreferredWidth = VideoWindowSizing.preferredWidth(forScreenWidthRatio: widthRatioDraft, on: NSApp.keyWindow?.screen)
+                                    onWindowWidthChange()
+                                }),
+                                in: VideoWindowSizing.minimumScreenWidthRatio...VideoWindowSizing.maximumScreenWidthRatio,
+                                step: 0.01,
+                                onEditingChanged: { editing in
+                                    isEditingWidth = editing
+                                    if !editing {
+                                        appState.saveSettings()
+                                    }
+                                }
+                            )
+                            .tint(palette.trackProgress)
+
+                            Text("\(Int(((isEditingWidth ? widthRatioDraft : currentWidthRatio) * 100).rounded()))%")
+                                .font(.caption2.monospacedDigit().weight(.semibold))
+                                .foregroundStyle(palette.secondary)
+                                .frame(width: 42, alignment: .trailing)
+                        }
+                    }
+
+                    PlayerSettingToggleRow(
+                        title: "窗口置顶",
+                        systemImage: "pin",
+                        isOn: appState.settings.videoPlayerAlwaysOnTop,
+                        palette: palette
+                    ) {
+                        appState.settings.videoPlayerAlwaysOnTop.toggle()
+                        appState.saveSettings()
+                        PlayerWindowActions.setAlwaysOnTop(appState.settings.videoPlayerAlwaysOnTop)
+                    }
+
+                    PlayerSettingRow(title: "预览图", systemImage: "photo.on.rectangle.angled", palette: palette) {
+                        PlayerChoiceGroup {
+                            ForEach(VideoScrubberPreviewMode.allCases) { mode in
+                                PlayerChoiceButton(
+                                    title: mode.displayName,
+                                    selected: appState.settings.videoScrubberPreviewMode == mode,
+                                    palette: palette
+                                ) {
+                                    appState.settings.videoScrubberPreviewMode = mode
+                                    appState.saveSettings()
+                                }
+                            }
+                        }
+                    }
+
+                    PlayerSettingRow(title: "更多设置", systemImage: "slider.horizontal.3", palette: palette) {
+                        Button {
+                            onOpenAdvancedSettings()
+                        } label: {
+                            Label("打开完整设置", systemImage: "arrow.up.right.square")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(palette.primary)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 28)
+                                .playerCapsuleControl(cornerRadius: 10, palette: palette)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(13)
+        }
+        .frame(width: 420)
+        .frame(maxHeight: 520)
+        .fixedSize(horizontal: true, vertical: false)
+        .playerPopoverGlass(palette: palette)
+        .onAppear {
+            widthRatioDraft = currentWidthRatio
+        }
+        .onChange(of: appState.settings.videoPlayerPreferredWidth) { _ in
+            if !isEditingWidth {
+                widthRatioDraft = currentWidthRatio
+            }
+        }
+    }
+
+    private var currentWidthRatio: Double {
+        VideoWindowSizing.screenWidthRatio(for: appState.settings.videoPlayerPreferredWidth, on: NSApp.keyWindow?.screen)
+    }
+
+}
+
+private struct PlayerSettingsGroup<Content: View>: View {
+    let title: String
+    var palette: VideoControlPalette = .lightContent
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text(title)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(palette.subdued)
+            VStack(alignment: .leading, spacing: 8) {
+                content
+            }
+        }
+    }
+}
+
+private struct PlayerSettingRow<Content: View>: View {
+    let title: String
+    let systemImage: String
+    var palette: VideoControlPalette = .lightContent
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(palette.secondary)
+                .labelStyle(.titleAndIcon)
+                .frame(width: 104, alignment: .leading)
+            content
+        }
+        .frame(minHeight: 28)
+    }
+}
+
+private struct PlayerSettingToggleRow: View {
+    let title: String
+    let systemImage: String
+    let isOn: Bool
+    var palette: VideoControlPalette = .lightContent
+    let action: () -> Void
+
+    var body: some View {
+        PlayerSettingRow(title: title, systemImage: systemImage, palette: palette) {
+            HStack {
+                Spacer(minLength: 0)
+                Button(action: action) {
+                    ZStack(alignment: isOn ? .trailing : .leading) {
+                        Capsule()
+                            .fill(isOn ? palette.choiceSelectedFill : palette.choiceFill)
+                            .overlay {
+                                Capsule().stroke(isOn ? palette.selectedRowStroke : palette.rowStroke, lineWidth: 0.8)
+                            }
+                        Circle()
+                            .fill(isOn ? palette.choiceSelectedForeground : palette.controlKnob)
+                            .frame(width: 16, height: 16)
+                            .padding(3)
+                    }
+                    .frame(width: 40, height: 22)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+private struct PlayerChoiceGroup<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: 5) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+}
+
+private struct PlayerChoiceButton: View {
+    let title: String
+    let selected: Bool
+    var palette: VideoControlPalette = .lightContent
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(selected ? palette.choiceSelectedForeground : palette.choiceForeground)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+                .padding(.horizontal, 9)
+                .frame(minWidth: 44)
+                .frame(height: 24)
+                .background {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(selected ? palette.choiceSelectedFill : palette.choiceFill)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(selected ? palette.selectedRowStroke : palette.rowStroke, lineWidth: 0.8)
+                }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private struct PlayerSnapSlider: View {
     private static let knobSize: CGFloat = 24
     @Binding var value: Double
     let range: ClosedRange<Double>
     let snapValues: [Double]
+    let palette: VideoControlPalette
     @Binding var isEditing: Bool
     let onEditingEnded: () -> Void
 
@@ -2013,27 +4437,27 @@ private struct PlayerSnapSlider: View {
             let knobCenterX = knobRadius + trackWidth * fraction
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Color.white.opacity(0.18))
+                    .fill(palette.trackBase)
                     .frame(width: trackWidth, height: 6)
                     .offset(x: knobRadius)
                 Capsule()
-                    .fill(.white.opacity(0.84))
+                    .fill(palette.trackProgress)
                     .frame(width: max(trackWidth * fraction, 0), height: 6)
                     .offset(x: knobRadius)
                 ForEach(snapValues, id: \.self) { snap in
                     let snapFraction = CGFloat((snap - range.lowerBound) / (range.upperBound - range.lowerBound))
                     let snapActive = abs(value - snap) < 0.02
                     Circle()
-                        .fill(.white.opacity(snapActive ? 0.92 : 0.34))
+                        .fill(snapActive ? palette.primary : palette.subdued)
                         .frame(width: snapActive ? 4.8 : 3.2, height: snapActive ? 4.8 : 3.2)
                         .position(x: knobRadius + trackWidth * snapFraction, y: 14)
                 }
                 Circle()
-                    .fill(.white)
+                    .fill(palette.controlKnob)
                     .frame(width: Self.knobSize, height: Self.knobSize)
-                    .shadow(color: .black.opacity(0.15), radius: 5, y: 1.5)
+                    .shadow(color: palette.shadow, radius: 5, y: 1.5)
                     .overlay {
-                        Circle().stroke(.white.opacity(0.42), lineWidth: 0.8)
+                        Circle().stroke(palette.border.first ?? palette.primary, lineWidth: 0.8)
                     }
                     .position(x: knobCenterX, y: 14)
             }
@@ -2059,6 +4483,7 @@ private struct PlayerLinearSlider: View {
     private static let knobSize: CGFloat = 20
     @Binding var value: Double
     let range: ClosedRange<Double>
+    let palette: VideoControlPalette
     @Binding var isEditing: Bool
     let onEditingEnded: () -> Void
 
@@ -2073,30 +4498,24 @@ private struct PlayerLinearSlider: View {
 
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Color.white.opacity(0.17))
+                    .fill(palette.trackBase)
                     .overlay {
-                        Capsule().stroke(.white.opacity(0.14), lineWidth: 0.6)
+                        Capsule().stroke(palette.border.last ?? palette.subdued, lineWidth: 0.6)
                     }
                     .frame(width: trackWidth, height: 5.5)
                     .offset(x: knobRadius)
 
                 Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [.white.opacity(0.92), .white.opacity(0.62)],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
+                    .fill(palette.trackProgress)
                     .frame(width: max(trackWidth * fraction, 0), height: 5.5)
                     .offset(x: knobRadius)
 
                 Circle()
-                    .fill(.white)
+                    .fill(palette.primary)
                     .frame(width: Self.knobSize, height: Self.knobSize)
-                    .shadow(color: .black.opacity(0.15), radius: 5, y: 1.5)
+                    .shadow(color: palette.shadow, radius: 5, y: 1.5)
                     .overlay {
-                        Circle().stroke(.white.opacity(0.48), lineWidth: 0.8)
+                        Circle().stroke(palette.border.first ?? palette.primary, lineWidth: 0.8)
                     }
                     .position(x: knobCenterX, y: 13)
             }
@@ -2123,6 +4542,7 @@ private struct PlayerSpeedTickLabels: View {
     let currentRate: Double
     let ticks: [Double]
     let range: ClosedRange<Double>
+    let palette: VideoControlPalette
 
     var body: some View {
         GeometryReader { proxy in
@@ -2134,7 +4554,7 @@ private struct PlayerSpeedTickLabels: View {
                     let fraction = CGFloat((tick - range.lowerBound) / (range.upperBound - range.lowerBound))
                     Text(rateLabel(tick))
                         .font(.caption2.monospacedDigit().weight(.medium))
-                        .foregroundStyle(abs(currentRate - tick) < 0.01 ? .white.opacity(0.92) : .white.opacity(0.46))
+                        .foregroundStyle(abs(currentRate - tick) < 0.01 ? palette.primary : palette.subdued)
                         .fixedSize()
                         .position(x: knobRadius + trackWidth * fraction, y: 8)
                 }
@@ -2152,11 +4572,13 @@ private struct PlayerSpeedTickLabels: View {
 private struct PlayerMarkerSkipLayer: View {
     let controller: MpvPlayerController
     let markers: [PlaybackMarker]
+    let palette: VideoControlPalette
     @StateObject private var timeline: PlayerControllerProjection<PlayerTimelineState>
 
-    init(controller: MpvPlayerController, markers: [PlaybackMarker]) {
+    init(controller: MpvPlayerController, markers: [PlaybackMarker], palette: VideoControlPalette) {
         self.controller = controller
         self.markers = markers
+        self.palette = palette
         _timeline = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTimelineState.init))
     }
 
@@ -2169,12 +4591,12 @@ private struct PlayerMarkerSkipLayer: View {
                 } label: {
                     Label("跳过\(marker.kind.title)", systemImage: "forward.end.fill")
                         .font(.callout.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(palette.primary)
                         .padding(.horizontal, 16)
                         .frame(height: 34)
                 }
                 .buttonStyle(.plain)
-                .playerGlass(cornerRadius: 17)
+                .playerGlass(cornerRadius: 17, palette: palette)
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
                 .padding(.bottom, 98)
             }
@@ -2184,7 +4606,9 @@ private struct PlayerMarkerSkipLayer: View {
 
     private var activeMarker: PlaybackMarker? {
         markers.first {
-            ($0.kind == .intro || $0.kind == .credits) && $0.contains(timeline.value.currentTime)
+            ($0.kind == .intro || $0.kind == .credits) &&
+                $0.isAcceptedForPlayback &&
+                $0.contains(timeline.value.currentTime)
         }
     }
 }
@@ -2193,16 +4617,20 @@ private struct PlayerMarkerPopover: View {
     let currentTime: Double
     let duration: Double
     let markers: [PlaybackMarker]
+    let palette: VideoControlPalette
     let onSeek: (Double) -> Void
     let onSetBoundary: (PlaybackMarker.Kind, Bool, Double) -> Void
     let onAddChapter: (Double) -> Void
     let onDeleteMarker: (PlaybackMarker) -> Void
+    let onAcceptMarker: (PlaybackMarker) -> Void
+    let onRejectMarker: (PlaybackMarker) -> Void
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 Label("章节与播放标记", systemImage: "bookmark")
                     .font(.callout.weight(.semibold))
+                    .foregroundStyle(palette.primary)
 
                 HStack(spacing: 7) {
                     markerAction("片头开始", systemImage: "play.fill") {
@@ -2228,12 +4656,12 @@ private struct PlayerMarkerPopover: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 10)
                         .frame(height: 30)
-                        .playerCapsuleControl(cornerRadius: 9)
+                        .playerCapsuleControl(cornerRadius: 9, palette: palette)
                 }
                 .buttonStyle(.plain)
 
                 Divider()
-                    .background(.white.opacity(0.18))
+                    .background(palette.divider)
 
                 if markers.isEmpty {
                     Text("当前视频还没有章节或手动标记。")
@@ -2249,7 +4677,8 @@ private struct PlayerMarkerPopover: View {
                                 PlayerTrackRow(
                                     title: marker.title,
                                     subtitle: markerSubtitle(marker),
-                                    selected: marker.contains(currentTime)
+                                    selected: marker.contains(currentTime),
+                                    palette: palette
                                 )
                             }
                             .buttonStyle(.plain)
@@ -2265,6 +4694,29 @@ private struct PlayerMarkerPopover: View {
                                 .buttonStyle(.plain)
                                 .help("删除标记")
                             }
+                            if marker.isPendingReview {
+                                Button {
+                                    onAcceptMarker(marker)
+                                } label: {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .frame(width: 24, height: 24)
+                                        .foregroundStyle(.green)
+                                }
+                                .buttonStyle(.plain)
+                                .help("采用自动标记")
+
+                                Button {
+                                    onRejectMarker(marker)
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .frame(width: 24, height: 24)
+                                        .foregroundStyle(.orange)
+                                }
+                                .buttonStyle(.plain)
+                                .help("忽略自动标记")
+                            }
                         }
                     }
                 }
@@ -2274,7 +4726,7 @@ private struct PlayerMarkerPopover: View {
         .frame(width: 330)
         .frame(maxHeight: 480)
         .fixedSize(horizontal: true, vertical: false)
-        .playerPopoverGlass()
+        .playerPopoverGlass(palette: palette)
     }
 
     private func markerAction(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
@@ -2284,13 +4736,22 @@ private struct PlayerMarkerPopover: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 9)
                 .frame(height: 28)
-                .playerCapsuleControl(cornerRadius: 9)
+                .playerCapsuleControl(cornerRadius: 9, palette: palette)
         }
         .buttonStyle(.plain)
     }
 
     private func markerSubtitle(_ marker: PlaybackMarker) -> String {
-        let origin = marker.origin == .embedded ? "内嵌章节" : "手动标记"
+        let origin: String
+        switch marker.origin {
+        case .embedded:
+            origin = "内嵌章节"
+        case .manual:
+            origin = "手动标记"
+        case .automatic:
+            let confidence = marker.confidence.map { " · \(Int(($0 * 100).rounded()))%" } ?? ""
+            origin = marker.reviewStatus == .pending ? "待审核\(confidence)" : "自动标记\(confidence)"
+        }
         guard let endTime = marker.endTime, endTime > marker.startTime else {
             return "\(origin) · \(formatTime(marker.startTime))"
         }
@@ -2312,12 +4773,14 @@ private struct PlayerMarkerPopover: View {
 private struct PlayerQualityPopover: View {
     let options: [VideoStreamQualityOption]
     let selectedID: String?
+    let palette: VideoControlPalette
     let onSelect: (VideoStreamQualityOption) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Label("清晰度", systemImage: "slider.horizontal.2.square")
                 .font(.callout.weight(.semibold))
+                .foregroundStyle(palette.primary)
 
             ForEach(options) { option in
                 Button {
@@ -2326,7 +4789,8 @@ private struct PlayerQualityPopover: View {
                     PlayerTrackRow(
                         title: option.label,
                         subtitle: option.detail,
-                        selected: option.id == selectedID
+                        selected: option.id == selectedID,
+                        palette: palette
                     )
                 }
                 .buttonStyle(.plain)
@@ -2335,39 +4799,50 @@ private struct PlayerQualityPopover: View {
         .padding(12)
         .frame(width: 300)
         .fixedSize(horizontal: true, vertical: true)
-        .playerPopoverGlass()
+        .playerPopoverGlass(palette: palette)
     }
 }
 
 private struct PlayerAudioTrackPopover: View {
-    @ObservedObject var controller: MpvPlayerController
+    let controller: MpvPlayerController
+    let palette: VideoControlPalette
+    @StateObject private var tracks: PlayerControllerProjection<PlayerAudioTrackListState>
+
+    init(controller: MpvPlayerController, palette: VideoControlPalette) {
+        self.controller = controller
+        self.palette = palette
+        _tracks = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerAudioTrackListState.init))
+    }
 
     var body: some View {
+        let audioTracks = tracks.value.audioTracks
         VStack(alignment: .leading, spacing: 10) {
             Label("音轨", systemImage: "waveform.circle")
                 .font(.callout.weight(.semibold))
+                .foregroundStyle(palette.primary)
 
             Button {
                 controller.selectDefaultAudioTrack()
             } label: {
-                PlayerTrackRow(title: "自动选择", subtitle: "由播放器选择默认音轨", selected: controller.audioTracks.allSatisfy { !$0.isSelected })
+                PlayerTrackRow(title: "自动选择", subtitle: "由播放器选择默认音轨", selected: audioTracks.allSatisfy { !$0.isSelected }, palette: palette)
             }
             .buttonStyle(.plain)
 
-            if controller.audioTracks.isEmpty {
+            if audioTracks.isEmpty {
                 Text("播放器暂未回传音轨列表。")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.secondary)
                     .padding(.vertical, 4)
             } else {
-                ForEach(controller.audioTracks) { track in
+                ForEach(audioTracks) { track in
                     Button {
                         controller.selectAudioTrack(track.id)
                     } label: {
                         PlayerTrackRow(
                             title: track.displayName,
                             subtitle: "ID \(track.id)",
-                            selected: track.isSelected
+                            selected: track.isSelected,
+                            palette: palette
                         )
                     }
                     .buttonStyle(.plain)
@@ -2377,15 +4852,17 @@ private struct PlayerAudioTrackPopover: View {
         .padding(12)
         .frame(width: 300)
         .fixedSize(horizontal: true, vertical: true)
-        .playerPopoverGlass()
+        .playerPopoverGlass(palette: palette)
     }
 }
 
 private struct PlayerSubtitlePopover: View {
     @EnvironmentObject private var appState: AppState
-    @ObservedObject var controller: MpvPlayerController
+    let controller: MpvPlayerController
     let sidecarSubtitles: [SidecarSubtitleFile]
     let item: MediaItem
+    let palette: VideoControlPalette
+    @StateObject private var tracks: PlayerControllerProjection<PlayerSubtitleTrackListState>
 
     @State private var onlineResults: [OnlineSubtitleResult] = []
     @State private var isSearchingOnline = false
@@ -2394,20 +4871,29 @@ private struct PlayerSubtitlePopover: View {
     @State private var downloadedIDs: Set<String> = []
     @State private var didAutoSearch = false
 
-    private var embeddedSubtitleTracks: [MpvTrack] {
-        controller.subtitleTracks.filter { !$0.isExternal }
-    }
-
-    private var externalSubtitleTracks: [MpvTrack] {
-        controller.subtitleTracks.filter(\.isExternal)
+    init(
+        controller: MpvPlayerController,
+        sidecarSubtitles: [SidecarSubtitleFile],
+        item: MediaItem,
+        palette: VideoControlPalette
+    ) {
+        self.controller = controller
+        self.sidecarSubtitles = sidecarSubtitles
+        self.item = item
+        self.palette = palette
+        _tracks = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerSubtitleTrackListState.init))
     }
 
     var body: some View {
+        let trackState = tracks.value
+        let embeddedSubtitleTracks = trackState.subtitleTracks.filter { !$0.isExternal }
+        let externalSubtitleTracks = trackState.subtitleTracks.filter(\.isExternal)
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 // Header
                 Label("字幕", systemImage: "captions.bubble")
                     .font(.callout.weight(.semibold))
+                    .foregroundStyle(palette.primary)
 
                 // Off + auto-load
                 Button {
@@ -2416,7 +4902,8 @@ private struct PlayerSubtitlePopover: View {
                     PlayerTrackRow(
                         title: "关闭字幕",
                         subtitle: nil,
-                        selected: controller.subtitleTracks.allSatisfy { !$0.isSelected }
+                        selected: trackState.subtitleTracks.allSatisfy { !$0.isSelected },
+                        palette: palette
                     )
                 }
                 .buttonStyle(.plain)
@@ -2427,7 +4914,8 @@ private struct PlayerSubtitlePopover: View {
                     PlayerTrackRow(
                         title: "自动加载目录字幕",
                         subtitle: "扫描同目录字幕文件",
-                        selected: controller.subtitleAutoLoadEnabled
+                        selected: trackState.subtitleAutoLoadEnabled,
+                        palette: palette
                     )
                 }
                 .buttonStyle(.plain)
@@ -2442,7 +4930,8 @@ private struct PlayerSubtitlePopover: View {
                             PlayerTrackRow(
                                 title: track.displayName,
                                 subtitle: "ID \(track.id)",
-                                selected: track.isSelected
+                                selected: track.isSelected,
+                                palette: palette
                             )
                         }
                         .buttonStyle(.plain)
@@ -2453,14 +4942,15 @@ private struct PlayerSubtitlePopover: View {
                 if !sidecarSubtitles.isEmpty || !externalSubtitleTracks.isEmpty {
                     playerPopoverSectionHeader("同目录字幕")
                     ForEach(sidecarSubtitles) { subtitle in
-                        let matchedTrack = controller.externalSubtitleTrack(for: subtitle.path)
+                        let matchedTrack = externalSubtitleTrack(for: subtitle.path, tracks: trackState.subtitleTracks)
                         Button {
                             controller.selectOrAddExternalSubtitle(path: subtitle.path)
                         } label: {
                             PlayerTrackRow(
                                 title: subtitle.displayName,
                                 subtitle: subtitle.languageHint,
-                                selected: matchedTrack?.isSelected == true
+                                selected: matchedTrack?.isSelected == true,
+                                palette: palette
                             )
                         }
                         .buttonStyle(.plain)
@@ -2472,7 +4962,7 @@ private struct PlayerSubtitlePopover: View {
                         Button {
                             controller.selectSubtitleTrack(track.id)
                         } label: {
-                            PlayerTrackRow(title: track.displayName, subtitle: "外挂字幕", selected: track.isSelected)
+                            PlayerTrackRow(title: track.displayName, subtitle: "外挂字幕", selected: track.isSelected, palette: palette)
                         }
                         .buttonStyle(.plain)
                     }
@@ -2480,27 +4970,27 @@ private struct PlayerSubtitlePopover: View {
 
                 // Online subtitle search section
                 Divider()
-                    .background(.white.opacity(0.18))
+                    .background(palette.divider)
 
                 HStack(spacing: 6) {
                     Text("在线字幕")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(palette.secondary)
                     Text("· Podnapisi" + (appState.settings.openSubtitlesAPIKey?.isEmpty == false ? " · OpenSubtitles" : ""))
                         .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.30))
+                        .foregroundStyle(palette.subdued)
                     Spacer()
                     if isSearchingOnline {
                         ProgressView()
                             .scaleEffect(0.65)
-                            .tint(.white.opacity(0.7))
+                            .tint(palette.secondary)
                     } else {
                         Button {
                             Task { await searchOnlineSubtitles() }
                         } label: {
                             Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.55))
+                                .foregroundStyle(palette.secondary)
                         }
                         .buttonStyle(.plain)
                         .help("重新搜索")
@@ -2510,12 +5000,12 @@ private struct PlayerSubtitlePopover: View {
                 if let error = onlineSearchError {
                     Text(error)
                         .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.40))
+                        .foregroundStyle(palette.subdued)
                         .padding(.top, 2)
                 } else if onlineResults.isEmpty && !isSearchingOnline {
                     Text("暂无在线字幕结果")
                         .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.38))
+                        .foregroundStyle(palette.subdued)
                         .padding(.top, 2)
                 } else {
                     ForEach(onlineResults.prefix(20)) { result in
@@ -2528,7 +5018,7 @@ private struct PlayerSubtitlePopover: View {
         .frame(width: 360)
         .frame(maxHeight: 540)
         .fixedSize(horizontal: true, vertical: false)
-        .playerPopoverGlass()
+        .playerPopoverGlass(palette: palette)
         .onAppear {
             guard !didAutoSearch else { return }
             didAutoSearch = true
@@ -2610,13 +5100,13 @@ private struct PlayerSubtitlePopover: View {
             HStack(spacing: 9) {
                 Group {
                     if isDownloading {
-                        ProgressView().scaleEffect(0.65).tint(.white.opacity(0.7))
+                        ProgressView().scaleEffect(0.65).tint(palette.secondary)
                     } else if isDownloaded {
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.white.opacity(0.70))
+                            .foregroundStyle(palette.primary)
                     } else {
                         Image(systemName: "arrow.down.circle")
-                            .foregroundStyle(.white.opacity(0.40))
+                            .foregroundStyle(palette.subdued)
                     }
                 }
                 .font(.system(size: 14, weight: .semibold))
@@ -2628,7 +5118,7 @@ private struct PlayerSubtitlePopover: View {
                         .lineLimit(1)
                     Text("\(result.sourceName) · \(result.language) · \(result.downloads) 下载")
                         .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.45))
+                        .foregroundStyle(palette.subdued)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
@@ -2637,14 +5127,14 @@ private struct PlayerSubtitlePopover: View {
             .frame(minHeight: 34)
             .background(
                 isDownloaded
-                    ? Color.white.opacity(0.10)
-                    : Color.white.opacity(0.045),
+                    ? palette.selectedRowFill
+                    : palette.rowFill,
                 in: RoundedRectangle(cornerRadius: 9, style: .continuous)
             )
             .overlay {
                 if isDownloaded {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(Color.white.opacity(0.16), lineWidth: 0.7)
+                        .stroke(palette.selectedRowStroke, lineWidth: 0.7)
                 }
             }
             .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -2656,11 +5146,24 @@ private struct PlayerSubtitlePopover: View {
     @ViewBuilder
     private func playerPopoverSectionHeader(_ title: String) -> some View {
         Divider()
-            .background(.white.opacity(0.18))
+            .background(palette.divider)
             .padding(.vertical, 2)
         Text(title)
             .font(.caption.weight(.semibold))
-            .foregroundStyle(.white.opacity(0.55))
+            .foregroundStyle(palette.secondary)
+    }
+
+    private func externalSubtitleTrack(for path: String?, tracks: [MpvTrack]) -> MpvTrack? {
+        guard let path else { return nil }
+        let targetURL = URL(fileURLWithPath: path)
+        return tracks.first { track in
+            guard track.isExternal else { return false }
+            if track.externalFilename == path { return true }
+            if let externalFilename = track.externalFilename {
+                return URL(fileURLWithPath: externalFilename).lastPathComponent == targetURL.lastPathComponent
+            }
+            return false
+        }
     }
 }
 
@@ -2668,21 +5171,23 @@ private struct PlayerTrackRow: View {
     let title: String
     let subtitle: String?
     let selected: Bool
+    var palette: VideoControlPalette = .lightContent
 
     var body: some View {
         HStack(spacing: 9) {
             Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(selected ? Color.white.opacity(0.94) : Color.white.opacity(0.42))
+                .foregroundStyle(selected ? palette.primary : palette.subdued)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.caption.weight(.semibold))
+                    .foregroundStyle(palette.primary)
                     .lineLimit(1)
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle)
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(palette.secondary)
                         .lineLimit(1)
                 }
             }
@@ -2690,10 +5195,10 @@ private struct PlayerTrackRow: View {
         }
         .padding(.horizontal, 8)
         .frame(minHeight: 32)
-        .background(selected ? Color.white.opacity(0.16) : Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .background(selected ? palette.selectedRowFill : palette.rowFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(selected ? Color.white.opacity(0.18) : Color.white.opacity(0.06), lineWidth: 0.7)
+                .stroke(selected ? palette.selectedRowStroke : palette.rowStroke, lineWidth: 0.7)
         }
         .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
@@ -2701,27 +5206,28 @@ private struct PlayerTrackRow: View {
 
 private struct PlayerVolumeHUD: View {
     let volume: Float
+    let palette: VideoControlPalette
 
     var body: some View {
         VStack(spacing: 8) {
             Image(systemName: volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.92))
+                .foregroundStyle(palette.primary)
             GeometryReader { proxy in
                 let width = proxy.size.width * CGFloat(volume)
                 ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.18))
-                    Capsule().fill(.white.opacity(0.78)).frame(width: width)
+                    Capsule().fill(palette.trackBase)
+                    Capsule().fill(palette.trackProgress).frame(width: width)
                 }
             }
             .frame(width: 128, height: 6)
             Text("\(Int((volume * 100).rounded()))%")
                 .font(.caption2.monospacedDigit().weight(.semibold))
-                .foregroundStyle(.white.opacity(0.82))
+                .foregroundStyle(palette.secondary)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
-        .playerGlass(cornerRadius: 18)
+        .playerGlass(cornerRadius: 18, palette: palette)
     }
 }
 
@@ -2734,6 +5240,7 @@ private struct VideoProgressScrubber: View {
     let currentTime: Double
     let duration: Double
     let enabled: Bool
+    let previewMode: VideoScrubberPreviewMode
     let coarsePreviewBuckets: Bool
     @Binding var preview: VideoScrubberPreview?
     let previewImage: NSImage?
@@ -2761,7 +5268,7 @@ private struct VideoProgressScrubber: View {
                 Capsule()
                     .fill(enabled ? palette.trackProgress : palette.subdued)
                     .frame(width: progressWidth, height: 6)
-                ForEach(markers.filter { ($0.kind == .intro || $0.kind == .credits) && $0.isCompleteRange }) { marker in
+                ForEach(markers.filter { ($0.kind == .intro || $0.kind == .credits) && $0.isCompleteRange && $0.isAcceptedForPlayback }) { marker in
                     let startFraction = duration > 0 ? min(max(marker.startTime / duration, 0), 1) : 0
                     let endFraction = duration > 0 ? min(max((marker.endTime ?? marker.startTime) / duration, 0), 1) : 0
                     Capsule()
@@ -2769,7 +5276,7 @@ private struct VideoProgressScrubber: View {
                         .frame(width: max(width * CGFloat(endFraction - startFraction), 2), height: 6)
                         .offset(x: width * CGFloat(startFraction))
                 }
-                ForEach(markers) { marker in
+                ForEach(markers.filter(\.isAcceptedForPlayback)) { marker in
                     let markerFraction = duration > 0 ? min(max(marker.startTime / duration, 0), 1) : 0
                     RoundedRectangle(cornerRadius: 1)
                         .fill(palette.primary.opacity(marker.kind == .chapter ? 0.82 : 0.96))
@@ -2790,9 +5297,14 @@ private struct VideoProgressScrubber: View {
                     PlayerProgressPreviewBubble(
                         time: preview.time,
                         image: previewImage,
-                        isLoading: previewIsLoading
+                        isLoading: previewIsLoading,
+                        showsFrame: previewMode.isEnabled,
+                        palette: palette
                     )
-                    .offset(x: min(max(preview.x - 82, 0), max(width - 164, 0)), y: -106)
+                    .offset(
+                        x: min(max(preview.x - 82, 0), max(width - 164, 0)),
+                        y: previewMode.isEnabled ? -106 : -44
+                    )
                     .transition(.opacity.combined(with: .scale(scale: 0.98)))
                     .allowsHitTesting(false)
                 }
@@ -2806,7 +5318,7 @@ private struct VideoProgressScrubber: View {
                         updatePreview(
                             location: CGPoint(x: clampedX, y: value.location.y),
                             width: width,
-                            force: true,
+                            forcePreview: false,
                             updateDraftTime: true
                         )
                     }
@@ -2839,7 +5351,7 @@ private struct VideoProgressScrubber: View {
                     updatePreview(
                         location: CGPoint(x: clampedX, y: location.y),
                         width: width,
-                        force: false,
+                        forcePreview: false,
                         updateDraftTime: false
                     )
                 case .ended:
@@ -2856,12 +5368,30 @@ private struct VideoProgressScrubber: View {
     private func updatePreview(
         location: CGPoint,
         width: CGFloat,
-        force: Bool,
+        forcePreview: Bool,
         updateDraftTime: Bool
     ) {
         let target = Double(location.x / max(width, 1)) * duration
+        if updateDraftTime {
+            draftTime = target
+        }
+        guard previewMode.isEnabled else {
+            let now = Date()
+            guard PointerHoverThrottle.shouldUpdate(
+                from: lastPreviewLocation,
+                previousUpdate: lastPreviewUpdate,
+                to: location,
+                now: now,
+                minInterval: previewMode.hoverMinimumInterval,
+                minDistance: CGFloat(previewMode.hoverMinimumDistance)
+            ) else { return }
+            lastPreviewUpdate = now
+            lastPreviewLocation = location
+            preview = VideoScrubberPreview(time: target, x: location.x)
+            return
+        }
         let bucket = VideoFramePreviewGenerator.bucket(for: target, duration: duration, preferCoarse: coarsePreviewBuckets)
-        if !force {
+        if !forcePreview {
             let now = Date()
             guard bucket != lastPreviewBucket ||
                     PointerHoverThrottle.shouldUpdate(
@@ -2869,8 +5399,8 @@ private struct VideoProgressScrubber: View {
                         previousUpdate: lastPreviewUpdate,
                         to: location,
                         now: now,
-                        minInterval: 1.0 / 30.0,
-                        minDistance: 8
+                        minInterval: previewMode.hoverMinimumInterval,
+                        minDistance: CGFloat(previewMode.hoverMinimumDistance)
                     ) else { return }
             lastPreviewUpdate = now
         } else {
@@ -2878,9 +5408,6 @@ private struct VideoProgressScrubber: View {
         }
         lastPreviewLocation = location
         lastPreviewBucket = bucket
-        if updateDraftTime {
-            draftTime = target
-        }
         preview = VideoScrubberPreview(time: target, x: location.x)
     }
 
@@ -2921,63 +5448,66 @@ private struct PlayerProgressPreviewBubble: View {
     let time: Double
     let image: NSImage?
     let isLoading: Bool
+    let showsFrame: Bool
+    let palette: VideoControlPalette
 
     var body: some View {
         VStack(spacing: 5) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.black.opacity(0.18))
-                if let image {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 148, height: 83)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                } else {
-                    VStack(spacing: 7) {
-                        PlayerMiniSpinner()
-                            .frame(width: 22, height: 22)
-                            .opacity(isLoading ? 1 : 0.72)
-                        Text(isLoading ? "提取预览" : "暂无预览")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.white.opacity(0.66))
+            if showsFrame {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color.black.opacity(0.18))
+                    if let image {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 148, height: 83)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    } else {
+                        VStack(spacing: 7) {
+                            PlayerMiniSpinner()
+                                .frame(width: 22, height: 22)
+                                .opacity(isLoading ? 1 : 0.72)
+                            Text(isLoading ? "提取预览" : "暂无预览")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(palette.secondary)
+                        }
                     }
                 }
-            }
-            .frame(width: 148, height: 83)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.22),
-                                Color.white.opacity(0.10),
-                                Color.black.opacity(0.14)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                .frame(width: 148, height: 83)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.22),
+                                    Color.white.opacity(0.12)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
                         )
-                    )
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [.white.opacity(0.34), .white.opacity(0.12), .white.opacity(0.05)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.55
-                    )
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [.white.opacity(0.34), .white.opacity(0.12), .white.opacity(0.05)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 0.55
+                        )
+                }
             }
 
             Text(PlayerProgressPreviewBubble.format(time))
                 .font(.caption2.monospacedDigit().weight(.semibold))
-                .foregroundStyle(.white.opacity(0.92))
+                .foregroundStyle(palette.primary)
         }
-        .padding(7)
-        .playerGlass(cornerRadius: 13)
+        .padding(showsFrame ? 7 : 9)
+        .playerGlass(cornerRadius: showsFrame ? 13 : 11, palette: palette)
         .shadow(color: .black.opacity(0.12), radius: 9, y: 4)
     }
 
@@ -2994,213 +5524,6 @@ private struct PlayerProgressPreviewBubble: View {
     }
 }
 
-private enum VideoFramePreviewGenerator {
-    private static let cache = NSCache<NSString, NSImage>()
-    private static let previewSize = CGSize(width: 312, height: 176)
-
-    static func bucket(for time: Double, duration: Double, preferCoarse: Bool) -> Int {
-        let interval = segmentInterval(duration: duration, preferCoarse: preferCoarse)
-        let segmentIndex = floor(max(time, 0) / interval)
-        let sampleTime = min(max(segmentIndex * interval + interval * 0.5, 0), max(duration - 0.25, 0))
-        return Int(sampleTime.rounded())
-    }
-
-    static func cachedImage(itemID: String, time: Double, duration: Double, preferFFmpeg: Bool) -> NSImage? {
-        let bucket = bucket(for: time, duration: duration, preferCoarse: preferFFmpeg)
-        let key = "\(itemID)-\(bucket)" as NSString
-        return cache.object(forKey: key)
-    }
-
-    static func prefetchAround(itemID: String, filePath: String, time: Double, duration: Double, preferFFmpeg: Bool) {
-        let interval = segmentInterval(duration: duration, preferCoarse: preferFFmpeg)
-        let candidates = [time + interval, time - interval, time + interval * 2]
-            .filter { $0 >= 0 && (duration <= 0 || $0 <= duration) }
-        guard !candidates.isEmpty else { return }
-        Task.detached(priority: .background) {
-            for candidate in candidates {
-                if Task.isCancelled { return }
-                if Self.cachedImage(itemID: itemID, time: candidate, duration: duration, preferFFmpeg: preferFFmpeg) != nil { continue }
-                _ = await Self.image(itemID: itemID, filePath: filePath, time: candidate, duration: duration, preferFFmpeg: preferFFmpeg)
-            }
-        }
-    }
-
-    static func image(itemID: String, filePath: String, time: Double, duration: Double, preferFFmpeg: Bool) async -> NSImage? {
-        cache.countLimit = 120
-        cache.totalCostLimit = 24 * 1024 * 1024
-        let bucket = bucket(for: time, duration: duration, preferCoarse: preferFFmpeg)
-        let key = "\(itemID)-\(bucket)" as NSString
-        if let cached = cache.object(forKey: key) {
-            return cached
-        }
-        return await Task.detached(priority: .utility) {
-            let seconds = max(Double(bucket), 0)
-            if !preferFFmpeg,
-               let image = Self.avFoundationImage(filePath: filePath, seconds: seconds) {
-                return SendableVideoPreviewImage(image)
-            }
-            if let image = Self.ffmpegImage(itemID: itemID, filePath: filePath, bucket: bucket, seconds: seconds) {
-                return SendableVideoPreviewImage(image)
-            }
-            if preferFFmpeg,
-               let image = Self.avFoundationImage(filePath: filePath, seconds: seconds) {
-                return SendableVideoPreviewImage(image)
-            }
-            return SendableVideoPreviewImage(nil)
-        }.value.image.map { image in
-            cache.setObject(image, forKey: key, cost: Int(image.size.width * image.size.height * 4))
-            return image
-        }
-    }
-
-    private static func segmentInterval(duration: Double, preferCoarse: Bool) -> Double {
-        guard duration.isFinite, duration > 0 else {
-            return preferCoarse ? 18 : 12
-        }
-        let targetSegments = preferCoarse ? 84.0 : 96.0
-        let minimum = preferCoarse ? 12.0 : 8.0
-        let maximum = preferCoarse ? 120.0 : 90.0
-        return min(max(duration / targetSegments, minimum), maximum)
-    }
-
-    private static func avFoundationImage(filePath: String, seconds: Double) -> NSImage? {
-        let url: URL
-        if let remoteURL = URL(string: filePath),
-           let scheme = remoteURL.scheme?.lowercased(),
-           scheme == "http" || scheme == "https" {
-            url = remoteURL
-        } else {
-            url = URL(fileURLWithPath: filePath)
-        }
-        let asset = AVURLAsset(url: url)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = previewSize
-        generator.requestedTimeToleranceBefore = CMTime(seconds: 1.0, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: 1.0, preferredTimescale: 600)
-        guard let cgImage = try? generator.copyCGImage(
-            at: CMTime(seconds: seconds, preferredTimescale: 600),
-            actualTime: nil
-        ), !Self.isLikelyBlackFrame(cgImage) else {
-            return nil
-        }
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-    }
-
-    private static func ffmpegImage(itemID: String, filePath: String, bucket: Int, seconds: Double) -> NSImage? {
-        guard let ffmpegURL = Self.ffmpegExecutableURL() else { return nil }
-        let outputDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("MediaLibPreviewFrames", isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        } catch {
-            return nil
-        }
-        let safeID = itemID.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "-", options: .regularExpression)
-        let outputURL = outputDirectory.appendingPathComponent("\(safeID)-\(bucket).jpg")
-        if let cached = NSImage(contentsOf: outputURL),
-           let cgImage = cached.cgImage(forProposedRect: nil, context: nil, hints: nil),
-           !Self.isLikelyBlackFrame(cgImage) {
-            return cached
-        }
-
-        let seekTimes = [seconds, max(seconds + 1.5, 0), max(seconds - 1.5, 0)]
-        for seek in seekTimes {
-            try? FileManager.default.removeItem(at: outputURL)
-            let arguments = [
-                "-hide_banner",
-                "-loglevel", "error",
-                "-y",
-                "-ss", String(format: "%.3f", seek),
-                "-i", filePath,
-                "-frames:v", "1",
-                "-vf", "scale=312:176:force_original_aspect_ratio=decrease,pad=312:176:(ow-iw)/2:(oh-ih)/2",
-                "-q:v", "4",
-                outputURL.path
-            ]
-            if Self.runFFmpeg(ffmpegURL: ffmpegURL, arguments: arguments, timeout: 9),
-               let image = Self.validateGeneratedFrame(outputURL) {
-                return image
-            }
-        }
-        try? FileManager.default.removeItem(at: outputURL)
-        return nil
-    }
-
-    private static func ffmpegExecutableURL() -> URL? {
-        var candidates: [URL] = []
-        if let executableDirectory = Bundle.main.executableURL?.deletingLastPathComponent() {
-            candidates.append(executableDirectory.appendingPathComponent("ffmpeg"))
-        }
-        candidates.append(URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg"))
-        candidates.append(URL(fileURLWithPath: "/usr/local/bin/ffmpeg"))
-        candidates.append(URL(fileURLWithPath: "/usr/bin/ffmpeg"))
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
-    }
-
-    private static func runFFmpeg(ffmpegURL: URL, arguments: [String], timeout: TimeInterval) -> Bool {
-        let process = Process()
-        process.executableURL = ffmpegURL
-        process.arguments = arguments
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-        } catch {
-            return false
-        }
-
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.04)
-        }
-        if process.isRunning {
-            process.terminate()
-            process.waitUntilExit()
-            return false
-        }
-        process.waitUntilExit()
-        return process.terminationStatus == 0
-    }
-
-    private static func validateGeneratedFrame(_ url: URL) -> NSImage? {
-        guard FileManager.default.fileExists(atPath: url.path),
-              let image = NSImage(contentsOf: url),
-              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              !Self.isLikelyBlackFrame(cgImage) else {
-            try? FileManager.default.removeItem(at: url)
-            return nil
-        }
-        return image
-    }
-
-    private static func isLikelyBlackFrame(_ image: CGImage) -> Bool {
-        guard let data = image.dataProvider?.data,
-              let bytes = CFDataGetBytePtr(data) else {
-            return false
-        }
-        let bytesPerPixel = max(image.bitsPerPixel / 8, 1)
-        let sampleCount = min(600, image.width * image.height)
-        guard sampleCount > 0 else { return false }
-
-        var darkSamples = 0
-        let dataLength = CFDataGetLength(data)
-        for i in 0..<sampleCount {
-            let x = (i * 37) % image.width
-            let y = (i * 53) % image.height
-            let offset = y * image.bytesPerRow + x * bytesPerPixel
-            guard offset + min(bytesPerPixel - 1, 2) < dataLength else { continue }
-            let r = Int(bytes[offset])
-            let g = bytesPerPixel > 1 ? Int(bytes[offset + 1]) : r
-            let b = bytesPerPixel > 2 ? Int(bytes[offset + 2]) : r
-            if (r + g + b) / 3 < 14 {
-                darkSamples += 1
-            }
-        }
-        return Double(darkSamples) / Double(sampleCount) > 0.90
-    }
-}
-
 private struct SendableVideoPreviewImage: @unchecked Sendable {
     let image: NSImage?
 
@@ -3210,23 +5533,19 @@ private struct SendableVideoPreviewImage: @unchecked Sendable {
 }
 
 private extension View {
-    func playerPopoverGlass() -> some View {
+    func playerPopoverGlass(palette: VideoControlPalette = .lightContent) -> some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
         return self
-            .foregroundStyle(.white)
-            .tint(.white.opacity(0.92))
-            .environment(\.colorScheme, .dark)
+            .foregroundStyle(palette.primary)
+            .tint(palette.primary)
+            .environment(\.colorScheme, palette.systemColorScheme)
             .background(.thinMaterial, in: shape)
             .background(
                 shape.fill(
                     LinearGradient(
-                        colors: [
-                            Color.white.opacity(0.30),
-                            Color.white.opacity(0.13),
-                            Color.black.opacity(0.15)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+                        colors: palette.popoverFill,
+                        startPoint: .top,
+                        endPoint: .bottom
                     )
                 )
             )
@@ -3239,14 +5558,14 @@ private extension View {
             .overlay {
                 shape.strokeBorder(
                     LinearGradient(
-                        colors: [.white.opacity(0.26), .white.opacity(0.09)],
+                        colors: palette.border,
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
                     lineWidth: 0.9
                 )
             }
-            .shadow(color: .black.opacity(0.08), radius: 9, y: 4)
+            .shadow(color: palette.shadow, radius: 9, y: 4)
             .shadow(color: .white.opacity(0.07), radius: 1, y: -0.5)
             .transaction { transaction in
                 transaction.animation = nil
@@ -3269,8 +5588,8 @@ private extension View {
                     Circle().fill(
                         LinearGradient(
                             colors: palette.materialFill,
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                            startPoint: .top,
+                            endPoint: .bottom
                         )
                     )
                 }
@@ -3297,8 +5616,8 @@ private extension View {
                     shape.fill(
                         LinearGradient(
                             colors: palette.materialFill,
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                            startPoint: .top,
+                            endPoint: .bottom
                         )
                     )
                 }
@@ -3318,7 +5637,7 @@ private extension View {
 }
 
 struct MpvPlayerView: NSViewRepresentable {
-    @ObservedObject var controller: MpvPlayerController
+    let controller: MpvPlayerController
 
     func makeNSView(context: Context) -> MpvOpenGLView {
         let view = MpvOpenGLView(controller: controller)
@@ -3484,6 +5803,17 @@ final class MpvPlayerController: ObservableObject {
     @Published var subtitleTracks: [MpvTrack] = []
     @Published var chapters: [MpvChapter] = []
     @Published var subtitleAutoLoadEnabled = false
+    @Published var audioDelay: Double = 0
+    @Published var subtitleDelay: Double = 0
+    @Published var subtitleScale: Double = 1
+    @Published var subtitlePosition: Double = 100
+    @Published var aspectOverride: VideoAspectOverride = .source
+    @Published var cropMode: VideoCropMode = .none
+    @Published var deinterlaceMode: VideoDeinterlaceMode = .off
+    @Published var rotationMode: VideoRotationMode = .source
+    @Published var loopCurrentItem = false
+    @Published var abLoopStart: Double?
+    @Published var abLoopEnd: Double?
     @Published var isBuffering = false
     @Published var bufferProgress: Double?
     @Published var audioSpectrumBands: [CGFloat] = AudioSpectrumAnalyzer.silenceBands
@@ -3513,6 +5843,30 @@ final class MpvPlayerController: ObservableObject {
     var isWaitingForVideoFrame: Bool {
         item?.type != .music && isReady && !hasVideoFrame && errorMessage == nil
     }
+
+#if DEBUG
+    @MainActor
+    func injectMusicVisualDebugState(
+        currentTime: Double,
+        duration: Double,
+        isPlaying: Bool
+    ) {
+        errorMessage = nil
+        statusMessage = nil
+        isPreparing = false
+        isReady = true
+        hasVideoFrame = false
+        self.isPlaying = isPlaying
+        self.duration = max(duration, 1)
+        let clampedTime = min(max(currentTime, 0), self.duration)
+        self.currentTime = clampedTime
+        lyricTime = clampedTime
+        audioSpectrumBands = AudioSpectrumAnalyzer.silenceBands.enumerated().map { index, _ in
+            let phase = Double(index) * 0.62 + clampedTime * 0.42
+            return CGFloat(0.24 + 0.58 * (0.5 + 0.5 * sin(phase)))
+        }
+    }
+#endif
 
     var formattedCurrentTime: String {
         formatTime(currentTime)
@@ -3610,6 +5964,7 @@ final class MpvPlayerController: ObservableObject {
         isPreparing = true
         hasVideoFrame = false
         playbackRate = Float(settings.defaultPlaybackRate)
+        applyVideoAdjustmentDefaults(settings)
         keepLocalAudioWithAirPlay = false
         volume = Float(settings.rememberedVolume(for: item.type))
         volumeBeforeMute = max(volume, 0.4)
@@ -3760,6 +6115,7 @@ final class MpvPlayerController: ObservableObject {
                 renderView?.needsDisplay = true
             }
             try client.loadFile(filePath)
+            applyVideoAdjustments(to: client)
             libMpvClient = client
             isPreparing = false
             isReady = true
@@ -4594,6 +6950,151 @@ final class MpvPlayerController: ObservableObject {
         }
     }
 
+    private func applyVideoAdjustmentDefaults(_ settings: AppSettings) {
+        audioDelay = AppSettings.clampedVideoSyncDelay(settings.videoDefaultAudioDelay)
+        subtitleDelay = AppSettings.clampedVideoSyncDelay(settings.videoDefaultSubtitleDelay)
+        subtitleScale = AppSettings.clampedVideoSubtitleScale(settings.videoDefaultSubtitleScale)
+        subtitlePosition = AppSettings.clampedVideoSubtitlePosition(settings.videoDefaultSubtitlePosition)
+        aspectOverride = settings.videoAspectOverride
+        cropMode = settings.videoCropMode
+        deinterlaceMode = settings.videoDeinterlaceMode
+        rotationMode = settings.videoRotationMode
+        loopCurrentItem = settings.videoLoopCurrentItem
+        abLoopStart = nil
+        abLoopEnd = nil
+    }
+
+    private func applyVideoAdjustments(to client: LibMpvClient) {
+        client.setDouble("audio-delay", audioDelay)
+        client.setDouble("sub-delay", subtitleDelay)
+        client.setDouble("sub-scale", subtitleScale)
+        client.setDouble("sub-pos", subtitlePosition)
+        client.setString("video-aspect-override", aspectOverride.mpvValue)
+        client.setDouble("panscan", cropMode.panscanValue)
+        client.setString("deinterlace", deinterlaceMode.mpvValue)
+        client.setString("video-rotate", rotationMode.mpvValue)
+        client.setString("loop-file", loopCurrentItem ? "inf" : "no")
+        applyABLoop(to: client)
+    }
+
+    func setAudioDelay(_ value: Double) {
+        audioDelay = AppSettings.clampedVideoSyncDelay(value)
+        libMpvClient?.setDouble("audio-delay", audioDelay)
+    }
+
+    func setSubtitleDelay(_ value: Double) {
+        subtitleDelay = AppSettings.clampedVideoSyncDelay(value)
+        libMpvClient?.setDouble("sub-delay", subtitleDelay)
+    }
+
+    func setSubtitleScale(_ value: Double) {
+        subtitleScale = AppSettings.clampedVideoSubtitleScale(value)
+        libMpvClient?.setDouble("sub-scale", subtitleScale)
+    }
+
+    func setSubtitlePosition(_ value: Double) {
+        subtitlePosition = AppSettings.clampedVideoSubtitlePosition(value)
+        libMpvClient?.setDouble("sub-pos", subtitlePosition)
+    }
+
+    func setAspectOverride(_ mode: VideoAspectOverride) {
+        aspectOverride = mode
+        libMpvClient?.setString("video-aspect-override", mode.mpvValue)
+    }
+
+    func setCropMode(_ mode: VideoCropMode) {
+        cropMode = mode
+        libMpvClient?.setDouble("panscan", mode.panscanValue)
+    }
+
+    func setDeinterlaceMode(_ mode: VideoDeinterlaceMode) {
+        deinterlaceMode = mode
+        libMpvClient?.setString("deinterlace", mode.mpvValue)
+    }
+
+    func setRotationMode(_ mode: VideoRotationMode) {
+        rotationMode = mode
+        libMpvClient?.setString("video-rotate", mode.mpvValue)
+    }
+
+    func setLoopCurrentItem(_ enabled: Bool) {
+        loopCurrentItem = enabled
+        libMpvClient?.setString("loop-file", enabled ? "inf" : "no")
+    }
+
+    @discardableResult
+    func cycleABLoopPoint() -> PlayerABLoopSelection {
+        let time = clampedTimelineTime(currentTime)
+        if abLoopStart == nil || (abLoopStart != nil && abLoopEnd != nil) {
+            setABLoop(start: time, end: nil)
+            return .start(time)
+        }
+        guard let start = abLoopStart else {
+            setABLoop(start: time, end: nil)
+            return .start(time)
+        }
+        if time <= start + 0.20 {
+            setABLoop(start: time, end: nil)
+            return .start(time)
+        }
+        setABLoop(start: start, end: time)
+        return .range(start, time)
+    }
+
+    func clearABLoop() {
+        setABLoop(start: nil, end: nil)
+    }
+
+    private func setABLoop(start: Double?, end: Double?) {
+        abLoopStart = start
+        abLoopEnd = end
+        guard let libMpvClient else { return }
+        applyABLoop(to: libMpvClient)
+    }
+
+    private func applyABLoop(to client: LibMpvClient) {
+        if let abLoopStart {
+            client.setDouble("ab-loop-a", abLoopStart)
+        } else {
+            client.setString("ab-loop-a", "no")
+        }
+        if let abLoopEnd {
+            client.setDouble("ab-loop-b", abLoopEnd)
+        } else {
+            client.setString("ab-loop-b", "no")
+        }
+    }
+
+    func cycleAspectOverride() {
+        setAspectOverride(nextMode(after: aspectOverride, in: VideoAspectOverride.allCases))
+    }
+
+    func cycleCropMode() {
+        setCropMode(nextMode(after: cropMode, in: VideoCropMode.allCases))
+    }
+
+    func cycleDeinterlaceMode() {
+        setDeinterlaceMode(nextMode(after: deinterlaceMode, in: VideoDeinterlaceMode.allCases))
+    }
+
+    func rotateVideo(clockwise: Bool) {
+        let modes = VideoRotationMode.allCases
+        guard let index = modes.firstIndex(of: rotationMode) else {
+            setRotationMode(clockwise ? .clockwise90 : .counterclockwise90)
+            return
+        }
+        let delta = clockwise ? 1 : modes.count - 1
+        setRotationMode(modes[(index + delta) % modes.count])
+    }
+
+    private func nextMode<T: CaseIterable & Equatable>(after current: T, in modes: T.AllCases) -> T where T.AllCases: RandomAccessCollection, T.AllCases.Index == Int {
+        guard !modes.isEmpty,
+              let index = modes.firstIndex(of: current) else {
+            return modes[modes.startIndex]
+        }
+        return modes[(index + 1) % modes.count]
+    }
+
     private var effectiveMusicVolume: Float {
         min(max(volume * musicNormalizationGain * audioTransitionVolumeScale, 0), 1)
     }
@@ -4915,6 +7416,7 @@ final class MpvPlayerController: ObservableObject {
             try libMpvClient.command(loadCommand)
             libMpvClient.setDouble("volume", Double(volume * 100))
             libMpvClient.setDouble("speed", Double(playbackRate))
+            applyVideoAdjustments(to: libMpvClient)
             if option.isOriginal, resumeTime > 1 {
                 enforceQualityResumeTime(resumeTime, for: option)
             }
@@ -4948,6 +7450,7 @@ final class MpvPlayerController: ObservableObject {
             try libMpvClient.command(["loadfile", targetURL, "replace"])
             libMpvClient.setDouble("volume", Double(volume * 100))
             libMpvClient.setDouble("speed", Double(playbackRate))
+            applyVideoAdjustments(to: libMpvClient)
             libMpvClient.setFlag("pause", !wasPlaying)
             if let currentItem = item {
                 prepareVideoRouteProxy(for: currentItem, filePath: targetURL)
@@ -5116,6 +7619,17 @@ final class MpvPlayerController: ObservableObject {
         try? libMpvClient.command([backward ? "frame-back-step" : "frame-step"])
     }
 
+    func captureCurrentVideoFrame(title: String) throws -> URL {
+        guard let libMpvClient else {
+            throw PlayerScreenshotError.unavailable
+        }
+        let folder = try Self.screenshotDirectory()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let targetURL = folder.appendingPathComponent(Self.screenshotFilename(title: title))
+        try libMpvClient.command(["screenshot-to-file", targetURL.path, "subtitles"])
+        return targetURL
+    }
+
     func saveProgress(appState: AppState, reloadLibrary: Bool = true) {
         guard !didSaveProgress, let item else { return }
         didSaveProgress = true
@@ -5143,6 +7657,35 @@ final class MpvPlayerController: ObservableObject {
             updateSystemNowPlaying()
             return
         }
+    }
+
+    private enum PlayerScreenshotError: LocalizedError {
+        case unavailable
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailable:
+                return "当前播放器不支持截图"
+            }
+        }
+    }
+
+    private static func screenshotDirectory() throws -> URL {
+        let base = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures", isDirectory: true)
+        return base.appendingPathComponent("MediaLIB 截图", isDirectory: true)
+    }
+
+    private static func screenshotFilename(title: String) -> String {
+        let cleanedTitle = title
+            .components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>"))
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let safeTitle = cleanedTitle.isEmpty ? "视频截图" : String(cleanedTitle.prefix(64))
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return "\(safeTitle) \(formatter.string(from: Date())).png"
     }
 
     func teardown() {
@@ -5712,6 +8255,11 @@ enum PlayerWindowActions {
         NSApp.keyWindow?.toggleFullScreen(nil)
     }
 
+    static func setAlwaysOnTop(_ enabled: Bool) {
+        guard let window = NSApp.keyWindow else { return }
+        window.level = enabled ? .floating : .normal
+    }
+
     static func exitFullScreenIfNeeded() -> Bool {
         guard let window = NSApp.keyWindow,
               window.styleMask.contains(.fullScreen) else {
@@ -5719,6 +8267,33 @@ enum PlayerWindowActions {
         }
         window.toggleFullScreen(nil)
         return true
+    }
+
+    static func resizeCurrentWindow(toContentSize contentSize: NSSize, animate: Bool = false) {
+        guard let window = NSApp.keyWindow,
+              !window.styleMask.contains(.fullScreen),
+              contentSize.width.isFinite,
+              contentSize.height.isFinite,
+              contentSize.width > 0,
+              contentSize.height > 0 else { return }
+        var targetContentSize = contentSize
+        if let visibleFrame = window.screen?.visibleFrame {
+            let maxFrameSize = NSSize(
+                width: max(visibleFrame.width - 20, 1),
+                height: max(visibleFrame.height - 20, 1)
+            )
+            let proposedFrameSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: targetContentSize)).size
+            let scale = min(maxFrameSize.width / max(proposedFrameSize.width, 1), maxFrameSize.height / max(proposedFrameSize.height, 1), 1)
+            targetContentSize = NSSize(width: targetContentSize.width * scale, height: targetContentSize.height * scale)
+        }
+        let currentFrame = window.frame
+        let frameSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: targetContentSize)).size
+        window.contentAspectRatio = targetContentSize
+        let origin = NSPoint(
+            x: currentFrame.midX - frameSize.width / 2,
+            y: currentFrame.midY - frameSize.height / 2
+        )
+        window.setFrame(NSRect(origin: origin, size: frameSize), display: true, animate: animate)
     }
 }
 
@@ -5773,6 +8348,7 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
                     screen: sourceScreen,
                     aspectOverride: predictedAspect
                 )
+                window?.level = settings.videoPlayerAlwaysOnTop ? .floating : .normal
                 resizeWindow(to: preferredSize, animate: false)
                 window?.makeKeyAndOrderFront(nil)
                 return
@@ -5854,6 +8430,7 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
             window.backgroundColor = .clear
             window.isOpaque = false
             window.hasShadow = true
+            window.level = settings.videoPlayerAlwaysOnTop ? .floating : .normal
             window.collectionBehavior = [.fullScreenPrimary]
             let minimumContentSize = Self.minimumPlayerContentSize(for: item, aspectOverride: predictedAspect)
             applyMinimumContentSize(minimumContentSize, to: window)

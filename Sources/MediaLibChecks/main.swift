@@ -13,6 +13,7 @@ for type in MediaType.allCases {
 }
 check(MediaType.privateCollection.rawValue == "private", "Privacy media type should use stable raw value")
 check(AppSettings.defaultHomeTabs.contains(.overview), "Default home tabs should include overview")
+check(AppSettings.defaultHomeTabs.contains(.offline), "Default home tabs should include offline entry")
 check(AppSettings().enabledHomeTabs.count >= 8, "Home should expose expanded configurable tabs")
 
 let embyRemoteItem = MediaItem(
@@ -22,23 +23,71 @@ let embyRemoteItem = MediaItem(
     filePath: "https://emby.example/videos/1/stream.mkv?api_key=token",
     metadataProvider: "Emby"
 )
-check(embyRemoteItem.isPlayable, "Emby remote stream should be treated as playable")
 check(embyRemoteItem.isRemoteResource, "Emby remote stream should be treated as a remote resource")
+let jellyfinSource = MediaSource(name: "Jellyfin", path: "jellyfin://jellyfin.example/source-id")
+check(jellyfinSource.sourceKind == .jellyfin, "Jellyfin source path should map to the Jellyfin source kind")
+check(jellyfinSource.displayPath == "jellyfin://jellyfin.example/source-id", "Jellyfin display path should be sanitized like other remote sources")
+let plexSource = MediaSource(name: "Plex", path: "plex://plex.example/source-id")
+check(plexSource.sourceKind == .plex, "Plex source path should map to the Plex source kind")
+check(plexSource.displayPath == "plex://plex.example/source-id", "Plex display path should be sanitized like other remote sources")
 
 let legacySettingsData = #"{"enableThumbnailFallback":false}"#.data(using: .utf8)!
 let legacySettings = try JSONDecoder().decode(AppSettings.self, from: legacySettingsData)
 check(legacySettings.artworkFallbackMode == .none, "Legacy thumbnail fallback switch should map to no artwork fallback")
 check(!legacySettings.enabledHomeTabs.isEmpty, "Legacy settings should receive default home tabs")
+let legacyHomeTabsData = #"{"enabledHomeTabs":["overview","nextUp","continueWatching","recent","movies","tvShows","anime","documentaries","variety","music","other","favorites","unwatched"]}"#.data(using: .utf8)!
+let legacyHomeTabsSettings = try JSONDecoder().decode(AppSettings.self, from: legacyHomeTabsData)
+check(legacyHomeTabsSettings.enabledHomeTabs.contains(.offline), "Legacy default home tabs should migrate to include offline entry")
 let automaticScanSettingsData = #"{"automaticScanInterval":"hourly"}"#.data(using: .utf8)!
 let automaticScanSettings = try JSONDecoder().decode(AppSettings.self, from: automaticScanSettingsData)
 check(automaticScanSettings.automaticScanInterval == .hourly, "Automatic scan interval should round-trip from settings")
 check(AppSettings().musicLoudnessNormalization == .track, "Music loudness normalization should default to track mode")
 check(AppSettings().musicTransitionMode == .immediate, "Music transition should preserve immediate switching by default")
+check(AppSettings().videoCacheSizeLimitGB == 0, "Video cache size limit should be unlimited by default")
+check(AppSettings().videoTrackpadGesturesEnabled, "Video trackpad gestures should be enabled by default")
+check(AppSettings().videoAspectOverride == .source, "Video aspect override should follow source by default")
+check(AppSettings().videoCropMode == .none, "Video crop mode should be disabled by default")
+check(AppSettings().videoDeinterlaceMode == .off, "Video deinterlace mode should be disabled by default")
+check(AppSettings().videoRotationMode == .source, "Video rotation should be disabled by default")
+let videoAdjustmentSettingsData = #"{"videoDefaultAudioDelay":8,"videoDefaultSubtitleDelay":-8,"videoDefaultSubtitleScale":3,"videoDefaultSubtitlePosition":20,"videoAspectOverride":"sixteenByNine","videoCropMode":"balanced","videoDeinterlaceMode":"auto","videoRotationMode":"clockwise90"}"#.data(using: .utf8)!
+let videoAdjustmentSettings = try JSONDecoder().decode(AppSettings.self, from: videoAdjustmentSettingsData)
+check(videoAdjustmentSettings.videoDefaultAudioDelay == 3, "Video audio delay should clamp to the supported range")
+check(videoAdjustmentSettings.videoDefaultSubtitleDelay == -3, "Video subtitle delay should clamp to the supported range")
+check(videoAdjustmentSettings.videoDefaultSubtitleScale == 1.5, "Video subtitle scale should clamp to the supported range")
+check(videoAdjustmentSettings.videoDefaultSubtitlePosition == 70, "Video subtitle position should clamp to the supported range")
+check(videoAdjustmentSettings.videoAspectOverride == .sixteenByNine, "Video aspect override should decode from settings")
+check(videoAdjustmentSettings.videoCropMode == .balanced, "Video crop mode should decode from settings")
+check(videoAdjustmentSettings.videoDeinterlaceMode == .auto, "Video deinterlace mode should decode from settings")
+check(videoAdjustmentSettings.videoRotationMode == .clockwise90, "Video rotation mode should decode from settings")
+check(!AppSettings().videoLoopCurrentItem, "Video single item loop should be disabled by default")
+let videoLoopSettingsData = #"{"videoLoopCurrentItem":true}"#.data(using: .utf8)!
+let videoLoopSettings = try JSONDecoder().decode(AppSettings.self, from: videoLoopSettingsData)
+check(videoLoopSettings.videoLoopCurrentItem, "Video single item loop should decode from settings")
+check(AppSettings().resolvedVideoKeyboardShortcuts(for: .playPause).count >= 2, "Video player should keep alternate play/pause shortcuts")
+check(AppSettings().videoPlayerShortcutAction(for: VideoKeyboardShortcut(keyCode: 11, characters: "b")) == .cycleABLoopPoint, "Video A-B loop shortcut should resolve by default")
+check(AppSettings().videoPlayerShortcutAction(for: VideoKeyboardShortcut(keyCode: 11, characters: "b", modifiers: .shift)) == .clearABLoop, "Video A-B clear shortcut should resolve by default")
+check(AppSettings().videoPlayerShortcutAction(for: VideoKeyboardShortcut(keyCode: 34, characters: "i")) == .showPlaybackInfo, "Video playback info shortcut should resolve by default")
+check(AppSettings().videoPlayerShortcutAction(for: VideoKeyboardShortcut(keyCode: 6, characters: "z")) == .subtitleDelayDown, "Video subtitle delay shortcut should resolve by default")
+check(AppSettings().videoPlayerShortcutAction(for: VideoKeyboardShortcut(keyCode: 2, characters: "d")) == .cycleDeinterlaceMode, "Video deinterlace shortcut should resolve by default")
+var shortcutSettings = AppSettings()
+let customPlayShortcut = VideoKeyboardShortcut(keyCode: 7, characters: "x")
+shortcutSettings.setVideoKeyboardShortcuts([customPlayShortcut], for: .playPause)
+check(shortcutSettings.videoPlayerShortcutAction(for: customPlayShortcut) == .playPause, "Custom video shortcut should resolve to the assigned action")
+let defaultMuteShortcut = VideoKeyboardShortcut(keyCode: 46, characters: "m")
+shortcutSettings.setVideoKeyboardShortcuts([defaultMuteShortcut], for: .playPause)
+check(shortcutSettings.videoPlayerShortcutAction(for: defaultMuteShortcut) == .playPause, "Duplicate shortcut should move to the latest assigned action")
+check(shortcutSettings.resolvedVideoKeyboardShortcuts(for: .mute).isEmpty, "Duplicate shortcut assignment should clear the old action")
 let musicOutputSettingsData = #"{"musicLoudnessNormalization":"album","musicTransitionMode":"softFade","musicSoftFadeDuration":1.4}"#.data(using: .utf8)!
 let musicOutputSettings = try JSONDecoder().decode(AppSettings.self, from: musicOutputSettingsData)
 check(musicOutputSettings.musicLoudnessNormalization == .album, "Music loudness mode should decode from settings")
 check(musicOutputSettings.musicTransitionMode == .softFade, "Music transition mode should decode from settings")
 check(abs(musicOutputSettings.musicSoftFadeDuration - 1.4) < 0.001, "Music soft fade duration should decode from settings")
+let videoCacheLimitSettingsData = #"{"videoCacheSizeLimitGB":50}"#.data(using: .utf8)!
+let videoCacheLimitSettings = try JSONDecoder().decode(AppSettings.self, from: videoCacheLimitSettingsData)
+check(videoCacheLimitSettings.videoCacheSizeLimitGB == 50, "Video cache size limit should decode from settings")
+let hugeVideoCacheLimitSettingsData = #"{"videoCacheSizeLimitGB":99999}"#.data(using: .utf8)!
+let hugeVideoCacheLimitSettings = try JSONDecoder().decode(AppSettings.self, from: hugeVideoCacheLimitSettingsData)
+check(hugeVideoCacheLimitSettings.videoCacheSizeLimitGB == 4096, "Video cache size limit should clamp extreme values")
 let attenuatedGain = MusicLoudnessGain.linearGain(
     mode: .track,
     trackGainDB: -6,
@@ -138,6 +187,12 @@ check(
 )
 
 let parser = FilenameParser()
+let sidecarSamples = ["track.lrc", "subtitle.ass", "movie.cue", "poster.heic"]
+for sample in sidecarSamples {
+    let url = URL(fileURLWithPath: "/Media/\(sample)")
+    check(parser.isSidecarMetadataFile(url), "\(sample) should be treated as sidecar metadata")
+    check(!parser.isMediaFile(url, preferredType: .auto), "\(sample) should never be imported as media")
+}
 let englishEpisode = parser.parse(url: URL(fileURLWithPath: "/TV/Breaking Bad/Season 01/Breaking.Bad.S01E02.1080p.WEB-DL.mkv"))
 check(englishEpisode.kind == .episode, "S01E02 should parse as episode")
 check(englishEpisode.title == "Breaking Bad", "Episode title should be cleaned")
@@ -166,6 +221,60 @@ check(classicA.title == "The Last of Us", "Classic directory should own show tit
 check(classicB.title == "The Last of Us", "Bare SxxExx in Season folder should use show directory")
 check(classicA.seriesDirectoryPath == classicB.seriesDirectoryPath, "Classic episodes should share series directory identity")
 
+let localStoryboardBuckets = VideoFramePreviewGenerator.storyboardBuckets(duration: 7_200, preferCoarse: false)
+let coarseStoryboardBuckets = VideoFramePreviewGenerator.storyboardBuckets(duration: 7_200, preferCoarse: true)
+check(localStoryboardBuckets.count > 80 && localStoryboardBuckets.count <= 100, "Storyboard buckets should keep long local videos finite")
+check(coarseStoryboardBuckets.count > 70 && coarseStoryboardBuckets.count < localStoryboardBuckets.count, "Coarse storyboard buckets should use fewer segments")
+check(Set(localStoryboardBuckets).count == localStoryboardBuckets.count, "Storyboard buckets should be unique")
+check(localStoryboardBuckets == localStoryboardBuckets.sorted(), "Storyboard buckets should be sorted")
+check(
+    VideoFramePreviewGenerator.bucket(for: 64, duration: 7_200, preferCoarse: false) ==
+        VideoFramePreviewGenerator.bucket(for: 70, duration: 7_200, preferCoarse: false),
+    "Nearby preview times should share the same storyboard bucket"
+)
+let traktPayload = TraktSyncPayloadBuilder.buildPayload(from: [
+    .movie(tmdbID: 550),
+    .movie(tmdbID: 603),
+    .movie(tmdbID: 550),
+    .show(tmdbID: 1400),
+    .episode(showTmdbID: 1396, season: 1, episode: 2),
+    .episode(showTmdbID: 1396, season: 1, episode: 1),
+    .episode(showTmdbID: 1396, season: 1, episode: 2),
+    .show(tmdbID: 1399),
+    .show(tmdbID: 1399)
+])
+let traktPayloadData = try JSONSerialization.data(withJSONObject: traktPayload, options: [.sortedKeys])
+let traktPayloadText = String(data: traktPayloadData, encoding: .utf8) ?? ""
+check(
+    traktPayloadText.contains(#""movies":[{"ids":{"tmdb":550}},{"ids":{"tmdb":603}}]"#),
+    "Trakt payload should sort and deduplicate TMDB movie refs"
+)
+check(
+    traktPayloadText.contains(#""episodes":[{"number":1},{"number":2}]"#),
+    "Trakt payload should sort and deduplicate episode refs"
+)
+check(
+    traktPayloadText.contains(#""shows":[{"ids":{"tmdb":1399}},{"ids":{"tmdb":1400}},{"ids":{"tmdb":1396},"seasons""#),
+    "Trakt payload should sort and deduplicate standalone show refs"
+)
+let parsedTrueSyncValue = try SyncConflictValueParser.boolean("yes")
+let parsedFalseSyncValue = try SyncConflictValueParser.boolean("0")
+let parsedUserRating = try SyncConflictValueParser.userRating("4.5")
+let parsedZeroUserRating = try SyncConflictValueParser.userRating("0")
+let parsedNullUserRating = try SyncConflictValueParser.userRating("null")
+check(parsedTrueSyncValue, "Sync conflict parser should accept yes as true")
+check(!parsedFalseSyncValue, "Sync conflict parser should accept 0 as false")
+check(parsedUserRating == 4.5, "Sync conflict parser should accept user ratings in 0-5 scale")
+check(parsedZeroUserRating == nil, "Sync conflict parser should treat 0 user rating as clearing the rating")
+check(parsedNullUserRating == nil, "Sync conflict parser should treat null user rating as clearing the rating")
+var rejectedInvalidUserRating = false
+do {
+    _ = try SyncConflictValueParser.userRating("8")
+} catch {
+    rejectedInvalidUserRating = true
+}
+check(rejectedInvalidUserRating, "Sync conflict parser should reject user ratings outside 0-5")
+
 let tempDatabaseURL = FileManager.default.temporaryDirectory
     .appendingPathComponent("MediaLibChecks-\(UUID().uuidString).sqlite")
 defer { try? FileManager.default.removeItem(at: tempDatabaseURL) }
@@ -176,13 +285,54 @@ let mediaRepository = MediaRepository(database: database)
 let musicQueueRepository = MusicQueueRepository(database: database)
 let musicPlaylistRepository = MusicPlaylistRepository(database: database)
 let videoSmartCollectionRepository = VideoSmartCollectionRepository(database: database)
+let videoManualCollectionRepository = VideoManualCollectionRepository(database: database)
+let videoOfflineSubscriptionRepository = VideoOfflineSubscriptionRepository(database: database)
 let playbackMarkerRepository = PlaybackMarkerRepository(database: database)
+let metadataCorrectionRepository = MetadataCorrectionRepository(database: database)
+let remoteConnectorAccountRepository = RemoteConnectorAccountRepository(database: database)
+let syncConflictRepository = SyncConflictRepository(database: database)
 let initialSchemaVersion = try database.schemaVersion()
 check(initialSchemaVersion == DatabaseManager.currentSchemaVersion, "Database should migrate to current schema version")
 let mediaSourceColumns = try database.query("PRAGMA table_info(media_sources)") { row in row.string(1) ?? "" }
 let mediaItemColumns = try database.query("PRAGMA table_info(media_items)") { row in row.string(1) ?? "" }
+let manualCollectionTables = try database.query(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('video_manual_collections', 'video_manual_collection_items')"
+) { row in row.string(0) ?? "" }
+let offlineSubscriptionTables = try database.query(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'video_offline_subscriptions'"
+) { row in row.string(0) ?? "" }
+let manualCollectionColumns = try database.query("PRAGMA table_info(video_manual_collections)") { row in row.string(1) ?? "" }
+let smartCollectionColumns = try database.query("PRAGMA table_info(video_smart_collections)") { row in row.string(1) ?? "" }
+let offlineSubscriptionColumns = try database.query("PRAGMA table_info(video_offline_subscriptions)") { row in row.string(1) ?? "" }
 check(mediaSourceColumns.contains("remote_trace_sync_mode"), "Schema v10 should include Emby trace sync mode")
 check(mediaItemColumns.contains("user_rating"), "Schema v10 should include user rating")
+check(manualCollectionTables.count == 2, "Schema v11 should include video manual collection tables")
+check(smartCollectionColumns.contains("rules_json"), "Schema v12 should include video smart collection rules JSON")
+check(manualCollectionColumns.contains("show_on_home"), "Schema v13 should include manual collection home publishing")
+check(smartCollectionColumns.contains("show_on_home"), "Schema v13 should include smart collection home publishing")
+check(mediaSourceColumns.contains("selected_emby_library_ids"), "Schema v14 should include Emby library selection")
+check(offlineSubscriptionTables.count == 1, "Schema v15 should include video offline subscription table")
+check(offlineSubscriptionColumns.contains("quality_id"), "Schema v15 should include offline subscription quality preference")
+check(offlineSubscriptionColumns.contains("season_number"), "Schema v16 should include offline subscription season target")
+check(offlineSubscriptionColumns.contains("paused_until"), "Schema v16 should include offline subscription pause state")
+check(offlineSubscriptionColumns.contains("expires_at"), "Schema v16 should include offline subscription expiry")
+check(offlineSubscriptionColumns.contains("network_policy"), "Schema v16 should include offline subscription network policy")
+let playbackMarkerColumns = try database.query("PRAGMA table_info(playback_markers)") { row in row.string(1) ?? "" }
+check(playbackMarkerColumns.contains("review_status"), "Schema v17 should include playback marker review status")
+check(playbackMarkerColumns.contains("detector_identifier"), "Schema v17 should include playback marker detector identifier")
+check(playbackMarkerColumns.contains("confidence"), "Schema v17 should include playback marker confidence")
+let batchTables = try database.query(
+    """
+    SELECT name FROM sqlite_master
+    WHERE type = 'table'
+      AND name IN (
+        'metadata_correction_history',
+        'sync_conflicts',
+        'remote_connector_accounts'
+      )
+    """
+) { row in row.string(0) ?? "" }
+check(batchTables.count == 3, "Schema v18 should include metadata, sync, and connector tables")
 
 let source = MediaSource(
     name: "测试媒体源",
@@ -191,7 +341,8 @@ let source = MediaSource(
     includeInMetadataFetch: false,
     preferMetadataWriteToSource: true,
     includeInHealthCheck: false,
-    remoteTraceSyncMode: .importOnly
+    remoteTraceSyncMode: .importOnly,
+    selectedEmbyLibraryIDs: ["movies", "tvshows"]
 )
 try sourceRepository.save(source)
 let sources = try sourceRepository.fetchAll()
@@ -201,6 +352,7 @@ check(sources.first?.includeInMetadataFetch == false, "Source metadata participa
 check(sources.first?.preferMetadataWriteToSource == true, "Source metadata write-back preference should round-trip")
 check(sources.first?.includeInHealthCheck == false, "Source health participation should round-trip")
 check(sources.first?.remoteTraceSyncMode == .importOnly, "Source Emby trace sync mode should round-trip")
+check(sources.first?.selectedEmbyLibraryIDs == ["movies", "tvshows"], "Source Emby library selection should round-trip")
 
 let showID = StableID.make(prefix: "show", value: "Breaking Bad")
 let show = MediaItem(id: showID, type: .tvShow, title: "Breaking Bad", rating: 8.4, sourcePath: source.path)
@@ -225,9 +377,100 @@ let loudnessTrack = MediaItem(
     loudnessTrackPeak: 0.97,
     loudnessAlbumPeak: 0.99
 )
+let collectionOnlyMovie = MediaItem(
+    id: "manual-collection-only",
+    type: .movie,
+    title: "Collection Only",
+    year: 2022,
+    rating: 8.6,
+    userRating: 4,
+    sourcePath: source.path,
+    genre: "动作, 科幻"
+)
 try mediaRepository.upsert(show)
 try mediaRepository.upsert(episode)
 try mediaRepository.upsert(loudnessTrack)
+try mediaRepository.upsert(collectionOnlyMovie)
+let literalSearchItem = MediaItem(
+    id: "literal-search-under_score",
+    type: .movie,
+    title: "Under_score",
+    sourcePath: source.path,
+    filePath: "/Volumes/Media/Under_score.mkv"
+)
+try mediaRepository.upsert(literalSearchItem)
+let literalUnderscoreSearch = try mediaRepository.search("_")
+check(
+    literalUnderscoreSearch.contains { $0.id == literalSearchItem.id },
+    "Search should find literal underscore titles"
+)
+check(
+    literalUnderscoreSearch.allSatisfy { $0.title.contains("_") || ($0.originalTitle?.contains("_") ?? false) },
+    "Search should not treat underscore as a wildcard"
+)
+let offlineSubscription = try videoOfflineSubscriptionRepository.save(
+    VideoOfflineSubscription(
+        seriesID: show.id,
+        seriesTitle: show.title,
+        mode: .nextUnwatched,
+        episodeLimit: 10,
+        qualityID: "height-1080"
+    )
+)
+let fetchedOfflineSubscription = try videoOfflineSubscriptionRepository.fetch(seriesID: show.id)
+check(fetchedOfflineSubscription?.id == offlineSubscription.id, "Video offline subscription should persist")
+check(fetchedOfflineSubscription?.mode == .nextUnwatched, "Video offline subscription mode should round-trip")
+check(fetchedOfflineSubscription?.episodeLimit == 10, "Video offline subscription episode limit should round-trip")
+check(fetchedOfflineSubscription?.displayName == "自动缓存未看 10 集", "Video offline subscription display name should reflect episode limit")
+check(fetchedOfflineSubscription?.qualityID == "height-1080", "Video offline subscription quality should round-trip")
+let pausedUntil = Date(timeIntervalSince1970: 1_800_000_000)
+let expiresAt = Date(timeIntervalSince1970: 1_900_000_000)
+_ = try videoOfflineSubscriptionRepository.save(
+    VideoOfflineSubscription(
+        id: offlineSubscription.id,
+        seriesID: show.id,
+        seriesTitle: show.title,
+        mode: .season,
+        episodeLimit: 1,
+        seasonNumber: 2,
+        qualityID: nil,
+        pausedUntil: pausedUntil,
+        expiresAt: expiresAt,
+        networkPolicy: .localNetworkOnly,
+        createdAt: offlineSubscription.createdAt
+    )
+)
+let fetchedSeasonOfflineSubscription = try videoOfflineSubscriptionRepository.fetch(seriesID: show.id)
+check(fetchedSeasonOfflineSubscription?.mode == .season, "Video offline subscription season mode should round-trip")
+check(fetchedSeasonOfflineSubscription?.seasonNumber == 2, "Video offline subscription season target should round-trip")
+check(fetchedSeasonOfflineSubscription?.compactDisplayName == "第 2 季", "Video offline subscription compact name should reflect season")
+check(fetchedSeasonOfflineSubscription?.networkPolicy == .localNetworkOnly, "Video offline subscription network policy should round-trip")
+check(fetchedSeasonOfflineSubscription?.isRunnable == false, "Paused video offline subscription should not be runnable")
+check(
+    abs((fetchedSeasonOfflineSubscription?.pausedUntil?.timeIntervalSince1970 ?? 0) - pausedUntil.timeIntervalSince1970) < 0.001,
+    "Video offline subscription pause date should round-trip"
+)
+check(
+    abs((fetchedSeasonOfflineSubscription?.expiresAt?.timeIntervalSince1970 ?? 0) - expiresAt.timeIntervalSince1970) < 0.001,
+    "Video offline subscription expiry date should round-trip"
+)
+try videoOfflineSubscriptionRepository.delete(seriesID: show.id)
+let deletedOfflineSubscription = try videoOfflineSubscriptionRepository.fetch(seriesID: show.id)
+check(deletedOfflineSubscription == nil, "Video offline subscription should be deletable")
+let expiredOfflineSubscription = try videoOfflineSubscriptionRepository.save(
+    VideoOfflineSubscription(
+        seriesID: show.id,
+        seriesTitle: show.title,
+        mode: .nextEpisode,
+        expiresAt: Date(timeIntervalSince1970: 1_500)
+    )
+)
+let expiredOfflineSubscriptions = try videoOfflineSubscriptionRepository.fetchExpired(now: Date(timeIntervalSince1970: 2_000))
+check(expiredOfflineSubscriptions.contains { $0.id == expiredOfflineSubscription.id }, "Expired video offline subscriptions should be fetchable")
+let expiredOfflineSubscriptionDeleteCount = try videoOfflineSubscriptionRepository.deleteExpired(now: Date(timeIntervalSince1970: 2_000))
+check(expiredOfflineSubscriptionDeleteCount == 1, "Expired video offline subscriptions should be deleted in bulk")
+let prunedOfflineSubscription = try videoOfflineSubscriptionRepository.fetch(seriesID: show.id)
+check(prunedOfflineSubscription == nil, "Expired video offline subscription cleanup should remove the rule")
 let shows = try mediaRepository.fetchTopLevel(type: .tvShow)
 let episodes = try mediaRepository.fetchChildren(parentID: showID)
 check(shows.count == 1, "Show should be fetched")
@@ -242,9 +485,181 @@ try mediaRepository.updateMetadata(id: show.id, metadata: MediaMetadataUpdate(ra
 let metadataRatedShow = try mediaRepository.fetchTopLevel(type: .tvShow).first
 check(metadataRatedShow?.rating == 9.2, "Metadata update should refresh provider score")
 check(metadataRatedShow?.userRating == 4, "Metadata update should not overwrite existing user rating")
+let metadataChanges = try mediaRepository.updateMetadata(
+    id: show.id,
+    metadata: MediaMetadataUpdate(
+        title: "Breaking Bad 修正版",
+        overview: "一次可撤销的元数据修正",
+        rating: 9.1,
+        metadataProvider: "TMDB zh-CN"
+    )
+)
+check(metadataChanges.contains { $0.field == .title }, "Metadata update should report changed title")
+check(metadataChanges.contains { $0.field == .overview }, "Metadata update should report changed overview")
+let correctionRecords = try metadataCorrectionRepository.record(
+    mediaID: show.id,
+    changes: metadataChanges,
+    source: "check"
+)
+check(!correctionRecords.isEmpty, "Metadata correction history should record changed fields")
+let correctionCountsByMediaID = try metadataCorrectionRepository.activeCountsByMediaID()
+check(
+    correctionCountsByMediaID[show.id] == correctionRecords.count,
+    "Metadata correction counts should group by media"
+)
+let correctionBatches = try metadataCorrectionRepository.fetchActiveBatches()
+check(
+    correctionBatches.contains { $0.mediaID == show.id && $0.batchID == correctionRecords[0].batchID && $0.fieldCount == correctionRecords.count },
+    "Metadata correction batches should summarize active history"
+)
+let undoBatch = try metadataCorrectionRepository.latestUndoableBatch(mediaID: show.id)
+check(undoBatch.count == correctionRecords.count, "Latest metadata correction batch should be fetchable")
+let undoValues = Dictionary(uniqueKeysWithValues: undoBatch.map { ($0.field, $0.oldValue) })
+try database.transaction {
+    try mediaRepository.restoreMetadataValues(id: show.id, values: undoValues)
+    try metadataCorrectionRepository.markBatchUndone(batchID: undoBatch[0].batchID)
+}
+let restoredShow = try mediaRepository.fetch(id: show.id)
+check(restoredShow?.title == "Breaking Bad", "Metadata undo should restore title")
+check(restoredShow?.overview == nil, "Metadata undo should restore nil overview")
+check(restoredShow?.rating == 9.2, "Metadata undo should restore provider score")
+let activeCorrectionRecordCount = try metadataCorrectionRepository.activeRecordCount()
+check(activeCorrectionRecordCount == 0, "Metadata correction undo should mark records as inactive")
 let persistedLoudnessTrack = try mediaRepository.fetchTopLevel(type: .music).first
 check(persistedLoudnessTrack?.loudnessTrackGainDB == -7.25, "Track loudness gain should persist")
 check(persistedLoudnessTrack?.loudnessAlbumPeak == 0.99, "Album loudness peak should persist")
+
+let jellyfinAccount = try remoteConnectorAccountRepository.save(
+    RemoteConnectorAccount(
+        provider: .jellyfin,
+        accountLabel: "Jellyfin 测试",
+        serverURL: "https://jellyfin.example",
+        username: "demo",
+        sourceID: source.id,
+        connectionMode: .library,
+        syncEnabled: true,
+        capabilitiesJSON: #"{"playback":true,"progress":true}"#
+    )
+)
+let plexAccount = try remoteConnectorAccountRepository.save(
+    RemoteConnectorAccount(
+        provider: .plex,
+        accountLabel: "Plex 测试",
+        serverURL: "https://plex.example",
+        username: "demo",
+        connectionMode: .direct
+    )
+)
+let traktAccount = try remoteConnectorAccountRepository.save(
+    RemoteConnectorAccount(
+        provider: .trakt,
+        accountLabel: "Trakt 测试",
+        serverURL: "https://trakt.tv",
+        connectionMode: .syncOnly,
+        syncEnabled: true,
+        capabilitiesJSON: #"{"historySync":true,"watchlistSync":true,"bidirectionalImport":true}"#
+    )
+)
+let connectorAccounts = try remoteConnectorAccountRepository.fetchAll()
+check(connectorAccounts.contains { $0.id == jellyfinAccount.id && $0.provider == .jellyfin }, "Jellyfin connector account should round-trip")
+check(connectorAccounts.contains { $0.id == plexAccount.id && $0.provider == .plex && $0.connectionMode == .direct }, "Plex connector account should round-trip")
+check(connectorAccounts.contains { $0.id == traktAccount.id && $0.provider == .trakt && $0.connectionMode == .syncOnly }, "Trakt connector account should round-trip")
+let sourceScopedConnectorSource = MediaSource(
+    name: "待删除 Jellyfin 来源",
+    path: "jellyfin://jellyfin.example/delete-source"
+)
+try sourceRepository.save(sourceScopedConnectorSource)
+let sourceScopedAccount = try remoteConnectorAccountRepository.save(
+    RemoteConnectorAccount(
+        provider: .jellyfin,
+        accountLabel: "待删除 Jellyfin",
+        sourceID: sourceScopedConnectorSource.id,
+        syncEnabled: true
+    )
+)
+try remoteConnectorAccountRepository.delete(sourceID: sourceScopedConnectorSource.id)
+let connectorAccountsAfterSourceDelete = try remoteConnectorAccountRepository.fetchAll()
+check(!connectorAccountsAfterSourceDelete.contains { $0.id == sourceScopedAccount.id }, "Connector accounts should be removable by source id")
+let conflict = try syncConflictRepository.save(
+    SyncConflict(
+        mediaID: show.id,
+        provider: .jellyfin,
+        accountID: jellyfinAccount.id,
+        fieldName: "watched",
+        localValue: "false",
+        remoteValue: "true",
+        localUpdatedAt: Date(timeIntervalSince1970: 1_800_000_000),
+        remoteUpdatedAt: Date(timeIntervalSince1970: 1_800_000_100)
+    )
+)
+let pendingConflictCount = try syncConflictRepository.pendingCount()
+check(pendingConflictCount == 1, "Sync conflict table should count pending conflicts")
+try syncConflictRepository.resolve(id: conflict.id, resolution: .useRemote)
+let resolvedPendingConflictCount = try syncConflictRepository.pendingCount()
+check(resolvedPendingConflictCount == 0, "Resolved sync conflict should leave pending queue")
+try mediaRepository.setWatchlist(id: show.id, watchlist: false)
+let remoteApplyConflict = try syncConflictRepository.save(
+    SyncConflict(
+        mediaID: show.id,
+        provider: .trakt,
+        accountID: traktAccount.id,
+        fieldName: "watchlist",
+        localValue: "false",
+        remoteValue: "true"
+    )
+)
+try database.transaction {
+    try mediaRepository.setWatchlist(id: show.id, watchlist: true)
+    try syncConflictRepository.resolve(id: remoteApplyConflict.id, resolution: .useRemote)
+}
+let remoteAppliedShow = try mediaRepository.fetch(id: show.id)
+check(remoteAppliedShow?.watchlist == true, "Adopting a remote watchlist conflict should update the internal media index")
+let pendingConflictCountAfterRemoteApply = try syncConflictRepository.pendingCount()
+check(pendingConflictCountAfterRemoteApply == 0, "Applied remote conflict should leave pending queue")
+let ignoredConflict = try syncConflictRepository.save(
+    SyncConflict(
+        mediaID: show.id,
+        provider: .plex,
+        accountID: plexAccount.id,
+        fieldName: "watchlist",
+        localValue: "true",
+        remoteValue: "false"
+    )
+)
+let pendingConflictCountAfterInsert = try syncConflictRepository.pendingCount()
+check(pendingConflictCountAfterInsert == 1, "New sync conflict should re-enter pending queue")
+try syncConflictRepository.ignore(id: ignoredConflict.id)
+let pendingConflictCountAfterIgnore = try syncConflictRepository.pendingCount()
+check(pendingConflictCountAfterIgnore == 0, "Ignored sync conflict should leave pending queue")
+let traktImportConflictID = StableID.make(prefix: "sync-conflict", value: "trakt-\(show.id)-watchlist")
+let traktImportConflict = try syncConflictRepository.save(
+    SyncConflict(
+        id: traktImportConflictID,
+        mediaID: show.id,
+        provider: .trakt,
+        accountID: traktAccount.id,
+        fieldName: "watchlist",
+        localValue: "false",
+        remoteValue: "true"
+    )
+)
+let traktImportConflictUpdate = try syncConflictRepository.save(
+    SyncConflict(
+        id: traktImportConflictID,
+        mediaID: show.id,
+        provider: .trakt,
+        accountID: traktAccount.id,
+        fieldName: "watchlist",
+        localValue: "true",
+        remoteValue: "false"
+    )
+)
+check(traktImportConflict.id == traktImportConflictUpdate.id, "Trakt import conflict should use a stable conflict id")
+let traktImportPendingCount = try syncConflictRepository.pendingCount()
+check(traktImportPendingCount == 1, "Stable Trakt import conflict should update instead of duplicating")
+try syncConflictRepository.resolve(id: traktImportConflictID, resolution: .useLocal)
+let resolvedTraktImportPendingCount = try syncConflictRepository.pendingCount()
+check(resolvedTraktImportPendingCount == 0, "Resolved Trakt import conflict should leave pending queue")
 
 try mediaRepository.setWatchlist(id: show.id, watchlist: true)
 let watchlistedShows = try mediaRepository.fetchTopLevel(type: .tvShow)
@@ -252,19 +667,200 @@ check(watchlistedShows.first?.watchlist == true, "Video watchlist state should p
 try mediaRepository.upsert(show)
 let rescannedShows = try mediaRepository.fetchTopLevel(type: .tvShow)
 check(rescannedShows.first?.watchlist == true, "Video rescans should preserve local watchlist state")
+try mediaRepository.markWatched(id: show.id, watched: true)
+let defaultWatchedShow = try mediaRepository.fetch(id: show.id)
+check(defaultWatchedShow?.watchlist == true, "Default mark watched should preserve watchlist state")
+check(defaultWatchedShow?.playProgress == 1, "Marking watched should move progress to complete")
+try mediaRepository.markWatched(id: show.id, watched: false, clearWatchlistWhenWatched: true)
+let unwatchedWatchlistShow = try mediaRepository.fetch(id: show.id)
+check(unwatchedWatchlistShow?.watchlist == true, "Unmarking watched should not clear watchlist state")
+check(unwatchedWatchlistShow?.watched == false, "Unmarking watched should clear watched state")
+check(unwatchedWatchlistShow?.playProgress == 0, "Unmarking watched should clear completed progress")
+check(unwatchedWatchlistShow?.playPosition == 0, "Unmarking watched should clear playback position")
+check(unwatchedWatchlistShow?.lastPlayedAt == nil, "Unmarking watched should clear playback recency")
+try mediaRepository.markWatched(id: show.id, watched: true, clearWatchlistWhenWatched: true)
+let watchedCleanedShow = try mediaRepository.fetch(id: show.id)
+check(watchedCleanedShow?.watchlist == false, "Marking watched with cleanup should remove video watchlist state")
+try mediaRepository.setWatchlist(id: show.id, watchlist: true)
 
 let smartCollection = try videoSmartCollectionRepository.save(
     VideoSmartCollection(
         name: "最近想看电影",
         mediaScope: .movies,
         stateFilter: .watchlist,
-        recency: .thirtyDays
+        recency: .thirtyDays,
+        rules: VideoSmartCollectionRules(
+            matchMode: .all,
+            year: .since2020,
+            providerRating: .atLeastEight,
+            userRating: .atLeastFour,
+            genreKeyword: "科幻",
+            source: .local
+        ),
+        showOnHome: true
     )
 )
 let fetchedSmartCollection = try videoSmartCollectionRepository.fetchAll().first
 check(fetchedSmartCollection?.id == smartCollection.id, "Video smart collection should persist")
 check(fetchedSmartCollection?.mediaScope == .movies, "Video smart collection media scope should round-trip")
 check(fetchedSmartCollection?.stateFilter == .watchlist, "Video smart collection state filter should round-trip")
+check(fetchedSmartCollection?.showOnHome == true, "Video smart collection home publishing should round-trip")
+check(fetchedSmartCollection?.rules.year == .since2020, "Video smart collection year rule should round-trip")
+check(fetchedSmartCollection?.rules.providerRating == .atLeastEight, "Video smart collection provider score rule should round-trip")
+check(fetchedSmartCollection?.rules.userRating == .atLeastFour, "Video smart collection user rating rule should round-trip")
+check(fetchedSmartCollection?.rules.genreKeyword == "科幻", "Video smart collection genre rule should be normalized and persist")
+check(fetchedSmartCollection?.rules.source == .local, "Video smart collection source rule should round-trip")
+let smartCollectionMatchMovie = MediaItem(
+    id: "smart-match-movie",
+    type: .movie,
+    title: "Smart Match",
+    year: 2023,
+    rating: 8.7,
+    userRating: 4,
+    sourcePath: source.path,
+    watchlist: true,
+    genre: "科幻, 冒险"
+)
+check(
+    fetchedSmartCollection?.matches(smartCollectionMatchMovie, watchedThreshold: 0.9) == true,
+    "Video smart collection should match extended rules"
+)
+let smartCollectionRemoteMovie = MediaItem(
+    id: "smart-remote-movie",
+    type: .movie,
+    title: "Smart Remote",
+    year: 2023,
+    rating: 8.7,
+    userRating: 4,
+    sourcePath: "emby://server/source/library/movies",
+    watchlist: true,
+    metadataProvider: "Emby",
+    genre: "科幻, 冒险"
+)
+check(
+    fetchedSmartCollection?.matches(smartCollectionRemoteMovie, watchedThreshold: 0.9) == false,
+    "Video smart collection local source rule should reject remote media server items"
+)
+let smartCollectionMismatchMovie = MediaItem(
+    id: "smart-mismatch-movie",
+    type: .movie,
+    title: "Smart Mismatch",
+    year: 2018,
+    rating: 8.7,
+    userRating: 4,
+    sourcePath: source.path,
+    watchlist: true,
+    genre: "科幻"
+)
+check(
+    fetchedSmartCollection?.matches(smartCollectionMismatchMovie, watchedThreshold: 0.9) == false,
+    "Video smart collection should reject items that miss an all-mode extended rule"
+)
+let smartAnyCollection = VideoSmartCollection(
+    name: "任一高分",
+    mediaScope: .movies,
+    rules: VideoSmartCollectionRules(matchMode: .any, providerRating: .atLeastEight)
+)
+check(
+    smartAnyCollection.matches(smartCollectionMatchMovie, watchedThreshold: 0.9),
+    "Video smart collection should allow any-mode matches inside the selected media scope"
+)
+check(
+    !smartAnyCollection.matches(
+        MediaItem(id: "smart-any-music", type: .music, title: "High Score Song", rating: 9.5),
+        watchedThreshold: 0.9
+    ),
+    "Video smart collection any-mode should still keep media scope as the base boundary"
+)
+let smartRemoteCollection = VideoSmartCollection(
+    name: "远程高分",
+    mediaScope: .movies,
+    rules: VideoSmartCollectionRules(source: .emby)
+)
+check(
+    smartRemoteCollection.matches(smartCollectionRemoteMovie, watchedThreshold: 0.9),
+    "Video smart collection remote source rule should match media server items"
+)
+check(
+    !smartRemoteCollection.matches(smartCollectionMatchMovie, watchedThreshold: 0.9),
+    "Video smart collection remote source rule should reject local media"
+)
+check(
+    !smartAnyCollection.matches(
+        MediaItem(id: "smart-any-private", type: .privateCollection, title: "Private High Score", rating: 9.5),
+        watchedThreshold: 0.9
+    ),
+    "Video smart collection should keep private collection items outside the media scope"
+)
+
+var manualCollection = try videoManualCollectionRepository.create(
+    name: "周末片单",
+    itemIDs: [show.id, episode.id, show.id, ""]
+)
+manualCollection.showOnHome = true
+manualCollection = try videoManualCollectionRepository.save(manualCollection)
+check(manualCollection.itemIDs == [show.id, episode.id], "Video manual collection should preserve unique item order")
+check(manualCollection.showOnHome == true, "Video manual collection home publishing should round-trip")
+manualCollection = try videoManualCollectionRepository.add(
+    itemIDs: [collectionOnlyMovie.id, show.id],
+    toCollectionID: manualCollection.id
+) ?? manualCollection
+check(
+    manualCollection.itemIDs == [show.id, episode.id, collectionOnlyMovie.id],
+    "Video manual collection should append new items without duplicating existing ones"
+)
+manualCollection = try videoManualCollectionRepository.remove(
+    itemIDs: [episode.id],
+    fromCollectionID: manualCollection.id
+) ?? manualCollection
+check(
+    manualCollection.itemIDs == [show.id, collectionOnlyMovie.id],
+    "Video manual collection should remove selected items"
+)
+var manualReorderCollection = try videoManualCollectionRepository.create(
+    name: "排序片单",
+    itemIDs: [show.id, episode.id, collectionOnlyMovie.id]
+)
+manualReorderCollection.itemIDs = VideoManualCollection.reorderedItemIDs(
+    manualReorderCollection.itemIDs,
+    movingItemIDs: [collectionOnlyMovie.id],
+    operation: .moveUp
+)
+manualReorderCollection = try videoManualCollectionRepository.save(manualReorderCollection)
+check(
+    manualReorderCollection.itemIDs == [show.id, collectionOnlyMovie.id, episode.id],
+    "Video manual collection should move an item up by one slot"
+)
+manualReorderCollection.itemIDs = VideoManualCollection.reorderedItemIDs(
+    manualReorderCollection.itemIDs,
+    movingItemIDs: [show.id, collectionOnlyMovie.id],
+    operation: .moveDown
+)
+manualReorderCollection = try videoManualCollectionRepository.save(manualReorderCollection)
+check(
+    manualReorderCollection.itemIDs == [episode.id, show.id, collectionOnlyMovie.id],
+    "Video manual collection should move selected items down while preserving relative order"
+)
+manualReorderCollection.itemIDs = VideoManualCollection.reorderedItemIDs(
+    manualReorderCollection.itemIDs,
+    movingItemIDs: [show.id],
+    operation: .moveToBottom
+)
+manualReorderCollection = try videoManualCollectionRepository.save(manualReorderCollection)
+check(
+    manualReorderCollection.itemIDs == [episode.id, collectionOnlyMovie.id, show.id],
+    "Video manual collection should move an item to the bottom"
+)
+manualReorderCollection.itemIDs = VideoManualCollection.reorderedItemIDs(
+    manualReorderCollection.itemIDs,
+    movingItemIDs: [show.id, episode.id],
+    operation: .moveToTop
+)
+manualReorderCollection = try videoManualCollectionRepository.save(manualReorderCollection)
+check(
+    manualReorderCollection.itemIDs == [episode.id, show.id, collectionOnlyMovie.id],
+    "Video manual collection should move selected items to the top in collection order"
+)
 
 let introMarker = try playbackMarkerRepository.save(
     PlaybackMarker(
@@ -277,6 +873,7 @@ let introMarker = try playbackMarkerRepository.save(
     )
 )
 check(introMarker.isCompleteRange, "Playback intro marker should preserve its complete range")
+check(introMarker.reviewStatus == .accepted, "Manual playback markers should default to accepted review status")
 try playbackMarkerRepository.replaceEmbeddedChapters(
     mediaID: episode.id,
     with: [
@@ -302,6 +899,29 @@ try playbackMarkerRepository.replaceEmbeddedChapters(
 let fetchedPlaybackMarkers = try playbackMarkerRepository.fetch(mediaID: episode.id)
 check(fetchedPlaybackMarkers.count == 3, "Playback marker repository should preserve manual ranges and embedded chapters")
 check(fetchedPlaybackMarkers.first?.startTime == 0, "Playback markers should sort by start time")
+let automaticPendingMarker = try playbackMarkerRepository.save(
+    PlaybackMarker(
+        id: "automatic-intro-check",
+        mediaID: episode.id,
+        kind: .intro,
+        title: "片头",
+        startTime: 14,
+        endTime: 88,
+        origin: .automatic,
+        reviewStatus: .pending,
+        detectorIdentifier: "embedded-chapter-keyword",
+        confidence: 0.88
+    )
+)
+check(automaticPendingMarker.isPendingReview, "Automatic playback markers should preserve pending review status")
+try playbackMarkerRepository.updateReviewStatus(id: automaticPendingMarker.id, status: .rejected)
+let visibleAfterReject = try playbackMarkerRepository.fetch(mediaID: episode.id)
+check(!visibleAfterReject.contains { $0.id == automaticPendingMarker.id }, "Rejected automatic playback markers should be hidden from normal fetch")
+let allAfterReject = try playbackMarkerRepository.fetchIncludingRejected(mediaID: episode.id)
+check(
+    allAfterReject.contains { $0.id == automaticPendingMarker.id && $0.reviewStatus == .rejected },
+    "Rejected automatic playback markers should remain available for duplicate suppression"
+)
 try playbackMarkerRepository.delete(id: introMarker.id)
 let playbackMarkersAfterManualDelete = try playbackMarkerRepository.fetch(mediaID: episode.id)
 check(
@@ -368,6 +988,124 @@ check(
     deletedHealthMarkerCount == 0,
     "Deleting a media index should cascade-delete its playback markers"
 )
+let recursiveDeleteParent = MediaItem(
+    id: "recursive-delete-parent",
+    type: .tvShow,
+    title: "Recursive Delete",
+    sourcePath: source.path
+)
+let recursiveDeleteChild = MediaItem(
+    id: "recursive-delete-child",
+    type: .episode,
+    title: "Recursive Delete Episode",
+    sourcePath: source.path,
+    parentID: recursiveDeleteParent.id,
+    filePath: "/Volumes/Media/Recursive Delete/S01E01.mkv"
+)
+let recursiveDeleteGrandchild = MediaItem(
+    id: "recursive-delete-grandchild",
+    type: .episode,
+    title: "Recursive Delete Nested Clip",
+    sourcePath: source.path,
+    parentID: recursiveDeleteChild.id,
+    filePath: "/Volumes/Media/Recursive Delete/S01E01-extra.mkv"
+)
+try mediaRepository.upsert(recursiveDeleteParent)
+try mediaRepository.upsert(recursiveDeleteChild)
+try mediaRepository.upsert(recursiveDeleteGrandchild)
+_ = try playbackMarkerRepository.save(
+    PlaybackMarker(mediaID: recursiveDeleteChild.id, kind: .bookmark, title: "子集书签", startTime: 20)
+)
+let recursiveDeleteCollection = try videoManualCollectionRepository.create(
+    name: "递归删除检查",
+    itemIDs: [recursiveDeleteParent.id, recursiveDeleteChild.id]
+)
+try mediaRepository.deleteItems(ids: [recursiveDeleteParent.id])
+let recursiveDeleteItemsAfterDelete = try mediaRepository.fetchAll()
+check(
+    recursiveDeleteItemsAfterDelete.allSatisfy {
+        $0.id != recursiveDeleteParent.id &&
+            $0.id != recursiveDeleteChild.id &&
+            $0.id != recursiveDeleteGrandchild.id
+    },
+    "Deleting a parent media index should also delete descendant media rows"
+)
+let recursiveDeleteMarkerCount = try database.query(
+    "SELECT COUNT(*) FROM playback_markers WHERE media_id = ?",
+    bindings: [.text(recursiveDeleteChild.id)]
+) { $0.int(0) ?? 0 }.first ?? 0
+check(
+    recursiveDeleteMarkerCount == 0,
+    "Deleting descendant media rows should cascade-delete their playback markers"
+)
+let recursiveCollectionAfterDelete = try videoManualCollectionRepository.fetch(id: recursiveDeleteCollection.id)
+check(
+    recursiveCollectionAfterDelete?.itemIDs.isEmpty == true,
+    "Deleting a parent media index should cascade-remove descendants from manual collections"
+)
+
+let wildcardLocalSourcePath = "/Volumes/Media/Wildcard"
+let wildcardLocalItem = MediaItem(
+    id: "wildcard-local-item",
+    type: .movie,
+    title: "Wildcard Local",
+    sourcePath: wildcardLocalSourcePath,
+    filePath: "/Volumes/Media/Wildcard/Season_1/movie.mkv"
+)
+let wildcardLocalSibling = MediaItem(
+    id: "wildcard-local-sibling",
+    type: .movie,
+    title: "Wildcard Local Sibling",
+    sourcePath: wildcardLocalSourcePath,
+    filePath: "/Volumes/Media/Wildcard/SeasonX1/movie.mkv"
+)
+try mediaRepository.upsert(wildcardLocalItem)
+try mediaRepository.upsert(wildcardLocalSibling)
+try mediaRepository.deleteItems(filePathPrefix: "/Volumes/Media/Wildcard/Season_1", sourcePath: wildcardLocalSourcePath)
+let wildcardLocalItemsAfterDelete = try mediaRepository.fetchAll()
+check(
+    !wildcardLocalItemsAfterDelete.contains { $0.id == wildcardLocalItem.id },
+    "Directory prefix cleanup should remove the requested underscore directory"
+)
+check(
+    wildcardLocalItemsAfterDelete.contains { $0.id == wildcardLocalSibling.id },
+    "Directory prefix cleanup should treat underscore as a literal path character"
+)
+let localSourceDeleteRoot = "/Volumes/Media/Delete_Source"
+let localSourceRootItem = MediaItem(
+    id: "local-source-root-delete",
+    type: .movie,
+    title: "Local Source Root Delete",
+    sourcePath: localSourceDeleteRoot,
+    filePath: "\(localSourceDeleteRoot)/movie.mkv"
+)
+let localSourceChildItem = MediaItem(
+    id: "local-source-child-delete",
+    type: .movie,
+    title: "Local Source Child Delete",
+    sourcePath: "\(localSourceDeleteRoot)/Nested",
+    filePath: "\(localSourceDeleteRoot)/Nested/movie.mkv"
+)
+let localSourceSiblingItem = MediaItem(
+    id: "local-source-sibling-keep",
+    type: .movie,
+    title: "Local Source Sibling Keep",
+    sourcePath: "/Volumes/Media/DeleteXSource",
+    filePath: "/Volumes/Media/DeleteXSource/movie.mkv"
+)
+try mediaRepository.upsert(localSourceRootItem)
+try mediaRepository.upsert(localSourceChildItem)
+try mediaRepository.upsert(localSourceSiblingItem)
+try mediaRepository.deleteItems(sourcePathPrefix: localSourceDeleteRoot)
+let localSourceItemsAfterDelete = try mediaRepository.fetchAll()
+check(
+    !localSourceItemsAfterDelete.contains { $0.id == localSourceRootItem.id || $0.id == localSourceChildItem.id },
+    "Source prefix cleanup should remove root and child source path indexes"
+)
+check(
+    localSourceItemsAfterDelete.contains { $0.id == localSourceSiblingItem.id },
+    "Source prefix cleanup should keep sibling source paths outside the slash boundary"
+)
 
 let remoteSourcePath = "emby://example/remote-source"
 let remoteItemA = MediaItem(
@@ -393,24 +1131,74 @@ let remoteItemB = MediaItem(
     externalID: "b",
     metadataProvider: "Emby"
 )
+let siblingRemoteItem = MediaItem(
+    id: "remote-item-sibling",
+    type: .movie,
+    title: "Sibling Remote",
+    sourcePath: "\(remoteSourcePath)2",
+    filePath: "https://emby.example/Videos/sibling/stream",
+    externalID: "sibling",
+    metadataProvider: "Emby"
+)
 try mediaRepository.replaceRemoteItems(sourcePathPrefix: remoteSourcePath, with: [remoteItemA, remoteItemB])
+try mediaRepository.upsert(siblingRemoteItem)
 var refreshedRemoteA = remoteItemA
 refreshedRemoteA.playPosition = 100
 refreshedRemoteA.playProgress = 1
 refreshedRemoteA.watched = true
 refreshedRemoteA.favorite = false
 try mediaRepository.replaceRemoteItems(sourcePathPrefix: remoteSourcePath, with: [refreshedRemoteA])
-let refreshedRemoteItems = try mediaRepository.fetchAll().filter { $0.sourcePath?.hasPrefix(remoteSourcePath) == true }
+let remoteItemsAfterScopedRefresh = try mediaRepository.fetchAll()
+let refreshedRemoteItems = remoteItemsAfterScopedRefresh.filter { $0.sourcePath == remoteSourcePath }
 check(refreshedRemoteItems.count == 1, "Remote replacement should remove server items no longer returned")
 check(refreshedRemoteItems.first?.watched == true, "Remote replacement should refresh watched state from server")
 check(refreshedRemoteItems.first?.favorite == false, "Remote replacement should refresh favorite state from server")
 check(refreshedRemoteItems.first?.playPosition == 100, "Remote replacement should refresh playback position from server")
+check(
+    remoteItemsAfterScopedRefresh.contains(where: { $0.id == siblingRemoteItem.id && $0.sourcePath == siblingRemoteItem.sourcePath }),
+    "Remote replacement should not delete sibling source paths that merely share a text prefix"
+)
 try mediaRepository.setWatchlist(id: refreshedRemoteA.id, watchlist: true)
-try mediaRepository.replaceRemoteItems(sourcePathPrefix: remoteSourcePath, with: [refreshedRemoteA])
+try mediaRepository.replaceRemoteItems(sourcePathPrefix: "\(remoteSourcePath)/", with: [refreshedRemoteA])
 let remoteItemsAfterWatchlistRefresh = try mediaRepository.fetchAll()
 check(
     remoteItemsAfterWatchlistRefresh.first(where: { $0.id == refreshedRemoteA.id })?.watchlist == true,
     "Remote refresh should preserve local watchlist state"
+)
+check(
+    remoteItemsAfterWatchlistRefresh.contains(where: { $0.id == siblingRemoteItem.id && $0.sourcePath == siblingRemoteItem.sourcePath }),
+    "Remote replacement should tolerate a trailing slash without widening to sibling sources"
+)
+let wildcardRemoteSourcePath = "emby://example/remote_source"
+let wildcardRemoteItem = MediaItem(
+    id: "wildcard-remote-item",
+    type: .movie,
+    title: "Wildcard Remote",
+    sourcePath: "\(wildcardRemoteSourcePath)/library",
+    filePath: "https://emby.example/Videos/wildcard/stream",
+    externalID: "wildcard",
+    metadataProvider: "Emby"
+)
+let wildcardRemoteSibling = MediaItem(
+    id: "wildcard-remote-sibling",
+    type: .movie,
+    title: "Wildcard Remote Sibling",
+    sourcePath: "emby://example/remoteXsource/library",
+    filePath: "https://emby.example/Videos/wildcard-sibling/stream",
+    externalID: "wildcard-sibling",
+    metadataProvider: "Emby"
+)
+try mediaRepository.replaceRemoteItems(sourcePathPrefix: wildcardRemoteSourcePath, with: [wildcardRemoteItem])
+try mediaRepository.upsert(wildcardRemoteSibling)
+try mediaRepository.replaceRemoteItems(sourcePathPrefix: wildcardRemoteSourcePath, with: [wildcardRemoteItem])
+let wildcardRemoteItemsAfterRefresh = try mediaRepository.fetchAll()
+check(
+    wildcardRemoteItemsAfterRefresh.contains { $0.id == wildcardRemoteItem.id },
+    "Remote replacement should keep items under the underscore source"
+)
+check(
+    wildcardRemoteItemsAfterRefresh.contains { $0.id == wildcardRemoteSibling.id },
+    "Remote replacement should treat underscore as a literal source path character"
 )
 
 let databaseBackupDirectory = FileManager.default.temporaryDirectory
@@ -437,11 +1225,25 @@ check(queueAfterDatabaseRestore.itemIDs == [queueTrackB.id, queueTrackA.id], "Da
 check(queueAfterDatabaseRestore.repeatModeRawValue == "repeatAll", "Database restore should recover queue state")
 let smartCollectionsAfterDatabaseRestore = try videoSmartCollectionRepository.fetchAll()
 check(smartCollectionsAfterDatabaseRestore.contains { $0.id == smartCollection.id }, "Database restore should recover video smart collections")
+let manualCollectionsAfterDatabaseRestore = try videoManualCollectionRepository.fetchAll()
+check(
+    manualCollectionsAfterDatabaseRestore.first(where: { $0.id == manualCollection.id })?.itemIDs == [show.id, collectionOnlyMovie.id],
+    "Database restore should recover video manual collections and item order"
+)
 let markersAfterDatabaseRestore = try playbackMarkerRepository.fetch(mediaID: episode.id)
 check(markersAfterDatabaseRestore.count == 2, "Database restore should recover playback markers")
+try mediaRepository.deleteItems(ids: [collectionOnlyMovie.id])
+let manualCollectionAfterMediaDelete = try videoManualCollectionRepository.fetch(id: manualCollection.id)
+check(
+    manualCollectionAfterMediaDelete?.itemIDs == [show.id],
+    "Deleting a media index should cascade-remove it from video manual collections"
+)
 try videoSmartCollectionRepository.delete(id: smartCollection.id)
 let smartCollectionsAfterDelete = try videoSmartCollectionRepository.fetchAll()
 check(smartCollectionsAfterDelete.allSatisfy { $0.id != smartCollection.id }, "Video smart collection should be deletable")
+try videoManualCollectionRepository.delete(id: manualCollection.id)
+let manualCollectionsAfterDelete = try videoManualCollectionRepository.fetchAll()
+check(manualCollectionsAfterDelete.allSatisfy { $0.id != manualCollection.id }, "Video manual collection should be deletable")
 
 let incompatibleDatabaseURL = FileManager.default.temporaryDirectory
     .appendingPathComponent("MediaLibChecks-Incompatible-\(UUID().uuidString).sqlite")
@@ -531,6 +1333,17 @@ check(incrementalAddSummary.importedItems == 1, "Incremental scan should import 
 let episodesAfterIncrementalAdd = try scanRepository.fetchChildren(parentID: scannedShows.first?.id ?? "")
 check(episodesAfterIncrementalAdd.count == 3, "Incremental scan should preserve existing episodes")
 
+let subtitleURL = seasonDirectory.appendingPathComponent("S01E03 - Long Long Time.zh-Hans.srt")
+try Data("1\n00:00:01,000 --> 00:00:02,000\nHello".utf8).write(to: subtitleURL)
+let sidecarChangeSummary = await scanner.scanChanges(
+    source: scanSource,
+    changedPaths: [subtitleURL.path],
+    settings: AppSettings(enableThumbnailFallback: false)
+) { _ in }
+check(sidecarChangeSummary.importedItems > 0, "Incremental sidecar changes should refresh nearby media files")
+let episodesAfterSidecarChange = try scanRepository.fetchChildren(parentID: scannedShows.first?.id ?? "")
+check(episodesAfterSidecarChange.count == 3, "Incremental sidecar changes should not import subtitle files as episodes")
+
 let removedEpisodeURL = seasonDirectory.appendingPathComponent("The.Last.of.Us.S01E01.mkv")
 try FileManager.default.removeItem(at: removedEpisodeURL)
 _ = await scanner.scanChanges(
@@ -556,6 +1369,24 @@ _ = await scanner.scanChanges(
 ) { _ in }
 let itemsAfterLastEpisodeDelete = try scanRepository.fetchAll()
 check(itemsAfterLastEpisodeDelete.isEmpty, "Incremental delete should remove an orphaned series after its last episode disappears")
+
+let dottedDirectory = scanRoot
+    .appendingPathComponent("TV Shows", isDirectory: true)
+    .appendingPathComponent("Arcane.S01", isDirectory: true)
+try FileManager.default.createDirectory(at: dottedDirectory, withIntermediateDirectories: true)
+try Data("fake-dotted-video".utf8).write(to: dottedDirectory.appendingPathComponent("Arcane.S01E01.mkv"))
+let dottedScanSummary = await scanner.scan(source: scanSource, settings: AppSettings(enableThumbnailFallback: false)) { _ in }
+check(dottedScanSummary.importedItems == 1, "Scanner should import an episode from a dotted directory")
+let dottedShows = try scanRepository.fetchTopLevel(type: .tvShow)
+check(dottedShows.count == 1, "Dotted directory scan should create one show")
+try FileManager.default.removeItem(at: dottedDirectory)
+_ = await scanner.scanChanges(
+    source: scanSource,
+    changedPaths: [dottedDirectory.path],
+    settings: AppSettings(enableThumbnailFallback: false)
+) { _ in }
+let itemsAfterDottedDirectoryDelete = try scanRepository.fetchAll()
+check(itemsAfterDottedDirectoryDelete.isEmpty, "Incremental directory delete should clean dotted folder paths")
 
 let musicRoot = FileManager.default.temporaryDirectory
     .appendingPathComponent("MediaLibChecks-Music-\(UUID().uuidString)", isDirectory: true)

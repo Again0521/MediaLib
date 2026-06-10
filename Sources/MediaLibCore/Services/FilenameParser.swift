@@ -11,7 +11,8 @@ public final class FilenameParser {
     ]
 
     public static let sidecarMetadataExtensions: Set<String> = [
-        "lrc", "txt", "srt", "ass", "ssa", "vtt", "nfo", "cue", "jpg", "jpeg", "png", "webp"
+        "lrc", "txt", "srt", "ass", "ssa", "vtt", "nfo", "cue",
+        "jpg", "jpeg", "png", "webp", "heic", "tif", "tiff", "gif", "bmp", "avif"
     ]
 
     private let noiseTokens: Set<String> = [

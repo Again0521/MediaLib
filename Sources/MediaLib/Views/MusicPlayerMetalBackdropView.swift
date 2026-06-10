@@ -210,14 +210,26 @@ struct MetalAlbumBackdropView: NSViewRepresentable {
             pendingTexturePath = path
             textureLoadTask = Task { @MainActor [weak self] in
                 let textureImage = await Task.detached(priority: .utility) {
-                    let base = ArtworkImageCache.image(
+                    let base: NSImage?
+#if DEBUG
+                    if let debugCover = MusicPlayerVisualDebugFixtures.coverImage(forPath: path, size: 160) {
+                        base = debugCover
+                    } else {
+                        base = ArtworkImageCache.image(
+                            path: path,
+                            targetSize: CGSize(width: 160, height: 160)
+                        )
+                    }
+#else
+                    base = ArtworkImageCache.image(
                         path: path,
-                        targetSize: CGSize(width: 192, height: 192)
+                        targetSize: CGSize(width: 160, height: 160)
                     )
-                    // 成熟音乐播放器常用的是"封面本体低分辨率大模糊"作为底层色场，
-                    // 这里预先做一次较重 blur，运行时 shader 只采样小纹理并调色。
-                    let blurred = MusicAlbumBackdropImageBlur.blurred(base, radius: 44) ?? base
-                    return SendableMusicMetalBackdropImage(blurred?.cgImageForMetalTexture())
+#endif
+                    // 提取低频专辑颜料场作为底板主色源；palette 只做轻微校色。
+                    // 色场先小网格重采样再低半径柔化，保留专辑多色关系但去掉文字/锐边/噪点。
+                    let field = MusicAlbumBackdropImageBlur.paintPalette(base) ?? base
+                    return SendableMusicMetalBackdropImage(field?.cgImageForMetalTexture())
                 }.value
                 guard let self,
                       !Task.isCancelled,
@@ -432,12 +444,14 @@ private struct MusicAlbumBackdropUniforms {
         self.glowSecondary = Self.cleanMetalGlowColor(palette.glowSecondary, palette: palette, isDark: isDarkMode).metalRGBA(alpha: 1)
         self.glowAccent = Self.cleanMetalGlowColor(palette.glowAccent, palette: palette, isDark: isDarkMode).metalRGBA(alpha: 1)
         self.glassIntensity = Float(min(max(state.glassIntensity, 0), 1))
-        // 让模糊封面纹理重新成为底板主成分之一：彩色封面更像专辑图被玻璃遮住后糊开，
-        // 低彩封面保留更克制权重，避免白/灰图直接洗成白雾。
+        // 文档要求 albumField 成为底板主色源；palette 只轻校色，因此这里按彩度区分纹理权重。
+        // 彩色封面：dark/light 都让低频封面色场占主体；低彩封面也保留足够权重，避免退回灰底。
         let artworkVibrancy = min(max(palette.vibrancy, 0), 1)
-        let artworkBase = isDarkMode ? 0.38 : 0.30
-        let artworkLift = isDarkMode ? 0.16 : 0.16
-        self.artworkOpacity = state.artworkReady ? Float(artworkBase + artworkLift * pow(artworkVibrancy, 0.72)) : 0
+        let colorfulness = min(max((artworkVibrancy - 0.24) / 0.46, 0), 1)
+        let lowOpacity = (isDarkMode ? 0.50 : 0.46) + (isDarkMode ? 0.10 : 0.10) * artworkVibrancy
+        let colorfulOpacity = (isDarkMode ? 0.78 : 0.72) + (isDarkMode ? 0.10 : 0.10) * pow(artworkVibrancy, 0.72)
+        let opacity = lowOpacity * (1 - colorfulness) + colorfulOpacity * colorfulness
+        self.artworkOpacity = state.artworkReady ? Float(opacity) : 0
         self.isDark = isDarkMode ? 1 : 0
         self.vibrancy = Float(min(max(palette.vibrancy, 0), 1))
     }
@@ -448,6 +462,21 @@ private struct MusicAlbumBackdropUniforms {
         case accent
     }
 
+    private static func warmRedRisk(hue: CGFloat, saturation: CGFloat, brightness: CGFloat) -> CGFloat {
+        let h = Double(hue)
+        let redOrangeRisk: Double
+        if h >= 0.94 || h <= 0.055 {
+            redOrangeRisk = 1
+        } else if h < 0.125 {
+            redOrangeRisk = max(0, (0.125 - h) / 0.070)
+        } else {
+            redOrangeRisk = 0
+        }
+        let satRisk = min(max((Double(saturation) - 0.14) / 0.40, 0), 1)
+        let briRisk = min(max((Double(brightness) - 0.28) / 0.54, 0), 1)
+        return CGFloat(redOrangeRisk * satRisk * briRisk)
+    }
+
     /// 干净底色：借鉴 Material tonal palette / Vibrant swatch 的思路，先让每个封面色进入可控的明度、
     /// 饱和度区间，再由主色定基底，辅色/强调色只作为轻量色场参与。避免互补色直接 RGB 平均后变灰发脏。
     private static func cleanMetalBaseColor(palette: AlbumColorPalette, isDark: Bool) -> SIMD4<Float> {
@@ -456,12 +485,14 @@ private struct MusicAlbumBackdropUniforms {
         let accent = cleanMetalRoleColor(palette.accent, palette: palette, role: .accent, isDark: isDark)
         let lowVibrancy = palette.vibrancy < 0.32
         var mixed = primary
-        mixed = mixRGB(mixed, secondary, amount: lowVibrancy ? 0.060 : 0.170)
-        mixed = mixRGB(mixed, accent, amount: lowVibrancy ? 0.045 : 0.130)
+        // 底色保持"干净的主色基调"：secondary/accent 只轻轻掺入定基底，多色层次交给上层的
+        // 颜料色场与定位渐变去呈现。掺入过多互补色会在 RGB 平均后发灰发脏（旧 0.170/0.130 偏重）。
+        mixed = mixRGB(mixed, secondary, amount: lowVibrancy ? 0.055 : 0.120)
+        mixed = mixRGB(mixed, accent, amount: lowVibrancy ? 0.040 : 0.085)
         let pearl = isDark
             ? NSColor(calibratedRed: 0.060, green: 0.066, blue: 0.080, alpha: 1)
-            : NSColor(calibratedRed: 0.760, green: 0.795, blue: 0.815, alpha: 1)
-        mixed = mixRGB(mixed, pearl, amount: isDark ? 0.045 : 0.085)
+            : NSColor(calibratedRed: 0.820, green: 0.858, blue: 0.872, alpha: 1)
+        mixed = mixRGB(mixed, pearl, amount: isDark ? 0.045 : 0.050)
         var hue: CGFloat = 0
         var sat: CGFloat = 0
         var bri: CGFloat = 0
@@ -469,22 +500,29 @@ private struct MusicAlbumBackdropUniforms {
         mixed.getHue(&hue, saturation: &sat, brightness: &bri, alpha: &al)
         let cleanedSat: CGFloat
         let cleanedBri: CGFloat
+        // 底板保持克制，绚丽感交给后续 mesh blobs；这里过饱和会让整窗底色发脏发怪。
         if isDark {
             cleanedSat = lowVibrancy
-                ? min(max(sat * 0.58, 0.0), 0.13)
-                : min(max(sat * 0.88, 0.21), 0.46)
+                ? min(max(sat * 0.60, 0.0), 0.15)
+                : min(max(sat * 0.71, 0.19), 0.34)
             cleanedBri = lowVibrancy
                 ? min(max(bri, 0.18), 0.31)
-                : min(max(bri * 0.92, 0.18), 0.32)
+                : min(max(bri * 0.90, 0.17), 0.29)
         } else {
             cleanedSat = lowVibrancy
-                ? min(max(sat * 0.52, 0.0), 0.10)
-                : min(max(sat * 0.80, sat < 0.035 ? sat : 0.165), 0.36)
+                ? min(max(sat * 0.54, 0.0), 0.12)
+                : min(max(sat * 0.60, sat < 0.035 ? sat : 0.13), 0.235)
             cleanedBri = lowVibrancy
-                ? min(max(bri, 0.76), 0.88)
-                : min(max(bri * 0.98, 0.68), 0.82)
+                ? min(max(bri, 0.80), 0.90)
+                : min(max(bri * 0.96, 0.64), 0.80)
         }
-        let cleaned = NSColor(calibratedHue: hue, saturation: cleanedSat, brightness: cleanedBri, alpha: 1)
+        let warmRisk = warmRedRisk(hue: hue, saturation: sat, brightness: bri)
+        let cleaned = NSColor(
+            calibratedHue: hue,
+            saturation: cleanedSat * (1 - warmRisk * (isDark ? 0.12 : 0.24)),
+            brightness: cleanedBri,
+            alpha: 1
+        )
         let rgb = cleaned.usingColorSpace(.deviceRGB) ?? cleaned
         return SIMD4(Float(rgb.redComponent), Float(rgb.greenComponent), Float(rgb.blueComponent), 1)
     }
@@ -504,7 +542,7 @@ private struct MusicAlbumBackdropUniforms {
         base.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
         return NSColor(
             calibratedHue: hue,
-            saturation: min(max(saturation * (isDark ? 0.76 : 0.64), 0.0), isDark ? 0.30 : 0.24),
+            saturation: min(max(saturation * (isDark ? 0.80 : 0.68), 0.0), isDark ? 0.32 : 0.26),
             brightness: min(max(brightness * (isDark ? 1.08 : 1.03), isDark ? 0.22 : 0.74), isDark ? 0.37 : 0.88),
             alpha: 1
         )
@@ -538,24 +576,31 @@ private struct MusicAlbumBackdropUniforms {
             case .accent: return isDark ? 0.98 : 0.96
             }
         }()
+        // 角色色用于柔光斑和语义染色，保持可读即可；不能把整窗推成高饱和底。
         let cleanedSaturation: CGFloat
         if lowColor {
-            cleanedSaturation = min(max(saturation * 0.58, 0.0), isDark ? 0.16 : 0.12)
+            cleanedSaturation = min(max(saturation * 0.61, 0.0), isDark ? 0.17 : 0.14)
         } else {
-            let scaled = saturation * (isDark ? 0.76 : 0.64) + vibrancy * (isDark ? 0.042 : 0.034) + roleSatOffset
-            cleanedSaturation = min(max(scaled, isDark ? 0.21 : 0.16), isDark ? 0.54 : 0.42)
+            let scaled = saturation * (isDark ? 0.71 : 0.66) + vibrancy * (isDark ? 0.024 : 0.026) + roleSatOffset
+            cleanedSaturation = min(max(scaled, isDark ? 0.16 : 0.14), isDark ? 0.48 : 0.42)
         }
         let cleanedBrightness: CGFloat
         if isDark {
             cleanedBrightness = lowColor
                 ? min(max(brightness * 0.92, 0.22), 0.42)
-                : min(max(brightness * 0.84 * roleBrightness, 0.23), 0.45)
+                : min(max(brightness * 0.84 * roleBrightness, 0.23), 0.47)
         } else {
             cleanedBrightness = lowColor
                 ? min(max(brightness * 1.02, 0.72), 0.90)
-                : min(max(brightness * 1.00 * roleBrightness, 0.60), 0.84)
+                : min(max(brightness * 0.98 * roleBrightness, 0.46), 0.80)
         }
-        return NSColor(calibratedHue: hue, saturation: cleanedSaturation, brightness: cleanedBrightness, alpha: 1)
+        let warmRisk = warmRedRisk(hue: hue, saturation: saturation, brightness: brightness)
+        return NSColor(
+            calibratedHue: hue,
+            saturation: cleanedSaturation * (1 - warmRisk * (isDark ? 0.08 : 0.15)),
+            brightness: cleanedBrightness,
+            alpha: 1
+        )
     }
 
     private static func cleanMetalGlowColor(_ source: AlbumPaletteColor, palette: AlbumColorPalette, isDark: Bool) -> NSColor {
@@ -566,12 +611,14 @@ private struct MusicAlbumBackdropUniforms {
         var alpha: CGFloat = 0
         color.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
         let lowColor = palette.vibrancy < 0.32 || saturation < 0.12
-        let glowSaturation = lowColor
-            ? min(max(saturation * 0.72, 0.0), isDark ? 0.20 : 0.16)
-            : min(max(saturation * (isDark ? 0.78 : 0.68), isDark ? 0.24 : 0.18), isDark ? 0.64 : 0.56)
+        // 发光色可比底板更鲜明，但仍需克制，避免浅色模式出现霓虹色块。
+        var glowSaturation = lowColor
+            ? min(max(saturation * 0.69, 0.0), isDark ? 0.21 : 0.17)
+            : min(max(saturation * (isDark ? 0.69 : 0.61), isDark ? 0.19 : 0.16), isDark ? 0.52 : 0.46)
+        glowSaturation *= 1 - warmRedRisk(hue: hue, saturation: saturation, brightness: brightness) * (isDark ? 0.08 : 0.14)
         let glowBrightness = isDark
-            ? min(max(brightness * 1.08, 0.60), 0.86)
-            : min(max(brightness * 1.02, 0.68), 0.90)
+            ? min(max(brightness * 1.04, 0.56), 0.80)
+            : min(max(brightness * 0.96, 0.58), 0.82)
         return NSColor(calibratedHue: hue, saturation: glowSaturation, brightness: glowBrightness, alpha: 1)
     }
 
@@ -613,14 +660,9 @@ private extension NSColor {
 private enum MusicAlbumBackdropImageBlur {
     private static let context = CIContext(options: [.useSoftwareRenderer: false])
 
-    /// 把封面渲染成一块"颜料调色盘"小纹理（取代旧的"高分辨率大模糊封面"）：
-    ///   1) Lanczos 大幅下采样到 grid×grid —— 每个 texel 就是封面对应区域的一抹平均颜料，
-    ///      所有可辨识的图像结构（人脸/文字/边缘）被丢弃，从源头消除"玻璃直接盖在封面上"的观感；
-    ///   2) 在小图坐标系里做一次轻高斯，把相邻颜料块揉开 —— 上传后 GPU 双线性再插值，
-    ///      得到完全平滑、无重影的低频色场，根除旧的多尺度采样造成的不均匀色斑；
-    ///   3) 回补饱和度 + 轻微 vibrance —— 抵消"下采样平均必然发灰"的脏感，让调色盘保持封面的鲜活。
-    /// 纹理虽小，但因为保留了封面的空间布局（上/下/左/右的颜料位置），底板仍"贴合封面"。
-    static func paintPalette(_ image: NSImage?, grid: Int = 40, soften: Double = 8) -> NSImage? {
+    /// 提取封面的低频空间色场：约 160px 输入 → 约 38px 网格 → 中等半径柔化。
+    /// 它是 Metal 底板的主色来源；palette 只做轻微校色，形成更柔和的高斯取色玻璃底。
+    static func paintPalette(_ image: NSImage?, grid: Int = 38, soften: Double = 15.0) -> NSImage? {
         guard let image,
               let tiff = image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiff),
@@ -629,7 +671,7 @@ private enum MusicAlbumBackdropImageBlur {
         let extent = input.extent
         guard extent.width > 1, extent.height > 1 else { return image }
 
-        // ① 下采样为"颜料网格"。
+        // ① 下采样到中等低频网格，丢弃文字/边缘等锐结构，但保留封面的多色区域关系。
         let scale = Double(grid) / Double(max(extent.width, extent.height))
         var working = input
         if let lanczos = CIFilter(name: "CILanczosScaleTransform") {
@@ -642,22 +684,25 @@ private enum MusicAlbumBackdropImageBlur {
             ? CGRect(x: 0, y: 0, width: CGFloat(grid), height: CGFloat(grid))
             : working.extent
 
-        // ② 轻高斯揉开颜料块（小坐标系里 soften 很小即可）。
+        // ② 在小坐标系里进一步揉开，保留多彩关系，避免 raw cover 大模糊造成泥色。
         if soften > 0, let blur = CIFilter(name: "CIGaussianBlur") {
             blur.setValue(working.clampedToExtent(), forKey: kCIInputImageKey)
             blur.setValue(soften, forKey: kCIInputRadiusKey)
             working = blur.outputImage ?? working
         }
 
-        // ③ 回补饱和度，抵消平均带来的发灰；vibrance 只补低饱和区，避免高饱和区过艳。
+        // ③ 不再回补鲜艳度，只保留轻微清洁化。底板需要像被玻璃揉开的颜料，
+        // 不能比封面更艳，也不能把黑场和文字边缘揉成脏色。
         if let controls = CIFilter(name: "CIColorControls") {
             controls.setValue(working, forKey: kCIInputImageKey)
-            controls.setValue(1.18, forKey: kCIInputSaturationKey)
+            controls.setValue(1.020, forKey: kCIInputSaturationKey)
+            controls.setValue(0.006, forKey: kCIInputBrightnessKey)
+            controls.setValue(0.90, forKey: kCIInputContrastKey)
             working = controls.outputImage ?? working
         }
         if let vibrance = CIFilter(name: "CIVibrance") {
             vibrance.setValue(working, forKey: kCIInputImageKey)
-            vibrance.setValue(0.20, forKey: "inputAmount")
+            vibrance.setValue(0.080, forKey: "inputAmount")
             working = vibrance.outputImage ?? working
         }
 
@@ -765,19 +810,58 @@ static float valueNoise(float2 p) {
 
 // ───────────────── 背景观感调参（集中管理的"调试参数"）─────────────────
 // 调这几个常量即可整体调节背景：曝光 / 光效强度 / 白色总量 / 彩度 / 高光压缩。
-constant float kExposure             = 1.000; // 整体曝光（>1 提亮，<1 压暗）
-constant float kGlowStrength         = 1.20;  // 受控专辑彩光总强度
-constant float kWhiteVeilStrength    = 0.46;  // 所有白色 veil/高光的总闸（压掉白雾）
-constant float kChromaBoost          = 1.18;  // 出图前彩度补偿（绚丽但不过艳）
+constant float kExposure             = 1.004; // 整体曝光（>1 提亮，<1 压暗）
+constant float kGlowStrength         = 0.56;  // 专辑彩光总强度；范围更大但强度更低，避免底板抢过封面
+constant float kWhiteVeilStrength    = 0.074; // 白色 veil 只保留极少镜面空气感，主受光交给专辑色
+constant float kChromaBoost          = 1.06;  // 出图前彩度补偿；避免大面积高饱和刺眼
 constant float kHighlightCompression = 0.96;  // 高光压缩强度（越大越压，越不易过曝）
 
 static float luminance(float3 c) {
     return dot(c, float3(0.2126, 0.7152, 0.0722));
 }
 
+static float3 srgbToLinear(float3 c) {
+    return pow(clamp(c, float3(0.0), float3(1.0)), float3(2.2));
+}
+
+static float3 linearToSRGB(float3 c) {
+    return pow(clamp(c, float3(0.0), float3(1.0)), float3(1.0 / 2.2));
+}
+
+static float4 linearColor(float4 c) {
+    return float4(srgbToLinear(c.rgb), c.a);
+}
+
 static float3 boostChroma(float3 c, float amount) {
     float L = luminance(c);
     return clamp(mix(float3(L), c, amount), float3(0.0), float3(1.0));
+}
+
+static float3 rgb2hsv(float3 c) {
+    float4 K = float4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    float4 p = mix(float4(c.bg, K.wz), float4(c.gb, K.xy), step(c.b, c.g));
+    float4 q = mix(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    return float3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+static float3 hsv2rgb(float3 c) {
+    float4 K = float4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    float3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+static float3 harmonicShift(float3 color, float hueDelta, float saturationScale, float valueScale) {
+    float3 hsv = rgb2hsv(clamp(color, float3(0.0), float3(1.0)));
+    hsv.x = fract(hsv.x + hueDelta);
+    hsv.y = clamp(hsv.y * saturationScale, 0.0, 0.70);
+    hsv.z = clamp(hsv.z * valueScale, 0.0, 0.94);
+    float3 shifted = hsv2rgb(hsv);
+    float originalL = max(luminance(color), 0.001);
+    float shiftedL = max(luminance(shifted), 0.001);
+    float targetL = mix(originalL, shiftedL, 0.42);
+    return clamp(shifted * (targetL / shiftedL), float3(0.0), float3(1.0));
 }
 
 // 柔和高光压缩（保彩度）：只压"拐点(knee)以上的高光"，拐点以下（中/暗调）几乎不变，
@@ -798,14 +882,34 @@ static float3 glassifyAlbumColor(float3 c, float3 semanticTint, float vibrancy, 
     float L = luminance(c);
     float chroma = length(c - float3(L));
     float lowChroma = 1.0 - smoothstep(0.030, 0.150, chroma);
-    float3 pearl = mix(float3(0.760, 0.790, 0.812), float3(0.058, 0.064, 0.078), isDark);
-    float minL = mix(0.58, 0.18, isDark);
-    float maxL = mix(0.86, 0.66, isDark);
+    float darkInk = 1.0 - smoothstep(0.060, 0.240, L);
+    float3 pearl = mix(float3(0.820, 0.858, 0.872), float3(0.058, 0.064, 0.078), isDark);
+    // 只把低频封面纹理清洁成色温场：亮/中色可以舒适抬起，
+    // 近黑区域则进入干净阴影，不能被硬抬成“会发光”的亮色块。
+    float litMinL = mix(0.54, 0.13, isDark);
+    float inkMinL = mix(0.32, 0.075, isDark);
+    float minL = mix(litMinL, inkMinL, darkInk);
+    float maxL = mix(0.84, 0.50, isDark);
     float Lt = clamp(L, minL, maxL);
     float3 toned = c * (Lt / max(L, 0.001));
-    toned = mix(toned, pearl, lowChroma * (0.24 - vibrancy * 0.10));
-    toned = mix(toned, semanticTint, (0.075 + vibrancy * 0.085) * (1.0 - lowChroma * 0.42));
-    float chromaAmount = mix(0.90, 1.14, vibrancy) * (1.0 - lowChroma * 0.14);
+    float3 quietTint = mix(semanticTint, pearl, 0.28 + lowChroma * 0.18);
+    float3 inkShade = mix(pearl * mix(0.74, 0.62, isDark), semanticTint, 0.10 + vibrancy * 0.10);
+    toned = mix(toned, inkShade, darkInk * (0.58 - vibrancy * 0.10));
+    toned = mix(toned, pearl, lowChroma * (0.16 - vibrancy * 0.05));
+    toned = mix(toned, semanticTint, (0.024 + vibrancy * 0.024) * (1.0 - lowChroma * 0.66) * (1.0 - darkInk * 0.38));
+
+    // 棕绿/灰棕低频混合最容易显脏：轻轻拉回干净 pearl 与语义色之间，不凭空造新色。
+    float3 hsv = rgb2hsv(toned);
+    float warmMudHue = smoothstep(0.075, 0.130, hsv.x) * (1.0 - smoothstep(0.225, 0.310, hsv.x));
+    float greenMudHue = smoothstep(0.215, 0.285, hsv.x) * (1.0 - smoothstep(0.355, 0.430, hsv.x));
+    float mudBody = smoothstep(0.10, 0.36, hsv.y) * smoothstep(0.18, 0.42, hsv.z) * (1.0 - smoothstep(0.58, 0.82, hsv.z));
+    float mudRisk = max(warmMudHue, greenMudHue * 0.80) * mudBody;
+    toned = mix(toned, mix(pearl, semanticTint, 0.22 + vibrancy * 0.14), mudRisk * (isDark * 0.22 + (1.0 - isDark) * 0.46));
+    float lowVibrancyClean = (1.0 - smoothstep(0.24, 0.52, vibrancy)) * (1.0 - isDark);
+    float3 cleanWash = mix(pearl, semanticTint, 0.18 + vibrancy * 0.10);
+    toned = mix(toned, cleanWash, lowVibrancyClean * (0.10 + lowChroma * 0.12 + mudRisk * 0.24));
+
+    float chromaAmount = mix(0.92, 1.07, vibrancy) * (1.0 - lowChroma * 0.22) * (1.0 - darkInk * 0.30);
     return boostChroma(softTonemap(toned, 0.36), chromaAmount);
 }
 
@@ -913,55 +1017,83 @@ fragment float4 musicAlbumBackdropFragment(
     float lowFlow = valueNoise(uv * float2(2.05, 1.55) + float2(0.17, 0.41));
     float crossFlow = valueNoise(uv * float2(3.10, 2.35) + float2(2.31, 1.67));
     float2 refractOffset = (float2(lowFlow, crossFlow) - 0.5) * (0.006 + vibrancy * 0.004);
-    float3 color = u.baseColor.rgb;
+    float4 baseColor = linearColor(u.baseColor);
+    float4 glassBaseColor = linearColor(u.glassBaseColor);
+    float4 primary = linearColor(u.primary);
+    float4 secondary = linearColor(u.secondary);
+    float4 accent = linearColor(u.accent);
+    float4 glowPrimary = linearColor(u.glowPrimary);
+    float4 glowSecondary = linearColor(u.glowSecondary);
+    float4 glowAccent = linearColor(u.glowAccent);
+    float harmonicDrift = (lowFlow - 0.5) * 0.018 + (crossFlow - 0.5) * 0.012;
+    float3 backdropPrimary = harmonicShift(primary.rgb, 0.030 + harmonicDrift, 0.82, 0.97);
+    float3 backdropSecondary = harmonicShift(secondary.rgb, -0.045 + harmonicDrift * 0.70, 0.80, 1.02);
+    float3 backdropAccent = harmonicShift(accent.rgb, 0.064 - harmonicDrift * 0.55, 0.76, 0.96);
+    float whiteSpecular = clamp(0.18 - vibrancy * 0.06, 0.10, 0.18);
+    float3 glassLightColor = mix(glowPrimary.rgb, float3(1.0), whiteSpecular);
+    float3 color = baseColor.rgb;
 
     float wv = kWhiteVeilStrength;
 
-    // 玻璃下方的主色场：成熟播放器通常不是只铺 dominant color，而是把专辑图低分辨率大模糊后作为背景。
-    // 这里在预模糊小纹理上做三次不同尺度采样，合成一个更像"封面高斯被玻璃遮住"的低频色场。
-    float2 artUV = (uv - 0.5) / (1.12 + lowFlow * 0.040) + 0.5 + refractOffset * 0.34;
-    float2 artUVWide = (uv - 0.5) / (0.86 + crossFlow * 0.030) + 0.5 - refractOffset * 0.22;
-    float2 artUVDrift = (uv - 0.5) / (1.46 + lowFlow * 0.050) + 0.5 + float2(0.035, -0.028) + refractOffset * 0.18;
-    float4 artSampleA = artwork.sample(artworkSampler, artUV);
-    float4 artSampleB = artwork.sample(artworkSampler, artUVWide);
-    float4 artSampleC = artwork.sample(artworkSampler, artUVDrift);
-    float artPresence = max(max(artSampleA.a, artSampleB.a), artSampleC.a);
-    float effectiveArtworkOpacity = u.artworkOpacity * artPresence;
-    float3 albumField = mix(mix(artSampleA.rgb, artSampleB.rgb, 0.42), artSampleC.rgb, 0.30);
-    // Palette 色只做语义调色：primary 定基调，secondary/accent 给高斯场补冷暖层次；低彩封面自动降低染色。
-    float3 semanticTint = mix(u.primary.rgb, mix(u.secondary.rgb, u.accent.rgb, 0.42), 0.34 + vibrancy * 0.12);
-    albumField = glassifyAlbumColor(albumField, semanticTint, vibrancy, isDark);
-    float3 albumToned = mix(albumField, semanticTint, (0.040 + vibrancy * 0.070) * effectiveArtworkOpacity);
-    color = overBlend(color, float4(albumToned, effectiveArtworkOpacity));
-    color = controlledScreen(color, float4(boostChroma(albumField, 1.02 + vibrancy * 0.12), effectiveArtworkOpacity * (isDark * 0.20 + isLight * 0.145)));
+    // ── L0 底板主色场：封面高斯取色层 ──
+    // artwork 传入的不是原始封面，而是 paintPalette 生成的低频高斯色场。这里把它拉满整窗，
+    // 再通过 glassifyAlbumColor 做明度/彩度清洁；palette 只轻微校色，不能替代封面空间颜色。
+    float2 fieldUV = uv + refractOffset * 0.6;
+    float fieldDiag = linearT(fieldUV, float2(0.04, -0.02), float2(0.96, 1.02));
+    float3 fieldMid = mix(backdropPrimary, backdropSecondary, 0.60);
+    float3 semanticField = (fieldDiag < 0.5)
+        ? mix(backdropPrimary, fieldMid, fieldDiag * 2.0)
+        : mix(fieldMid, backdropSecondary, (fieldDiag - 0.5) * 2.0);
+    float fieldCross = linearT(fieldUV, float2(1.02, 0.02), float2(-0.02, 0.98));
+    semanticField = mix(semanticField, backdropAccent, fieldCross * (0.12 + vibrancy * 0.10));
+    float fieldFocus = 1.0 - radialT(point, u.albumLightCenter, 0.0, max(u.viewportSize.x, u.viewportSize.y) * 0.96);
+    semanticField = mix(semanticField, mix(backdropPrimary, semanticField, 0.46), fieldFocus * (0.16 + vibrancy * 0.12));
+
+    float2 coverUV = clamp(fieldUV * 0.96 + 0.02, float2(0.0), float2(1.0));
+    float4 albumSample = artwork.sample(artworkSampler, coverUV);
+    float texturePresence = clamp(u.artworkOpacity * albumSample.a, 0.0, 1.0);
+    float3 albumFieldRaw = linearColor(float4(albumSample.rgb, 1.0)).rgb;
+    float3 albumField = glassifyAlbumColor(albumFieldRaw, semanticField, vibrancy, isDark);
+    float albumL = luminance(albumField);
+    float albumChroma = length(albumField - float3(albumL));
+    float rawLightGate = smoothstep(0.16, 0.42, luminance(albumFieldRaw));
+    float shiftable = smoothstep(0.026, 0.150, albumChroma) * rawLightGate;
+    float albumHueTravel = mix(-0.035, 0.046, fieldDiag) + (fieldCross - 0.5) * 0.022 + harmonicDrift * 0.58;
+    float3 albumHarmonic = harmonicShift(albumField, albumHueTravel, 0.84, 1.0);
+    float3 albumBridge = mix(albumHarmonic, semanticField, 0.10 + vibrancy * 0.08);
+    albumField = mix(albumField, albumBridge, shiftable * (0.28 + vibrancy * 0.18));
+    float fallbackAmount = (1.0 - texturePresence) * (isDark * 0.42 + isLight * 0.32) * (0.48 + vibrancy * 0.26);
+    color = mix(color, semanticField, clamp(fallbackAmount, 0.0, 1.0));
+    float albumAmount = pow(texturePresence, 0.92) * (isDark * 0.80 + isLight * 0.76);
+    color = mix(color, albumField, clamp(albumAmount, 0.0, 1.0));
 
     // 白色薄纱只保留空气感，主体颜色交给专辑三色，避免浅色模式发白。
     float veilT = linearT(uv, float2(0.12, 0.0), float2(0.92, 1.0));
     float4 veil = gradient3(
-        float4(1.0, 1.0, 1.0, (isDark * 0.060 + isLight * 0.026) * wv),
-        float4(1.0, 1.0, 1.0, (isDark * 0.020 + isLight * 0.008) * wv),
-        float4(1.0, 1.0, 1.0, (isDark * 0.075 + isLight * 0.030) * wv),
+        float4(glassLightColor, (isDark * 0.034 + isLight * 0.018) * wv),
+        float4(glassLightColor, (isDark * 0.012 + isLight * 0.006) * wv),
+        float4(glassLightColor, (isDark * 0.040 + isLight * 0.020) * wv),
         veilT
     );
-    veil.rgb = mix(float3(0.0), veil.rgb, isLight);
+    veil.a *= isLight;
     color = overBlend(color, veil);
 
-    // 纵向渐变：几乎不掺白，中段保留专辑主/辅色。
+    // 纵向渐变：只做底板色温分区，不让大面积 tint 抢过主色。
     float verticalT = linearT(uv, float2(0.5, 0.0), float2(0.5, 1.0));
     color = overBlend(color, gradient3(
-        colorWithAlpha(u.secondary, isDark * 0.12 + isLight * 0.080),
-        colorWithAlpha(u.primary, isDark * 0.22 + isLight * 0.255),
-        colorWithAlpha(u.accent, isDark * 0.10 + isLight * 0.090),
+        colorWithAlpha(float4(backdropSecondary, 1.0), isDark * 0.018 + isLight * 0.012),
+        colorWithAlpha(float4(backdropPrimary, 1.0), isDark * 0.030 + isLight * 0.022),
+        colorWithAlpha(float4(backdropAccent, 1.0), isDark * 0.014 + isLight * 0.010),
         verticalT
     ));
 
-    // 斜向多色染色（纯专辑色，overBlend，干净保彩度）。浅色染色略降，让底板更通透干净。
+    // 斜向多色染色保留为非常轻的基底层，绚丽感交给后面的加色柔光斑。
     float diagonalT = linearT(uv, float2(0.0, 0.0), float2(1.0, 1.0));
     color = overBlend(color, gradient4(
-        colorWithAlpha(u.primary, isDark * 0.27 + isLight * 0.205),
-        colorWithAlpha(u.secondary, isDark * 0.22 + isLight * 0.165),
-        colorWithAlpha(u.accent, isDark * 0.20 + isLight * 0.145),
-        colorWithAlpha(u.primary, isDark * 0.14 + isLight * 0.105),
+        colorWithAlpha(float4(backdropPrimary, 1.0), isDark * 0.026 + isLight * 0.018),
+        colorWithAlpha(float4(backdropSecondary, 1.0), isDark * 0.020 + isLight * 0.014),
+        colorWithAlpha(float4(backdropAccent, 1.0), isDark * 0.017 + isLight * 0.012),
+        colorWithAlpha(float4(backdropPrimary, 1.0), isDark * 0.010 + isLight * 0.008),
         diagonalT
     ));
 
@@ -970,8 +1102,8 @@ fragment float4 musicAlbumBackdropFragment(
         float2(0.28, 0.42) * u.viewportSize,
         28.0,
         720.0,
-        colorWithAlpha(u.primary, isDark * 0.27 + isLight * 0.205),
-        colorWithAlpha(u.accent, isDark * 0.15 + isLight * 0.118),
+        colorWithAlpha(float4(backdropPrimary, 1.0), isDark * 0.022 + isLight * 0.016),
+        colorWithAlpha(float4(backdropAccent, 1.0), isDark * 0.012 + isLight * 0.008),
         float4(0.0)
     ));
 
@@ -985,8 +1117,8 @@ fragment float4 musicAlbumBackdropFragment(
         u.albumLightCenter + float2(-18.0, -10.0),
         0.0,
         max(540.0, meshSpan * 0.58) * albumReachScale,
-        colorWithAlpha(u.glowPrimary, (isDark * 0.28 + isLight * 0.24) * (0.58 + vibrancy * 0.42)),
-        colorWithAlpha(u.primary, (isDark * 0.14 + isLight * 0.12) * (0.52 + vibrancy * 0.38)),
+        colorWithAlpha(glowPrimary, (isDark * 0.050 + isLight * 0.040) * (0.58 + vibrancy * 0.42)),
+        colorWithAlpha(float4(backdropPrimary, 1.0), (isDark * 0.018 + isLight * 0.014) * (0.48 + vibrancy * 0.34)),
         float4(0.0)
     ));
     color = controlledScreen(color, radial3(
@@ -994,43 +1126,43 @@ fragment float4 musicAlbumBackdropFragment(
         float2(0.73 + lowFlow * 0.05, 0.28 + crossFlow * 0.05) * u.viewportSize,
         0.0,
         max(620.0, meshSpan * 0.66),
-        colorWithAlpha(u.secondary, (isDark * 0.24 + isLight * 0.20) * (0.54 + vibrancy * 0.36)),
-        colorWithAlpha(u.accent, (isDark * 0.09 + isLight * 0.075) * (0.45 + vibrancy * 0.28)),
+        colorWithAlpha(secondary, (isDark * 0.040 + isLight * 0.030) * (0.54 + vibrancy * 0.36)),
+        colorWithAlpha(accent, (isDark * 0.015 + isLight * 0.012) * (0.45 + vibrancy * 0.28)),
         float4(0.0)
     ));
-    color = overBlend(color, radial3(
+    color = controlledScreen(color, radial3(
         point,
         float2(0.92 - lowFlow * 0.03, 0.76 + crossFlow * 0.04) * u.viewportSize,
         0.0,
         max(520.0, meshSpan * 0.54),
-        colorWithAlpha(u.accent, (isDark * 0.16 + isLight * 0.12) * (0.42 + vibrancy * 0.35)),
-        colorWithAlpha(u.secondary, (isDark * 0.055 + isLight * 0.046) * (0.42 + vibrancy * 0.24)),
+        colorWithAlpha(accent, (isDark * 0.024 + isLight * 0.018) * (0.42 + vibrancy * 0.35)),
+        colorWithAlpha(secondary, (isDark * 0.010 + isLight * 0.008) * (0.42 + vibrancy * 0.24)),
         float4(0.0)
     ));
 
     // Apple Music 式多色网格：主/辅/强调色作为大柔光斑铺满四角与中心。
     // 用 controlledPlus 受控加光：在中/暗调区显现绚丽彩光，亮区因 headroom 衰减不会被推白。
-    float blobReach = max(meshSpan * 0.66, 680.0);
+    float blobReach = max(meshSpan * 0.72, 760.0);
     float gs = kGlowStrength;
     // §4.3 mesh blobs 颜色一律走 glow*（lightenedForGlow：最低亮度有保证、饱和≤0.80、严格保色相），
     // 深色专辑也不发脏暗光；绚丽来自这些柔光斑而非底板。
-    color = controlledPlus(color, radial2(point, float2(0.82, 0.14) * u.viewportSize, 0.0, blobReach, colorWithAlpha(u.glowSecondary, (isDark * 0.46 + isLight * 0.48) * gs), float4(0.0)));
-    color = controlledPlus(color, radial2(point, float2(0.90, 0.84) * u.viewportSize, 0.0, blobReach * 1.04, colorWithAlpha(u.glowAccent, (isDark * 0.42 + isLight * 0.44) * gs), float4(0.0)));
-    color = controlledPlus(color, radial2(point, float2(0.10, 0.88) * u.viewportSize, 0.0, blobReach * 0.98, colorWithAlpha(u.glowPrimary, (isDark * 0.46 + isLight * 0.44) * gs), float4(0.0)));
-    color = controlledPlus(color, radial2(point, float2(0.15, 0.16) * u.viewportSize, 0.0, blobReach * 0.92, colorWithAlpha(u.glowPrimary, (isDark * 0.30 + isLight * 0.30) * gs), float4(0.0)));
-    color = controlledPlus(color, radial2(point, float2(0.50, 0.48) * u.viewportSize, 0.0, blobReach * 1.14, colorWithAlpha(u.glowSecondary, (isDark * 0.22 + isLight * 0.20) * gs), float4(0.0)));
+    color = controlledPlus(color, radial2(point, float2(0.82, 0.14) * u.viewportSize, 0.0, blobReach, colorWithAlpha(glowSecondary, (isDark * 0.090 + isLight * 0.075) * gs), float4(0.0)));
+    color = controlledPlus(color, radial2(point, float2(0.90, 0.84) * u.viewportSize, 0.0, blobReach * 1.04, colorWithAlpha(glowAccent, (isDark * 0.082 + isLight * 0.068) * gs), float4(0.0)));
+    color = controlledPlus(color, radial2(point, float2(0.10, 0.88) * u.viewportSize, 0.0, blobReach * 0.98, colorWithAlpha(glowPrimary, (isDark * 0.092 + isLight * 0.070) * gs), float4(0.0)));
+    color = controlledPlus(color, radial2(point, float2(0.15, 0.16) * u.viewportSize, 0.0, blobReach * 0.92, colorWithAlpha(glowPrimary, (isDark * 0.052 + isLight * 0.040) * gs), float4(0.0)));
+    color = controlledPlus(color, radial2(point, float2(0.50, 0.48) * u.viewportSize, 0.0, blobReach * 1.14, colorWithAlpha(glowSecondary, (isDark * 0.040 + isLight * 0.032) * gs), float4(0.0)));
     // §4.2 第 4 个柔光斑：颜色取 secondary 与 accent 的中间插值（着色器内 mix 0.5），丰富多色层次；
     // 仍走 glow* 体系，色相严格落在 secondary/accent 之间，绝不做 hue 偏移。
-    float4 blobMix = mix(u.glowSecondary, u.glowAccent, 0.5);
-    color = controlledPlus(color, radial2(point, float2(0.36, 0.72) * u.viewportSize, 0.0, blobReach * 1.02, colorWithAlpha(blobMix, (isDark * 0.26 + isLight * 0.26) * gs), float4(0.0)));
+    float4 blobMix = mix(glowSecondary, glowAccent, 0.5);
+    color = controlledPlus(color, radial2(point, float2(0.36, 0.72) * u.viewportSize, 0.0, blobReach * 1.02, colorWithAlpha(blobMix, (isDark * 0.048 + isLight * 0.038) * gs), float4(0.0)));
 
     // 斜向高光：白色端再压（浅色 0.05），保留专辑主/次色染色。
     float shineT = linearT(uv, float2(0.08, 0.03), float2(0.94, 0.98));
     color = overBlend(color, gradient4(
-        float4(1.0, 1.0, 1.0, (isDark * 0.035 + isLight * 0.026) * wv),
-        colorWithAlpha(u.primary, isDark * 0.30 + isLight * 0.27),
+        float4(glassLightColor, (isDark * 0.012 + isLight * 0.009) * wv),
+        colorWithAlpha(float4(backdropPrimary, 1.0), isDark * 0.030 + isLight * 0.020),
         float4(0.0),
-        colorWithAlpha(u.secondary, isDark * 0.25 + isLight * 0.225),
+        colorWithAlpha(float4(backdropSecondary, 1.0), isDark * 0.025 + isLight * 0.016),
         shineT
     ));
 
@@ -1041,12 +1173,12 @@ fragment float4 musicAlbumBackdropFragment(
 
     // 大面积 ambient / 静态背光 / 近场光：全部改用 controlledScreen，
     // 亮背景上自动退化为染色而非滤色，从根本上不再洗白。
-    color = controlledScreen(color, radial5(point, c, 0.0, longReach * 0.82, colorWithAlpha(u.glowPrimary, (isDark * 0.34 + isLight * 0.29) * gs), colorWithAlpha(u.glowPrimary, (isDark * 0.22 + isLight * 0.19) * gs), colorWithAlpha(u.glowSecondary, (isDark * 0.13 + isLight * 0.12) * gs), colorWithAlpha(u.glowAccent, (isDark * 0.070 + isLight * 0.064) * gs), float4(0.0)));
-    color = controlledScreen(color, radial3(point, c, 0.0, midReach * 0.40, colorWithAlpha(u.glowPrimary, (isDark * 0.26 + isLight * 0.225) * gs), colorWithAlpha(u.glowAccent, (isDark * 0.13 + isLight * 0.11) * gs), float4(0.0)));
-    color = controlledScreen(color, radial3(point, c + float2(190.0, 42.0), 0.0, midReach * 0.76, colorWithAlpha(u.accent, (isDark * 0.20 + isLight * 0.17) * gs), colorWithAlpha(u.primary, (isDark * 0.090 + isLight * 0.078) * gs), float4(0.0)));
-    color = controlledScreen(color, radial3(point, c + float2(310.0, -82.0), 0.0, midReach * 0.72, colorWithAlpha(u.secondary, (isDark * 0.16 + isLight * 0.135) * gs), colorWithAlpha(u.accent, (isDark * 0.070 + isLight * 0.063) * gs), float4(0.0)));
-    color = controlledScreen(color, radial3(point, c + float2(-170.0, 178.0), 0.0, midReach * 0.58, colorWithAlpha(u.primary, (isDark * 0.13 + isLight * 0.108) * gs), colorWithAlpha(u.accent, (isDark * 0.058 + isLight * 0.050) * gs), float4(0.0)));
-    color = controlledScreen(color, beam(point, c + float2(longReach * 0.26, 10.0), float2(longReach * 1.02, 245.0), -3.14159265 / 20.0, colorWithAlpha(u.primary, 0.0), colorWithAlpha(u.primary, (isDark * 0.10 + isLight * 0.082) * gs), colorWithAlpha(u.accent, (isDark * 0.12 + isLight * 0.10) * gs), float4(0.0)));
+    color = controlledScreen(color, radial5(point, c, 0.0, longReach * 0.82, colorWithAlpha(glowPrimary, (isDark * 0.052 + isLight * 0.040) * gs), colorWithAlpha(glowPrimary, (isDark * 0.032 + isLight * 0.025) * gs), colorWithAlpha(glowSecondary, (isDark * 0.020 + isLight * 0.016) * gs), colorWithAlpha(glowAccent, (isDark * 0.012 + isLight * 0.009) * gs), float4(0.0)));
+    color = controlledScreen(color, radial3(point, c, 0.0, midReach * 0.40, colorWithAlpha(glowPrimary, (isDark * 0.040 + isLight * 0.030) * gs), colorWithAlpha(glowAccent, (isDark * 0.020 + isLight * 0.016) * gs), float4(0.0)));
+    color = controlledScreen(color, radial3(point, c + float2(190.0, 42.0), 0.0, midReach * 0.76, colorWithAlpha(accent, (isDark * 0.028 + isLight * 0.022) * gs), colorWithAlpha(primary, (isDark * 0.014 + isLight * 0.010) * gs), float4(0.0)));
+    color = controlledScreen(color, radial3(point, c + float2(310.0, -82.0), 0.0, midReach * 0.72, colorWithAlpha(secondary, (isDark * 0.024 + isLight * 0.017) * gs), colorWithAlpha(accent, (isDark * 0.012 + isLight * 0.009) * gs), float4(0.0)));
+    color = controlledScreen(color, radial3(point, c + float2(-170.0, 178.0), 0.0, midReach * 0.58, colorWithAlpha(primary, (isDark * 0.018 + isLight * 0.014) * gs), colorWithAlpha(accent, (isDark * 0.010 + isLight * 0.008) * gs), float4(0.0)));
+    color = controlledScreen(color, beam(point, c + float2(longReach * 0.26, 10.0), float2(longReach * 1.02, 210.0), -3.14159265 / 20.0, colorWithAlpha(primary, 0.0), colorWithAlpha(primary, (isDark * 0.014 + isLight * 0.011) * gs), colorWithAlpha(accent, (isDark * 0.018 + isLight * 0.013) * gs), float4(0.0)));
 
     float beat = 0.82;
     float slow = 0.56;
@@ -1054,30 +1186,30 @@ fragment float4 musicAlbumBackdropFragment(
     float driftY = sin((slow + beat * 0.16) * 6.2831853) * (22.0 + beat * 20.0);
     float localPulse = clamp((beat - 0.32) / 0.64, 0.0, 1.0);
     // 近场跳动光斑：用 controlledPlus（彩光加亮，受 headroom 控制不过曝）。
-    color = controlledPlus(color, radial3(point, c + float2(driftX * 0.70, driftY * 0.70), 0.0, 190.0 + localPulse * 68.0, colorWithAlpha(u.primary, ((isDark * 0.32 + isLight * 0.27) + localPulse * 0.10) * gs), colorWithAlpha(u.accent, (0.11 + localPulse * 0.045) * gs), float4(0.0)));
-    color = controlledScreen(color, radial3(point, c + float2(150.0 + driftX * 0.52, 18.0 - driftY * 0.28), 0.0, 220.0 + localPulse * 60.0, colorWithAlpha(u.primary, (0.15 + localPulse * 0.050) * gs), colorWithAlpha(u.secondary, (0.085 + slow * 0.024) * gs), float4(0.0)));
-    color = controlledScreen(color, radial3(point, c + float2(44.0 - driftX * 0.20, 164.0 + driftY * 0.42), 0.0, 170.0 + localPulse * 48.0, colorWithAlpha(u.accent, (0.13 + localPulse * 0.038) * gs), colorWithAlpha(u.primary, (0.070 + slow * 0.016) * gs), float4(0.0)));
+    color = controlledPlus(color, radial3(point, c + float2(driftX * 0.70, driftY * 0.70), 0.0, 190.0 + localPulse * 68.0, colorWithAlpha(primary, ((isDark * 0.035 + isLight * 0.026) + localPulse * 0.012) * gs), colorWithAlpha(accent, (0.012 + localPulse * 0.005) * gs), float4(0.0)));
+    color = controlledScreen(color, radial3(point, c + float2(150.0 + driftX * 0.52, 18.0 - driftY * 0.28), 0.0, 220.0 + localPulse * 60.0, colorWithAlpha(primary, (0.020 + localPulse * 0.006) * gs), colorWithAlpha(secondary, (0.012 + slow * 0.003) * gs), float4(0.0)));
+    color = controlledScreen(color, radial3(point, c + float2(44.0 - driftX * 0.20, 164.0 + driftY * 0.42), 0.0, 170.0 + localPulse * 48.0, colorWithAlpha(accent, (0.018 + localPulse * 0.005) * gs), colorWithAlpha(primary, (0.010 + slow * 0.003) * gs), float4(0.0)));
 
     // 整窗玻璃层：偏专辑色，白色高光只留边缘空气。
     float strength = clamp(u.glassIntensity, 0.0, 1.0);
-    color = overBlend(color, colorWithAlpha(u.glassBaseColor, (isDark * 0.30 + isLight * 0.115) * strength));
+    color = overBlend(color, colorWithAlpha(glassBaseColor, (isDark * 0.105 + isLight * 0.045) * strength));
     float glassT = linearT(uv, float2(0.0, 0.0), float2(1.0, 1.0));
     color = overBlend(color, gradient3(
-        float4(1.0, 1.0, 1.0, (isDark * 0.024 + isLight * 0.020) * strength * wv),
-        colorWithAlpha(u.primary, (isDark * 0.13 + isLight * 0.15) * strength),
-        colorWithAlpha(u.secondary, (isDark * 0.035 + isLight * 0.040) * strength),
+        float4(glassLightColor, (isDark * 0.010 + isLight * 0.008) * strength * wv),
+        colorWithAlpha(float4(backdropPrimary, 1.0), (isDark * 0.014 + isLight * 0.010) * strength),
+        colorWithAlpha(float4(backdropSecondary, 1.0), (isDark * 0.006 + isLight * 0.004) * strength),
         glassT
     ));
-    color = controlledScreen(color, radial3(point, float2(0.28, 0.24) * u.viewportSize, 0.0, 720.0, float4(1.0, 1.0, 1.0, (isDark * 0.020 + isLight * 0.026) * strength * wv), colorWithAlpha(u.glowPrimary, (isDark * 0.13 + isLight * 0.14) * strength * gs), float4(0.0)));
+    color = controlledScreen(color, radial3(point, float2(0.28, 0.24) * u.viewportSize, 0.0, 720.0, float4(glassLightColor, (isDark * 0.006 + isLight * 0.006) * strength * wv), colorWithAlpha(glowPrimary, (isDark * 0.014 + isLight * 0.011) * strength * gs), float4(0.0)));
 
     // Continuous full-screen Liquid Glass overlay. The "refraction" is a soft color-space ripple over the
     // album backdrop, not a behind-window blur, so it stays opaque and cheap.
     float liquidWave = sin((uv.x * 1.75 + uv.y * 2.25 + lowFlow * 0.72) * 6.2831853) * 0.5 + 0.5;
     float liquidBand = smoothstep(0.50, 0.92, liquidWave) * (1.0 - smoothstep(0.86, 1.0, liquidWave));
-    float glassChroma = (0.020 + vibrancy * 0.026) * strength;
-    color = controlledScreen(color, colorWithAlpha(mix(u.primary, u.secondary, lowFlow), glassChroma * liquidBand * (isDark * 1.08 + isLight * 0.82)));
-    color = overBlend(color, colorWithAlpha(u.glowAccent, (isDark * 0.040 + isLight * 0.030) * strength * crossFlow * (0.55 + vibrancy * 0.35)));
-    float refractiveLift = (lowFlow - 0.5) * (isDark * 0.030 + isLight * 0.020) * strength;
+    float glassChroma = (0.010 + vibrancy * 0.012) * strength;
+    color = controlledScreen(color, colorWithAlpha(float4(mix(backdropPrimary, backdropSecondary, lowFlow), 1.0), glassChroma * liquidBand * (isDark * 0.72 + isLight * 0.52)));
+    color = controlledScreen(color, colorWithAlpha(glowAccent, (isDark * 0.007 + isLight * 0.005) * strength * crossFlow * (0.55 + vibrancy * 0.35)));
+    float refractiveLift = (lowFlow - 0.5) * (isDark * 0.016 + isLight * 0.010) * strength;
     color = mix(color, color + color * refractiveLift, 0.55);
 
     // §1.1 整片镜面高光带：一条贯穿全窗、极低对比的斜向高光，方向由封面光心(albumLightCenter)指向窗口对侧
@@ -1085,14 +1217,19 @@ fragment float4 musicAlbumBackdropFragment(
     // 而不是颜色本身在变。强度上限：浅色 ≤0.05、深色 ≤0.035（再经 strength*wv 全局衰减）。
     float2 sweepUV = uv + refractOffset;
     float2 sweepLC = u.albumLightCenter / u.viewportSize;
+    float2 sweepTarget = mix(float2(0.82, 0.64), float2(0.58, 0.46), isDark * 0.18);
+    float2 sweepVector = sweepTarget - sweepLC;
     float2 sweepDir = normalize(float2(1.0, 0.62));
+    if (dot(sweepVector, sweepVector) > 0.0001) {
+        sweepDir = normalize(sweepVector);
+    }
     float sweepAlong = dot(sweepUV - sweepLC, sweepDir);
     float sweepAcross = dot(sweepUV - sweepLC, float2(-sweepDir.y, sweepDir.x));
     float sweepBand = exp(-sweepAcross * sweepAcross / 0.0026);            // 垂直轴方向的窄高光带
     float sweepMid = smoothstep(-0.55, -0.05, sweepAlong) *
                      (1.0 - smoothstep(0.18, 0.72, sweepAlong));          // 中段出现、两端淡出为 0
     float sweepSpecular = sweepBand * sweepMid;
-    color = controlledScreen(color, float4(1.0, 1.0, 1.0, sweepSpecular * (isDark * 0.035 + isLight * 0.050) * strength * wv));
+    color = controlledScreen(color, float4(glassLightColor, sweepSpecular * (isDark * 0.020 + isLight * 0.028) * strength));
 
     beat = 0.78;
     slow = 0.54;
@@ -1102,36 +1239,38 @@ fragment float4 musicAlbumBackdropFragment(
     float2 rightWash = c + float2(168.0 + driftX * 0.56, 36.0 - driftY * 0.22);
     float2 lowerWash = c + float2(40.0 - driftX * 0.24, 166.0 + driftY * 0.36);
     float beamWidth = clamp(u.viewportSize.x * 0.34, 420.0, 620.0);
-    color = controlledScreen(color, radial3(point, nearCenter, 0.0, 172.0 + beat * 52.0, colorWithAlpha(u.primary, ((isDark * 0.25 + isLight * 0.20) + beat * 0.065) * gs), colorWithAlpha(u.accent, (0.092 + beat * 0.032) * gs), float4(0.0)));
-    color = controlledScreen(color, radial3(point, rightWash, 0.0, 230.0 + beat * 52.0, colorWithAlpha(u.secondary, (0.12 + beat * 0.030) * gs), colorWithAlpha(u.primary, (0.074 + slow * 0.020) * gs), float4(0.0)));
-    color = controlledScreen(color, radial3(point, lowerWash, 0.0, 166.0 + beat * 40.0, colorWithAlpha(u.accent, (0.088 + beat * 0.028) * gs), colorWithAlpha(u.primary, (0.058 + slow * 0.014) * gs), float4(0.0)));
-    color = controlledScreen(color, beam(point, c + float2(230.0 + driftX * 0.34, 12.0 + driftY * 0.16), float2(beamWidth, 112.0 + beat * 26.0), (-7.0 + beat * 3.2) * 3.14159265 / 180.0, float4(0.0), colorWithAlpha(u.primary, (0.042 + beat * 0.024) * gs), colorWithAlpha(u.accent, (0.052 + slow * 0.016) * gs), float4(0.0)));
+    color = controlledScreen(color, radial3(point, nearCenter, 0.0, 172.0 + beat * 52.0, colorWithAlpha(primary, ((isDark * 0.024 + isLight * 0.018) + beat * 0.006) * gs), colorWithAlpha(accent, (0.010 + beat * 0.004) * gs), float4(0.0)));
+    color = controlledScreen(color, radial3(point, rightWash, 0.0, 230.0 + beat * 52.0, colorWithAlpha(secondary, (0.014 + beat * 0.004) * gs), colorWithAlpha(primary, (0.009 + slow * 0.002) * gs), float4(0.0)));
+    color = controlledScreen(color, radial3(point, lowerWash, 0.0, 166.0 + beat * 40.0, colorWithAlpha(accent, (0.012 + beat * 0.003) * gs), colorWithAlpha(primary, (0.008 + slow * 0.002) * gs), float4(0.0)));
+    color = controlledScreen(color, beam(point, c + float2(230.0 + driftX * 0.34, 12.0 + driftY * 0.16), float2(beamWidth, 112.0 + beat * 26.0), (-7.0 + beat * 3.2) * 3.14159265 / 180.0, float4(0.0), colorWithAlpha(primary, (0.006 + beat * 0.003) * gs), colorWithAlpha(accent, (0.007 + slow * 0.002) * gs), float4(0.0)));
 
     // 边缘空气感：白色高光只作为四周很窄的一圈"空气"，浅色 0.22→0.09，且仅在边缘（edgeMask）局部出现。
     float edgeDistance = min(min(point.x, point.y), min(u.viewportSize.x - point.x, u.viewportSize.y - point.y));
     float edgeMask = 1.0 - smoothstep(0.0, 1.0, edgeDistance);
-    color = controlledScreen(color, float4(1.0, 1.0, 1.0, (isDark * 0.052 + isLight * 0.052) * strength * edgeMask * wv));
+    color = controlledScreen(color, float4(glassLightColor, (isDark * 0.024 + isLight * 0.020) * strength * edgeMask * wv));
 
     // 整窗连续玻璃面板的纵向深度：顶部极轻提亮、底部极轻压暗，让整块玻璃有"上沿受光、下沿入影"的
     // 空间层次（Liquid Glass 的轻微深度阴影）。幅度克制（约 1.5%~5%），浅色更弱，不改变色相、不洗白。
     float depthT = clamp(uv.y, 0.0, 1.0);
     float topLift = (1.0 - smoothstep(0.0, 0.52, depthT)) * (isDark * 0.020 + isLight * 0.013) * strength;
     float bottomShade = smoothstep(0.56, 1.0, depthT) * (isDark * 0.050 + isLight * 0.030) * strength;
-    color = controlledScreen(color, float4(1.0, 1.0, 1.0, topLift * wv));
+    color = controlledScreen(color, float4(glassLightColor, topLift * wv));
     color *= (1.0 - bottomShade);
 
     // ── 出图后处理：曝光 → 高光柔压（保彩度）→ 彩度补偿 → 抖动去断层 → 防纯白 clamp ──
     color *= kExposure;
     color = softTonemap(color, kHighlightCompression);
     float outL = luminance(color);
-    color = mix(float3(outL), color, kChromaBoost);          // 回补彩度（更绚丽但保留 tonemap）
+    float chromaLimit = mix(kChromaBoost * 0.92, kChromaBoost, 1.0 - smoothstep(0.68, 0.86, outL));
+    color = mix(float3(outL), color, chromaLimit);           // 回补彩度，但亮区不再继续推艳
+    color = linearToSRGB(color);
     // 抖动(dithering)：大面积平滑渐变在 8bit 输出时会出现可见色彩断层（banding），
-    // 加入幅度约 ±1.2/255 的有序噪声打散量化台阶，肉眼几乎不可见，但能消除断层。
+    // 只保留极低幅度打散量化台阶；grain 不参与观感，避免底板发脏。
     float dither = fract(sin(dot(point, float2(12.9898, 78.233))) * 43758.5453);
     float grain = hash21(floor(point * 0.72) + float2(5.17, 9.31)) - 0.5;
-    color += (dither - 0.5) * (1.35 / 255.0);
-    color += grain * (0.52 / 255.0) * (0.50 + vibrancy * 0.40);
-    color = clamp(color, float3(0.0), float3(0.972));         // 上限略低于纯白，杜绝大片洗白
+    color += (dither - 0.5) * (0.52 / 255.0);
+    color += grain * (0.045 / 255.0) * (0.34 + vibrancy * 0.20);
+    color = clamp(color, float3(0.0), float3(0.935));         // 上限低于纯白，杜绝大片洗白/刺眼
     return float4(color, 1.0);
 }
 """#

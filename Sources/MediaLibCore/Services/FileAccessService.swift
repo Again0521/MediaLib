@@ -6,6 +6,7 @@ public struct AppDirectories {
     public let databaseBackups: URL
     public let cache: URL
     public let thumbnails: URL
+    public let previewFrames: URL
     public let logs: URL
 }
 
@@ -30,10 +31,11 @@ public enum FileAccessService {
         let appSupport = supportBase.appendingPathComponent("MediaLib", isDirectory: true)
         let cache = cacheBase.appendingPathComponent("MediaLib", isDirectory: true)
         let thumbnails = cache.appendingPathComponent("Thumbnails", isDirectory: true)
+        let previewFrames = cache.appendingPathComponent("PreviewFrames", isDirectory: true)
         let logs = appSupport.appendingPathComponent("Logs", isDirectory: true)
         let databaseBackups = appSupport.appendingPathComponent("DatabaseBackups", isDirectory: true)
 
-        for directory in [appSupport, cache, thumbnails, logs, databaseBackups] {
+        for directory in [appSupport, cache, thumbnails, previewFrames, logs, databaseBackups] {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
 
@@ -43,6 +45,7 @@ public enum FileAccessService {
             databaseBackups: databaseBackups,
             cache: cache,
             thumbnails: thumbnails,
+            previewFrames: previewFrames,
             logs: logs
         )
     }

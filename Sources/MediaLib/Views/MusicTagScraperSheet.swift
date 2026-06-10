@@ -322,15 +322,17 @@ struct MusicTagScraperSheet: View {
     private var footer: some View {
         HStack(spacing: 12) {
             if writeFileTags {
-                Label("写入会修改本地音频文件；远程或不支持格式会逐条跳过并显示失败原因。", systemImage: "exclamationmark.shield")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                AppInlineNoticeLabel(
+                    text: "写入会修改本地音频文件；远程或不支持格式会逐条跳过并显示失败原因。",
+                    systemImage: "exclamationmark.shield",
+                    lineLimit: 2
+                )
             } else {
-                Label("默认只更新 MediaLIB 索引；打开“写入文件”后才会改动音乐文件标签。", systemImage: "info.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                AppInlineNoticeLabel(
+                    text: "默认只更新 MediaLIB 索引；打开“写入文件”后才会改动音乐文件标签。",
+                    systemImage: "info.circle",
+                    lineLimit: 2
+                )
             }
 
             Spacer()

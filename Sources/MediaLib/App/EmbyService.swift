@@ -6,6 +6,18 @@ struct EmbySession {
     var username: String
     var userID: String
     var accessToken: String
+    var provider: RemoteConnectorProvider = .emby
+}
+
+private extension EmbySession {
+    var stableIDPrefix: String {
+        switch provider {
+        case .jellyfin:
+            return "jellyfin"
+        default:
+            return "emby"
+        }
+    }
 }
 
 enum EmbyServiceError: LocalizedError {
@@ -20,7 +32,7 @@ enum EmbyServiceError: LocalizedError {
         case .authenticationExpired:
             return "Emby 登录已失效，需要重新认证。"
         case .clientRestricted:
-            return "该 Emby 服务器可能限制第三方客户端接入。请联系管理员将 MediaLIB 加入白名单。"
+            return "该远程服务器可能限制第三方客户端接入。请联系管理员将 MediaLIB 加入白名单。"
         case .requestFailed(let statusCode):
             return "Emby 请求失败（HTTP \(statusCode)），请检查服务器状态和网络连接。"
         }
@@ -117,7 +129,12 @@ struct EmbyService {
         return false
     }
 
-    func authenticate(serverURL: URL, username: String, password: String) async throws -> EmbySession {
+    func authenticate(
+        serverURL: URL,
+        username: String,
+        password: String,
+        provider: RemoteConnectorProvider = .emby
+    ) async throws -> EmbySession {
         let baseURL = normalizedServerURL(serverURL)
         var request = URLRequest(url: baseURL.appendingPathComponent("Users/AuthenticateByName"))
         request.httpMethod = "POST"
@@ -133,19 +150,35 @@ struct EmbyService {
             serverURL: baseURL,
             username: payload.User.Name ?? username,
             userID: payload.User.Id,
-            accessToken: payload.AccessToken
+            accessToken: payload.AccessToken,
+            provider: provider
         )
     }
 
-    func fetchItems(session: EmbySession, sourceID: String, sourcePath: String) async throws -> [MediaItem] {
-        let libraries = try await fetchLibraries(session: session, sourceID: sourceID, sourceName: session.serverURL.host ?? "Emby")
+    func fetchItems(
+        session: EmbySession,
+        sourceID: String,
+        sourcePath: String,
+        selectedLibraryIDs: Set<String> = []
+    ) async throws -> [MediaItem] {
+        let libraries = try await fetchLibraries(
+            session: session,
+            sourceID: sourceID,
+            sourceName: session.serverURL.host ?? session.provider.displayName
+        )
         guard !libraries.isEmpty else {
+            guard selectedLibraryIDs.isEmpty else { return [] }
             return try await fetchItems(session: session, sourceID: sourceID, sourcePath: sourcePath, parentID: nil)
         }
 
+        let syncLibraries = selectedLibraryIDs.isEmpty
+            ? libraries
+            : libraries.filter { selectedLibraryIDs.contains($0.viewID) || selectedLibraryIDs.contains($0.id) }
+        guard !syncLibraries.isEmpty else { return [] }
+
         var imported: [MediaItem] = []
         var seen = Set<String>()
-        for library in libraries {
+        for library in syncLibraries {
             let libraryPath = Self.librarySourcePath(base: sourcePath, library: library)
             let items = try await fetchItems(session: session, sourceID: sourceID, sourcePath: libraryPath, parentID: library.viewID)
             for item in items where seen.insert(item.id).inserted {
@@ -304,13 +337,13 @@ struct EmbyService {
 
     static func sourceRootPath(from librarySourcePath: String) -> String? {
         guard let range = librarySourcePath.range(of: "/library/") else {
-            return librarySourcePath.hasPrefix("emby://") ? librarySourcePath : nil
+            return isMediaServerSourcePath(librarySourcePath) ? librarySourcePath : nil
         }
         return String(librarySourcePath[..<range.lowerBound])
     }
 
     static func libraryInfo(from sourcePath: String) -> (id: String, name: String?, collectionType: String?)? {
-        guard sourcePath.hasPrefix("emby://"),
+        guard isMediaServerSourcePath(sourcePath),
               let range = sourcePath.range(of: "/library/") else { return nil }
         let remainder = sourcePath[range.upperBound...]
         let parts = remainder.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
@@ -338,6 +371,11 @@ struct EmbyService {
         guard parts.count >= 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
         let name = parts[0].removingPercentEncoding ?? parts[0]
         return (parts[1], name, nil)
+    }
+
+    static func isMediaServerSourcePath(_ value: String?) -> Bool {
+        guard let value else { return false }
+        return value.hasPrefix("emby://") || value.hasPrefix("jellyfin://") || value.hasPrefix("plex://")
     }
 
     private func fetchItems(session: EmbySession, sourceID: String, sourcePath: String, parentID: String?) async throws -> [MediaItem] {
@@ -418,9 +456,9 @@ struct EmbyService {
 
     private func mediaItem(from dto: EmbyItemDTO, session: EmbySession, sourceID: String, sourcePath: String) -> MediaItem? {
         guard let type = mediaType(for: dto.type) else { return nil }
-        let id = StableID.make(prefix: "emby", value: "\(sourceID)-\(dto.Id)")
+        let id = StableID.make(prefix: session.stableIDPrefix, value: "\(sourceID)-\(dto.Id)")
         let episodeParent = dto.SeriesId ?? dto.ParentId
-        let parentID = episodeParent.map { StableID.make(prefix: "emby", value: "\(sourceID)-\($0)") }
+        let parentID = episodeParent.map { StableID.make(prefix: session.stableIDPrefix, value: "\(sourceID)-\($0)") }
         let duration = dto.RunTimeTicks.map { Double($0) / 10_000_000.0 }
         let position = dto.UserData?.PlaybackPositionTicks.map { Double($0) / 10_000_000.0 } ?? 0
         let progress: Double
@@ -469,7 +507,7 @@ struct EmbyService {
             watched: dto.UserData?.Played ?? false,
             favorite: dto.UserData?.IsFavorite ?? false,
             externalID: dto.Id,
-            metadataProvider: "Emby",
+            metadataProvider: session.provider.displayName,
             lastPlayedAt: dto.UserData?.LastPlayedDate.flatMap(Self.parseEmbyDate),
             genre: (dto.Genres?.isEmpty == false) ? dto.Genres?.joined(separator: ", ") : nil
         )
@@ -511,7 +549,7 @@ struct EmbyService {
         session: EmbySession
     ) -> [MediaItem] {
         return seriesByID.compactMap { seriesID, episodeDTO in
-            let parentID = StableID.make(prefix: "emby", value: "\(sourceID)-\(seriesID)")
+            let parentID = StableID.make(prefix: session.stableIDPrefix, value: "\(sourceID)-\(seriesID)")
             guard existingIDs.insert(parentID).inserted else { return nil }
             return MediaItem(
                 id: parentID,
@@ -524,7 +562,7 @@ struct EmbyService {
                 userRating: Self.seedUserRating(from: episodeDTO.CommunityRating),
                 sourcePath: sourcePath,
                 externalID: seriesID,
-                metadataProvider: "Emby",
+                metadataProvider: session.provider.displayName,
                 genre: (episodeDTO.Genres?.isEmpty == false) ? episodeDTO.Genres?.joined(separator: ", ") : nil
             )
         }

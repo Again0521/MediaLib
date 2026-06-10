@@ -15,7 +15,7 @@ enum VideoCacheDownloadControlError: LocalizedError {
         case .invalidHTTPStatus(let status):
             return "服务器返回 \(status)，缓存失败。"
         case .missingTemporaryFile:
-            return "下载完成后没有找到临时文件。"
+            return "缓存完成校验失败，请重新缓存。"
         }
     }
 }

@@ -212,7 +212,10 @@ final class LibMpvClient {
     func setString(_ name: String, _ value: String) {
         _ = name.withCString { namePointer in
             value.withCString { valuePointer in
-                setPropertyFunction(handle, namePointer, Format.string, valuePointer)
+                var propertyValue: UnsafePointer<CChar>? = valuePointer
+                return withUnsafePointer(to: &propertyValue) { propertyPointer in
+                    setPropertyFunction(handle, namePointer, Format.string, UnsafeRawPointer(propertyPointer))
+                }
             }
         }
     }
@@ -347,7 +350,7 @@ private enum LibMpvError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .libraryMissing:
-            return "未找到 libmpv 播放核心。请重新打包应用，或临时安装 mpv。"
+            return "未找到视频播放核心。请重新安装 MediaLIB，或联系维护者获取完整安装包。"
         case .missingSymbol(let name):
             return "libmpv 缺少符号：\(name)"
         case .createFailed:

@@ -21,6 +21,8 @@ public struct MediaSource: Identifiable, Codable, Hashable {
     public var includeInHealthCheck: Bool
     /// Emby 痕迹数据同步策略：控制播放记录、收藏和已观看状态是否与服务端互写。
     public var remoteTraceSyncMode: RemoteTraceSyncMode
+    /// Emby 来源纳入 MediaLIB 的服务器媒体库 ID。空数组表示保持兼容的全库同步。
+    public var selectedEmbyLibraryIDs: [String]
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -41,6 +43,7 @@ public struct MediaSource: Identifiable, Codable, Hashable {
         preferMetadataWriteToSource: Bool = false,
         includeInHealthCheck: Bool = true,
         remoteTraceSyncMode: RemoteTraceSyncMode = .bidirectional,
+        selectedEmbyLibraryIDs: [String] = [],
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
@@ -60,6 +63,7 @@ public struct MediaSource: Identifiable, Codable, Hashable {
         self.preferMetadataWriteToSource = preferMetadataWriteToSource
         self.includeInHealthCheck = includeInHealthCheck
         self.remoteTraceSyncMode = remoteTraceSyncMode
+        self.selectedEmbyLibraryIDs = selectedEmbyLibraryIDs
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -81,6 +85,7 @@ public struct MediaSource: Identifiable, Codable, Hashable {
         case preferMetadataWriteToSource
         case includeInHealthCheck
         case remoteTraceSyncMode
+        case selectedEmbyLibraryIDs
         case createdAt
         case updatedAt
     }
@@ -104,6 +109,7 @@ public struct MediaSource: Identifiable, Codable, Hashable {
             preferMetadataWriteToSource: try container.decodeIfPresent(Bool.self, forKey: .preferMetadataWriteToSource) ?? false,
             includeInHealthCheck: try container.decodeIfPresent(Bool.self, forKey: .includeInHealthCheck) ?? true,
             remoteTraceSyncMode: try container.decodeIfPresent(RemoteTraceSyncMode.self, forKey: .remoteTraceSyncMode) ?? .bidirectional,
+            selectedEmbyLibraryIDs: try container.decodeIfPresent([String].self, forKey: .selectedEmbyLibraryIDs) ?? [],
             createdAt: try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(),
             updatedAt: try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         )
@@ -116,6 +122,12 @@ public struct MediaSource: Identifiable, Codable, Hashable {
     public var sourceKind: MediaSourceKind {
         if path.hasPrefix("emby://") {
             return .emby
+        }
+        if path.hasPrefix("jellyfin://") {
+            return .jellyfin
+        }
+        if path.hasPrefix("plex://") {
+            return .plex
         }
         if path.hasPrefix("smb://") {
             return .smb
@@ -132,17 +144,10 @@ public struct MediaSource: Identifiable, Codable, Hashable {
         return .local
     }
 
-    public var exists: Bool {
-        if sourceKind == .emby {
-            return true
-        }
-        return FileManager.default.fileExists(atPath: path)
-    }
-
     public var displayPath: String {
         guard let components = URLComponents(string: path),
               let scheme = components.scheme,
-              ["emby", "smb", "ftp", "ftps"].contains(scheme.lowercased()) else {
+              ["emby", "jellyfin", "plex", "smb", "ftp", "ftps"].contains(scheme.lowercased()) else {
             return path
         }
         var sanitized = components
@@ -155,8 +160,25 @@ public struct MediaSource: Identifiable, Codable, Hashable {
 public enum MediaSourceKind: String, Codable, Hashable {
     case local
     case emby
+    case jellyfin
+    case plex
     case smb
     case ftp
+
+    public var isRemoteMediaServer: Bool {
+        self == .emby || self == .jellyfin || self == .plex
+    }
+
+    public var displayName: String {
+        switch self {
+        case .local: return "本地"
+        case .emby: return "EMBY"
+        case .jellyfin: return "Jellyfin"
+        case .plex: return "Plex"
+        case .smb: return "SMB"
+        case .ftp: return "FTP"
+        }
+    }
 }
 
 public enum RemoteTraceSyncMode: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -169,7 +191,7 @@ public enum RemoteTraceSyncMode: String, Codable, CaseIterable, Identifiable, Se
     public var title: String {
         switch self {
         case .bidirectional: return "数据双向同步"
-        case .importOnly: return "仅从 Emby 同步"
+        case .importOnly: return "仅从服务器同步"
         case .disabled: return "数据不同步"
         }
     }
@@ -185,11 +207,11 @@ public enum RemoteTraceSyncMode: String, Codable, CaseIterable, Identifiable, Se
     public var detail: String {
         switch self {
         case .bidirectional:
-            return "本地播放记录、收藏和已观看状态会与 Emby 互相更新。"
+            return "本地播放记录、收藏和已观看状态会与远程服务器互相更新。"
         case .importOnly:
-            return "只接收 Emby 状态，不把本机痕迹写回服务器。"
+            return "只接收服务器状态，不把本机痕迹写回服务器。"
         case .disabled:
-            return "本机痕迹完全保留在 MediaLIB，不受 Emby 多人使用影响。"
+            return "本机痕迹完全保留在 MediaLIB，不受多人共用服务器影响。"
         }
     }
 }

@@ -12,6 +12,33 @@ struct VideoCacheEntry: Codable, Hashable, Sendable {
     let videoBitrate: Int64?
     let fileSize: Int64?
     let createdAt: Date
+    let lastAccessedAt: Date?
+
+    init(
+        itemID: String,
+        parentID: String?,
+        title: String,
+        localPath: String,
+        qualityID: String,
+        qualityLabel: String,
+        resolution: String?,
+        videoBitrate: Int64?,
+        fileSize: Int64?,
+        createdAt: Date,
+        lastAccessedAt: Date? = nil
+    ) {
+        self.itemID = itemID
+        self.parentID = parentID
+        self.title = title
+        self.localPath = localPath
+        self.qualityID = qualityID
+        self.qualityLabel = qualityLabel
+        self.resolution = resolution
+        self.videoBitrate = videoBitrate
+        self.fileSize = fileSize
+        self.createdAt = createdAt
+        self.lastAccessedAt = lastAccessedAt
+    }
 }
 
 enum VideoSeriesCacheState: Equatable, Sendable {
@@ -30,9 +57,34 @@ struct VideoCacheMaintenanceResult: Equatable, Sendable {
     let missingManifestEntries: Int
     let orphanManifestEntries: Int
     let untrackedFiles: Int
+    let overLimitEntries: Int
+    let bytesBeforeCleanup: Int64
+    let bytesAfterCleanup: Int64
+    let byteLimit: Int64?
 
     var totalRemoved: Int {
-        missingManifestEntries + orphanManifestEntries + untrackedFiles
+        missingManifestEntries + orphanManifestEntries + untrackedFiles + overLimitEntries
+    }
+}
+
+struct VideoCacheStorageSummary: Equatable, Sendable {
+    let entryCount: Int
+    let totalBytes: Int64
+    let byteLimit: Int64?
+
+    var isOverLimit: Bool {
+        guard let byteLimit, byteLimit > 0 else { return false }
+        return totalBytes > byteLimit
+    }
+}
+
+struct VideoCacheCleanupHint: Sendable {
+    let watchedItemIDs: Set<String>
+    let recentlyPlayedItemIDs: Set<String>
+
+    init(watchedItemIDs: Set<String> = [], recentlyPlayedItemIDs: Set<String> = []) {
+        self.watchedItemIDs = watchedItemIDs
+        self.recentlyPlayedItemIDs = recentlyPlayedItemIDs
     }
 }
 
@@ -97,7 +149,21 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
         }
     }
 
-    func runMaintenance(validItemIDs: Set<String>) throws -> VideoCacheMaintenanceResult {
+    func storageSummary(byteLimit: Int64?) -> VideoCacheStorageSummary {
+        lock.withLock {
+            VideoCacheStorageSummary(
+                entryCount: entries.count,
+                totalBytes: estimatedTotalBytesLocked(for: entries),
+                byteLimit: Self.normalizedByteLimit(byteLimit)
+            )
+        }
+    }
+
+    func runMaintenance(
+        validItemIDs: Set<String>,
+        byteLimit: Int64?,
+        cleanupHint: VideoCacheCleanupHint = VideoCacheCleanupHint()
+    ) throws -> VideoCacheMaintenanceResult {
         try lock.withLock {
             let originalCount = entries.count
             var nextEntries = pruneMissingFilesLocked(entries)
@@ -110,7 +176,20 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
             }
 
             let untrackedFiles = pruneUntrackedCacheFilesLocked(keeping: nextEntries)
-            if nextEntries != entries || missingManifestEntries > 0 || !orphanEntries.isEmpty || untrackedFiles > 0 {
+            let byteLimit = Self.normalizedByteLimit(byteLimit)
+            let bytesBeforeCleanup = totalTrackedBytesLocked(for: nextEntries)
+            let overLimitEntries = pruneOverLimitEntriesLocked(
+                entries: &nextEntries,
+                byteLimit: byteLimit,
+                cleanupHint: cleanupHint
+            )
+            let bytesAfterCleanup = totalTrackedBytesLocked(for: nextEntries)
+
+            if nextEntries != entries ||
+                missingManifestEntries > 0 ||
+                !orphanEntries.isEmpty ||
+                untrackedFiles > 0 ||
+                overLimitEntries > 0 {
                 entries = nextEntries
                 try saveLocked(entries)
             }
@@ -118,7 +197,11 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
             return VideoCacheMaintenanceResult(
                 missingManifestEntries: missingManifestEntries,
                 orphanManifestEntries: orphanEntries.count,
-                untrackedFiles: untrackedFiles
+                untrackedFiles: untrackedFiles,
+                overLimitEntries: overLimitEntries,
+                bytesBeforeCleanup: bytesBeforeCleanup,
+                bytesAfterCleanup: bytesAfterCleanup,
+                byteLimit: byteLimit
             )
         }
     }
@@ -127,6 +210,28 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
         lock.withLock {
             guard let entry = entries[itemID], fileManager.fileExists(atPath: entry.localPath) else { return nil }
             return entry
+        }
+    }
+
+    func markAccessed(itemID: String, at date: Date = Date()) throws {
+        try lock.withLock {
+            guard var entry = entries[itemID],
+                  fileManager.fileExists(atPath: entry.localPath) else { return }
+            entry = VideoCacheEntry(
+                itemID: entry.itemID,
+                parentID: entry.parentID,
+                title: entry.title,
+                localPath: entry.localPath,
+                qualityID: entry.qualityID,
+                qualityLabel: entry.qualityLabel,
+                resolution: entry.resolution,
+                videoBitrate: entry.videoBitrate,
+                fileSize: entry.fileSize,
+                createdAt: entry.createdAt,
+                lastAccessedAt: date
+            )
+            entries[itemID] = entry
+            try saveLocked(entries)
         }
     }
 
@@ -249,10 +354,93 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
             options: [.skipsHiddenFiles]
         ) else { return }
         for file in files {
-            guard file.deletingPathExtension().lastPathComponent.hasPrefix(base),
+            guard Self.isSidecarBase(file.deletingPathExtension().lastPathComponent, forVideoBase: base),
                   Self.sidecarSubtitleExtensions.contains(file.pathExtension.lowercased()) else { continue }
             try? fileManager.removeItem(at: file)
         }
+    }
+
+    private func pruneOverLimitEntriesLocked(
+        entries: inout [String: VideoCacheEntry],
+        byteLimit: Int64?,
+        cleanupHint: VideoCacheCleanupHint
+    ) -> Int {
+        guard let byteLimit, byteLimit > 0 else { return 0 }
+        var totalBytes = totalTrackedBytesLocked(for: entries)
+        guard totalBytes > byteLimit else { return 0 }
+
+        let candidates = entries.values.sorted { lhs, rhs in
+            let lhsScore = cleanupScore(for: lhs, hint: cleanupHint)
+            let rhsScore = cleanupScore(for: rhs, hint: cleanupHint)
+            if lhsScore != rhsScore { return lhsScore > rhsScore }
+            return cacheRecencyDate(lhs) < cacheRecencyDate(rhs)
+        }
+
+        var removed = 0
+        for entry in candidates where totalBytes > byteLimit {
+            let bytes = trackedBytesLocked(for: entry)
+            do {
+                try removeCachedFilesLocked(for: entry)
+                entries.removeValue(forKey: entry.itemID)
+                totalBytes = max(totalBytes - bytes, 0)
+                removed += 1
+            } catch {
+                continue
+            }
+        }
+        return removed
+    }
+
+    private func cleanupScore(for entry: VideoCacheEntry, hint: VideoCacheCleanupHint) -> Int {
+        if hint.watchedItemIDs.contains(entry.itemID), !hint.recentlyPlayedItemIDs.contains(entry.itemID) { return 3 }
+        if !hint.recentlyPlayedItemIDs.contains(entry.itemID) { return 2 }
+        if hint.watchedItemIDs.contains(entry.itemID) { return 1 }
+        return 0
+    }
+
+    private func cacheRecencyDate(_ entry: VideoCacheEntry) -> Date {
+        entry.lastAccessedAt ?? entry.createdAt
+    }
+
+    private func totalTrackedBytesLocked(for entries: [String: VideoCacheEntry]) -> Int64 {
+        entries.values.reduce(Int64(0)) { partial, entry in
+            partial + trackedBytesLocked(for: entry)
+        }
+    }
+
+    private func estimatedTotalBytesLocked(for entries: [String: VideoCacheEntry]) -> Int64 {
+        // 设置页只需要轻量趋势值，避免滚动或播放缓存时同步枚举大量字幕旁路文件。
+        // 真正删除前的容量回收仍通过 totalTrackedBytesLocked 做一次完整核算。
+        entries.values.reduce(Int64(0)) { partial, entry in
+            partial + max(entry.fileSize ?? fileSize(at: URL(fileURLWithPath: entry.localPath)) ?? 0, 0)
+        }
+    }
+
+    private func trackedBytesLocked(for entry: VideoCacheEntry) -> Int64 {
+        let videoURL = URL(fileURLWithPath: entry.localPath)
+        var total = fileSize(at: videoURL) ?? entry.fileSize ?? 0
+        let directory = videoURL.deletingLastPathComponent()
+        let base = videoURL.deletingPathExtension().lastPathComponent
+        guard let files = try? fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else { return max(total, 0) }
+        for file in files {
+            guard Self.sidecarSubtitleExtensions.contains(file.pathExtension.lowercased()),
+                  Self.isSidecarBase(file.deletingPathExtension().lastPathComponent, forVideoBase: base) else { continue }
+            total += fileSize(at: file) ?? 0
+        }
+        return max(total, 0)
+    }
+
+    private func fileSize(at url: URL) -> Int64? {
+        if let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+           let fileSize = values.fileSize {
+            return Int64(fileSize)
+        }
+        let attributes = try? fileManager.attributesOfItem(atPath: url.path)
+        return attributes?[.size] as? Int64
     }
 
     private func pruneUntrackedCacheFilesLocked(keeping entries: [String: VideoCacheEntry]) -> Int {
@@ -273,7 +461,7 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
             if keptVideoPaths.contains(file.path) { continue }
             let base = file.deletingPathExtension().lastPathComponent
             let isTrackedSidecar = Self.sidecarSubtitleExtensions.contains(file.pathExtension.lowercased()) &&
-                keptSidecarBases.contains { base.hasPrefix($0) }
+                keptSidecarBases.contains { Self.isSidecarBase(base, forVideoBase: $0) }
             if isTrackedSidecar { continue }
             do {
                 try fileManager.removeItem(at: file)
@@ -283,6 +471,12 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
             }
         }
         return removed
+    }
+
+    private static func isSidecarBase(_ candidateBase: String, forVideoBase videoBase: String) -> Bool {
+        // Subtitle sidecars are written as "<video-base>.<language>.<stream>.<ext>".
+        // Requiring the dot boundary prevents deleting "abcde.zh.srt" when the cached video is "abc.mp4".
+        candidateBase == videoBase || candidateBase.hasPrefix("\(videoBase).")
     }
 
     private func safeComponent(_ raw: String) -> String {
@@ -323,6 +517,11 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
             return "vtt"
         }
         return sidecarSubtitleExtensions.contains(normalized) ? normalized : nil
+    }
+
+    private static func normalizedByteLimit(_ value: Int64?) -> Int64? {
+        guard let value, value > 0 else { return nil }
+        return value
     }
 }
 

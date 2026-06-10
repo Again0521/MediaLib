@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public final class DatabaseManager {
-    public static let currentSchemaVersion = 10
+    public static let currentSchemaVersion = 18
 
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
@@ -266,6 +266,62 @@ public final class DatabaseManager {
             }
             version = 10
         }
+        if version < 11 {
+            try transaction {
+                try migrateToVersion11()
+                try execute("PRAGMA user_version = 11")
+            }
+            version = 11
+        }
+        if version < 12 {
+            try transaction {
+                try migrateToVersion12()
+                try execute("PRAGMA user_version = 12")
+            }
+            version = 12
+        }
+        if version < 13 {
+            try transaction {
+                try migrateToVersion13()
+                try execute("PRAGMA user_version = 13")
+            }
+            version = 13
+        }
+        if version < 14 {
+            try transaction {
+                try migrateToVersion14()
+                try execute("PRAGMA user_version = 14")
+            }
+            version = 14
+        }
+        if version < 15 {
+            try transaction {
+                try migrateToVersion15()
+                try execute("PRAGMA user_version = 15")
+            }
+            version = 15
+        }
+        if version < 16 {
+            try transaction {
+                try migrateToVersion16()
+                try execute("PRAGMA user_version = 16")
+            }
+            version = 16
+        }
+        if version < 17 {
+            try transaction {
+                try migrateToVersion17()
+                try execute("PRAGMA user_version = 17")
+            }
+            version = 17
+        }
+        if version < 18 {
+            try transaction {
+                try migrateToVersion18()
+                try execute("PRAGMA user_version = 18")
+            }
+            version = 18
+        }
         guard version == Self.currentSchemaVersion else {
             throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
         }
@@ -505,6 +561,214 @@ public final class DatabaseManager {
         END
         WHERE user_rating IS NULL AND rating IS NOT NULL
         """)
+    }
+
+    private func migrateToVersion11() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS video_manual_collections (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          created_at TEXT,
+          updated_at TEXT
+        )
+        """)
+        try execute("""
+        CREATE TABLE IF NOT EXISTS video_manual_collection_items (
+          collection_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          added_at TEXT,
+          PRIMARY KEY(collection_id, media_id),
+          FOREIGN KEY(collection_id) REFERENCES video_manual_collections(id) ON DELETE CASCADE,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_video_manual_collections_updated_at ON video_manual_collections(updated_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_video_manual_collection_items_position ON video_manual_collection_items(collection_id, position)")
+        try execute("CREATE INDEX IF NOT EXISTS index_video_manual_collection_items_media_id ON video_manual_collection_items(media_id)")
+    }
+
+    private func migrateToVersion12() throws {
+        try addColumnIfMissing(table: "video_smart_collections", column: "rules_json", definition: "rules_json TEXT")
+    }
+
+    private func migrateToVersion13() throws {
+        try addColumnIfMissing(
+            table: "video_manual_collections",
+            column: "show_on_home",
+            definition: "show_on_home INTEGER NOT NULL DEFAULT 0"
+        )
+        try addColumnIfMissing(
+            table: "video_smart_collections",
+            column: "show_on_home",
+            definition: "show_on_home INTEGER NOT NULL DEFAULT 0"
+        )
+    }
+
+    private func migrateToVersion14() throws {
+        try addColumnIfMissing(
+            table: "media_sources",
+            column: "selected_emby_library_ids",
+            definition: "selected_emby_library_ids TEXT"
+        )
+    }
+
+    private func migrateToVersion15() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS video_offline_subscriptions (
+          id TEXT PRIMARY KEY,
+          series_id TEXT NOT NULL UNIQUE,
+          series_title TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          episode_limit INTEGER NOT NULL DEFAULT 3,
+          quality_id TEXT,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT,
+          updated_at TEXT,
+          FOREIGN KEY(series_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_video_offline_subscriptions_enabled ON video_offline_subscriptions(enabled)")
+        try execute("CREATE INDEX IF NOT EXISTS index_video_offline_subscriptions_updated_at ON video_offline_subscriptions(updated_at)")
+    }
+
+    private func migrateToVersion16() throws {
+        try addColumnIfMissing(table: "video_offline_subscriptions", column: "season_number", definition: "season_number INTEGER")
+        try addColumnIfMissing(table: "video_offline_subscriptions", column: "paused_until", definition: "paused_until TEXT")
+        try addColumnIfMissing(table: "video_offline_subscriptions", column: "expires_at", definition: "expires_at TEXT")
+        try addColumnIfMissing(
+            table: "video_offline_subscriptions",
+            column: "network_policy",
+            definition: "network_policy TEXT NOT NULL DEFAULT 'allowRemote'"
+        )
+        try execute("CREATE INDEX IF NOT EXISTS index_video_offline_subscriptions_season ON video_offline_subscriptions(series_id, season_number)")
+        try execute("CREATE INDEX IF NOT EXISTS index_video_offline_subscriptions_paused_until ON video_offline_subscriptions(paused_until)")
+        try execute("CREATE INDEX IF NOT EXISTS index_video_offline_subscriptions_expires_at ON video_offline_subscriptions(expires_at)")
+    }
+
+    private func migrateToVersion17() throws {
+        try addColumnIfMissing(
+            table: "playback_markers",
+            column: "review_status",
+            definition: "review_status TEXT NOT NULL DEFAULT 'accepted'"
+        )
+        try addColumnIfMissing(table: "playback_markers", column: "detector_identifier", definition: "detector_identifier TEXT")
+        try addColumnIfMissing(table: "playback_markers", column: "confidence", definition: "confidence REAL")
+        try execute("CREATE INDEX IF NOT EXISTS index_playback_markers_review ON playback_markers(media_id, review_status)")
+        try execute("CREATE INDEX IF NOT EXISTS index_playback_markers_origin_review ON playback_markers(origin, review_status)")
+    }
+
+    private func migrateToVersion18() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS metadata_correction_history (
+          id TEXT PRIMARY KEY,
+          batch_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          field_name TEXT NOT NULL,
+          old_value TEXT,
+          new_value TEXT,
+          source TEXT NOT NULL,
+          created_at TEXT,
+          undone_at TEXT,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_metadata_correction_media_time ON metadata_correction_history(media_id, created_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_metadata_correction_batch ON metadata_correction_history(batch_id)")
+        try execute("CREATE INDEX IF NOT EXISTS index_metadata_correction_undone ON metadata_correction_history(media_id, undone_at)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS local_user_profiles (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          is_default INTEGER NOT NULL DEFAULT 0,
+          avatar_symbol TEXT,
+          restricts_private_items INTEGER NOT NULL DEFAULT 0,
+          child_mode INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT,
+          updated_at TEXT
+        )
+        """)
+        try execute("CREATE UNIQUE INDEX IF NOT EXISTS index_local_user_profiles_default ON local_user_profiles(is_default) WHERE is_default = 1")
+        try execute("CREATE INDEX IF NOT EXISTS index_local_user_profiles_updated_at ON local_user_profiles(updated_at)")
+        let now = DateCoding.string(from: Date()) ?? ""
+        try execute(
+            """
+            INSERT INTO local_user_profiles (id, name, is_default, avatar_symbol, restricts_private_items, child_mode, created_at, updated_at)
+            SELECT ?, ?, 1, ?, 0, 0, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM local_user_profiles WHERE is_default = 1)
+            """,
+            bindings: [.text("default"), .text("默认档案"), .text("person.circle"), .text(now), .text(now)]
+        )
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS profile_media_state (
+          profile_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          play_count INTEGER NOT NULL DEFAULT 0,
+          play_position REAL NOT NULL DEFAULT 0,
+          play_progress REAL NOT NULL DEFAULT 0,
+          watched INTEGER NOT NULL DEFAULT 0,
+          favorite INTEGER NOT NULL DEFAULT 0,
+          watchlist INTEGER NOT NULL DEFAULT 0,
+          user_rating REAL,
+          last_played_at TEXT,
+          updated_at TEXT,
+          PRIMARY KEY(profile_id, media_id),
+          FOREIGN KEY(profile_id) REFERENCES local_user_profiles(id) ON DELETE CASCADE,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_profile_media_state_media ON profile_media_state(media_id)")
+        try execute("CREATE INDEX IF NOT EXISTS index_profile_media_state_updated ON profile_media_state(profile_id, updated_at)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS remote_connector_accounts (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          account_label TEXT NOT NULL,
+          server_url TEXT,
+          username TEXT,
+          source_id TEXT,
+          connection_mode TEXT NOT NULL DEFAULT 'library',
+          sync_enabled INTEGER NOT NULL DEFAULT 0,
+          capabilities_json TEXT,
+          privacy_note TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          last_synced_at TEXT,
+          FOREIGN KEY(source_id) REFERENCES media_sources(id) ON DELETE SET NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_remote_connector_provider ON remote_connector_accounts(provider)")
+        try execute("CREATE INDEX IF NOT EXISTS index_remote_connector_source ON remote_connector_accounts(source_id)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS sync_conflicts (
+          id TEXT PRIMARY KEY,
+          media_id TEXT,
+          profile_id TEXT,
+          provider TEXT NOT NULL,
+          account_id TEXT,
+          field_name TEXT NOT NULL,
+          local_value TEXT,
+          remote_value TEXT,
+          local_updated_at TEXT,
+          remote_updated_at TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          resolution TEXT,
+          error_message TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          resolved_at TEXT,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE,
+          FOREIGN KEY(profile_id) REFERENCES local_user_profiles(id) ON DELETE CASCADE,
+          FOREIGN KEY(account_id) REFERENCES remote_connector_accounts(id) ON DELETE SET NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_sync_conflicts_status ON sync_conflicts(status, updated_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_sync_conflicts_media ON sync_conflicts(media_id, provider, field_name)")
+        try execute("CREATE INDEX IF NOT EXISTS index_sync_conflicts_account ON sync_conflicts(account_id)")
     }
 
     private func validateBackup(at backupURL: URL) throws {

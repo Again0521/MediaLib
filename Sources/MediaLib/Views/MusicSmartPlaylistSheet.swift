@@ -126,7 +126,7 @@ struct MusicSmartPlaylistSheet: View {
             .adaptiveMenuControl(selectedTitle: selectedTitle, minWidth: Self.optionMenuMinWidth, maxWidth: Self.optionMenuMaxWidth)
     }
 
-    private static let optionMenuMinWidth: CGFloat = 108
+    private static let optionMenuMinWidth: CGFloat = 76
     private static let optionMenuMaxWidth: CGFloat = 176
 
     private var trimmedName: String {

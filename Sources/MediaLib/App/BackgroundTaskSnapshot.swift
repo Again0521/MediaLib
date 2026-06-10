@@ -8,6 +8,8 @@ enum BackgroundTaskKind: String, Codable, Sendable {
     case cleanup
     case videoCache
     case metadataSupplement
+    case keyframeStoryboard
+    case markerAnalysis
 
     var title: String {
         switch self {
@@ -18,6 +20,8 @@ enum BackgroundTaskKind: String, Codable, Sendable {
         case .cleanup: return "一键清理"
         case .videoCache: return "视频缓存"
         case .metadataSupplement: return "元数据补充"
+        case .keyframeStoryboard: return "章节图"
+        case .markerAnalysis: return "片头片尾检测"
         }
     }
 
@@ -30,6 +34,8 @@ enum BackgroundTaskKind: String, Codable, Sendable {
         case .cleanup: return "sparkles"
         case .videoCache: return "arrow.down.circle"
         case .metadataSupplement: return "tag.badge.plus"
+        case .keyframeStoryboard: return "film.stack"
+        case .markerAnalysis: return "wand.and.stars"
         }
     }
 }
@@ -71,6 +77,9 @@ struct BackgroundTaskSnapshot: Identifiable, Codable, Sendable {
     var finishedAt: Date?
     var isCancellable: Bool
     var hidesDetail: Bool
+    var retrySourceID: String?
+    var retryItemID: String?
+    var retryQualityID: String?
 
     init(
         id: UUID = UUID(),
@@ -82,7 +91,10 @@ struct BackgroundTaskSnapshot: Identifiable, Codable, Sendable {
         startedAt: Date = Date(),
         finishedAt: Date? = nil,
         isCancellable: Bool = true,
-        hidesDetail: Bool = false
+        hidesDetail: Bool = false,
+        retrySourceID: String? = nil,
+        retryItemID: String? = nil,
+        retryQualityID: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -94,5 +106,8 @@ struct BackgroundTaskSnapshot: Identifiable, Codable, Sendable {
         self.finishedAt = finishedAt
         self.isCancellable = isCancellable
         self.hidesDetail = hidesDetail
+        self.retrySourceID = retrySourceID
+        self.retryItemID = retryItemID
+        self.retryQualityID = retryQualityID
     }
 }

@@ -54,7 +54,7 @@ public final class MediaScanner {
         progress: @escaping (ScanProgress) -> Void
     ) async -> ScanSummary {
         guard FileAccessService.isReachableDirectory(source.path) else {
-            let message = "媒体源不可访问：\(source.path)"
+            let message = inaccessibleSourceMessage(source, incremental: false)
             logger?.log(message, level: .warning)
             progress(ScanProgress(sourceID: source.id, status: "failed", totalFiles: 0, processedFiles: 0, currentPath: nil, errorMessage: message))
             return ScanSummary(scannedFiles: 0, importedItems: 0, skippedFiles: 0, errors: [message])
@@ -86,11 +86,7 @@ public final class MediaScanner {
                     ? "隐私媒体源中有文件扫描失败。"
                     : "\(fileURL.lastPathComponent): \(error.localizedDescription)"
                 errors.append(message)
-                if source.mediaType == .privateCollection {
-                    logger?.log(message, level: .error)
-                } else {
-                    logger?.log(message, level: .error)
-                }
+                logger?.log(message, level: .error)
             }
         }
 
@@ -117,7 +113,7 @@ public final class MediaScanner {
         progress: @escaping (ScanProgress) -> Void
     ) async -> ScanSummary {
         guard FileAccessService.isReachableDirectory(source.path) else {
-            let message = "媒体源不可访问，已跳过增量更新：\(source.path)"
+            let message = inaccessibleSourceMessage(source, incremental: true)
             logger?.log(message, level: .warning)
             progress(ScanProgress(sourceID: source.id, status: "failed", totalFiles: 0, processedFiles: 0, currentPath: nil, errorMessage: message))
             return ScanSummary(scannedFiles: 0, importedItems: 0, skippedFiles: 0, errors: [message])
@@ -149,7 +145,7 @@ public final class MediaScanner {
                 deletedFilePaths.insert(canonicalMediaURL(url).path)
             } else if isMetadataSidecar(url) {
                 mediaFiles(at: url.deletingLastPathComponent(), source: source, recursive: false).forEach { importURLs.insert($0) }
-            } else if url.pathExtension.isEmpty {
+            } else {
                 deletedDirectoryPaths.insert(path)
             }
         }
@@ -459,7 +455,7 @@ public final class MediaScanner {
     }
 
     private func isMetadataSidecar(_ url: URL) -> Bool {
-        ["nfo", "jpg", "jpeg", "png", "webp", "heic"].contains(url.pathExtension.lowercased())
+        parser.isSidecarMetadataFile(url)
     }
 
     private func canonicalMediaURL(_ url: URL) -> URL {
@@ -471,6 +467,14 @@ public final class MediaScanner {
             return source.minimumFileSize
         }
         return min(source.minimumFileSize, 512 * 1024)
+    }
+
+    /// 保险库扫描错误不能暴露来源路径；普通来源保留路径便于用户排查挂载问题。
+    private func inaccessibleSourceMessage(_ source: MediaSource, incremental: Bool) -> String {
+        if source.mediaType == .privateCollection {
+            return incremental ? "保险库媒体源不可访问，已跳过增量更新。" : "保险库媒体源不可访问。"
+        }
+        return incremental ? "媒体源不可访问，已跳过增量更新：\(source.path)" : "媒体源不可访问：\(source.path)"
     }
 
     private func musicTitle(for fileURL: URL) -> String {

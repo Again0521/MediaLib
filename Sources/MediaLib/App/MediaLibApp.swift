@@ -83,9 +83,9 @@ struct MediaLibApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            rootView
                 .environmentObject(appState)
-                .preferredColorScheme(appState.settings.theme.colorScheme)
+                .preferredColorScheme(preferredAppColorScheme)
                 // 不在 SwiftUI 层用 .frame(minWidth/minHeight) 限制最小尺寸：它会与音乐展开覆盖层的
                 // ignoresSafeArea 叠加，导致每次展开把窗口最小内容尺寸顶大、收起又不缩回（窗口被撑大）。
                 // 改为在 MainWindowToolbarVisibilityGuard 里用 AppKit 的 contentMinSize 固定最小尺寸。
@@ -157,4 +157,39 @@ struct MediaLibApp: App {
             }
         }
     }
+
+    @ViewBuilder
+    private var rootView: some View {
+#if DEBUG
+        if isMusicVisualDebugMode {
+            MusicPlayerVisualDebugHarness()
+        } else {
+            ContentView()
+        }
+#else
+        ContentView()
+#endif
+    }
+
+    private var preferredAppColorScheme: ColorScheme? {
+#if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        if arguments.contains("--music-player-visual-debug-dark") {
+            return .dark
+        }
+        if arguments.contains("--music-player-visual-debug-light") {
+            return .light
+        }
+#endif
+        return appState.settings.theme.colorScheme
+    }
+
+#if DEBUG
+    private var isMusicVisualDebugMode: Bool {
+        let arguments = ProcessInfo.processInfo.arguments
+        return arguments.contains("--music-player-visual-debug") ||
+            arguments.contains("--music-player-visual-debug-dark") ||
+            arguments.contains("--music-player-visual-debug-light")
+    }
+#endif
 }

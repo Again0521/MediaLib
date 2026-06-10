@@ -139,14 +139,6 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
         year.map(String.init) ?? "未知年份"
     }
 
-    public var isPlayable: Bool {
-        guard let filePath, !filePath.isEmpty else { return false }
-        if isRemoteResource {
-            return true
-        }
-        return FileManager.default.fileExists(atPath: filePath)
-    }
-
     public var isRemoteResource: Bool {
         guard let filePath,
               let scheme = URL(string: filePath)?.scheme?.lowercased() else {
@@ -182,5 +174,9 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
             value?.isEmpty == false ? value : nil
         }
         return values.isEmpty ? nil : values.joined(separator: " · ")
+    }
+
+    public var hasPlaybackTrace: Bool {
+        lastPlayedAt != nil || playPosition > 0 || playProgress > 0 || watched
     }
 }

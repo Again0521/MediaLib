@@ -10,7 +10,21 @@ public final class PlaybackMarkerRepository {
     public func fetch(mediaID: String) throws -> [PlaybackMarker] {
         try database.query(
             """
-            SELECT id, media_id, kind, title, start_time, end_time, origin, created_at, updated_at
+            SELECT id, media_id, kind, title, start_time, end_time, origin, review_status, detector_identifier, confidence, created_at, updated_at
+            FROM playback_markers
+            WHERE media_id = ?
+              AND review_status != ?
+            ORDER BY start_time ASC, created_at ASC
+            """,
+            bindings: [.text(mediaID), .text(PlaybackMarker.ReviewStatus.rejected.rawValue)],
+            map: map(row:)
+        )
+    }
+
+    public func fetchIncludingRejected(mediaID: String) throws -> [PlaybackMarker] {
+        try database.query(
+            """
+            SELECT id, media_id, kind, title, start_time, end_time, origin, review_status, detector_identifier, confidence, created_at, updated_at
             FROM playback_markers
             WHERE media_id = ?
             ORDER BY start_time ASC, created_at ASC
@@ -26,12 +40,13 @@ public final class PlaybackMarkerRepository {
         updated.title = normalizedTitle(marker.title, kind: marker.kind)
         updated.startTime = max(marker.startTime, 0)
         updated.endTime = marker.endTime.map { max($0, 0) }
+        updated.reviewStatus = normalizedReviewStatus(marker.reviewStatus, origin: marker.origin)
         updated.updatedAt = Date()
         try database.execute(
             """
             INSERT INTO playback_markers (
-              id, media_id, kind, title, start_time, end_time, origin, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              id, media_id, kind, title, start_time, end_time, origin, review_status, detector_identifier, confidence, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               media_id = excluded.media_id,
               kind = excluded.kind,
@@ -39,6 +54,9 @@ public final class PlaybackMarkerRepository {
               start_time = excluded.start_time,
               end_time = excluded.end_time,
               origin = excluded.origin,
+              review_status = excluded.review_status,
+              detector_identifier = excluded.detector_identifier,
+              confidence = excluded.confidence,
               updated_at = excluded.updated_at
             """,
             bindings: [
@@ -49,6 +67,9 @@ public final class PlaybackMarkerRepository {
                 .double(updated.startTime),
                 .optionalDouble(updated.endTime),
                 .text(updated.origin.rawValue),
+                .text(updated.reviewStatus.rawValue),
+                .optionalText(updated.detectorIdentifier),
+                .optionalDouble(updated.confidence),
                 .optionalDate(updated.createdAt),
                 .optionalDate(updated.updatedAt)
             ]
@@ -76,9 +97,32 @@ public final class PlaybackMarkerRepository {
         try database.execute("DELETE FROM playback_markers WHERE id = ?", bindings: [.text(id)])
     }
 
+    public func updateReviewStatus(id: String, status: PlaybackMarker.ReviewStatus) throws {
+        try database.execute(
+            """
+            UPDATE playback_markers
+            SET review_status = ?, updated_at = ?
+            WHERE id = ? AND origin = ?
+            """,
+            bindings: [
+                .text(status.rawValue),
+                .optionalDate(Date()),
+                .text(id),
+                .text(PlaybackMarker.Origin.automatic.rawValue)
+            ]
+        )
+    }
+
     private func normalizedTitle(_ title: String, kind: PlaybackMarker.Kind) -> String {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? kind.title : trimmed
+    }
+
+    private func normalizedReviewStatus(
+        _ status: PlaybackMarker.ReviewStatus,
+        origin: PlaybackMarker.Origin
+    ) -> PlaybackMarker.ReviewStatus {
+        origin == .automatic ? status : .accepted
     }
 
     private static func matches(_ lhs: [PlaybackMarker], _ rhs: [PlaybackMarker]) -> Bool {
@@ -111,8 +155,11 @@ public final class PlaybackMarkerRepository {
             startTime: row.double(4) ?? 0,
             endTime: row.double(5),
             origin: PlaybackMarker.Origin(rawValue: row.string(6) ?? "") ?? .manual,
-            createdAt: row.date(7) ?? Date(),
-            updatedAt: row.date(8) ?? Date()
+            reviewStatus: PlaybackMarker.ReviewStatus(rawValue: row.string(7) ?? "") ?? .accepted,
+            detectorIdentifier: row.string(8),
+            confidence: row.double(9),
+            createdAt: row.date(10) ?? Date(),
+            updatedAt: row.date(11) ?? Date()
         )
     }
 }

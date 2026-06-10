@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// #14 樱花彩蛋：花瓣从屏幕上方缓缓飘落到下方，整体持续约 5 秒后淡出消失。
+/// 轻量樱花动效：花瓣从屏幕上方缓缓飘落到下方，整体持续约 5 秒后淡出消失。
 /// 使用 TimelineView(.animation) + Canvas 驱动，按显示器刷新率绘制（高帧率、低开销），
 /// 不拦截点击，覆盖整窗。
 struct SakuraFallView: View {

@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// 受限 Emby 服务器（白名单拒绝）提示面板。
+/// 受限远程媒体服务器（白名单拒绝）提示面板。
 /// 当服务器对登录 / 拉库 / 取流返回 401/403/451 或白名单类错误时弹出，
 /// 提示用户联系管理员，并展示可一键复制的客户端身份信息（Client / Device / DeviceId / Version / User-Agent）。
 struct EmbyRestrictionSheet: View {
@@ -34,15 +34,13 @@ struct EmbyRestrictionSheet: View {
                 truncationMode: .middle
             )
 
-            Text("该 Emby 服务器可能限制第三方客户端接入。请联系管理员将 MediaLIB 加入白名单。")
+            Text("该远程服务器可能限制第三方客户端接入。请联系管理员将 MediaLIB 加入白名单。")
                 .font(.callout)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
 
             if let reason = notice.reason, !reason.isEmpty {
-                Label(reason, systemImage: "info.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                AppInlineNoticeLabel(text: reason, systemImage: "info.circle")
                     .fixedSize(horizontal: false, vertical: true)
             }
 

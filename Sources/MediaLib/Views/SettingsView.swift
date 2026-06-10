@@ -13,20 +13,23 @@ struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
     @State private var showingMusicTagSheet = false
     @State private var showingAboutSoftware = false
+    @State private var showingSyncConflictQueue = false
+    @State private var showingMetadataHistory = false
     @State private var autoStartMusicMetadataConsole = false
 
     var body: some View {
-        // P1：原 ScrollView + LazyVStack 不回收（设置项随滚动累积驻留）。
-        // 改为原生 List 真正虚拟化；每个分组作为一行，保留 860pt 居中最大宽度与 24pt 间距。
+        // 设置分组使用原生 List 虚拟化，每个分组作为一行，保留 860pt 居中最大宽度与 24pt 间距。
         List {
             settingsRow(topPadding: 30) { SettingsHeader() }
-            settingsRow { playbackSettings }
             settingsRow { homeSettings }
+            settingsRow { appearanceSettings }
+            settingsRow { videoPlaybackSettings }
+            settingsRow { musicPlaybackSettings }
             settingsRow { scanSettings }
             settingsRow { metadataSettings }
             settingsRow { subtitleSettings }
             settingsRow { thumbnailSettings }
-            settingsRow { appearanceSettings }
+            settingsRow { connectorStateSettings }
             settingsRow { traktSettings }
             settingsRow { privacySettings }
             settingsRow { advancedSettings }
@@ -56,6 +59,14 @@ struct SettingsView: View {
         .sheet(isPresented: $showingAboutSoftware) {
             AboutMediaLIBSheet()
         }
+        .sheet(isPresented: $showingSyncConflictQueue) {
+            SyncConflictQueueSheet()
+                .environmentObject(appState)
+        }
+        .sheet(isPresented: $showingMetadataHistory) {
+            MetadataCorrectionHistorySheet()
+                .environmentObject(appState)
+        }
     }
 
     // 设置分组行：860pt 居中最大宽度 + 上下内边距构成 24pt 间距，清除 List 默认行样式。
@@ -70,22 +81,8 @@ struct SettingsView: View {
             .listRowSeparator(.hidden)
     }
 
-    private var playbackSettings: some View {
-        SettingsSection(title: "播放与控制", subtitle: "调整视频、音乐和通用播放方式。", systemImage: "play.rectangle") {
-            let usesBuiltInVideo = appState.settings.videoDefaultPlayer == .builtIn
-            let usesAnyBuiltInPlayer = appState.settings.videoDefaultPlayer == .builtIn || appState.settings.musicDefaultPlayer == .builtIn
-            let videoWidthRatio = Binding<Double>(
-                get: {
-                    VideoWindowSizing.screenWidthRatio(for: appState.settings.videoPlayerPreferredWidth)
-                },
-                set: { ratio in
-                    appState.settings.videoPlayerPreferredWidth = VideoWindowSizing.preferredWidth(forScreenWidthRatio: ratio)
-                    appState.saveSettings()
-                }
-            )
-
-            SettingsSubsectionHeader(title: "视频播放", systemImage: "film")
-
+    private var videoPlaybackSettings: some View {
+        SettingsSection(title: "视频播放与缓存", subtitle: "设置视频启动方式、观看规则和离线缓存。", systemImage: "play.rectangle") {
             SettingsRow(title: "视频播放器", systemImage: "play.rectangle") {
                 Picker("视频播放器", selection: Binding(get: {
                     appState.settings.videoDefaultPlayer
@@ -113,6 +110,37 @@ struct SettingsView: View {
                 }
             }
 
+            SettingsDescription(text: "内置视频播放器的窗口宽度、预览图、默认倍速和跳转间隔可在播放窗口齿轮菜单中调整；这里保留默认启动方式，避免切到系统播放器后无法回到内置。")
+
+            SettingsSubsectionHeader(title: "观看规则", systemImage: "slider.horizontal.3")
+
+            SettingsToggleRow(title: "记忆播放进度", systemImage: "clock.arrow.circlepath", isOn: binding(\.rememberPlaybackPosition))
+            SettingsToggleRow(title: "自动播放下一集", systemImage: "forward.end", isOn: binding(\.autoPlayNextEpisode))
+            SettingsToggleRow(title: "播放完成自动标记已看", systemImage: "checkmark.circle", isOn: binding(\.autoMarkWatched))
+
+            if appState.settings.videoDefaultPlayer == .builtIn {
+                SettingsRow(title: "默认倍速", systemImage: "speedometer") {
+                    Picker("默认倍速", selection: binding(\.defaultPlaybackRate)) {
+                        Text("0.75x").tag(0.75)
+                        Text("1.00x").tag(1.0)
+                        Text("1.25x").tag(1.25)
+                        Text("1.50x").tag(1.5)
+                        Text("2.00x").tag(2.0)
+                    }
+                    .labelsHidden()
+                    .settingsMenuControl(selectedTitle: settingsPlaybackRateTitle(appState.settings.defaultPlaybackRate))
+                }
+
+                SettingsRow(title: "快进/快退", systemImage: "gobackward.5") {
+                    Slider(value: binding(\.skipInterval), in: 5...30, step: 5)
+                    Text("\(Int(appState.settings.skipInterval)) 秒")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 54, alignment: .trailing)
+                }
+            }
+
+            SettingsSubsectionHeader(title: "离线缓存", systemImage: "externaldrive.badge.arrow.down")
+
             SettingsRow(title: "视频缓存位置", systemImage: "externaldrive.badge.arrow.down") {
                 SettingsPathText(text: appState.videoCacheDirectoryDisplayPath)
                 Button {
@@ -134,21 +162,36 @@ struct SettingsView: View {
 
             SettingsDescription(text: "离线视频会保存到该位置的 VideoCache 子目录。删除缓存只会移除 MediaLIB 记录的缓存文件，不会改动媒体源。")
 
-            if usesBuiltInVideo {
-                SettingsRow(title: "视频窗口宽度", systemImage: "arrow.left.and.right") {
-                    Slider(
-                        value: videoWidthRatio,
-                        in: VideoWindowSizing.minimumScreenWidthRatio...VideoWindowSizing.maximumScreenWidthRatio,
-                        step: 0.01
-                    )
-                    Text("\(Int((videoWidthRatio.wrappedValue * 100).rounded()))%")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 48, alignment: .trailing)
-                }
+            SettingsRow(title: "视频缓存占用", systemImage: "internaldrive") {
+                Text(appState.videoCacheStorageDisplayText)
+                    .font(.caption.weight(appState.videoCacheStorageSummary.isOverLimit ? .semibold : .regular))
+                    .foregroundStyle(appState.videoCacheStorageSummary.isOverLimit ? AppColors.selectedGlassTint : .secondary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .staticSurfaceBackground(cornerRadius: 9, thickness: 0.86)
             }
 
-            SettingsSubsectionHeader(title: "音乐播放", systemImage: "music.note")
+            SettingsRow(title: "缓存容量上限", systemImage: "externaldrive.badge.minus") {
+                Picker("缓存容量上限", selection: Binding(get: {
+                    appState.settings.videoCacheSizeLimitGB
+                }, set: { value in
+                    appState.updateVideoCacheSizeLimit(value)
+                })) {
+                    ForEach(settingsVideoCacheLimitOptions(current: appState.settings.videoCacheSizeLimitGB), id: \.self) { value in
+                        Text(settingsVideoCacheLimitTitle(value)).tag(value)
+                    }
+                }
+                .labelsHidden()
+                .settingsMenuControl(selectedTitle: appState.videoCacheSizeLimitDisplayText)
+            }
 
+            SettingsDescription(text: "设置上限后，一键清理会优先整理失效记录和无引用文件，再回收已看或较久未播放的离线缓存。")
+        }
+    }
+
+    private var musicPlaybackSettings: some View {
+        SettingsSection(title: "音乐播放", subtitle: "设置音乐播放器、歌词、响度和过渡。", systemImage: "music.note") {
             SettingsRow(title: "音乐播放器", systemImage: "music.note") {
                 Picker("音乐播放器", selection: Binding(get: {
                     appState.settings.musicDefaultPlayer
@@ -238,49 +281,18 @@ struct SettingsView: View {
                     SettingsDescription(text: "5 段均衡（60 / 230 / 910 / 3.6k / 14k Hz）作用于本地与在线音乐，调整在下一首切换时生效。")
                 }
             }
-
-            SettingsSubsectionHeader(title: "通用控制", systemImage: "slider.horizontal.3")
-
-            SettingsToggleRow(title: "记忆播放进度", systemImage: "clock.arrow.circlepath", isOn: binding(\.rememberPlaybackPosition))
-            SettingsToggleRow(title: "自动播放下一集", systemImage: "forward.end", isOn: binding(\.autoPlayNextEpisode))
-            SettingsToggleRow(title: "播放完成自动标记已看", systemImage: "checkmark.circle", isOn: binding(\.autoMarkWatched))
-
-            if usesAnyBuiltInPlayer {
-                SettingsRow(title: "默认倍速", systemImage: "speedometer") {
-                    Picker("默认倍速", selection: binding(\.defaultPlaybackRate)) {
-                        Text("0.75x").tag(0.75)
-                        Text("1.00x").tag(1.0)
-                        Text("1.25x").tag(1.25)
-                        Text("1.50x").tag(1.5)
-                        Text("2.00x").tag(2.0)
-                    }
-                    .labelsHidden()
-                    .settingsMenuControl(selectedTitle: settingsPlaybackRateTitle(appState.settings.defaultPlaybackRate))
-                }
-
-                SettingsRow(title: "快进/快退", systemImage: "gobackward.5") {
-                    Slider(value: binding(\.skipInterval), in: 5...30, step: 5)
-                    Text("\(Int(appState.settings.skipInterval)) 秒")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 54, alignment: .trailing)
-                }
-            }
-
-            if usesBuiltInVideo {
-                SettingsDescription(text: "内置播放器会按视频比例调整窗口，并自动识别同目录字幕。字幕与音轨可在播放器内切换。")
-            }
         }
     }
 
     private var homeSettings: some View {
-        SettingsSection(title: "首页", subtitle: "选择首页显示的内容。", systemImage: "square.grid.2x2") {
+        SettingsSection(title: "首页入口", subtitle: "选择首页显示的内容。", systemImage: "square.grid.2x2") {
             SettingsDescription(text: "首页只显示已开启且有内容的分类，并始终保留至少一个选项卡。")
             HomeTabSettingsGrid()
         }
     }
 
     private var scanSettings: some View {
-        SettingsSection(title: "扫描", subtitle: "设置媒体库的自动更新频率。", systemImage: "arrow.triangle.2.circlepath") {
+        SettingsSection(title: "媒体库更新", subtitle: "设置扫描频率、后台进度和完成提醒。", systemImage: "arrow.triangle.2.circlepath") {
             SettingsRow(title: "自动扫描", systemImage: "clock.arrow.circlepath") {
                 Picker("自动扫描", selection: binding(\.automaticScanInterval)) {
                     ForEach(AutomaticScanInterval.allCases) { interval in
@@ -308,7 +320,7 @@ struct SettingsView: View {
     }
 
     private var thumbnailSettings: some View {
-        SettingsSection(title: "封面", subtitle: "设置缺失封面的处理方式。", systemImage: "photo.on.rectangle") {
+        SettingsSection(title: "封面与截图", subtitle: "设置缺失封面、视频帧截图和并发任务。", systemImage: "photo.on.rectangle") {
             SettingsRow(title: "缺失封面处理", systemImage: "photo.badge.plus") {
                 ArtworkFallbackModeCapsules(
                     selection: Binding(get: {
@@ -354,7 +366,7 @@ struct SettingsView: View {
     }
 
     private var metadataSettings: some View {
-        SettingsSection(title: "元数据", subtitle: "管理影片与音乐的信息来源。", systemImage: "sparkles.rectangle.stack") {
+        SettingsSection(title: "元数据与匹配", subtitle: "管理影片、剧集和音乐的信息来源。", systemImage: "sparkles.rectangle.stack") {
             SettingsSubsectionHeader(title: "影片信息", systemImage: "film")
             SettingsDescription(text: "影片信息由 TMDB 提供；填写 API Key 或 Read Access Token 后即可匹配。")
 
@@ -565,7 +577,7 @@ struct SettingsView: View {
     }
 
     private var subtitleSettings: some View {
-        SettingsSection(title: "字幕", subtitle: "设置在线字幕来源与首选语言。", systemImage: "captions.bubble") {
+        SettingsSection(title: "字幕下载", subtitle: "设置在线字幕来源与首选语言。", systemImage: "captions.bubble") {
             SettingsDescription(text: "播放器会搜索 Podnapisi 和 OpenSubtitles。下载的字幕保存在视频同目录并立即加载。")
 
             SettingsRow(title: "首选语言", systemImage: "globe") {
@@ -597,7 +609,7 @@ struct SettingsView: View {
     }
 
     private var appearanceSettings: some View {
-        SettingsSection(title: "界面", subtitle: "调整主题与海报布局。", systemImage: "paintbrush.pointed") {
+        SettingsSection(title: "外观与布局", subtitle: "调整主题、配色和海报尺寸。", systemImage: "paintbrush.pointed") {
             SettingsRow(title: "主题", systemImage: "circle.lefthalf.filled") {
                 Picker("主题", selection: Binding(get: {
                     appState.settings.theme
@@ -667,7 +679,7 @@ struct SettingsView: View {
     }
 
     private var traktSettings: some View {
-        SettingsSection(title: "Trakt 同步", subtitle: "把标记已看 / 想看自动同步到 Trakt。", systemImage: "arrow.triangle.2.circlepath.circle") {
+        SettingsSection(title: "Trakt 同步", subtitle: "同步已看 / 想看，并可从 Trakt 导入差异到冲突队列。", systemImage: "arrow.triangle.2.circlepath.circle") {
             SettingsRow(title: "Client ID", systemImage: "key") {
                 SecureField("Client ID", text: Binding(get: {
                     appState.settings.traktClientID ?? ""
@@ -721,15 +733,57 @@ struct SettingsView: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                 }
+
+                SettingsRow(title: "从 Trakt 导入", systemImage: "tray.and.arrow.down") {
+                    Button {
+                        appState.importTraktState()
+                    } label: {
+                        Label(appState.isImportingTraktState ? "正在导入…" : "导入状态", systemImage: "tray.and.arrow.down")
+                    }
+                    .settingsActionButton(width: 132, prominent: true)
+                    .disabled(!appState.settings.traktSyncEnabled || appState.isImportingTraktState)
+                }
             }
 
-            SettingsDescription(text: "在 trakt.tv 创建应用获取 Client ID 与 Secret。连接时会打开网页让你输入验证码。仅推送已匹配 TMDB 的电影与剧集（含剧集分季分集）；本地 → Trakt 单向同步。")
+            SettingsDescription(text: "在 trakt.tv 创建应用获取 Client ID 与 Secret。连接时会打开网页让你输入验证码。仅处理已匹配 TMDB 的公开视频：本机改动会推送已看 / 想看；从 Trakt 导入会生成同步冲突，采用远端后写入 MediaLIB 内部索引。")
+        }
+    }
+
+    private var connectorStateSettings: some View {
+        SettingsSection(title: "账号与同步状态", subtitle: "查看远程账号、同步冲突和元数据历史。", systemImage: "arrow.triangle.2.circlepath") {
+            SettingsRow(title: "远程账号", systemImage: "server.rack") {
+                Text("\(appState.remoteConnectorAccounts.count) 个")
+                    .foregroundStyle(.secondary)
+            }
+            SettingsRow(title: "同步冲突", systemImage: "arrow.triangle.branch") {
+                Text("\(appState.pendingSyncConflictCount) 个待处理")
+                    .foregroundStyle(appState.pendingSyncConflictCount > 0 ? Color.orange : Color.secondary)
+                Button {
+                    showingSyncConflictQueue = true
+                } label: {
+                    Label("查看", systemImage: "list.bullet.rectangle")
+                }
+                .settingsActionButton(width: 92)
+                .disabled(appState.pendingSyncConflictCount == 0)
+            }
+            SettingsRow(title: "元数据历史", systemImage: "clock.arrow.circlepath") {
+                Text("\(appState.metadataCorrectionRecordCount) 条可撤销记录")
+                    .foregroundStyle(.secondary)
+                Button {
+                    showingMetadataHistory = true
+                } label: {
+                    Label("查看", systemImage: "clock.arrow.circlepath")
+                }
+                .settingsActionButton(width: 92)
+                .disabled(appState.metadataCorrectionRecordCount == 0)
+            }
+            SettingsDescription(text: "同步冲突队列中采用远端会把已看、想看、喜欢和用户评级写入 MediaLIB 内部索引；Trakt 冲突选择保留本地会把本机已看/想看写回 Trakt。Plex/Jellyfin/Emby 的更多远端写回、评分冲突来源接入和多字段合并仍由后续连接器执行。该分组不提供多档案隔离，所有播放记录、喜欢、想看和评分都使用全局本机索引。")
         }
     }
 
     private var advancedSettings: some View {
-        SettingsSection(title: "数据与诊断", subtitle: "管理备份、存储位置和调试日志。", systemImage: "externaldrive") {
-            SettingsToggleRow(title: "调试日志", systemImage: "ladybug", isOn: binding(\.debugLoggingEnabled))
+        SettingsSection(title: "数据、存储与诊断", subtitle: "管理备份、存储位置、清理和性能记录。", systemImage: "externaldrive") {
+            SettingsToggleRow(title: "性能记录", systemImage: "gauge.with.dots.needle.67percent", isOn: binding(\.debugLoggingEnabled))
             if let directories = appState.directories {
                 SettingsRow(title: "数据库版本", systemImage: "number.square") {
                     Text("Schema v\(appState.databaseSchemaVersion)")
@@ -840,7 +894,7 @@ struct SettingsView: View {
         panel.allowedContentTypes = [UTType(filenameExtension: "sqlite") ?? .data]
         panel.directoryURL = backupDirectory
         panel.prompt = "选择备份"
-        panel.message = "恢复会替换 MediaLIB 内部索引、播放记录、喜欢、想看、智能集合、歌单和队列，不会修改媒体文件。"
+        panel.message = "恢复会替换 MediaLIB 内部索引、播放记录、喜欢、想看、视频集合、歌单和队列，不会修改媒体文件。"
         guard panel.runModal() == .OK, let backupURL = panel.url else { return }
 
         let confirmation = NSAlert()
@@ -891,8 +945,8 @@ private struct AboutMediaLIBSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sheetContent) {
             HStack(alignment: .center, spacing: 16) {
-                PlayfulSymbolIcon(systemImage: "play.rectangle.on.rectangle", size: 62)
-                    .frame(width: 72, height: 72, alignment: .center)
+                AboutAppLogoView()
+                    .frame(width: 78, height: 78, alignment: .center)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("关于 MediaLIB")
@@ -908,7 +962,7 @@ private struct AboutMediaLIBSheet: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 6) {
                 AboutInfoRow(title: "GitHub", systemImage: "link") {
                     Link("Again0521/MediaLib", destination: githubURL)
                         .buttonStyle(.plain)
@@ -942,17 +996,46 @@ private struct AboutMediaLIBSheet: View {
     }
 }
 
+private struct AboutAppLogoView: View {
+    private static let logo: NSImage? = {
+        guard let url = Bundle.module.url(forResource: "AppIcon", withExtension: "png") else { return nil }
+        return NSImage(contentsOf: url)
+    }()
+
+    var body: some View {
+        Group {
+            if let logo = Self.logo {
+                Image(nsImage: logo)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+                    .shadow(color: Color.black.opacity(0.08), radius: 8, y: 3)
+            } else {
+                PlayfulSymbolIcon(systemImage: "play.rectangle.on.rectangle", size: 62)
+            }
+        }
+        .frame(width: 74, height: 74, alignment: .center)
+    }
+}
+
 private struct AboutInfoRow<Content: View>: View {
     let title: String
     let systemImage: String
     @ViewBuilder var content: Content
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Label(title, systemImage: systemImage)
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.system(size: 18, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28, alignment: .center)
+
+            Text(title)
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .frame(width: 92, alignment: .leading)
+                .frame(width: 86, alignment: .leading)
 
             content
                 .font(.callout.weight(.medium))
@@ -960,6 +1043,7 @@ private struct AboutInfoRow<Content: View>: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(minHeight: 38, alignment: .center)
     }
 }
 
@@ -1305,7 +1389,7 @@ private extension View {
     func settingsMenuControl(selectedTitle: String) -> some View {
         adaptiveMenuControl(
             selectedTitle: selectedTitle,
-            minWidth: 86,
+            minWidth: 76,
             maxWidth: 260
         )
     }
@@ -1325,6 +1409,24 @@ private func settingsPlaybackRateTitle(_ rate: Double) -> String {
     case 1.5, 2: return String(format: "%.2fx", rate)
     default: return String(format: "%.2fx", rate)
     }
+}
+
+private func settingsVideoCacheLimitOptions(current: Double) -> [Double] {
+    let presets: [Double] = [0, 20, 50, 100, 200, 500]
+    let normalizedCurrent = max(0, current)
+    if presets.contains(normalizedCurrent) {
+        return presets
+    }
+    return (presets + [normalizedCurrent]).sorted()
+}
+
+private func settingsVideoCacheLimitTitle(_ value: Double) -> String {
+    guard value > 0 else { return "不限制" }
+    let rounded = value.rounded()
+    if abs(value - rounded) < 0.01 {
+        return "\(Int(rounded)) GB"
+    }
+    return String(format: "%.1f GB", value)
 }
 
 private func settingsElasticInputWidth(for text: String, placeholder: String, minWidth: CGFloat, maxWidth: CGFloat) -> CGFloat {

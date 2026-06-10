@@ -1,10 +1,11 @@
 import Foundation
+import MediaLibCore
 
-/// Trakt 媒体引用：用 TMDB id 表达，与本地条目的 externalID 对应。
-enum TraktMediaRef: Equatable {
-    case movie(tmdbID: Int)
-    case show(tmdbID: Int)
-    case episode(showTmdbID: Int, season: Int, episode: Int)
+struct TraktRemoteState: Equatable {
+    var watchedMovies: Set<Int> = []
+    var watchedEpisodes: Set<TraktEpisodeKey> = []
+    var watchlistMovies: Set<Int> = []
+    var watchlistShows: Set<Int> = []
 }
 
 struct TraktDeviceCode {
@@ -42,7 +43,7 @@ enum TraktError: LocalizedError {
     }
 }
 
-/// Trakt 同步服务：设备码授权流程 + 观影历史 / 想看清单的推送（本地 → Trakt）。
+/// Trakt 同步服务：设备码授权流程、状态推送，以及历史/想看清单拉取。
 struct TraktService {
     let clientID: String
     let clientSecret: String
@@ -117,48 +118,63 @@ struct TraktService {
         try await sync(path: "/sync/watchlist/remove", refs: refs, accessToken: accessToken)
     }
 
+    func fetchRemoteState(accessToken: String) async throws -> TraktRemoteState {
+        async let watchedMovies = fetchWatchedMovies(accessToken: accessToken)
+        async let watchedShows = fetchWatchedShows(accessToken: accessToken)
+        async let watchlistItems = fetchWatchlist(accessToken: accessToken)
+
+        var state = TraktRemoteState()
+        state.watchedMovies = try await watchedMovies
+        state.watchedEpisodes = try await watchedShows
+        let watchlist = try await watchlistItems
+        state.watchlistMovies = watchlist.movies
+        state.watchlistShows = watchlist.shows
+        return state
+    }
+
     private func sync(path: String, refs: [TraktMediaRef], accessToken: String) async throws {
         guard !refs.isEmpty else { return }
-        let payload = Self.buildPayload(from: refs)
+        let payload = TraktSyncPayloadBuilder.buildPayload(from: refs)
         let bodyData = try JSONSerialization.data(withJSONObject: payload)
         _ = try await postData(path: path, bodyData: bodyData, accessToken: accessToken, expecting: [200, 201])
     }
 
-    /// 把引用聚合成 Trakt sync 载荷：movies 列表 + 按剧集归并的 shows（含 seasons/episodes）。
-    static func buildPayload(from refs: [TraktMediaRef]) -> [String: Any] {
-        var movies: [[String: Any]] = []
-        var standaloneShows: [[String: Any]] = []
-        // showTmdbID -> (season -> [episodes])
-        var showEpisodes: [Int: [Int: Set<Int>]] = [:]
+    private func fetchWatchedMovies(accessToken: String) async throws -> Set<Int> {
+        let data = try await get(path: "/sync/watched/movies", accessToken: accessToken, queryItems: [URLQueryItem(name: "extended", value: "min")])
+        return Set(try decode([WatchedMovieItem].self, from: data).compactMap { $0.movie.ids.tmdb })
+    }
 
-        for ref in refs {
-            switch ref {
-            case .movie(let id):
-                movies.append(["ids": ["tmdb": id]])
-            case .show(let id):
-                standaloneShows.append(["ids": ["tmdb": id]])
-            case .episode(let showID, let season, let episode):
-                showEpisodes[showID, default: [:]][season, default: []].insert(episode)
+    private func fetchWatchedShows(accessToken: String) async throws -> Set<TraktEpisodeKey> {
+        let data = try await get(path: "/sync/watched/shows", accessToken: accessToken, queryItems: [URLQueryItem(name: "extended", value: "min")])
+        let shows = try decode([WatchedShowItem].self, from: data)
+        var keys: Set<TraktEpisodeKey> = []
+        for show in shows {
+            guard let showTmdbID = show.show.ids.tmdb else { continue }
+            for season in show.seasons {
+                for episode in season.episodes {
+                    keys.insert(TraktEpisodeKey(showTmdbID: showTmdbID, season: season.number, episode: episode.number))
+                }
             }
         }
+        return keys
+    }
 
-        var shows = standaloneShows
-        for (showID, seasons) in showEpisodes {
-            let seasonsPayload: [[String: Any]] = seasons
-                .sorted { $0.key < $1.key }
-                .map { season, episodes in
-                    [
-                        "number": season,
-                        "episodes": episodes.sorted().map { ["number": $0] }
-                    ]
-                }
-            shows.append(["ids": ["tmdb": showID], "seasons": seasonsPayload])
+    private func fetchWatchlist(accessToken: String) async throws -> (movies: Set<Int>, shows: Set<Int>) {
+        let data = try await get(path: "/sync/watchlist", accessToken: accessToken, queryItems: [URLQueryItem(name: "extended", value: "min")])
+        let items = try decode([WatchlistItem].self, from: data)
+        var movies: Set<Int> = []
+        var shows: Set<Int> = []
+        for item in items {
+            switch item.type {
+            case "movie":
+                if let tmdbID = item.movie?.ids.tmdb { movies.insert(tmdbID) }
+            case "show":
+                if let tmdbID = item.show?.ids.tmdb { shows.insert(tmdbID) }
+            default:
+                continue
+            }
         }
-
-        var payload: [String: Any] = [:]
-        if !movies.isEmpty { payload["movies"] = movies }
-        if !shows.isEmpty { payload["shows"] = shows }
-        return payload
+        return (movies, shows)
     }
 
     // MARK: - 底层请求
@@ -203,6 +219,20 @@ struct TraktService {
         return data
     }
 
+    private func get(path: String, accessToken: String, queryItems: [URLQueryItem] = []) async throws -> Data {
+        guard var components = URLComponents(string: base + path) else { throw TraktError.invalidResponse }
+        components.queryItems = queryItems.isEmpty ? nil : queryItems
+        guard let url = components.url else { throw TraktError.invalidResponse }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 20
+        for (key, value) in headers(accessToken: accessToken) { request.setValue(value, forHTTPHeaderField: key) }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard status == 200 else { throw TraktError.requestFailed(status) }
+        return data
+    }
+
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         do { return try JSONDecoder().decode(type, from: data) }
         catch { throw TraktError.invalidResponse }
@@ -222,4 +252,40 @@ private struct DeviceCodeResponse: Decodable {
 private struct TokenResponse: Decodable {
     let access_token: String
     let refresh_token: String
+}
+
+private struct TraktIDs: Decodable {
+    let tmdb: Int?
+}
+
+private struct TraktMovieObject: Decodable {
+    let ids: TraktIDs
+}
+
+private struct TraktShowObject: Decodable {
+    let ids: TraktIDs
+}
+
+private struct WatchedMovieItem: Decodable {
+    let movie: TraktMovieObject
+}
+
+private struct WatchedShowEpisode: Decodable {
+    let number: Int
+}
+
+private struct WatchedShowSeason: Decodable {
+    let number: Int
+    let episodes: [WatchedShowEpisode]
+}
+
+private struct WatchedShowItem: Decodable {
+    let show: TraktShowObject
+    let seasons: [WatchedShowSeason]
+}
+
+private struct WatchlistItem: Decodable {
+    let type: String
+    let movie: TraktMovieObject?
+    let show: TraktShowObject?
 }

@@ -11,8 +11,8 @@ public struct LocalMetadata {
 
 public final class LocalMetadataService {
     private let fileManager: FileManager
-    private let posterNames = ["poster.jpg", "poster.png", "cover.jpg", "cover.png", "folder.jpg", "folder.png"]
-    private let backdropNames = ["fanart.jpg", "fanart.png", "backdrop.jpg", "backdrop.png", "background.jpg", "background.png"]
+    private let posterNames = LocalMetadataService.artworkNames(stems: ["poster", "cover", "folder"])
+    private let backdropNames = LocalMetadataService.artworkNames(stems: ["fanart", "backdrop", "background"])
 
     // 预编译常用 NFO 字段正则，避免每次解析都重新编译
     private static let compiledTagPatterns: [String: NSRegularExpression] = {
@@ -25,6 +25,11 @@ public final class LocalMetadataService {
 
     public init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
+    }
+
+    private static func artworkNames(stems: [String]) -> [String] {
+        let extensions = ["jpg", "jpeg", "png", "webp", "heic"]
+        return stems.flatMap { stem in extensions.map { "\(stem).\($0)" } }
     }
 
     public func metadata(for videoURL: URL, readNFO: Bool, preferLocalArtwork: Bool) -> LocalMetadata {

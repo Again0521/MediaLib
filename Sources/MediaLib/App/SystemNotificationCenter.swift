@@ -1,6 +1,6 @@
 import AppKit
 import Foundation
-import UserNotifications
+@preconcurrency import UserNotifications
 
 /// 系统通知（Phase 4）：后台任务完成后向通知中心发本地通知。
 /// 仅在 App 拥有有效 bundle identifier 时启用（避免未打包运行时崩溃）。
@@ -19,18 +19,26 @@ enum SystemNotificationCenter {
         }
     }
 
-    /// 发送一条通知（已授权才会真正展示）。
-    static func post(title: String, body: String) {
-        guard isAvailable else { return }
+    /// 发送一条通知（已授权才会真正展示）。completion 表示系统通知是否已成功投递。
+    static func post(title: String, body: String, completion: ((Bool) -> Void)? = nil) {
+        guard isAvailable else {
+            completion?(false)
+            return
+        }
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
-            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
+            guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
+                Task { @MainActor in completion?(false) }
+                return
+            }
             let content = UNMutableNotificationContent()
             content.title = title
             content.body = body
             content.sound = .default
             let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-            center.add(request, withCompletionHandler: nil)
+            center.add(request) { error in
+                Task { @MainActor in completion?(error == nil) }
+            }
         }
     }
 }

@@ -14,8 +14,9 @@ public final class SourceRepository {
               id, name, path, media_type, recursive, auto_scan, minimum_file_size,
               ignore_hidden_files, read_nfo, prefer_local_artwork, network_scraping_enabled,
               screenshot_fallback_enabled, include_in_metadata_fetch, prefer_metadata_write_to_source,
-              include_in_health_check, remote_trace_sync_mode, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              include_in_health_check, remote_trace_sync_mode, selected_emby_library_ids,
+              created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               name = excluded.name,
               path = excluded.path,
@@ -32,6 +33,7 @@ public final class SourceRepository {
               prefer_metadata_write_to_source = excluded.prefer_metadata_write_to_source,
               include_in_health_check = excluded.include_in_health_check,
               remote_trace_sync_mode = excluded.remote_trace_sync_mode,
+              selected_emby_library_ids = excluded.selected_emby_library_ids,
               updated_at = excluded.updated_at
             """,
             bindings: bindings(for: source)
@@ -48,7 +50,8 @@ public final class SourceRepository {
             SELECT id, name, path, media_type, recursive, auto_scan, minimum_file_size,
                    ignore_hidden_files, read_nfo, prefer_local_artwork, network_scraping_enabled,
                    screenshot_fallback_enabled, include_in_metadata_fetch, prefer_metadata_write_to_source,
-                   include_in_health_check, remote_trace_sync_mode, created_at, updated_at
+                   include_in_health_check, remote_trace_sync_mode, selected_emby_library_ids,
+                   created_at, updated_at
             FROM media_sources
             ORDER BY created_at ASC
             """
@@ -70,8 +73,9 @@ public final class SourceRepository {
                 preferMetadataWriteToSource: row.bool(13),
                 includeInHealthCheck: row.bool(14),
                 remoteTraceSyncMode: RemoteTraceSyncMode(rawValue: row.string(15) ?? "") ?? .bidirectional,
-                createdAt: row.date(16) ?? Date(),
-                updatedAt: row.date(17) ?? Date()
+                selectedEmbyLibraryIDs: Self.decodeEmbyLibraryIDs(row.string(16)),
+                createdAt: row.date(17) ?? Date(),
+                updatedAt: row.date(18) ?? Date()
             )
         }
     }
@@ -94,8 +98,36 @@ public final class SourceRepository {
             .bool(source.preferMetadataWriteToSource),
             .bool(source.includeInHealthCheck),
             .text(source.remoteTraceSyncMode.rawValue),
+            Self.encodeEmbyLibraryIDs(source.selectedEmbyLibraryIDs),
             .optionalDate(source.createdAt),
             .optionalDate(source.updatedAt)
         ]
+    }
+
+    private static func encodeEmbyLibraryIDs(_ ids: [String]) -> SQLiteValue {
+        let cleaned = ids
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return .null }
+        guard let data = try? JSONEncoder().encode(cleaned),
+              let value = String(data: data, encoding: .utf8) else {
+            return .text(cleaned.joined(separator: "\n"))
+        }
+        return .text(value)
+    }
+
+    private static func decodeEmbyLibraryIDs(_ value: String?) -> [String] {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else { return [] }
+        if let data = value.data(using: .utf8),
+           let ids = try? JSONDecoder().decode([String].self, from: data) {
+            return ids
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        return value
+            .split { $0 == "\n" || $0 == "," }
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 }

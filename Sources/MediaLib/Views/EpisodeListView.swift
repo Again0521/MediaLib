@@ -1,8 +1,7 @@
 import MediaLibCore
 import SwiftUI
 
-// P1：原 EpisodeListView 容器（VStack + LazyVStack + 包裹卡片）已被移除。
-// 剧集列表改由 DetailView 的原生 List 直接承载、逐行回收（见 DetailView.body）。
+// 剧集列表由 DetailView 的原生 List 直接承载并逐行回收，避免超长列表常驻视图。
 // 此文件现仅保留单行视图 EpisodeRowView 供 List 行复用。
 
 struct EpisodeRowView: View {

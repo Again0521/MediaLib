@@ -242,10 +242,13 @@ strip_bundle_metadata "$DMG_ROOT/$DISPLAY_NAME.app"
 ln -s /Applications "$DMG_ROOT/Applications"
 hdiutil create -volname "$DISPLAY_NAME" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG_PATH"
 hdiutil verify "$DMG_PATH"
-ditto --noextattr --noqtn "$APP_BUNDLE" "$APP_COPY"
-strip_bundle_metadata "$APP_COPY"
-if ! codesign --verify --deep --strict "$APP_COPY"; then
-  echo "warning: APP_COPY strict codesign verification was blocked by filesystem-managed extended attributes; verified source bundle at $APP_BUNDLE instead." >&2
+if ditto --noextattr --noqtn "$APP_BUNDLE" "$APP_COPY"; then
+  strip_bundle_metadata "$APP_COPY"
+  if ! codesign --verify --deep --strict "$APP_COPY"; then
+    echo "warning: APP_COPY strict codesign verification was blocked by filesystem-managed extended attributes; verified source bundle at $APP_BUNDLE instead." >&2
+  fi
+else
+  echo "warning: APP_COPY refresh failed; verified DMG and source bundle remain available." >&2
 fi
 
 echo "APP=$APP_BUNDLE"

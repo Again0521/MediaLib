@@ -75,7 +75,7 @@ struct BackgroundTaskCenterView: View {
                         .controlSize(.small)
                 }
                 if task.hidesDetail {
-                    Text("路径和文件名已隐藏")
+                    Text("条目、路径和文件名已隐藏")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else if let detail = task.detail, !detail.isEmpty {
@@ -96,6 +96,15 @@ struct BackgroundTaskCenterView: View {
 
     @ViewBuilder
     private func taskActions(_ task: BackgroundTaskSnapshot) -> some View {
+        if task.state == .failed, appState.canRetryBackgroundTask(task) {
+            Button {
+                appState.retryBackgroundTask(task)
+            } label: {
+                Image(systemName: "arrow.clockwise.circle")
+            }
+            .help("重试任务")
+        }
+
         if task.isCancellable, task.state.isActive {
             if task.kind == .videoCache {
                 HStack(spacing: 8) {

@@ -25,8 +25,7 @@ struct DetailView: View {
     var body: some View {
         let episodes = appState.children(for: item)
 
-        // P1：原 ScrollView + VStack（剧集走 LazyVStack）不回收，超长剧集（动漫上千集）会累积视图与缩略图。
-        // 改为原生 List 真正虚拟化：顶栏 / 主信息 / 剧集表头作为行，剧集逐行回收。交互语义全部保留。
+        // 原生 List 让超长剧集列表逐行回收；顶栏、主信息和剧集表头作为普通行保持同一滚动语义。
         List {
             detailRow(top: 28, bottom: 8) { topBar }
             detailRow(top: 8, bottom: 8) { hero }
@@ -75,7 +74,7 @@ struct DetailView: View {
             selectedEpisodeID = nil
         }
         .background {
-            KeyCaptureView { key in
+            RawKeyCaptureView { key in
                 if key == .space, appState.settings.enableQuickPreview,
                    let selected = episodes.first(where: { $0.id == selectedEpisodeID }) ?? episodes.first {
                     appState.quickPreviewItem = selected
@@ -106,7 +105,8 @@ struct DetailView: View {
             Spacer()
             Text("\(episodes.count) 集")
                 .foregroundStyle(.secondary)
-            let allWatched = episodes.allSatisfy { $0.watched || $0.playProgress >= 0.9 }
+            let watchedThreshold = appState.settings.watchedThreshold
+            let allWatched = episodes.allSatisfy { $0.watched || $0.playProgress >= watchedThreshold }
             Button {
                 appState.markAllWatched(episodes, watched: !allWatched)
             } label: {
@@ -150,6 +150,7 @@ struct DetailView: View {
                     Label("外部打开", systemImage: "arrow.up.forward.app")
                 }
                 VideoCacheMenuItems(item: episode)
+                VideoManualCollectionMenuItems(items: [episode])
                 Divider()
                 // #10 右键具体剧集只标记该集；已看完时提供“清除已观看”。
                 if episode.watched {
@@ -200,6 +201,10 @@ struct DetailView: View {
                 .contextMenu {
                     if !appState.videoCacheQualityChoices(for: item).isEmpty {
                         VideoCacheMenuItems(item: item)
+                        Divider()
+                    }
+                    if appState.canUseInVideoManualCollection(item) {
+                        VideoManualCollectionMenuItems(items: [item])
                         Divider()
                     }
                     Button {
@@ -269,7 +274,7 @@ struct DetailView: View {
                         .fixedSize()
                 }
 
-                Text(item.overview?.isEmpty == false ? item.overview! : "暂无简介。")
+                Text(item.overview.flatMap { $0.isEmpty ? nil : $0 } ?? "暂无简介。")
                     .foregroundStyle(.secondary)
                     .lineLimit(6)
 
@@ -304,6 +309,14 @@ struct DetailView: View {
                             showingMetadataSearch = true
                         } label: {
                             Label(item.type == .music ? "搜索音乐信息" : "搜索 TMDB", systemImage: "magnifyingglass")
+                        }
+
+                        if appState.canUndoLatestMetadataCorrection(for: item) {
+                            Button {
+                                appState.undoLatestMetadataCorrection(for: item)
+                            } label: {
+                                Label("撤销元数据", systemImage: "arrow.uturn.backward")
+                            }
                         }
 
                         if item.type == .movie,
@@ -417,8 +430,10 @@ struct DetailView: View {
 
     private var remoteDisplayName: String {
         guard item.isRemoteResource else { return item.filePath ?? "" }
-        if item.metadataProvider == "Emby" {
-            return "Emby 流媒体 · \(item.title)"
+        if let provider = item.metadataProvider,
+           provider.localizedCaseInsensitiveContains("emby") ||
+            provider.localizedCaseInsensitiveContains("jellyfin") {
+            return "\(provider) 流媒体 · \(item.title)"
         }
         return item.filePath ?? "远程流媒体"
     }
@@ -584,7 +599,6 @@ struct MetadataSearchView: View {
     @State private var query: String
     @State private var results: [MetadataSearchResult] = []
     @State private var isLoading = false
-    @State private var applyingResultID: String?
     @State private var message: String?
 
     private let service = MetadataSearchService()
@@ -638,11 +652,9 @@ struct MetadataSearchView: View {
                 List {
                     ForEach(results) { result in
                         MetadataResultCard(
-                            result: result,
-                            applying: applyingResultID == result.id,
-                            disabled: applyingResultID != nil
+                            result: result
                         ) {
-                            Task { await apply(result) }
+                            apply(result)
                         }
                         .listRowInsets(EdgeInsets(top: 5, leading: 2, bottom: 5, trailing: 2))
                         .listRowBackground(Color.clear)
@@ -703,25 +715,14 @@ struct MetadataSearchView: View {
         isLoading = false
     }
 
-    @MainActor
-    private func apply(_ result: MetadataSearchResult) async {
-        applyingResultID = result.id
-        let update = await service.materializedMetadataUpdate(
-            for: result,
-            itemID: item.id,
-            artworkDirectory: appState.directories?.thumbnails,
-            preserveEmbeddedPoster: item.type == .music && item.hasEmbeddedArtwork
-        )
-        appState.applyMetadata(update, to: item)
-        applyingResultID = nil
+    private func apply(_ result: MetadataSearchResult) {
         dismiss()
+        appState.applyMetadataSearchResult(result, to: item)
     }
 }
 
 private struct MetadataResultCard: View {
     let result: MetadataSearchResult
-    let applying: Bool
-    let disabled: Bool
     let onApply: () -> Void
 
     var body: some View {
@@ -762,11 +763,10 @@ private struct MetadataResultCard: View {
                     Label(String(format: "%.1f", rating), systemImage: "star.fill")
                 }
                 Spacer()
-                Button(applying ? "应用中" : "应用") {
+                Button("应用") {
                     onApply()
                 }
                 .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 10, minHeight: 28))
-                .disabled(disabled)
             }
             .font(.caption)
         }
@@ -840,10 +840,10 @@ struct SubtitleSearchSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             // API Key 提示
             if appState.settings.openSubtitlesAPIKey?.isEmpty != false {
-                HStack(spacing: 8) {
-                    Image(systemName: "key.horizontal").foregroundStyle(.orange)
-                    Text("OpenSubtitles API Key 可在设置 → 元数据中配置。").font(.caption)
-                }
+                AppInlineNoticeLabel(
+                    text: "OpenSubtitles API Key 可在设置 → 元数据中配置。",
+                    systemImage: "key.horizontal"
+                )
                 .padding(10)
                 .staticSurfaceBackground(cornerRadius: 10)
             }
@@ -857,7 +857,7 @@ struct SubtitleSearchSheet: View {
                 }
                 .adaptiveMenuControl(
                     selectedTitle: languageOptions.first(where: { $0.code == language })?.label ?? language,
-                    minWidth: 96,
+                    minWidth: 76,
                     maxWidth: 260
                 )
                 .onChange(of: language) { _ in
@@ -875,17 +875,25 @@ struct SubtitleSearchSheet: View {
             }
 
             if let error = errorMessage {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(AppColors.selectedGlassTint.opacity(0.88))
+                    Text(error)
+                        .foregroundStyle(.orange)
+                }
+                .font(.caption)
                     .padding(10)
                     .staticSurfaceBackground(cornerRadius: 10)
             }
 
             if let path = downloadedPath {
-                Label("已保存：\(URL(fileURLWithPath: path).lastPathComponent)", systemImage: "checkmark.circle")
-                    .font(.caption)
-                    .foregroundStyle(.green)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "checkmark.circle")
+                        .foregroundStyle(AppColors.selectedGlassTint.opacity(0.88))
+                    Text("已保存：\(URL(fileURLWithPath: path).lastPathComponent)")
+                        .foregroundStyle(.green)
+                }
+                .font(.caption)
                     .padding(10)
                     .staticSurfaceBackground(cornerRadius: 10)
             }

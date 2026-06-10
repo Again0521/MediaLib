@@ -124,11 +124,11 @@ public enum MusicTagEditingError: LocalizedError {
         case .fileNotWritable:
             return "当前音乐文件或所在文件夹不可写。"
         case .ffmpegUnavailable:
-            return "未找到可用的 ffmpeg，无法写入音频文件标签。"
+            return "缺少音频标签写入组件，无法写入文件标签。"
         case .ffmpegFailed(let message):
-            return message.isEmpty ? "ffmpeg 写入音频标签失败。" : "ffmpeg 写入音频标签失败：\(message)"
+            return message.isEmpty ? "音频标签写入失败。" : "音频标签写入失败：\(message)"
         case .outputMissing:
-            return "标签写入后的临时文件无效，原文件未被替换。"
+            return "写入结果未通过校验，原文件未被替换。"
         }
     }
 }

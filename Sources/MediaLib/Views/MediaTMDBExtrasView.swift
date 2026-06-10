@@ -1,6 +1,13 @@
 import MediaLibCore
 import SwiftUI
 
+private struct SimilarDisplayItem: Identifiable {
+    let id: String
+    let similar: TMDBSimilarTitle
+    let localItem: MediaItem?
+    let score: Double
+}
+
 /// 详情页内容深度区：演职人员（A1）+ 相关推荐（A2）。
 /// 对已匹配 TMDB 的影视条目，进详情时按需拉取 credits + similar 展示；相关推荐与本地库交叉匹配，
 /// 已入库的可点开，未入库的作为"发现"展示。
@@ -148,14 +155,94 @@ struct MediaTMDBExtrasView: View {
 
     private func similarStrip(_ similar: [TMDBSimilarTitle]) -> some View {
         let localByExternalID: [String: MediaItem] = Dictionary(
-            appState.items.compactMap { item in item.externalID.map { ($0, item) } },
+            appState.items.compactMap { item in
+                guard !(appState.isPrivateItem(item) && !appState.canDisplayPrivateItems) else { return nil }
+                return item.externalID.map { ($0, item) }
+            },
             uniquingKeysWith: { first, _ in first }
         )
+        let currentGenres = Set(genreKeys(for: item))
+        let ranked = similar.enumerated()
+            .map { index, sim in
+                let localItem = localByExternalID[sim.id]
+                return SimilarDisplayItem(
+                    id: sim.id,
+                    similar: sim,
+                    localItem: localItem,
+                    score: similarRecommendationScore(
+                        sim,
+                        index: index,
+                        localItem: localItem,
+                        currentGenres: currentGenres
+                    )
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score { return lhs.score > rhs.score }
+                return lhs.similar.title.localizedCaseInsensitiveCompare(rhs.similar.title) == .orderedAscending
+            }
         return horizontalStrip {
-            ForEach(similar) { sim in
-                similarCard(sim, localItem: localByExternalID[sim.id])
+            ForEach(ranked) { entry in
+                similarCard(entry.similar, localItem: entry.localItem)
             }
         }
+    }
+
+    private func similarRecommendationScore(
+        _ sim: TMDBSimilarTitle,
+        index: Int,
+        localItem: MediaItem?,
+        currentGenres: Set<String>
+    ) -> Double {
+        var score = Double(max(0, 16 - index)) * 0.08
+        if let year = sim.year, let currentYear = item.year {
+            score += max(0, 1.2 - Double(abs(year - currentYear)) / 8)
+        }
+
+        guard let localItem else { return score }
+        score += 3.6
+        score += normalizedProviderScore(localItem.rating) * 0.9
+        score += normalizedUserScore(localItem.userRating) * 0.75
+        score += seriesRecommendationTypes.contains(localItem.type) ? 0.8 : 0.2
+        score += localItem.watchlist ? 0.7 : 0
+        score += localItem.favorite ? 0.45 : 0
+        let overlap = currentGenres.intersection(genreKeys(for: localItem)).count
+        score += min(Double(overlap), 3) * 1.15
+        if localItem.watched || localItem.playProgress >= appState.settings.watchedThreshold {
+            score -= 1.8
+        } else if localItem.playProgress <= 0.02 {
+            score += 0.5
+        }
+        return score
+    }
+
+    private var seriesRecommendationTypes: Set<MediaType> {
+        [.tvShow, .anime, .documentary, .variety]
+    }
+
+    private func normalizedProviderScore(_ rating: Double?) -> Double {
+        guard let rating, rating.isFinite, rating > 0 else { return 0 }
+        return rating <= 5 ? rating * 2 : min(rating, 10)
+    }
+
+    private func normalizedUserScore(_ rating: Double?) -> Double {
+        guard let rating, rating.isFinite, rating > 0 else { return 0 }
+        return min(rating, 5) * 2
+    }
+
+    private func genreKeys(for item: MediaItem) -> Set<String> {
+        guard let genre = item.genre else { return [] }
+        let separators = CharacterSet(charactersIn: ",，、/|;；")
+        return Set(
+            genre
+                .components(separatedBy: separators)
+                .map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+                        .lowercased()
+                }
+                .filter { !$0.isEmpty }
+        )
     }
 
     private func similarCard(_ sim: TMDBSimilarTitle, localItem: MediaItem?) -> some View {

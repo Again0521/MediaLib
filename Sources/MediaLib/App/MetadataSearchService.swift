@@ -68,9 +68,10 @@ enum MetadataMatchScorer {
         // 同分时保留 TMDB/各源原有相关性排序（先出现者优先），所以用严格大于更新。
         for result in results {
             let value = score(result)
-            if best == nil || value > best!.1 {
-                best = (result, value)
+            if let currentBest = best {
+                guard value > currentBest.1 else { continue }
             }
+            best = (result, value)
         }
         guard let best else { return nil }
         return (best.0, best.1)
@@ -545,7 +546,7 @@ struct MetadataSearchService {
         let decoded = try JSONDecoder().decode(LastFMSearchResponse.self, from: data)
         return (decoded.results?.trackmatches?.track ?? []).prefix(12).map { track in
             let cover = track.image?.last(where: { !($0.text?.isEmpty ?? true) })?.text
-            let identity = (track.mbid?.isEmpty == false ? track.mbid! : "\(track.artist ?? "")-\(track.name)")
+            let identity = track.mbid.flatMap { $0.isEmpty ? nil : $0 } ?? "\(track.artist ?? "")-\(track.name)"
             return MetadataSearchResult(
                 id: "lastfm:\(identity)",
                 provider: "Last.fm",

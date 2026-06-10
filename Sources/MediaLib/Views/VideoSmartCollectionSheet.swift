@@ -28,6 +28,13 @@ struct VideoSmartCollectionSheet: View {
     @State private var mediaScope: VideoSmartCollectionMediaScope
     @State private var stateFilter: VideoSmartCollectionStateFilter
     @State private var recency: VideoSmartCollectionRecency
+    @State private var matchMode: VideoSmartCollectionRuleMatchMode
+    @State private var yearRule: VideoSmartCollectionYearRule
+    @State private var providerRatingRule: VideoSmartCollectionProviderRatingRule
+    @State private var userRatingRule: VideoSmartCollectionUserRatingRule
+    @State private var genreKeyword: String
+    @State private var sourceRule: VideoSmartCollectionSourceRule
+    @State private var showOnHome: Bool
 
     init(
         request: VideoSmartCollectionEditorRequest,
@@ -41,6 +48,13 @@ struct VideoSmartCollectionSheet: View {
         _mediaScope = State(initialValue: request.collection.mediaScope)
         _stateFilter = State(initialValue: request.collection.stateFilter)
         _recency = State(initialValue: request.collection.recency)
+        _matchMode = State(initialValue: request.collection.rules.matchMode)
+        _yearRule = State(initialValue: request.collection.rules.year)
+        _providerRatingRule = State(initialValue: request.collection.rules.providerRating)
+        _userRatingRule = State(initialValue: request.collection.rules.userRating)
+        _genreKeyword = State(initialValue: request.collection.rules.genreKeyword)
+        _sourceRule = State(initialValue: request.collection.rules.source)
+        _showOnHome = State(initialValue: request.collection.showOnHome)
     }
 
     // 保持右侧控件边界稳定，同时允许菜单和名称输入在安全范围内随文字伸缩。
@@ -83,6 +97,60 @@ struct VideoSmartCollectionSheet: View {
                         }
                     }
                 }
+                SettingsRow(title: "首页展示", systemImage: "house") {
+                    Toggle("", isOn: $showOnHome)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .staticSurfaceBackground(cornerRadius: 18)
+
+            VStack(spacing: 14) {
+                SettingsRow(title: "条件关系", systemImage: "checklist") {
+                    picker(selection: $matchMode, selectedTitle: matchMode.displayName) {
+                        ForEach(VideoSmartCollectionRuleMatchMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                }
+                SettingsRow(title: "年份", systemImage: "calendar") {
+                    picker(selection: $yearRule, selectedTitle: yearRule.displayName) {
+                        ForEach(VideoSmartCollectionYearRule.allCases) { rule in
+                            Text(rule.displayName).tag(rule)
+                        }
+                    }
+                }
+                SettingsRow(title: "资料评分", systemImage: "chart.bar") {
+                    picker(selection: $providerRatingRule, selectedTitle: providerRatingRule.displayName) {
+                        ForEach(VideoSmartCollectionProviderRatingRule.allCases) { rule in
+                            Text(rule.displayName).tag(rule)
+                        }
+                    }
+                }
+                SettingsRow(title: "我的评级", systemImage: "star") {
+                    picker(selection: $userRatingRule, selectedTitle: userRatingRule.displayName) {
+                        ForEach(VideoSmartCollectionUserRatingRule.allCases) { rule in
+                            Text(rule.displayName).tag(rule)
+                        }
+                    }
+                }
+                SettingsRow(title: "题材", systemImage: "tag") {
+                    TextField("动作 / 科幻", text: $genreKeyword)
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.center)
+                        .glassFormField()
+                        .frame(width: adaptiveFieldWidth(text: genreKeyword, placeholder: "动作 / 科幻", minWidth: 132), alignment: .trailing)
+                }
+                SettingsRow(title: "来源", systemImage: "tray.full") {
+                    picker(selection: $sourceRule, selectedTitle: sourceRule.displayName) {
+                        ForEach(VideoSmartCollectionSourceRule.allCases) { rule in
+                            Text(rule.displayName).tag(rule)
+                        }
+                    }
+                }
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 16)
@@ -98,6 +166,15 @@ struct VideoSmartCollectionSheet: View {
                     collection.mediaScope = mediaScope
                     collection.stateFilter = stateFilter
                     collection.recency = recency
+                    collection.rules = VideoSmartCollectionRules(
+                        matchMode: matchMode,
+                        year: yearRule,
+                        providerRating: providerRatingRule,
+                        userRating: userRatingRule,
+                        genreKeyword: genreKeyword,
+                        source: sourceRule
+                    )
+                    collection.showOnHome = showOnHome
                     onSave(collection)
                 } label: {
                     Label("保存", systemImage: "checkmark")
@@ -106,7 +183,7 @@ struct VideoSmartCollectionSheet: View {
                 .disabled(trimmedName.isEmpty)
             }
         }
-        .appSheetChrome(width: 580)
+        .appSheetChrome(width: 620)
     }
 
     private func picker<SelectionValue: Hashable, Content: View>(
@@ -120,7 +197,7 @@ struct VideoSmartCollectionSheet: View {
             .adaptiveMenuControl(selectedTitle: selectedTitle, minWidth: Self.optionMenuMinWidth, maxWidth: Self.optionMenuMaxWidth)
     }
 
-    private static let optionMenuMinWidth: CGFloat = 108
+    private static let optionMenuMinWidth: CGFloat = 76
     private static let optionMenuMaxWidth: CGFloat = 176
 
     private var trimmedName: String {

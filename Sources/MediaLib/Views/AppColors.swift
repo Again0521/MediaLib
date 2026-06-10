@@ -253,6 +253,10 @@ private struct SuppressPointerHoverDuringScrollKey: EnvironmentKey {
     static let defaultValue = false
 }
 
+private struct MainLayoutTransitionActiveKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 enum GlassSurfaceRenderMode {
     case material
     case efficient
@@ -310,6 +314,11 @@ extension EnvironmentValues {
     var suppressPointerHoverDuringScroll: Bool {
         get { self[SuppressPointerHoverDuringScrollKey.self] }
         set { self[SuppressPointerHoverDuringScrollKey.self] = newValue }
+    }
+
+    var mainLayoutTransitionActive: Bool {
+        get { self[MainLayoutTransitionActiveKey.self] }
+        set { self[MainLayoutTransitionActiveKey.self] = newValue }
     }
 }
 
@@ -422,8 +431,8 @@ struct LiquidGlassSurfaceLayer: View {
         }
     }
 
-    /// P0：列表/网格/设置分组专用的零阴影、零 material、零 blendMode 表面。
-    /// 视觉保留白玻璃底色 + 左上柔光渐变 + 冷灰渐变描边，但不产生离屏渲染通道。
+    /// 列表、网格和设置分组专用的低成本表面。
+    /// 视觉保留白玻璃底色、左上柔光渐变和冷灰渐变描边，但不产生离屏渲染通道。
     private var flatSurface: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let depth = min(max(thickness, 0.7), 2.1)
@@ -1126,7 +1135,7 @@ private struct HorizontalMouseDragScrollMonitor: NSViewRepresentable {
                   bounds.height > 1 else { return }
             let localPoint = convert(event.locationInWindow, from: nil)
             guard bounds.contains(localPoint),
-                  let scrollView = enclosingHorizontalScrollView(),
+                  let scrollView = horizontalScrollView(containingWindowPoint: event.locationInWindow),
                   scrollView.documentView != nil else { return }
             activeScrollView = scrollView
             dragStartLocation = event.locationInWindow
@@ -1166,20 +1175,87 @@ private struct HorizontalMouseDragScrollMonitor: NSViewRepresentable {
             return consumed
         }
 
+        private func horizontalScrollView(containingWindowPoint point: CGPoint) -> NSScrollView? {
+            if let direct = enclosingHorizontalScrollView() {
+                return direct
+            }
+            guard let window,
+                  let contentView = window.contentView else { return nil }
+
+            let anchorFrame = convert(bounds, to: nil)
+            var scrollViews: [NSScrollView] = []
+            collectScrollViews(in: contentView, into: &scrollViews)
+
+            return scrollViews
+                .filter { scrollView in
+                    guard canScrollHorizontally(scrollView) else { return false }
+                    let frame = scrollView.convert(scrollView.bounds, to: nil)
+                    return frame.contains(point) || frame.intersects(anchorFrame)
+                }
+                .max { lhs, rhs in
+                    candidateScore(for: lhs, anchorFrame: anchorFrame) < candidateScore(for: rhs, anchorFrame: anchorFrame)
+                }
+        }
+
         private func enclosingHorizontalScrollView() -> NSScrollView? {
             var view: NSView? = self
             while let current = view {
                 if let scrollView = current as? NSScrollView,
-                   scrollView.hasHorizontalScroller || scrollView.horizontalScroller != nil || (scrollView.documentView?.bounds.width ?? 0) > scrollView.contentView.bounds.width {
+                   canScrollHorizontally(scrollView) {
                     return scrollView
                 }
                 view = current.superview
             }
-            return enclosingScrollView
+            guard let scrollView = enclosingScrollView,
+                  canScrollHorizontally(scrollView) else { return nil }
+            return scrollView
+        }
+
+        private func canScrollHorizontally(_ scrollView: NSScrollView) -> Bool {
+            let documentWidth = scrollView.documentView?.bounds.width ?? 0
+            let visibleWidth = scrollView.contentView.bounds.width
+            return scrollView.hasHorizontalScroller ||
+                scrollView.horizontalScroller != nil ||
+                documentWidth > visibleWidth + 1
+        }
+
+        private func candidateScore(for scrollView: NSScrollView, anchorFrame: CGRect) -> CGFloat {
+            let frame = scrollView.convert(scrollView.bounds, to: nil)
+            let overlap = frame.intersection(anchorFrame)
+            let overlapArea = max(overlap.width, 0) * max(overlap.height, 0)
+            let centerDistance = abs(frame.midX - anchorFrame.midX) + abs(frame.midY - anchorFrame.midY)
+            let visibleArea = max(frame.width, 1) * max(frame.height, 1)
+            return overlapArea / visibleArea - centerDistance / 10_000
+        }
+
+        private func collectScrollViews(in view: NSView, into result: inout [NSScrollView]) {
+            if let scrollView = view as? NSScrollView {
+                result.append(scrollView)
+            }
+            for subview in view.subviews {
+                collectScrollViews(in: subview, into: &result)
+            }
         }
 
         deinit {
             stopMonitoring()
+        }
+    }
+}
+
+private struct HorizontalMouseDragScrollModifier: ViewModifier {
+    let enabled: Bool
+    let onDraggingChanged: (Bool) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.background {
+                HorizontalMouseDragScrollMonitor(onDraggingChanged: onDraggingChanged)
+                    .allowsHitTesting(false)
+            }
+        } else {
+            content
         }
     }
 }
@@ -1371,11 +1447,11 @@ extension View {
         modifier(SuppressHoverDuringScrollModifier())
     }
 
-    func horizontalMouseDragScroll(onDraggingChanged: @escaping (Bool) -> Void = { _ in }) -> some View {
-        background {
-            HorizontalMouseDragScrollMonitor(onDraggingChanged: onDraggingChanged)
-                .allowsHitTesting(false)
-        }
+    func horizontalMouseDragScroll(
+        enabled: Bool = true,
+        onDraggingChanged: @escaping (Bool) -> Void = { _ in }
+    ) -> some View {
+        modifier(HorizontalMouseDragScrollModifier(enabled: enabled, onDraggingChanged: onDraggingChanged))
     }
 
     func suppressListHighlight() -> some View {
@@ -1911,14 +1987,13 @@ struct AppPageBackground: View {
 
     var body: some View {
         ZStack {
-            // P3：开启"降低透明度"时用不透明窗口底色，避免桌面透出；否则用原半透明白玻璃底色。
+            // 开启“降低透明度”时用不透明窗口底色，避免桌面透出；否则用原半透明白玻璃底色。
             if reduceTransparency {
                 Color(nsColor: .windowBackgroundColor)
             } else {
                 AppColors.pageBackground
             }
-            // P3：开启"降低透明度"时，省去半透明环境光与两层 screen 混合，只保留实色底，
-            // 既尊重无障碍设置，也在该模式下消除两个页面级合成组。
+            // 降低透明度模式下省去环境光与 screen 混合，只保留实色底，同时减少页面级合成组。
             if includeDirectionalLight && !reduceTransparency {
                 // 太阳光从左上柔和射入：降低高光强度、扩大过渡范围，避免左上角出现刺眼亮斑。
                 RadialGradient(
@@ -2116,7 +2191,7 @@ struct AppInfoNote: View {
             if let systemImage {
                 Image(systemName: systemImage)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AppColors.selectedGlassTint.opacity(0.88))
             }
             Text(text)
                 .font(.caption)
@@ -2127,6 +2202,26 @@ struct AppInfoNote: View {
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .staticSurfaceBackground(cornerRadius: AppRadius.informationNote, thickness: 0.86)
+    }
+}
+
+struct AppInlineNoticeLabel: View {
+    let text: String
+    let systemImage: String
+    var font: Font = .caption
+    var lineLimit: Int? = nil
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: systemImage)
+                .font(font.weight(.semibold))
+                .foregroundStyle(AppColors.selectedGlassTint.opacity(0.88))
+            Text(text)
+                .font(font)
+                .foregroundStyle(.secondary)
+                .lineLimit(lineLimit)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -2939,9 +3034,9 @@ struct GlassMenuButton<MenuItems: View>: View {
 
 func adaptiveMenuControlWidth(
     for title: String,
-    minWidth: CGFloat = 92,
+    minWidth: CGFloat = 76,
     maxWidth: CGFloat = 360,
-    horizontalChrome: CGFloat = 78
+    horizontalChrome: CGFloat = 72
 ) -> CGFloat {
     let font = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
     let measured = (title as NSString).size(withAttributes: [.font: font]).width + horizontalChrome
@@ -3015,6 +3110,18 @@ enum ArtworkImageCache {
     static func image(path: String?, targetSize: CGSize? = nil) -> NSImage? {
         configureIfNeeded()
         guard let path else { return nil }
+#if DEBUG
+        if let debugCover = MusicPlayerVisualDebugFixtures.coverImage(
+            forPath: path,
+            size: Int(max(targetSize?.width ?? defaultTargetSize.width, targetSize?.height ?? defaultTargetSize.height))
+        ) {
+            return debugCover
+        }
+        if path == MusicPlayerVisualDebugFixtures.quadrantCoverPath {
+            let side = Int(max(targetSize?.width ?? defaultTargetSize.width, targetSize?.height ?? defaultTargetSize.height))
+            return MusicPlayerVisualDebugFixtures.quadrantCoverImage(size: side)
+        }
+#endif
         if let remoteURL = remoteURL(from: path) {
             return remoteImage(url: remoteURL, targetSize: targetSize)
         }
