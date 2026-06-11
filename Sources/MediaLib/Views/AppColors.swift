@@ -214,10 +214,10 @@ enum AppMotion {
     static let musicPlayer = Animation.spring(response: 0.40, dampingFraction: 0.90, blendDuration: 0.0)
     static let lyric = Animation.spring(response: 0.74, dampingFraction: 0.91, blendDuration: 0.14)
     // 歌词行级透明度/模糊切换：高阻尼（0.94）接近临界，无明显过冲；response 缩短使切换更利落，
-    // 配合 lyricScroll 的临界阻尼弹簧，整体呈现平移渐变感而非”抛掷”感。
+    // 配合 lyricScroll 的长缓动平移，整体呈现平移渐变感而非”抛掷”感。
     static let lyricFlow = Animation.spring(response: 0.50, dampingFraction: 0.94, blendDuration: 0.04)
-    // 歌词整列”滚动”：临界阻尼弹簧（dampingFraction=1.0），无过冲、无回弹，呈现平滑平移而非抛掷感。
-    static let lyricScroll = Animation.spring(response: 0.44, dampingFraction: 1.0)
+    // 歌词整列滚动：不用弹簧，改为 Apple Music 式的长缓动平移，避免自动居中时出现“抛过去”的力感。
+    static let lyricScroll = Animation.timingCurve(0.20, 0.0, 0.0, 1.0, duration: 0.68)
 
     static var pageInsertion: AnyTransition {
         .opacity.combined(with: .scale(scale: 0.995, anchor: .top))

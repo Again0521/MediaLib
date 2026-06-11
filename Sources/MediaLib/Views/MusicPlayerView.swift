@@ -20,9 +20,11 @@ enum MusicPlayerVisualTokens {
 
     /// 玻璃材质（明/暗双模式同源参数）。
     enum Glass {
-        static func frostWhite(dark: Bool) -> Double { dark ? 0.024 : 0.076 }
+        /// 白霜 = 玻璃的"提亮体"：比底板亮一档才有玻璃质感；但过高会变灰雾，
+        /// 灰/透的平衡靠 material 模糊 + 专辑染色一起承担。
+        static func frostWhite(dark: Bool) -> Double { dark ? 0.042 : 0.108 }
         static func frostTexture(dark: Bool) -> Double { dark ? 0.010 : 0.009 }
-        static func topHighlight(dark: Bool) -> Double { dark ? 0.154 : 0.250 }
+        static func topHighlight(dark: Bool) -> Double { dark ? 0.160 : 0.255 }
         /// §1.3 底沿内侧极淡暗线（仅最底 ~2pt 的 .black），与顶部高光形成"上受光、下背光"的厚度感。
         static func bottomShade(dark: Bool) -> Double { dark ? 0.034 : 0.002 }
         /// 发丝描边渐变三色（白 → 专辑色 → 暗），方向 topLeading→bottomTrailing。
@@ -34,16 +36,16 @@ enum MusicPlayerVisualTokens {
     /// 封面发光（§2）。
     enum Glow {
         /// 外层环境光有效半径抵达歌词卡边缘后再多出的距离（pt），即"轻微触达并略超过"。
-        static let edgeOvershoot: CGFloat = 108
+        static let edgeOvershoot: CGFloat = 52
         /// 几何落点换算出的 reach 夹紧区间（相对 posterSize 的倍数）。
-        static let minReach: CGFloat = 3.18
-        static let maxReach: CGFloat = 7.8
+        static let minReach: CGFloat = 2.14
+        static let maxReach: CGFloat = 6.4
         /// SDF glow 使用整块 frame 做衰减画布，可见光程 ≈ frame半径。
         static let bloomVisibleFraction: CGFloat = 1.0
         /// 低彩封面略收光程，避免白灰封面大面积雾化。
-        static let lowVibrancyDamp: Double = 0.88
+        static let lowVibrancyDamp: Double = 0.82
         /// 几何不可用（stacked）时的兜底 reach（再经视图层 vibrancy 轻微缩放）。
-        static let fallbackReach: CGFloat = 5.34
+        static let fallbackReach: CGFloat = 4.4
         /// 近场 bloom 饱和度封顶，避免彩色封面近场霓虹感。
         static let nearSaturationCap: Double = 1.18
         /// 暂停"掉色温"：glow 降到 0 时彩色投影饱和度向中性靠拢，最低保留比例。
@@ -52,17 +54,18 @@ enum MusicPlayerVisualTokens {
 
     /// 封面光浸染到玻璃卡边缘（§2.3）。
     enum Spill {
-        // 第一轮视觉修正：左侧封面光只短距离浸入玻璃，避免歌词卡顶部/中部被整片染色；
-        // 右侧保留一束更弱的主色柔光，用来平衡歌词卡右边界，但不能接近左侧强度。
-        static let lyricsIntensity: Double = 0.88
-        static let lyricsTrailingIntensity: Double = 0.30
-        static let controlsIntensity: Double = 0.88
-        static let chromeIntensity: Double = 0.66
+        // 向参考图靠拢（封面光真正漫进歌词卡左缘 / 控制栏上沿）：左侧浸染强度与 reach 上调，
+        // 让歌词卡左边缘明确接住封面色；右侧仍保留更弱的主色平衡光，强度不接近左侧。
+        static let lyricsIntensity: Double = 1.78
+        static let lyricsTrailingIntensity: Double = 0.34
+        static let controlsIntensity: Double = 1.38
+        static let chromeIntensity: Double = 1.08
         // §2.3 reach 决定浸染向卡片内部延伸的归一化宽度（也撑开 near/mid/fade 三段渐变 → 更柔的羽化）。
-        static let lyricsReach: Double = 0.36
-        static let lyricsTrailingReach: Double = 0.20
-        static let controlsReach: Double = 0.52
-        static let chromeReach: Double = 0.46
+        // reach 调大 = 浸染漫得更深、过渡更长更柔（边缘羽化），与“光软软漫进卡片”的参考观感一致。
+        static let lyricsReach: Double = 0.46
+        static let lyricsTrailingReach: Double = 0.18
+        static let controlsReach: Double = 0.50
+        static let chromeReach: Double = 0.42
         static let chromaTravelBase: Double = 0.50
         static let chromaTravelVibrancy: Double = 0.38
         static let innerPeak: Double = 0.02
@@ -85,16 +88,16 @@ enum MusicPlayerVisualTokens {
     /// 歌词景深（§3）。
     enum Lyrics {
         /// 距当前行的距离模糊分段（index = distance，0 为当前行恒不模糊）。
-        static let distanceBlur: [CGFloat] = [0, 0.9, 2.1, 3.4, 5.0]
-        static let distanceBlurMax: CGFloat = 7.4
+        static let distanceBlur: [CGFloat] = [0, 1.1, 2.5, 4.1, 6.2]
+        static let distanceBlurMax: CGFloat = 8.6
         /// 距当前行 2~3 行起，叠加一点点固定模糊，强化"上下比中间更糊"的位置感（克制）。
-        static let edgeExtraBlur: CGFloat = 1.35
+        static let edgeExtraBlur: CGFloat = 1.70
         /// 按行距估算该行在卡片中窗外的归一化位置，避免只按距离导致边缘景深不稳定。
         static let edgePositionStep: CGFloat = 0.18
         /// 清晰中窗高度比（中间约 40% 高度保持全清晰，两端羽化）。
         static let clearWindowRatio: Double = 0.40
         static let browseClearDuration: Double = 0.22
-        static let browseRecoverDuration: Double = 1.4
+        static let browseRecoverDuration: Double = 1.65
         static let viewportStabilityDelay: UInt64 = 780_000_000
         /// 手动浏览歌词后，保持 4 秒清晰阅读窗口，再恢复自动居中与景深。
         static let browseFallbackResumeDelay: UInt64 = 4_000_000_000
@@ -124,8 +127,11 @@ enum MusicPlayerVisualTokens {
 
     /// 专辑取色（§4）：保证彩色封面优先取真实不同色相；接近单色时才退化为克制类比三色。
     enum Palette {
-        static let colorfulFractionThreshold: Double = 0.13
-        static let vibrancyNormalizer: Double = 0.34
+        // 真实封面常见"鲜艳色只占小块面积、其余是中性背景/肤色"（如制服+白墙）。
+        // 阈值偏高 + normalizer 偏大会把这类封面判成中性→灰底板→封面不发光、发光没颜色。
+        // 下调让"有明显鲜艳块"的封面走彩色方案并拿到足够 vibrancy，同时仍靠面积权重防止指甲油级别夺主色。
+        static let colorfulFractionThreshold: Double = 0.10
+        static let vibrancyNormalizer: Double = 0.24
         static let secondaryHueDistance: Double = 0.06
         static let accentHueDistance: Double = 0.08
         static let secondaryHueWeightFraction: Double = 0.12
@@ -160,18 +166,25 @@ enum MusicPlayerVisualDebugVariant: String, CaseIterable {
     case cream
     case black
     case whiteFrame = "whiteframe"
+    /// 真实封面诊断：从固定临时路径加载真实专辑封面，并走真实取色管线（不用合成 palette），
+    /// 用于复现"真机上真实封面发光"的观感（合成 fixture 太亮，会掩盖真实封面偏暗导致的弱发光问题）。
+    case real
 
     static var fromArguments: MusicPlayerVisualDebugVariant {
         let arguments = ProcessInfo.processInfo.arguments
         return allCases.first { arguments.contains($0.argument) } ?? .quadrant
     }
 
+    /// 真实封面诊断固定读取路径：把任意真实封面拷到这里即可在不重编译的情况下切换测试图。
+    static let realCoverTestPath = "/tmp/medialib_real_cover_test.jpg"
+
     var argument: String {
         "--music-player-visual-debug-\(rawValue)"
     }
 
     var coverPath: String {
-        "__MediaLIB_MUSIC_VISUAL_DEBUG_\(rawValue.uppercased())__"
+        if self == .real { return Self.realCoverTestPath }
+        return "__MediaLIB_MUSIC_VISUAL_DEBUG_\(rawValue.uppercased())__"
     }
 
     var trackID: String {
@@ -192,6 +205,8 @@ enum MusicPlayerVisualDebugVariant: String, CaseIterable {
             return "黑底少量亮部测试"
         case .whiteFrame:
             return "白框浅蓝取色测试"
+        case .real:
+            return "真实封面发光诊断"
         }
     }
 
@@ -209,6 +224,8 @@ enum MusicPlayerVisualDebugVariant: String, CaseIterable {
             return "Black Glow Fixture"
         case .whiteFrame:
             return "White Frame Fixture"
+        case .real:
+            return "Real Cover Diagnostic"
         }
     }
 
@@ -226,6 +243,8 @@ enum MusicPlayerVisualDebugVariant: String, CaseIterable {
             return "黑色底色 · 少量青金亮部"
         case .whiteFrame:
             return "近白外框 · 浅蓝纸纹 · 黄色亮部"
+        case .real:
+            return "真实封面 · 真实取色管线"
         }
     }
 
@@ -273,6 +292,9 @@ enum MusicPlayerVisualDebugVariant: String, CaseIterable {
                 accent: AlbumPaletteColor(red: 0.40, green: 0.74, blue: 0.78),
                 vibrancy: 0.36
             )
+        case .real:
+            // 仅作占位；.real 走真实取色管线（palette(for:) 对 .real 返回 nil 触发真实计算）。
+            return .fallback
         }
     }
 
@@ -336,6 +358,14 @@ enum MusicPlayerVisualDebugVariant: String, CaseIterable {
             [00:32.00]右侧边界可以有很弱的主色受光
             [00:40.00]玻璃应该透亮而不是一整块灰板
             """
+        case .real:
+            return """
+            [00:00.00]真实封面发光诊断
+            [00:08.00]左侧光应漫到歌词卡边缘
+            [00:16.00]当前行保持清晰
+            [00:24.00]底板不应发脏
+            [00:32.00]控制栏应像取色玻璃
+            """
         }
     }
 }
@@ -358,7 +388,9 @@ enum MusicPlayerVisualDebugFixtures {
     }
 
     static func palette(for path: String?) -> AlbumColorPalette? {
-        variant(for: path)?.palette
+        // .real 走真实取色管线：返回 nil 让 AlbumPaletteCache 从真实封面计算 palette。
+        guard let v = variant(for: path), v != .real else { return nil }
+        return v.palette
     }
 
     static func writeLyricsSidecar(for variant: MusicPlayerVisualDebugVariant = .quadrant) {
@@ -409,6 +441,8 @@ enum MusicPlayerVisualDebugFixtures {
     }
 
     private static func coverCGImage(for variant: MusicPlayerVisualDebugVariant, size: Int) -> CGImage? {
+        // .real 不合成封面：返回 nil 让烘焙/底板回退到 ArtworkImageCache 加载真实封面文件。
+        if variant == .real { return nil }
         if variant == .quadrant {
             return quadrantCoverCGImageBody(size: size)
         }
@@ -547,7 +581,7 @@ enum MusicPlayerVisualDebugFixtures {
             context.addLine(to: CGPoint(x: contentRect.maxX * 0.95, y: contentRect.maxY - full * 0.10))
             context.strokePath()
             context.restoreGState()
-        case .quadrant:
+        case .quadrant, .real:
             break
         }
 
@@ -673,7 +707,7 @@ struct MusicPlayerView: View {
                     palette: albumPalette,
                     artworkReady: glassLayerReady,
                     albumLightCenter: layout.albumLightCenter,
-                    glassIntensity: glassLayerReady ? 1.0 : 0.78,
+                    glassIntensity: 1.0,
                     reduceMotion: reduceMotion,
                     dynamicEffectsEnabled: false,
                     colorScheme: colorScheme
@@ -683,25 +717,34 @@ struct MusicPlayerView: View {
                 }
                 .zIndex(0)
 
-                AlbumProjectedCoverGlowLayer(
-                    item: currentItem,
+                AlbumGlobalGlassVeil(palette: albumPalette, colorScheme: colorScheme)
+                    .allowsHitTesting(false)
+                    .zIndex(0.5)
+
+                // 真·封面发光：放大封面 + 重高斯模糊 + 圆角方形羽化，铺在清晰封面正后方（见 AlbumGlowBlurCover）。
+                AlbumGlowBlurCover(
+                    posterPath: currentItem.posterPath,
                     controller: controller,
-                    palette: albumPalette,
-                    coverSize: layout.posterSize,
-                    glowReach: layout.projectedGlowReach,
+                    displaySide: layout.glowBlurSide,
+                    coverSide: layout.coverDisplaySide,
                     coverGlowEnabled: appState.settings.musicAlbumCoverGlowEnabled
                 )
-                .frame(
-                    width: layout.projectedGlowFrame.width,
-                    height: layout.projectedGlowFrame.height
-                )
-                .position(
-                    x: layout.projectedGlowFrame.midX,
-                    y: layout.projectedGlowFrame.midY
-                )
+                .position(x: layout.albumLightCenter.x, y: layout.albumLightCenter.y)
                 .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
                 .allowsHitTesting(false)
                 .zIndex(1)
+
+                AlbumPhysicalLightField(
+                    palette: albumPalette,
+                    controller: controller,
+                    center: layout.albumLightCenter,
+                    coverSide: layout.coverDisplaySide,
+                    radius: layout.albumGlowRadius,
+                    isEnabled: appState.settings.musicAlbumCoverGlowEnabled
+                )
+                .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
+                .allowsHitTesting(false)
+                .zIndex(1.1)
 
                 ZStack(alignment: .topLeading) {
                     if layout.stackedLayout {
@@ -1261,832 +1304,721 @@ private struct MusicPlayerPointerLightScope: ViewModifier {
     }
 }
 
-// MARK: - 封面高斯模糊发光层
+// MARK: - 展开页封面高斯底板
 
-private enum AlbumCoverGlowProfile: String, Hashable, Sendable {
-    case ambient
-    case projected
-}
-
-/// Image-based 封面发光：把封面本身当成真实光源，先按边缘邻近色向外延展，再烘焙三层【放大 + 大半径高斯模糊】，
-/// 让封面里的冷暖色彩按上/下/左/右邻近关系柔和地向四周空间蔓延（near / mid / far 三程），而非依赖单一主色 shadow。
-/// 颜色全部来自封面原图（零色相偏移）：烘焙阶段不再改 RGB，只靠透明度、模糊半径与羽化控制亮度。
-/// near/mid/far 分别用 plusLighter / screen / screen，并对白/低彩封面做 alpha 保护，避免白色封面过曝。
-/// 三层 blur/mask 由 AlbumCoverGlowBakeCache 后台预烘焙，
-/// 运行时只贴透明图并随 glowStrength 调 opacity/scale，避免展开页持续承担大面积实时高斯合成。
-private struct AlbumBlurredCoverGlowLayer: View {
+private struct AlbumBlurredBackdropLayer: View {
     let posterPath: String?
+    let title: String
     let palette: AlbumColorPalette
-    let glowStrength: Double
+    let canvasSize: CGSize
+    let isReady: Bool
     let colorScheme: ColorScheme
-    var profile: AlbumCoverGlowProfile = .ambient
-    /// 实际封面边长：glow 以它为基准放大，保证发光区与真实封面对齐、向外蔓延而非缩在中心。
-    var coverSize: CGFloat = 0
-    @State private var bakedKey: AlbumGlowBakeKey?
-    @State private var bakedImages: [String: AlbumBakedCoverGlowImage] = [:]
+    @State private var image: NSImage?
+    @State private var loadedKey = ""
 
-    private struct GlowSpec: Identifiable {
-        let name: String
-        let blur: CGFloat
-        let edgeReach: CGFloat
-        let opacity: Double
-        let maxAlpha: Double
-        let blend: BlendMode
-        let saturation: Double
-        let brightness: Double
-        let contrast: Double
-        let colorFieldSize: CGFloat
-        let colorFieldBlur: CGFloat
-        let falloffPower: Double
-
-        var id: String { name }
-
-        var bakeSpec: AlbumGlowBakeSpec {
-            AlbumGlowBakeSpec(
-                name: name,
-                blur: Double(blur),
-                edgeReach: Double(edgeReach),
-                saturation: saturation,
-                brightness: brightness,
-                contrast: contrast,
-                colorFieldSize: Double(colorFieldSize),
-                colorFieldBlur: Double(colorFieldBlur),
-                falloffPower: falloffPower
-            )
-        }
+    private var bakeKey: String {
+        let width = Int(max(canvasSize.width, 1).rounded())
+        let height = Int(max(canvasSize.height, 1).rounded())
+        return "\(posterPath ?? "")|\(title)|\(width)x\(height)|\(colorScheme == .dark ? "dark" : "light")"
     }
 
     var body: some View {
-        GeometryReader { geo in
-            let side = min(geo.size.width, geo.size.height)
-            let base = coverSize > 1 ? coverSize : side * 0.42
-            let vib = palette.vibrancy
-            let dark = colorScheme == .dark
-            let damp = alphaDamp(vibrancy: vib, dark: dark)
-            let specs = glowSpecs(vibrancy: vib, dark: dark)
-            let key = AlbumGlowBakeKey(
-                bakeVersion: 16,
-                profile: profile,
-                path: posterPath ?? "",
-                basePoints: bucket(base, step: 4),
-                canvasPoints: bucket(side, step: 32),
-                dark: dark,
-                vibrancyBucket: Int((min(max(vib, 0), 1) * 100).rounded())
-            )
-            ZStack {
-                if bakedKey == key {
-                    ForEach(specs) { spec in
-                        if let baked = bakedImages[spec.name] {
-                            glowCopy(baked, spec: spec, damp: damp)
-                        }
-                    }
-                }
+        ZStack {
+            palette.backdropBaseColor(for: colorScheme)
+
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.medium)
+                    .scaledToFill()
+                    .frame(width: canvasSize.width, height: canvasSize.height)
+                    .clipped()
+                    .transition(.opacity)
+            } else {
+                AlbumBackdropFallbackWash(palette: palette, colorScheme: colorScheme)
             }
-            .frame(width: geo.size.width, height: geo.size.height)
-            .compositingGroup()
-            .task(id: key) {
-                await loadBakedGlow(key: key, specs: specs.map(\.bakeSpec))
-            }
+
+            AlbumBackdropFallbackWash(palette: palette, colorScheme: colorScheme)
+                .blendMode(colorScheme == .dark ? .plusLighter : .screen)
+                .opacity(colorScheme == .dark ? 0.22 : 0.16)
         }
-    }
-
-    private func glowCopy(_ baked: AlbumBakedCoverGlowImage, spec: GlowSpec, damp: Double) -> some View {
-        let finalOpacity = min(spec.opacity * damp * glowStrength, spec.maxAlpha)
-        return Image(nsImage: baked.image)
-            .resizable()
-            .interpolation(.medium)
-            .frame(width: baked.displaySide, height: baked.displaySide)
-            .opacity(finalOpacity)
-            .blendMode(spec.blend)
-            .accessibilityHidden(true)
-            .allowsHitTesting(false)
-    }
-
-    private func alphaDamp(vibrancy: Double, dark: Bool) -> Double {
-        // 彩度调制：彩色封面让三层 glow 达到配方目标浓度；白/低彩封面仍压低，
-        // 避免在 screen/plusLighter 下变成白雾过曝。
-        let vib = min(max(vibrancy, 0), 1)
-        let base = dark ? 0.66 : 0.60
-        let colorfulLift = dark ? 0.42 : 0.46
-        return min(base + colorfulLift * pow(vib, 0.68), 1.0)
+        .frame(width: canvasSize.width, height: canvasSize.height)
+        .clipped()
+        .opacity(isReady ? 1 : 0.96)
+        .animation(AppMotion.standard, value: loadedKey)
+        .task(id: bakeKey) {
+            await load()
+        }
     }
 
     @MainActor
-    private func loadBakedGlow(key: AlbumGlowBakeKey, specs: [AlbumGlowBakeSpec]) async {
-        guard !key.path.isEmpty else {
-            bakedKey = key
-            bakedImages = [:]
-            return
-        }
-        let result = await AlbumCoverGlowBakeCache.layers(for: key, specs: specs)
+    private func load() async {
+        let key = bakeKey
+        guard key != loadedKey || image == nil else { return }
+        let path = posterPath
+        let title = title
+        let size = canvasSize
+        let scheme = colorScheme
+        let baked = await Task.detached(priority: .userInitiated) {
+            SendableAlbumBackdropImage(AlbumBlurredBackdropBaker.bake(
+                path: path,
+                title: title,
+                canvasSize: size,
+                colorScheme: scheme
+            ))
+        }.value
         guard !Task.isCancelled else { return }
-        var images: [String: AlbumBakedCoverGlowImage] = [:]
-        for layer in result {
-            images[layer.name] = AlbumBakedCoverGlowImage(
-                image: NSImage(
-                    cgImage: layer.image,
-                    size: NSSize(width: layer.displaySide, height: layer.displaySide)
-                ),
-                displaySide: CGFloat(layer.displaySide)
+        image = baked.image
+        loadedKey = key
+    }
+}
+
+private struct AlbumGlobalGlassVeil: View {
+    let palette: AlbumColorPalette
+    let colorScheme: ColorScheme
+
+    var body: some View {
+        ZStack {
+            AppKitVisualEffectBackground(material: .hudWindow, blendingMode: .withinWindow)
+                .opacity(colorScheme == .dark ? 0.22 : 0.28)
+
+            Rectangle()
+                .fill((colorScheme == .dark ? Color.black : Color.white).opacity(colorScheme == .dark ? 0.07 : 0.105))
+
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(colorScheme == .dark ? 0.075 : 0.145),
+                    Color.white.opacity(colorScheme == .dark ? 0.028 : 0.050),
+                    Color.black.opacity(colorScheme == .dark ? 0.075 : 0.012)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            RadialGradient(
+                colors: [
+                    palette.glowPrimary.color.opacity(colorScheme == .dark ? 0.080 : 0.070),
+                    .clear
+                ],
+                center: .topLeading,
+                startRadius: 40,
+                endRadius: 760
+            )
+
+            FrostedGlassTextureOverlay(opacity: colorScheme == .dark ? 0.010 : 0.012)
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+private struct AlbumBackdropFallbackWash: View {
+    let palette: AlbumColorPalette
+    let colorScheme: ColorScheme
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    palette.secondary.color.opacity(colorScheme == .dark ? 0.30 : 0.26),
+                    palette.primary.color.opacity(colorScheme == .dark ? 0.24 : 0.22),
+                    palette.accent.color.opacity(colorScheme == .dark ? 0.22 : 0.18)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            RadialGradient(
+                colors: [
+                    palette.primary.color.opacity(colorScheme == .dark ? 0.38 : 0.34),
+                    .clear
+                ],
+                center: .leading,
+                startRadius: 40,
+                endRadius: 620
+            )
+            RadialGradient(
+                colors: [
+                    palette.secondary.color.opacity(colorScheme == .dark ? 0.26 : 0.22),
+                    .clear
+                ],
+                center: .trailing,
+                startRadius: 80,
+                endRadius: 760
+            )
+            RadialGradient(
+                colors: [
+                    palette.accent.color.opacity(colorScheme == .dark ? 0.20 : 0.18),
+                    .clear
+                ],
+                center: .bottomLeading,
+                startRadius: 80,
+                endRadius: 780
             )
         }
-        bakedKey = key
-        bakedImages = images
     }
+}
 
-    private func glowSpecs(vibrancy: Double, dark: Bool) -> [GlowSpec] {
-        // Image-based album glow（封面即光源）三层配方：
-        //   - 光源矩形等于真实封面尺寸，edgeReach 只控制 SDF 边缘外扩距离；
-        //   - 颜色来自低频封面色场，不把 raw cover 直接大模糊，避免文字/高对比边缘被揉成脏色；
-        //   - opacity 经 alphaDamp(随彩度) 调制 + maxAlpha 硬钳，白/低彩封面不会在 plusLighter 下过曝。
-        switch profile {
-        case .ambient:
-            return [
-            // far：最外圈 ambient spill，沿几何画布轻触歌词卡边缘。
-            GlowSpec(
-                name: "farGlow",
-                blur: 182,
-                edgeReach: 1.10,
-                opacity: dark ? 0.176 : 0.142,
-                maxAlpha: 0.190,
-                blend: .screen,
-                saturation: 1.00,
-                brightness: -0.024,
-                contrast: 0.99,
-                colorFieldSize: 116,
-                colorFieldBlur: 22,
-                falloffPower: 1.08
-            ),
-            // mid：中程 spill，承接 far 与 near，让光从封面边缘自然扩散到歌词卡方向。
-            GlowSpec(
-                name: "midGlow",
-                blur: 116,
-                edgeReach: 0.94,
-                opacity: dark ? 0.272 : 0.222,
-                maxAlpha: 0.286,
-                blend: .screen,
-                saturation: 1.02,
-                brightness: -0.020,
-                contrast: 1.00,
-                colorFieldSize: 128,
-                colorFieldBlur: 17,
-                falloffPower: 1.30
-            ),
-            // near：贴近封面边缘的 bloom，保留边缘方向色，但不靠高饱和/高 opacity 抢戏。
-            GlowSpec(
-                name: "nearGlow",
-                blur: 60,
-                edgeReach: 0.60,
-                opacity: dark ? 0.350 : 0.286,
-                maxAlpha: 0.360,
-                blend: .plusLighter,
-                saturation: 1.00,
-                brightness: -0.018,
-                contrast: 1.00,
-                colorFieldSize: 144,
-                colorFieldBlur: 12,
-                falloffPower: 1.66
-            )
-            ]
-        case .projected:
-            return [
-                // projectedFar：页面底层的封面复制光，范围更大、亮度更低，用于把封面颜色推到歌词卡左缘。
-                GlowSpec(
-                    name: "projectedFarGlow",
-                    blur: 214,
-                    edgeReach: 1.12,
-                    opacity: dark ? 0.132 : 0.106,
-                    maxAlpha: 0.142,
-                    blend: .screen,
-                    saturation: 1.00,
-                    brightness: -0.024,
-                    contrast: 0.99,
-                    colorFieldSize: 108,
-                    colorFieldBlur: 24,
-                    falloffPower: 1.02
-                ),
-                // projectedMid：承接封面底部与控制栏，使光看起来像从封面下方柔和铺开。
-                GlowSpec(
-                    name: "projectedMidGlow",
-                    blur: 140,
-                    edgeReach: 1.02,
-                    opacity: dark ? 0.204 : 0.166,
-                    maxAlpha: 0.218,
-                    blend: .screen,
-                    saturation: 1.01,
-                    brightness: -0.020,
-                    contrast: 1.00,
-                    colorFieldSize: 128,
-                    colorFieldBlur: 18,
-                    falloffPower: 1.20
-                ),
-                // projectedCore：贴近封面底部的柔亮底光，不参与布局，只做玻璃下的高斯色感。
-                GlowSpec(
-                    name: "projectedCoreGlow",
-                    blur: 78,
-                    edgeReach: 0.70,
-                    opacity: dark ? 0.232 : 0.184,
-                    maxAlpha: 0.244,
-                    blend: .plusLighter,
-                    saturation: 1.00,
-                    brightness: -0.018,
-                    contrast: 1.00,
-                    colorFieldSize: 144,
-                    colorFieldBlur: 13,
-                    falloffPower: 1.44
-                )
-            ]
+private enum AlbumBlurredBackdropBaker {
+    private static let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private static let cacheLock = NSLock()
+    private static var cache: [String: NSImage] = [:]
+    private static var order: [String] = []
+    private static let maxEntries = 8
+
+    static func bake(path: String?, title: String, canvasSize: CGSize, colorScheme: ColorScheme) -> NSImage? {
+        guard canvasSize.width > 16, canvasSize.height > 16 else { return nil }
+        let pixelWidth = max(420, min(Int((canvasSize.width * 0.70).rounded()), 1180))
+        let pixelHeight = max(300, min(Int((canvasSize.height * 0.70).rounded()), 820))
+        let key = "\(path ?? title)|\(pixelWidth)x\(pixelHeight)|\(colorScheme == .dark ? "dark" : "light")"
+        cacheLock.lock()
+        if let cached = cache[key] { cacheLock.unlock(); return cached }
+        cacheLock.unlock()
+
+        guard let cover = loadCover(path: path, title: title) else { return nil }
+        let input = CIImage(cgImage: cover)
+        let src = input.extent
+        guard src.width > 1, src.height > 1 else { return nil }
+        let canvas = CGRect(x: 0, y: 0, width: CGFloat(pixelWidth), height: CGFloat(pixelHeight))
+
+        let scale = max(canvas.width / src.width, canvas.height / src.height)
+        let placed = input.transformed(by: CGAffineTransform(
+            a: scale, b: 0, c: 0, d: scale,
+            tx: canvas.midX - src.width * scale * 0.5,
+            ty: canvas.midY - src.height * scale * 0.5
+        ))
+
+        let blurRadius = min(max(min(canvas.width, canvas.height) * 0.145, 52), 118)
+        let blurred = placed
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blurRadius])
+            .cropped(to: canvas)
+
+        let tuned = blurred
+            .applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: colorScheme == .dark ? 1.10 : 1.08,
+                kCIInputBrightnessKey: colorScheme == .dark ? -0.015 : 0.018,
+                kCIInputContrastKey: colorScheme == .dark ? 0.94 : 0.90
+            ])
+            .applyingFilter("CIGammaAdjust", parameters: ["inputPower": colorScheme == .dark ? 0.96 : 0.90])
+            .cropped(to: canvas)
+
+        let veil = CIImage(color: CIColor(
+            red: colorScheme == .dark ? 0.03 : 1.0,
+            green: colorScheme == .dark ? 0.035 : 1.0,
+            blue: colorScheme == .dark ? 0.04 : 1.0,
+            alpha: colorScheme == .dark ? 0.05 : 0.135
+        )).cropped(to: canvas)
+        let composed = veil
+            .applyingFilter("CISourceOverCompositing", parameters: [kCIInputBackgroundImageKey: tuned])
+            .cropped(to: canvas)
+
+        guard let cg = ciContext.createCGImage(composed, from: canvas) else { return nil }
+        let image = NSImage(cgImage: cg, size: NSSize(width: canvasSize.width, height: canvasSize.height))
+
+        cacheLock.lock()
+        cache[key] = image
+        order.append(key)
+        while order.count > maxEntries, let oldest = order.first {
+            order.removeFirst()
+            cache.removeValue(forKey: oldest)
         }
+        cacheLock.unlock()
+        return image
     }
 
-    private func bucket(_ value: CGFloat, step: Int) -> Int {
-        guard value.isFinite, value > 0 else { return step }
-        let stepValue = CGFloat(step)
-        return max(step, Int((value / stepValue).rounded(.toNearestOrAwayFromZero) * stepValue))
+    private nonisolated static func loadCover(path: String?, title: String) -> CGImage? {
+#if DEBUG
+        if let path, let debug = MusicPlayerVisualDebugFixtures.coverCGImage(forPath: path, size: 420) {
+            return debug
+        }
+#endif
+        if let path,
+           let ns = ArtworkImageCache.image(path: path, targetSize: CGSize(width: 520, height: 520)) {
+            if let cg = ns.cgImage(forProposedRect: nil, context: nil, hints: nil) { return cg }
+            if let tiff = ns.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) {
+                return bitmap.cgImage
+            }
+        }
+        let fallback = NSImage(size: NSSize(width: 420, height: 420))
+        fallback.lockFocus()
+        let hash = abs(title.hashValue)
+        let hue = CGFloat(hash % 360) / 360.0
+        NSColor(calibratedHue: hue, saturation: 0.36, brightness: 0.74, alpha: 1).setFill()
+        NSRect(x: 0, y: 0, width: 420, height: 420).fill()
+        NSColor(calibratedHue: fmod(hue + 0.09, 1), saturation: 0.30, brightness: 0.88, alpha: 1).setFill()
+        NSBezierPath(ovalIn: NSRect(x: -80, y: 130, width: 340, height: 340)).fill()
+        NSColor(calibratedHue: fmod(hue + 0.58, 1), saturation: 0.22, brightness: 0.68, alpha: 1).setFill()
+        NSBezierPath(ovalIn: NSRect(x: 190, y: -80, width: 360, height: 360)).fill()
+        fallback.unlockFocus()
+        return fallback.cgImage(forProposedRect: nil, context: nil, hints: nil)
     }
 }
 
-private struct AlbumGlowBakeKey: Hashable, Sendable {
-    let bakeVersion: Int
-    let profile: AlbumCoverGlowProfile
-    let path: String
-    let basePoints: Int
-    let canvasPoints: Int
-    let dark: Bool
-    let vibrancyBucket: Int
+private struct SendableAlbumBackdropImage: @unchecked Sendable {
+    let image: NSImage?
+
+    init(_ image: NSImage?) {
+        self.image = image
+    }
 }
 
-private struct AlbumGlowBakeSpec: Hashable, Sendable {
-    let name: String
-    let blur: Double
-    let edgeReach: Double
-    let saturation: Double
-    let brightness: Double
-    let contrast: Double
-    let colorFieldSize: Double
-    let colorFieldBlur: Double
-    let falloffPower: Double
-}
+// MARK: - 真·封面发光（iTunes/Apple Music 式：放大封面 + 重高斯模糊 + 边缘羽化，铺在封面正后方）
 
-private struct AlbumBakedCoverGlowImage {
-    let image: NSImage
-    let displaySide: CGFloat
-}
-
-private struct SendableAlbumBakedCoverGlowImage: @unchecked Sendable {
-    let name: String
-    let image: CGImage
-    let displaySide: Double
-    let cost: Int
-}
-
-private struct AlbumProjectedCoverGlowLayer: View {
+/// 把专辑封面本身放大到 ~2x、做重高斯模糊、并把边缘羽化成透明，铺在清晰封面的正后方。
+/// 封面的真实颜色因此向四周柔和溢出，看起来"封面在发光"。不做低频色场/亮度门控等复杂处理——
+/// 就是参考图里那种"封面底部叠一张模糊大封面"的直接做法。烘焙成静态图缓存，运行期只贴图，零逐帧成本。
+private struct AlbumGlowBlurCover: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let item: MediaItem
+    let posterPath: String?
     let controller: MpvPlayerController
-    let palette: AlbumColorPalette
-    let coverSize: CGFloat
-    let glowReach: CGFloat
+    /// 发光画布边长（= 清晰封面边长 × 几何 reach，光程刚好触达歌词卡左缘 / 控制栏并略超出）。
+    let displaySide: CGFloat
+    /// 真实封面显示边长：烘焙时据此对齐光源矩形与真实封面。
+    let coverSide: CGFloat
     let coverGlowEnabled: Bool
-    @StateObject private var playbackStateObserver: MusicMiniTransportStateObserver
-    @State private var glowVisualProgress: Double = 1
-    @State private var collapseTask: Task<Void, Never>?
+    @StateObject private var playbackObserver: MusicMiniTransportStateObserver
+    @State private var image: NSImage?
+    @State private var loadedKey: String = ""
+    @State private var glowOpacity: Double = 1
+    @State private var glowScale: Double = 1
+    @State private var farCollapseTask: Task<Void, Never>?
 
     init(
-        item: MediaItem,
+        posterPath: String?,
         controller: MpvPlayerController,
-        palette: AlbumColorPalette,
-        coverSize: CGFloat,
-        glowReach: CGFloat,
+        displaySide: CGFloat,
+        coverSide: CGFloat,
         coverGlowEnabled: Bool
     ) {
-        self.item = item
+        self.posterPath = posterPath
         self.controller = controller
-        self.palette = palette
-        self.coverSize = coverSize
-        self.glowReach = glowReach
+        self.displaySide = displaySide
+        self.coverSide = coverSide
         self.coverGlowEnabled = coverGlowEnabled
-        _playbackStateObserver = StateObject(wrappedValue: MusicMiniTransportStateObserver(controller: controller))
+        _playbackObserver = StateObject(wrappedValue: MusicMiniTransportStateObserver(controller: controller))
+    }
+
+    private var bakeKey: String {
+        "\(posterPath ?? "")|\(Int(displaySide.rounded()))|\(Int(coverSide.rounded()))"
     }
 
     var body: some View {
-        let isPlaying = playbackStateObserver.state.isPlaying
-        let progress = smoothstep(glowVisualProgress)
-        let glowStrength = pow(progress, 1.34)
-        let vibDamp = MusicPlayerVisualTokens.Glow.lowVibrancyDamp +
-            (1 - MusicPlayerVisualTokens.Glow.lowVibrancyDamp) * palette.vibrancy
-        let reach = max(glowReach * CGFloat(vibDamp), 1)
-        let projectedSide = coverSize * reach
-
+        let isPlaying = playbackObserver.state.isPlaying
         ZStack {
-            if coverGlowEnabled, glowStrength > 0.01 {
-                AlbumBlurredCoverGlowLayer(
-                    posterPath: item.posterPath,
-                    palette: palette,
-                    glowStrength: glowStrength * 0.98,
-                    colorScheme: colorScheme,
-                    profile: .projected,
-                    coverSize: coverSize
-                )
-                .frame(width: projectedSide, height: projectedSide)
-                .blendMode(.screen)
+            if coverGlowEnabled, let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.medium)
+                    .frame(width: displaySide, height: displaySide)
+                    .opacity(glowOpacity * (colorScheme == .dark ? 0.74 : 0.80))
+                    .scaleEffect(glowScale)
+                    .blendMode(.normal)
 
-                AlbumBlurredCoverGlowLayer(
-                    posterPath: item.posterPath,
-                    palette: palette,
-                    glowStrength: glowStrength * 0.52,
-                    colorScheme: colorScheme,
-                    profile: .ambient,
-                    coverSize: coverSize
-                )
-                .frame(width: projectedSide * 0.84, height: projectedSide * 0.84)
-                .blendMode(.screen)
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.medium)
+                    .frame(width: displaySide, height: displaySide)
+                    .opacity(glowOpacity * (colorScheme == .dark ? 0.36 : 0.26))
+                    .scaleEffect(glowScale)
+                    .blendMode(.screen)
 
-                AlbumBlurredCoverGlowLayer(
-                    posterPath: item.posterPath,
-                    palette: palette,
-                    glowStrength: glowStrength * 0.36,
-                    colorScheme: colorScheme,
-                    profile: .projected,
-                    coverSize: coverSize
-                )
-                .frame(width: projectedSide * 0.58, height: projectedSide * 0.58)
-                .blendMode(.plusLighter)
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.medium)
+                    .frame(width: displaySide, height: displaySide)
+                    .opacity(glowOpacity * (colorScheme == .dark ? 0.10 : 0.075))
+                    .scaleEffect(glowScale)
+                    .blendMode(.plusLighter)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .mask(ProjectedCoverGlowFeatherMask())
-        .compositingGroup()
-        .onAppear {
-            syncGlow(isPlaying: isPlaying, animated: false)
+        .frame(width: displaySide, height: displaySide)
+        .allowsHitTesting(false)
+        .task(id: bakeKey) {
+            await load()
         }
+        .onAppear { applyPlayback(isPlaying: isPlaying, animated: false) }
         .onChange(of: isPlaying) { playing in
-            syncGlow(isPlaying: playing, animated: true)
+            applyPlayback(isPlaying: playing, animated: true)
         }
-        .onChange(of: item.id) { _ in
-            syncGlow(isPlaying: isPlaying, animated: false)
-        }
-        .onDisappear {
-            collapseTask?.cancel()
-        }
+        .onDisappear { farCollapseTask?.cancel() }
     }
 
-    private func syncGlow(isPlaying: Bool, animated: Bool) {
-        let target = isPlaying ? 1.0 : 0.0
-        collapseTask?.cancel()
+    /// 暂停时发光收回封面底下的目标 scale：略小于"暂停后缩小的封面"（封面暂停缩到 0.912），
+    /// 让模糊大封面完全藏进清晰封面下方，不留出血边。
+    private var tuckedScale: Double {
+        guard displaySide > 1, coverSide > 1 else { return 0.28 }
+        return Double(coverSide / displaySide) * 0.88
+    }
+
+    /// 播放：光快速升起铺满；暂停：光由近及远收拢——先收一半，再整体缩到封面底下并熄灭。
+    private func applyPlayback(isPlaying: Bool, animated: Bool) {
+        farCollapseTask?.cancel()
         guard animated, !reduceMotion else {
-            glowVisualProgress = target
+            glowOpacity = isPlaying ? 1.0 : 0.0
+            glowScale = isPlaying ? 1.0 : tuckedScale
             return
         }
-
         if isPlaying {
-            withAnimation(.easeOut(duration: 0.26)) {
-                glowVisualProgress = 1
+            withAnimation(.easeOut(duration: 0.32)) {
+                glowOpacity = 1.0
+                glowScale = 1.0
             }
         } else {
-            withAnimation(.easeInOut(duration: 0.22)) {
-                glowVisualProgress = 0.18
+            let tuck = tuckedScale
+            withAnimation(.easeInOut(duration: 0.26)) {
+                glowScale = min(tuck * 1.9, 0.62)
+                glowOpacity = 0.42
             }
-            collapseTask = Task { @MainActor in
-                do { try await Task.sleep(nanoseconds: 280_000_000) } catch { return }
+            farCollapseTask = Task { @MainActor in
+                do { try await Task.sleep(nanoseconds: 220_000_000) } catch { return }
                 guard !Task.isCancelled else { return }
-                withAnimation(.easeOut(duration: 0.36)) {
-                    glowVisualProgress = 0
+                withAnimation(.easeOut(duration: 0.40)) {
+                    glowScale = tuck
+                    glowOpacity = 0.0
                 }
             }
         }
     }
 
-    private func smoothstep(_ value: Double) -> Double {
-        let clamped = min(max(value, 0), 1)
-        return clamped * clamped * (3 - 2 * clamped)
-    }
-}
-
-private struct ProjectedCoverGlowFeatherMask: View {
-    var body: some View {
-        GeometryReader { geometry in
-            let radius = max(geometry.size.width, geometry.size.height) * 0.66
-            RadialGradient(
-                stops: [
-                    .init(color: .black, location: 0.00),
-                    .init(color: .black, location: 0.48),
-                    .init(color: .black.opacity(0.78), location: 0.68),
-                    .init(color: .black.opacity(0.30), location: 0.88),
-                    .init(color: .clear, location: 1.00)
-                ],
-                center: .center,
-                startRadius: 0,
-                endRadius: radius
-            )
-            .frame(width: geometry.size.width, height: geometry.size.height)
-        }
-    }
-}
-
-private actor AlbumCoverGlowBakeCache {
-    static let shared = AlbumCoverGlowBakeCache()
-    private static let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
-    private static let ciContext = CIContext(options: [.useSoftwareRenderer: false])
-    // 封面 glow 已是低频柔光；烘焙纹理不需要 Retina 级锐度，限制像素边长可显著降低合成带宽。
-    private static let maxPixelSide = 1408
-#if DEBUG
-    /// 调试专用封面 key：覆盖四象限、冷色、暖黄和奶油低彩，用于验证 glow 方向与视觉状态。
-    static let debugQuadrantCoverPath = MusicPlayerVisualDebugFixtures.quadrantCoverPath
-#endif
-
-    private struct CacheKey: Hashable {
-        let layout: AlbumGlowBakeKey
-        let specs: [AlbumGlowBakeSpec]
-    }
-
-    private var values: [CacheKey: [SendableAlbumBakedCoverGlowImage]] = [:]
-    private var costs: [CacheKey: Int] = [:]
-    private var accessTick: [CacheKey: Int] = [:]
-    private var tickCounter = 0
-    private var totalCost = 0
-    private let maxCost = 96 * 1024 * 1024
-    private let maxEntries = 6
-
-    static func layers(for key: AlbumGlowBakeKey, specs: [AlbumGlowBakeSpec]) async -> [SendableAlbumBakedCoverGlowImage] {
-        await shared.layers(for: key, specs: specs)
-    }
-
-    private func layers(for key: AlbumGlowBakeKey, specs: [AlbumGlowBakeSpec]) async -> [SendableAlbumBakedCoverGlowImage] {
-        let cacheKey = CacheKey(layout: key, specs: specs)
-        if let cached = values[cacheKey] {
-            markRecentlyUsed(cacheKey)
-            return cached
-        }
-
-        let baked = await Task.detached(priority: .utility) {
-            Self.bakeLayers(for: key, specs: specs)
+    @MainActor
+    private func load() async {
+        guard coverGlowEnabled else { return }
+        let key = bakeKey
+        guard key != loadedKey || image == nil else { return }
+        let path = posterPath
+        let side = displaySide
+        let fraction = coverSide > 1 && displaySide > 1 ? coverSide / displaySide : 0.3
+        let baked = await Task.detached(priority: .userInitiated) {
+            SendableAlbumBackdropImage(AlbumGlowBlurCoverBaker.bake(path: path, displaySide: side, coverFraction: fraction))
         }.value
-        guard !baked.isEmpty else { return [] }
+        guard !Task.isCancelled else { return }
+        image = baked.image
+        loadedKey = key
+    }
+}
 
-        let cost = baked.reduce(0) { $0 + $1.cost }
-        values[cacheKey] = baked
-        costs[cacheKey] = cost
-        totalCost += cost
-        markRecentlyUsed(cacheKey)
-        pruneIfNeeded()
-        return baked
+/// 独立的封面光程层：不承担底板取色，只模拟“封面作为光源”向外均匀扩散。
+/// 半径由布局直接给出：光心到歌词卡左缘/控制栏上沿的距离 + overshoot，
+/// 因此光尾会真实抵达歌词卡左边缘并稍微超过一点。
+private struct AlbumPhysicalLightField: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let palette: AlbumColorPalette
+    let controller: MpvPlayerController
+    let center: CGPoint
+    let coverSide: CGFloat
+    let radius: CGFloat
+    let isEnabled: Bool
+    @StateObject private var playbackObserver: MusicMiniTransportStateObserver
+    @State private var lightProgress: Double = 0
+    @State private var lightScale: Double = 1
+    @State private var collapseTask: Task<Void, Never>?
+
+    init(
+        palette: AlbumColorPalette,
+        controller: MpvPlayerController,
+        center: CGPoint,
+        coverSide: CGFloat,
+        radius: CGFloat,
+        isEnabled: Bool
+    ) {
+        self.palette = palette
+        self.controller = controller
+        self.center = center
+        self.coverSide = coverSide
+        self.radius = radius
+        self.isEnabled = isEnabled
+        _playbackObserver = StateObject(wrappedValue: MusicMiniTransportStateObserver(controller: controller))
     }
 
-    private func markRecentlyUsed(_ key: CacheKey) {
-        tickCounter &+= 1
-        accessTick[key] = tickCounter
-    }
+    var body: some View {
+        let isPlaying = playbackObserver.state.isPlaying
+        GeometryReader { proxy in
+            if isEnabled {
+                let safeRadius = max(radius, coverSide * 1.35, 1)
+                let edgeDistance = max(safeRadius - coverSide * 0.5, coverSide * 0.35)
+                // 高斯 blur 的可见尾部约为 2.6-3.0 个 radius；用目标光程反推 blur，
+                // 让 halo 正好到达歌词卡左缘并略过一点，而不是无限铺满整窗。
+                let coreBlur = min(max(edgeDistance * 0.36, 36), 180)
+                let tailBlur = min(max(edgeDistance * 0.54, 56), 240)
+                let isDark = colorScheme == .dark
+                let primary = palette.glowPrimary.adjustedPreservingHue(
+                    saturationMultiplier: 0.96,
+                    brightnessMultiplier: 1.18,
+                    minSaturation: 0.16,
+                    maxSaturation: isDark ? 0.62 : 0.54,
+                    minBrightness: isDark ? 0.58 : 0.72,
+                    maxBrightness: isDark ? 0.92 : 0.98
+                ).color
+                let secondary = palette.glowSecondary.adjustedPreservingHue(
+                    saturationMultiplier: 0.92,
+                    brightnessMultiplier: 1.16,
+                    minSaturation: 0.14,
+                    maxSaturation: isDark ? 0.58 : 0.50,
+                    minBrightness: isDark ? 0.56 : 0.70,
+                    maxBrightness: isDark ? 0.90 : 0.96
+                ).color
+                let accent = palette.glowAccent.adjustedPreservingHue(
+                    saturationMultiplier: 0.88,
+                    brightnessMultiplier: 1.14,
+                    minSaturation: 0.12,
+                    maxSaturation: isDark ? 0.54 : 0.46,
+                    minBrightness: isDark ? 0.54 : 0.68,
+                    maxBrightness: isDark ? 0.88 : 0.94
+                ).color
+                let progress = lightProgress
+                let lightShape = RoundedRectangle(cornerRadius: max(22, coverSide * 0.125), style: .continuous)
+                let albumField = LinearGradient(
+                    stops: [
+                        .init(color: secondary, location: 0.0),
+                        .init(color: primary, location: 0.46),
+                        .init(color: accent, location: 1.0)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
 
-    private func pruneIfNeeded() {
-        while values.count > maxEntries || totalCost > maxCost,
-              let oldest = accessTick.min(by: { $0.value < $1.value })?.key {
-            values.removeValue(forKey: oldest)
-            accessTick.removeValue(forKey: oldest)
-            totalCost -= costs.removeValue(forKey: oldest) ?? 0
+                ZStack {
+                    // 真实光源：与封面同尺寸、同圆角的色块向外高斯扩散。
+                    lightShape
+                        .fill(albumField)
+                        .frame(width: coverSide, height: coverSide)
+                        .position(center)
+                        .scaleEffect(lightScale)
+                        .blur(radius: coreBlur)
+                        .opacity(progress * (isDark ? 0.72 : 0.62))
+                        .blendMode(.normal)
+
+                    lightShape
+                        .fill(albumField)
+                        .frame(width: coverSide, height: coverSide)
+                        .position(center)
+                        .scaleEffect(lightScale * 1.04)
+                        .blur(radius: tailBlur)
+                        .opacity(progress * (isDark ? 0.48 : 0.40))
+                        .blendMode(.screen)
+
+                    lightShape
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [
+                                    secondary.opacity(progress * (isDark ? 0.38 : 0.32)),
+                                    primary.opacity(progress * (isDark ? 0.44 : 0.36)),
+                                    accent.opacity(progress * (isDark ? 0.28 : 0.24))
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: max(4, coverSide * 0.018)
+                        )
+                        .frame(width: coverSide + coreBlur * 0.70, height: coverSide + coreBlur * 0.70)
+                        .position(center)
+                        .scaleEffect(lightScale)
+                        .blur(radius: max(14, coreBlur * 0.20))
+                        .blendMode(.screen)
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height)
+            }
         }
+        .onAppear { applyPlayback(isPlaying: isPlaying, animated: false) }
+        .onChange(of: isPlaying) { playing in
+            applyPlayback(isPlaying: playing, animated: true)
+        }
+        .onDisappear { collapseTask?.cancel() }
     }
 
-    private nonisolated static func bakeLayers(
-        for key: AlbumGlowBakeKey,
-        specs: [AlbumGlowBakeSpec]
-    ) -> [SendableAlbumBakedCoverGlowImage] {
-        let coverCG: CGImage?
-#if DEBUG
-        if let debugCover = MusicPlayerVisualDebugFixtures.coverCGImage(forPath: key.path, size: 256) {
-            coverCG = debugCover
+    private var tuckedScale: Double {
+        guard radius > 1, coverSide > 1 else { return 0.34 }
+        return min(max(Double(coverSide * 0.42 / radius), 0.18), 0.42)
+    }
+
+    private func applyPlayback(isPlaying: Bool, animated: Bool) {
+        collapseTask?.cancel()
+        guard animated, !reduceMotion else {
+            lightProgress = isPlaying ? 1.0 : 0.0
+            lightScale = isPlaying ? 1.0 : tuckedScale
+            return
+        }
+        if isPlaying {
+            withAnimation(.easeOut(duration: 0.34)) {
+                lightProgress = 1.0
+                lightScale = 1.0
+            }
         } else {
-            coverCG = ArtworkImageCache.image(
-                path: key.path,
-                targetSize: CGSize(width: 256, height: 256)
-            ).flatMap { cgImage(from: $0) }
-        }
-#else
-        coverCG = ArtworkImageCache.image(
-            path: key.path,
-            targetSize: CGSize(width: 256, height: 256)
-        ).flatMap { cgImage(from: $0) }
-#endif
-        guard let coverCG else { return [] }
-
-        return specs.compactMap { spec in
-            bakeLayer(cover: coverCG, key: key, spec: spec)
+            let tuck = tuckedScale
+            withAnimation(.easeInOut(duration: 0.24)) {
+                lightProgress = 0.28
+                lightScale = max(tuck * 1.85, 0.52)
+            }
+            collapseTask = Task { @MainActor in
+                do { try await Task.sleep(nanoseconds: 230_000_000) } catch { return }
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeOut(duration: 0.42)) {
+                    lightProgress = 0.0
+                    lightScale = tuck
+                }
+            }
         }
     }
+}
 
-    private nonisolated static func bakeLayer(
-        cover: CGImage,
-        key: AlbumGlowBakeKey,
-        spec: AlbumGlowBakeSpec
-    ) -> SendableAlbumBakedCoverGlowImage? {
-        let basePoints = Double(max(key.basePoints, 1))
-        let canvasPoints = Double(max(key.canvasPoints, 1))
-        // 光源矩形必须等于真实封面尺寸；外层 frame 只提供 SDF falloff 的画布。
-        let imageSidePoints = basePoints
-        let displaySide = max(canvasPoints, basePoints * 1.08)
-        let pixelScale = min(1.0, Double(maxPixelSide) / max(displaySide, 1))
-        let pixelSide = max(32, Int((displaySide * pixelScale).rounded(.toNearestOrAwayFromZero)))
-        let imageSide = max(1, imageSidePoints * pixelScale)
-        let blurRadius = max(0, spec.blur * pixelScale)
+private enum AlbumGlowBlurCoverBaker {
+    private static let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private static let cacheLock = NSLock()
+    private static var cache: [String: NSImage] = [:]
+    private static var order: [String] = []
+    private static let maxEntries = 8
 
-        let colorField = lowFrequencyCover(
-            from: cover,
-            targetSide: spec.colorFieldSize,
-            blurRadius: spec.colorFieldBlur
-        ) ?? cover
-        guard var output = edgeClampedCoverSource(
-            colorField,
-            canvasPixels: pixelSide,
-            imageSide: imageSide,
-            insetRatio: 0.06
-        ) else {
-            return nil
-        }
-        let extent = CGRect(x: 0, y: 0, width: pixelSide, height: pixelSide)
-        output = output
-            .applyingFilter(
-                "CIColorControls",
-                parameters: [
-                    kCIInputSaturationKey: spec.saturation,
-                    kCIInputBrightnessKey: spec.brightness,
-                    kCIInputContrastKey: spec.contrast
-                ]
-            )
-        if blurRadius > 0 {
-            output = output
-                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blurRadius])
-                .cropped(to: extent)
-        }
+    /// 封面发光烘焙（2026-06-10 重写，对应需求 1/2）：
+    /// 物理模型 = 封面是一块发光体，边界颜色沿法线方向向外延伸（左上红则光左上红），
+    /// 经高斯扩散后按 SDF 圆角方形羽化衰减；亮度门控让黑色区域不发光。
+    /// - `coverFraction`：真实封面边长 / 发光画布边长（光程由几何 reach 决定）。
+    static func bake(path: String?, displaySide: CGFloat, coverFraction: CGFloat) -> NSImage? {
+        guard let path, !path.isEmpty, displaySide > 8 else { return nil }
+        let fraction = min(max(coverFraction, 0.10), 0.90)
+        // 发光是低频内容，画布像素无需跟随点尺寸：上限 720 足够。
+        let pixelSide = max(128, min(Int((displaySide * 0.55).rounded()), 720))
+        let key = "\(path)|\(pixelSide)|\(Int((fraction * 100).rounded()))"
+        cacheLock.lock()
+        if let cached = cache[key] { cacheLock.unlock(); return cached }
+        cacheLock.unlock()
 
-        guard let mask = makeGlowAlphaMask(
-                width: pixelSide,
-                height: pixelSide,
-                imageSide: imageSide,
-                spec: spec
-              ),
-              let final = applyAlphaMask(to: output, mask: mask, extent: extent) else {
-            return nil
-        }
-
-        return SendableAlbumBakedCoverGlowImage(
-            name: spec.name,
-            image: final,
-            displaySide: displaySide,
-            cost: final.width * final.height * 4
+        guard let cover = loadCover(path: path) else { return nil }
+        let input = CIImage(cgImage: cover)
+        let src = input.extent
+        guard src.width > 1, src.height > 1 else { return nil }
+        let canvas = CGRect(x: 0, y: 0, width: CGFloat(pixelSide), height: CGFloat(pixelSide))
+        let coverSide = CGFloat(pixelSide) * fraction
+        let coverRect = CGRect(
+            x: (CGFloat(pixelSide) - coverSide) * 0.5,
+            y: (CGFloat(pixelSide) - coverSide) * 0.5,
+            width: coverSide,
+            height: coverSide
         )
-    }
-
-    private nonisolated static func edgeClampedCoverSource(
-        _ cover: CGImage,
-        canvasPixels: Int,
-        imageSide: Double,
-        insetRatio: Double
-    ) -> CIImage? {
-        let canvas = CGRect(x: 0, y: 0, width: canvasPixels, height: canvasPixels)
-        let imageRect = CGRect(
-            x: (Double(canvasPixels) - imageSide) * 0.5,
-            y: (Double(canvasPixels) - imageSide) * 0.5,
-            width: imageSide,
-            height: imageSide
-        )
-        let rawInput = CIImage(cgImage: cover)
-        let input = rawInput.transformed(by: CGAffineTransform(
-            a: 1,
-            b: 0,
-            c: 0,
-            d: -1,
-            tx: 0,
-            ty: rawInput.extent.height
+        // ① 封面 aspect-fill 进中心方形（与真实封面 1:1 对齐）。
+        let scale = max(coverRect.width / src.width, coverRect.height / src.height)
+        let placed = input.transformed(by: CGAffineTransform(
+            a: scale, b: 0, c: 0, d: scale,
+            tx: coverRect.midX - src.width * scale * 0.5,
+            ty: coverRect.midY - src.height * scale * 0.5
         ))
-        let source = input.extent
-        guard source.width > 0, source.height > 0 else { return nil }
-        let scale = max(imageRect.width / source.width, imageRect.height / source.height)
-        let placedWidth = source.width * scale
-        let placedHeight = source.height * scale
-        let transform = CGAffineTransform(
-            a: scale,
-            b: 0,
-            c: 0,
-            d: scale,
-            tx: imageRect.midX - placedWidth * 0.5,
-            ty: imageRect.midY - placedHeight * 0.5
-        )
-        let placed = input.transformed(by: transform)
-        // 先裁到真实封面内缩 4%~8% 的低频采样区，再做 edge clamp。
-        // 这样 glow 外侧采样的是"最近边点向封面内部 inset 后"的颜色：
-        // 顶边吃顶边低频色、左边吃左边低频色，角落自然混合，避免中心平均色污染所有方向。
-        let inset = min(max(insetRatio, 0.04), 0.08) * imageSide
-        let sampleRect = imageRect.insetBy(dx: inset, dy: inset)
-        return placed
-            .cropped(to: sampleRect)
+        // ② 边缘向外延伸：从真实可见封面边界 clamp，
+        //    每个方向向外延续的是最近边界的低频色。不能再内缩取样，否则边缘色会先被平均掉，
+        //    glow 看起来就不像封面颜色的直接延伸。
+        let inset = coverSide * 0.006
+        let extended = placed
+            .cropped(to: coverRect.insetBy(dx: inset, dy: inset))
             .clampedToExtent()
             .cropped(to: canvas)
+        // ③ 高斯扩散：半径按封面边长走，光晕和封面尺寸保持比例。
+        //    半径不能太大：封面内部的大面积深色会被糊进边缘延伸区，把发光颜色污染暗、
+        //    再被亮度门控扣掉——表现为"深色占比高的封面几乎不发光"。
+        let blurRadius = Double(coverSide) * 0.108
+        let blurredBase = extended
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blurRadius])
+            .cropped(to: canvas)
+        // ④ 颜色链：发光的颜色 = 封面边缘色的"保色相提亮"版。
+        //    浅色底板亮度 ~0.85，比底板暗的颜色 normal 混合看起来是阴影不是光——
+        //    所以发光色必须亮过底板才"像光"。gamma(<1) + 曝光都是乘性映射：
+        //    中间调被抬亮成光色，黑色乘出来仍是黑，不会回退"黑发灰光"。
+        let glowColor = blurredBase
+            .applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: 1.18,
+                kCIInputBrightnessKey: 0.0,
+                kCIInputContrastKey: 0.96
+            ])
+            .applyingFilter("CIGammaAdjust", parameters: ["inputPower": 0.72])
+            .applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: 0.18])
+            .cropped(to: canvas)
+        // ⑤ 羽化 = SDF 圆角方形衰减。颜色来源始终是封面本身；
+        //    运行期用 screen 混合，黑/深色不会把底板压暗，彩色区域会以保色相的方式照亮周围。
+        guard let falloff = sdfFalloffMask(pixelSide: pixelSide, coverSide: coverSide) else { return nil }
+        let combinedMask = CIImage(cgImage: falloff).cropped(to: canvas)
+        let clear = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 0)).cropped(to: canvas)
+        // CIBlendWithMask 按遮罩【灰度】插值；CIBlendWithAlphaMask 读 alpha 通道会让灰度羽化失效。
+        let feathered = glowColor.applyingFilter("CIBlendWithMask", parameters: [
+            kCIInputBackgroundImageKey: clear,
+            kCIInputMaskImageKey: combinedMask
+        ]).cropped(to: canvas)
+
+        guard let cg = ciContext.createCGImage(feathered, from: canvas) else { return nil }
+        let nsImage = NSImage(cgImage: cg, size: NSSize(width: displaySide, height: displaySide))
+        cacheLock.lock()
+        cache[key] = nsImage
+        order.append(key)
+        while order.count > maxEntries, let oldest = order.first {
+            order.removeFirst()
+            cache.removeValue(forKey: oldest)
+        }
+        cacheLock.unlock()
+        return nsImage
     }
 
-    private nonisolated static func lowFrequencyCover(
-        from cover: CGImage,
-        targetSide: Double,
-        blurRadius: Double
-    ) -> CGImage? {
-        let input = CIImage(cgImage: cover)
-        let source = input.extent
-        guard source.width > 1, source.height > 1 else { return cover }
-        let side = max(32.0, min(max(targetSide, 32), 160))
-        let scale = side / Double(max(source.width, source.height))
-        var working = input
-        if let lanczos = CIFilter(name: "CILanczosScaleTransform") {
-            lanczos.setValue(working, forKey: kCIInputImageKey)
-            lanczos.setValue(scale, forKey: kCIInputScaleKey)
-            lanczos.setValue(1.0, forKey: kCIInputAspectRatioKey)
-            working = lanczos.outputImage ?? working
+    private nonisolated static func loadCover(path: String) -> CGImage? {
+#if DEBUG
+        if let debug = MusicPlayerVisualDebugFixtures.coverCGImage(forPath: path, size: 320) {
+            return debug
         }
-        let extent = working.extent
-        if blurRadius > 0 {
-            working = working
-                .clampedToExtent()
-                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blurRadius])
-                .cropped(to: extent)
-        }
-        if let vibrance = CIFilter(name: "CIVibrance") {
-            vibrance.setValue(working, forKey: kCIInputImageKey)
-            vibrance.setValue(0.18, forKey: "inputAmount")
-            working = vibrance.outputImage ?? working
-        }
-        return ciContext.createCGImage(working, from: extent)
+#endif
+        guard let ns = ArtworkImageCache.image(path: path, targetSize: CGSize(width: 320, height: 320)) else { return nil }
+        if let cg = ns.cgImage(forProposedRect: nil, context: nil, hints: nil) { return cg }
+        guard let tiff = ns.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
+        return bitmap.cgImage
     }
 
-    private nonisolated static func makeGlowAlphaMask(
-        width: Int,
-        height: Int,
-        imageSide: Double,
-        spec: AlbumGlowBakeSpec
-    ) -> CGImage? {
-        let safeWidth = max(width, 1)
-        let safeHeight = max(height, 1)
-        let centerX = Double(safeWidth) * 0.5
-        let centerY = Double(safeHeight) * 0.5
-        let halfSide = imageSide * 0.5
-        let radius = imageSide * 0.155
-        let availableReach = max((Double(min(safeWidth, safeHeight)) - imageSide) * 0.5, 1)
-        let edgeReach = max(availableReach * min(max(spec.edgeReach, 0.05), 1.0), 1)
-        let power = max(spec.falloffPower, 0.6)
-        var pixels = [UInt8](repeating: 0, count: safeWidth * safeHeight * 4)
+    /// SDF 圆角方形衰减遮罩：封面矩形内 alpha=1，向外按 smoothstep^power 衰减到画布边缘为 0。
+    /// 光顺着【方形】封面边缘向外漫（方形封面的物理直觉），衰减曲线长而柔 = 边缘羽化。
+    private nonisolated static func sdfFalloffMask(pixelSide: Int, coverSide: CGFloat) -> CGImage? {
+        let n = max(pixelSide, 1)
+        let center = Double(n) * 0.5
+        let halfSide = Double(coverSide) * 0.5
+        let cornerRadius = Double(coverSide) * 0.155
+        let reach = max(Double(n) * 0.5 - halfSide, 1)
+        var pixels = [UInt8](repeating: 0, count: n * n)
 
-        for y in 0..<safeHeight {
-            let py = Double(y) + 0.5 - centerY
-            for x in 0..<safeWidth {
-                let px = Double(x) + 0.5 - centerX
-                let distance = roundedRectSignedDistance(
-                    x: px,
-                    y: py,
-                    halfSide: halfSide,
-                    radius: radius
-                )
-                let outside = max(distance, 0)
+        for y in 0..<n {
+            let py = Double(y) + 0.5 - center
+            for x in 0..<n {
+                let px = Double(x) + 0.5 - center
+                // 圆角方形 signed distance。
+                let qx = abs(px) - halfSide + cornerRadius
+                let qy = abs(py) - halfSide + cornerRadius
+                let outside = (qx > 0 || qy > 0)
+                    ? (qx > 0 && qy > 0 ? (qx * qx + qy * qy).squareRoot() : max(qx, qy, 0))
+                    : 0
+                let distance = outside + min(max(qx, qy), 0) - cornerRadius
                 let alpha: Double
                 if distance <= 0 {
                     alpha = 1
                 } else {
-                    let t = min(max(outside / edgeReach, 0), 1)
-                    alpha = pow(1 - smoothstep(t), power)
+                    let t = min(max(distance / reach, 0), 1)
+                    let smooth = t * t * (3 - 2 * t)
+                    alpha = pow(1 - smooth, 1.16)
                 }
-                let value = UInt8(min(max((alpha * 255).rounded(), 0), 255))
-                let offset = (y * safeWidth + x) * 4
-                pixels[offset] = value
-                pixels[offset + 1] = value
-                pixels[offset + 2] = value
-                pixels[offset + 3] = value
+                pixels[y * n + x] = UInt8(min(max(alpha * 255, 0), 255))
             }
         }
 
         let data = Data(pixels) as CFData
         guard let provider = CGDataProvider(data: data) else { return nil }
         return CGImage(
-            width: safeWidth,
-            height: safeHeight,
+            width: n,
+            height: n,
             bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: safeWidth * 4,
-            space: colorSpace,
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            bitsPerPixel: 8,
+            bytesPerRow: n,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
             provider: provider,
             decode: nil,
             shouldInterpolate: true,
             intent: .defaultIntent
         )
     }
-
-    private nonisolated static func roundedRectSignedDistance(
-        x: Double,
-        y: Double,
-        halfSide: Double,
-        radius: Double
-    ) -> Double {
-        let qx = abs(x) - halfSide + radius
-        let qy = abs(y) - halfSide + radius
-        let outside = hypot(max(qx, 0), max(qy, 0))
-        let inside = min(max(qx, qy), 0)
-        return outside + inside - radius
-    }
-
-    private nonisolated static func smoothstep(_ t: Double) -> Double {
-        let x = min(max(t, 0), 1)
-        return x * x * (3 - 2 * x)
-    }
-
-#if DEBUG
-    private nonisolated static func debugQuadrantCover(size: Int) -> CGImage? {
-        MusicPlayerVisualDebugFixtures.quadrantCoverCGImage(size: size)
-    }
-#endif
-
-    private nonisolated static func applyAlphaMask(
-        to image: CIImage,
-        mask: CGImage,
-        extent: CGRect
-    ) -> CGImage? {
-        let baseMask = CIImage(cgImage: mask).cropped(to: extent)
-        let maskImage = lightEmitterMask(for: image, baseMask: baseMask, extent: extent)
-        let clear = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 0)).cropped(to: extent)
-        let masked = image
-            .cropped(to: extent)
-            .applyingFilter(
-                "CIBlendWithAlphaMask",
-                parameters: [
-                    kCIInputBackgroundImageKey: clear,
-                    kCIInputMaskImageKey: maskImage
-                ]
-            )
-            .cropped(to: extent)
-        guard let rendered = ciContext.createCGImage(masked, from: extent) else { return nil }
-        return verticallyFlipped(rendered)
-    }
-
-    private nonisolated static func lightEmitterMask(
-        for image: CIImage,
-        baseMask: CIImage,
-        extent: CGRect
-    ) -> CIImage {
-        // 黑色与近黑像素只能提供深度，不能提供“发光”。这里把 glow alpha 再乘以
-        // 低频色场的亮度门控：月光、金字、霓虹等亮部会继续扩散，黑底和暗边缘会自然退场。
-        let luma = image
-            .cropped(to: extent)
-            .applyingFilter(
-                "CIColorMatrix",
-                parameters: [
-                    "inputRVector": CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0),
-                    "inputGVector": CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0),
-                    "inputBVector": CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0),
-                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)
-                ]
-            )
-            .applyingFilter(
-                "CIColorControls",
-                parameters: [
-                    kCIInputSaturationKey: 0,
-                    kCIInputBrightnessKey: -0.105,
-                    kCIInputContrastKey: 1.88
-                ]
-            )
-            .applyingFilter("CIGammaAdjust", parameters: ["inputPower": 1.34])
-            .cropped(to: extent)
-
-        return luma
-            .applyingFilter("CIMultiplyCompositing", parameters: [kCIInputBackgroundImageKey: baseMask])
-            .cropped(to: extent)
-    }
-
-    private nonisolated static func verticallyFlipped(_ image: CGImage) -> CGImage? {
-        guard let context = CGContext(
-            data: nil,
-            width: image.width,
-            height: image.height,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-
-        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
-        context.clear(rect)
-        context.translateBy(x: 0, y: CGFloat(image.height))
-        context.scaleBy(x: 1, y: -1)
-        context.draw(image, in: rect)
-        return context.makeImage()
-    }
-
-    private nonisolated static func cgImage(from image: NSImage) -> CGImage? {
-        if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-            return cgImage
-        }
-        guard let data = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: data) else {
-            return nil
-        }
-        return bitmap.cgImage
-    }
 }
+
+// MARK: - 封面高斯模糊发光层
 
 private struct MusicExpandedArtwork: View {
     @Environment(\.colorScheme) private var colorScheme
@@ -2127,8 +2059,6 @@ private struct MusicExpandedArtwork: View {
         // 暂停时缩小并后退；播放态本身由布局略微收小，避免左侧视觉重量过大。
         let coverScale = CGFloat(lerp(from: 0.912, to: 1.0, progress: coverProgress))
         let coverOffset = CGFloat(lerp(from: 15, to: 0, progress: coverProgress))
-        // 暂停时光晕收得更小（0.5），播放时铺满到 1.0；范围由外层 frame 决定。
-        let glowScale = CGFloat(lerp(from: 0.38, to: 1.0, progress: glowStrength))
         // §2.2 关灯"掉色温"：彩色投影饱和度随 glow 下降而向中性靠拢（保色相），
         // 模拟"发光体关闭后只剩环境光"；重新播放反向恢复。
         let shadowSatFloor = MusicPlayerVisualTokens.Glow.pausedShadowSaturationFloor
@@ -2171,26 +2101,8 @@ private struct MusicExpandedArtwork: View {
                 .aspectRatio(1, contentMode: .fit)
                 .frame(width: posterSize, height: posterSize)
                 .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
-                .background {
-                    if coverGlowEnabled, glowStrength > 0.01 {
-                        // Image-based 封面发光：封面作为光源向四周蔓延（见 AlbumBlurredCoverGlowLayer）。
-                        // §2.1 reach 只决定可用画布大小（容纳大半径模糊不被裁切，并让光铺向歌词卡方向）；
-                        // 发光的实际形态与浓度由 coverSize + 三层放大/模糊决定。vibrancy 仅做轻微缩放。
-                        let vibDamp = MusicPlayerVisualTokens.Glow.lowVibrancyDamp +
-                            (1 - MusicPlayerVisualTokens.Glow.lowVibrancyDamp) * palette.vibrancy
-                        let reach = max(glowReach * CGFloat(vibDamp), 1)
-                        AlbumBlurredCoverGlowLayer(
-                            posterPath: item.posterPath,
-                            palette: palette,
-                            glowStrength: glowStrength,
-                            colorScheme: colorScheme,
-                            coverSize: posterSize
-                        )
-                        .frame(width: posterSize * reach, height: posterSize * reach)
-                        .scaleEffect(glowScale)
-                        .allowsHitTesting(false)
-                    }
-                }
+                // 封面发光统一交给铺在整层背后的「模糊大封面」(AlbumGlowBlurCover)，
+                // 这里不再叠 image-based 三层封面色场，避免两套发光互相打架/发糊。
                 .overlay {
                     RoundedRectangle(cornerRadius: 30, style: .continuous)
                 .strokeBorder(.white.opacity(lerp(from: 0.32, to: 0.48, progress: coverProgress)), lineWidth: 1.1)
@@ -2509,25 +2421,17 @@ private struct MusicExpandedArtworkShadowLayer: NSViewRepresentable {
                 shadowLayer.rasterizationScale = scale
             }
 
-            // 注意坐标系：ShadowView 为非翻转 NSView（y 向上），CALayer 的 shadowOffset 正 y 会向【上】投影。
-            // 原 SwiftUI `.shadow(y: 正值)` 是向【下】投影，因此这里取负，保持阴影朝下（与封面落地阴影一致）。
-            // 彩色主光源已经由 AlbumBlurredCoverGlowLayer 的 image-based 三层封面复制图承担。
-            // palette 色影只留一层几乎不可察觉的接触色，避免封面边缘被主色/辅色推成邻近区域不存在的颜色。
+            // 彩色接触光只做贴边定义：真正的封面颜色外延交给上层 AlbumGlowBlurCover。
+            // 这里必须保持零偏移，否则会和大封面 glow 叠成“下方更亮”的非均匀光晕。
             primaryShadowLayer.shadowColor = latestPrimaryColor.cgColor
-            primaryShadowLayer.shadowOpacity = Float(lerp(from: 0.0, to: 0.018, progress: latestGlowStrength))
-            primaryShadowLayer.shadowRadius = CGFloat(lerp(from: 2, to: 8, progress: latestGlowStrength))
-            primaryShadowLayer.shadowOffset = CGSize(
-                width: 0,
-                height: -CGFloat(lerp(from: 1, to: 4, progress: latestGlowStrength))
-            )
+            primaryShadowLayer.shadowOpacity = Float(lerp(from: 0.0, to: 0.18, progress: latestGlowStrength))
+            primaryShadowLayer.shadowRadius = CGFloat(lerp(from: 8, to: 28, progress: latestGlowStrength))
+            primaryShadowLayer.shadowOffset = .zero
 
             accentShadowLayer.shadowColor = latestAccentColor.cgColor
-            accentShadowLayer.shadowOpacity = Float(lerp(from: 0.0, to: 0.006, progress: latestGlowStrength))
-            accentShadowLayer.shadowRadius = CGFloat(lerp(from: 2, to: 6, progress: latestGlowStrength))
-            accentShadowLayer.shadowOffset = CGSize(
-                width: 0,
-                height: -CGFloat(lerp(from: 1, to: 3, progress: latestGlowStrength))
-            )
+            accentShadowLayer.shadowOpacity = Float(lerp(from: 0.0, to: 0.12, progress: latestGlowStrength))
+            accentShadowLayer.shadowRadius = CGFloat(lerp(from: 10, to: 46, progress: latestGlowStrength))
+            accentShadowLayer.shadowOffset = .zero
 
             depthShadowLayer.shadowColor = NSColor.black.cgColor
             depthShadowLayer.shadowOpacity = Float(lerp(from: 0.18, to: 0.24, progress: latestCoverProgress))
@@ -2597,6 +2501,9 @@ private struct MusicExpandedLyricsPanel: View {
                 primaryOnly: true
             )
             .allowsHitTesting(false)
+
+            LyricsCardEdgeFrost(palette: palette, cornerRadius: MusicPlayerVisualTokens.Radius.card)
+                .allowsHitTesting(false)
 
             lyricsView
                 .padding(.horizontal, 54)
@@ -2805,6 +2712,68 @@ private struct MusicAdaptiveTextScrim: View {
     }
 }
 
+private struct LyricsCardEdgeFrost: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let palette: AlbumColorPalette
+    let cornerRadius: CGFloat
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let isDark = colorScheme == .dark
+        ZStack {
+            shape
+                .fill(
+                    LinearGradient(
+                        stops: [
+                            .init(color: Color.white.opacity(isDark ? 0.080 : 0.155), location: 0.00),
+                            .init(color: Color.white.opacity(isDark ? 0.050 : 0.100), location: 0.11),
+                            .init(color: Color.white.opacity(isDark ? 0.014 : 0.026), location: 0.27),
+                            .init(color: .clear, location: 0.41),
+                            .init(color: .clear, location: 0.59),
+                            .init(color: Color.white.opacity(isDark ? 0.012 : 0.022), location: 0.73),
+                            .init(color: Color.white.opacity(isDark ? 0.040 : 0.082), location: 0.89),
+                            .init(color: Color.white.opacity(isDark ? 0.070 : 0.135), location: 1.00)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+            shape
+                .fill(
+                    LinearGradient(
+                        stops: [
+                            .init(color: palette.albumGlassBaseColor(for: colorScheme).opacity(isDark ? 0.062 : 0.050), location: 0.00),
+                            .init(color: palette.glowPrimary.color.opacity(isDark ? 0.045 : 0.036), location: 0.15),
+                            .init(color: .clear, location: 0.36),
+                            .init(color: .clear, location: 0.64),
+                            .init(color: palette.glowSecondary.color.opacity(isDark ? 0.034 : 0.026), location: 0.86),
+                            .init(color: palette.albumGlassBaseColor(for: colorScheme).opacity(isDark ? 0.052 : 0.040), location: 1.00)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .blendMode(.screen)
+
+            shape
+                .fill(
+                    LinearGradient(
+                        stops: [
+                            .init(color: .black.opacity(isDark ? 0.045 : 0.010), location: 0.0),
+                            .init(color: .clear, location: 0.24),
+                            .init(color: .clear, location: 0.76),
+                            .init(color: .black.opacity(isDark ? 0.040 : 0.008), location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+        }
+        .clipShape(shape)
+    }
+}
+
 private struct LyricTimingSourceBadge: View {
     let source: LyricTimingSource
 
@@ -2864,42 +2833,43 @@ private struct LyricCenterSpotlight: View {
 
     var body: some View {
         GeometryReader { geo in
-            // 扩散更大：较短边的 0.56，夹在 [200, 320]，让光晕铺得更开。
-            let radius = min(max(min(geo.size.width, geo.size.height) * 0.60, 220), 350)
-            // 中心更均匀（前 ~0.34 半径保持峰值平台，不再是一个尖亮的中心点）+ 峰值更低，
-            // 之后用近高斯的多 stop 做更长、更柔的衰减，避免中心过亮与可见的硬环。
-            let peak = colorScheme == .dark ? 0.058 : 0.090
-            let stagePeak = colorScheme == .dark ? 0.074 : 0.108
+            // 舞台光（需求7）：特别柔和——峰值压低、平台收窄、衰减拉到更长，
+            // 看起来是"中心慢慢亮起来"而不是一束突然的光；只提亮背景，不冲淡歌词颜色。
+            let radius = min(max(min(geo.size.width, geo.size.height) * 0.66, 240), 390)
+            let peak = colorScheme == .dark ? 0.040 : 0.060
+            let stagePeak = colorScheme == .dark ? 0.052 : 0.074
+            // 白色均匀舞台光强度（反馈3）。
+            let stageWhite = colorScheme == .dark ? 0.050 : 0.068
             ZStack {
                 Ellipse()
                     .fill(
                         RadialGradient(
                             stops: [
                                 .init(color: palette.glowPrimary.color.opacity(stagePeak), location: 0.00),
-                                .init(color: palette.glowSecondary.color.opacity(stagePeak * 0.64), location: 0.36),
-                                .init(color: palette.glowAccent.color.opacity(stagePeak * 0.22), location: 0.66),
+                                .init(color: palette.glowSecondary.color.opacity(stagePeak * 0.58), location: 0.40),
+                                .init(color: palette.glowAccent.color.opacity(stagePeak * 0.18), location: 0.70),
                                 .init(color: .clear, location: 1.00)
                             ],
                             center: .center,
                             startRadius: 0,
-                            endRadius: radius * 0.80
+                            endRadius: radius * 0.84
                         )
                     )
                     .frame(
-                        width: min(max(geo.size.width * 0.60, 320), 620),
-                        height: min(max(geo.size.height * 0.16, 92), 156)
+                        width: min(max(geo.size.width * 0.62, 320), 640),
+                        height: min(max(geo.size.height * 0.17, 96), 164)
                     )
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                    .blur(radius: 18)
+                    .blur(radius: 26)
                     .blendMode(.screen)
 
                 RadialGradient(
                     stops: [
                         .init(color: palette.glowPrimary.color.opacity(peak), location: 0.00),
-                        .init(color: palette.glowPrimary.color.opacity(peak), location: 0.22),
-                        .init(color: palette.glowSecondary.color.opacity(peak * 0.82), location: 0.38),
-                        .init(color: palette.glowPrimary.color.opacity(peak * 0.50), location: 0.58),
-                        .init(color: palette.glowAccent.color.opacity(peak * 0.20), location: 0.78),
+                        .init(color: palette.glowPrimary.color.opacity(peak * 0.94), location: 0.16),
+                        .init(color: palette.glowSecondary.color.opacity(peak * 0.70), location: 0.38),
+                        .init(color: palette.glowPrimary.color.opacity(peak * 0.40), location: 0.60),
+                        .init(color: palette.glowAccent.color.opacity(peak * 0.15), location: 0.80),
                         .init(color: .clear, location: 1.00)
                     ],
                     center: .center,
@@ -2908,18 +2878,21 @@ private struct LyricCenterSpotlight: View {
                 )
                 .blendMode(.screen)
 
+                // 白色均匀舞台光（反馈3）：宽平台保持亮度均匀（不是一个亮点），
+                // 之后用很长的羽化淡出——画在文字层之下，screen 只提亮背景，不冲淡歌词颜色。
                 RadialGradient(
                     stops: [
-                        .init(color: .white.opacity(peak * 0.060), location: 0.00),
-                        .init(color: .white.opacity(peak * 0.045), location: 0.30),
-                        .init(color: .white.opacity(peak * 0.018), location: 0.56),
+                        .init(color: .white.opacity(stageWhite), location: 0.00),
+                        .init(color: .white.opacity(stageWhite * 0.97), location: 0.40),
+                        .init(color: .white.opacity(stageWhite * 0.72), location: 0.62),
+                        .init(color: .white.opacity(stageWhite * 0.30), location: 0.82),
                         .init(color: .clear, location: 1.00)
                     ],
                     center: .center,
                     startRadius: 0,
-                    endRadius: radius * 0.76
+                    endRadius: radius * 1.04
                 )
-                .blendMode(.plusLighter)
+                .blendMode(.screen)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -3020,14 +2993,14 @@ private struct LyricStageLightLayer: NSViewRepresentable {
         }
 
         private func updateColors() {
-            // 柔和、低对比的专辑色径向光，避免中心过亮、泛白或边缘形成可见分界。
+            // 柔和、低对比的专辑色径向光，避免中心过亮、泛白或边缘形成可见分界（需求7 再压一档）。
             radialLayer.colors = [
-                palette.glowPrimary.nsColor.withAlphaComponent(colorScheme == .dark ? 0.116 : 0.142).cgColor,
-                palette.glowSecondary.nsColor.withAlphaComponent(colorScheme == .dark ? 0.066 : 0.080).cgColor,
-                NSColor.white.withAlphaComponent(colorScheme == .dark ? 0.010 : 0.013).cgColor,
+                palette.glowPrimary.nsColor.withAlphaComponent(colorScheme == .dark ? 0.086 : 0.104).cgColor,
+                palette.glowSecondary.nsColor.withAlphaComponent(colorScheme == .dark ? 0.050 : 0.060).cgColor,
+                NSColor.white.withAlphaComponent(colorScheme == .dark ? 0.007 : 0.009).cgColor,
                 NSColor.clear.cgColor
             ]
-            radialLayer.locations = [0, 0.42, 0.72, 1]
+            radialLayer.locations = [0, 0.46, 0.76, 1]
 
             // 去掉中部横向亮带：它在歌词卡中部形成可见的"断层"横条。整体只保留柔和径向光。
             beamLayer.colors = [
@@ -3103,31 +3076,31 @@ private struct AlbumLightSpillOverlay: View {
     var body: some View {
         let isPlaying = playbackObserver.state.isPlaying
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let darkMode = colorScheme == .dark
         let glowColor = palette.glowPrimary.adjustedPreservingHue(
-            saturationMultiplier: 1.18,
-            brightnessMultiplier: 0.88,
-            minSaturation: 0.22,
-            maxSaturation: 0.88,
-            minBrightness: 0.42,
-            maxBrightness: 0.78
+            saturationMultiplier: 0.96,
+            brightnessMultiplier: 1.14,
+            minSaturation: 0.16,
+            maxSaturation: 0.62,
+            minBrightness: darkMode ? 0.56 : 0.72,
+            maxBrightness: darkMode ? 0.88 : 0.96
         ).color
         let secondaryColor = (primaryOnly ? palette.glowPrimary : palette.glowSecondary).adjustedPreservingHue(
-            saturationMultiplier: 1.16,
-            brightnessMultiplier: 0.90,
-            minSaturation: 0.20,
-            maxSaturation: 0.84,
-            minBrightness: 0.42,
-            maxBrightness: 0.80
+            saturationMultiplier: 0.92,
+            brightnessMultiplier: 1.12,
+            minSaturation: 0.14,
+            maxSaturation: 0.58,
+            minBrightness: darkMode ? 0.54 : 0.70,
+            maxBrightness: darkMode ? 0.86 : 0.94
         ).color
         let accentColor = (primaryOnly ? palette.glowPrimary : palette.glowAccent).adjustedPreservingHue(
-            saturationMultiplier: 1.14,
-            brightnessMultiplier: 0.88,
-            minSaturation: 0.20,
-            maxSaturation: 0.84,
-            minBrightness: 0.40,
-            maxBrightness: 0.78
+            saturationMultiplier: 0.88,
+            brightnessMultiplier: 1.10,
+            minSaturation: 0.12,
+            maxSaturation: 0.54,
+            minBrightness: darkMode ? 0.52 : 0.68,
+            maxBrightness: darkMode ? 0.84 : 0.92
         ).color
-        let darkMode = colorScheme == .dark
         let startPoint = sourceEdge.startPoint
         let endPoint = sourceEdge.endPoint
         let trailingPrimaryLight: Bool = {
@@ -3157,9 +3130,9 @@ private struct AlbumLightSpillOverlay: View {
                     LinearGradient(
                         stops: [
                             .init(color: glowColor.opacity((darkMode ? 0.20 : 0.15) * spill), location: MusicPlayerVisualTokens.Spill.innerPeak),
-                            .init(color: glowColor.opacity((darkMode ? 0.145 : 0.110) * spill), location: MusicPlayerVisualTokens.Spill.innerPrimary),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.078 : 0.058) * spill), location: MusicPlayerVisualTokens.Spill.innerSecondary),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.034 : 0.026) * spill), location: innerSoftStop),
+                            .init(color: glowColor.opacity((darkMode ? 0.225 : 0.185) * spill), location: MusicPlayerVisualTokens.Spill.innerPrimary),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.128 : 0.102) * spill), location: MusicPlayerVisualTokens.Spill.innerSecondary),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.058 : 0.046) * spill), location: innerSoftStop),
                             .init(color: .clear, location: innerTailStop)
                         ],
                         startPoint: startPoint,
@@ -3173,10 +3146,10 @@ private struct AlbumLightSpillOverlay: View {
                 .fill(
                     LinearGradient(
                         stops: [
-                            .init(color: glowColor.opacity((darkMode ? 0.46 : 0.34) * spill), location: 0),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.25 : 0.18) * spill), location: nearStop),
-                            .init(color: accentColor.opacity((darkMode ? 0.105 : 0.078) * spill), location: midStop),
-                            .init(color: accentColor.opacity((darkMode ? 0.040 : 0.030) * spill), location: fadeStop),
+                            .init(color: glowColor.opacity((darkMode ? 0.62 : 0.52) * spill), location: 0),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.36 : 0.30) * spill), location: nearStop),
+                            .init(color: accentColor.opacity((darkMode ? 0.160 : 0.132) * spill), location: midStop),
+                            .init(color: accentColor.opacity((darkMode ? 0.066 : 0.054) * spill), location: fadeStop),
                             .init(color: .clear, location: tailStop)
                         ],
                         startPoint: startPoint,
@@ -3185,15 +3158,32 @@ private struct AlbumLightSpillOverlay: View {
                 )
                 .blendMode(.screen)
 
+            // 近白玻璃上单纯 screen 只会“变白”而不明显染色；额外叠一层很薄的 normal tint，
+            // 让被光照到的边缘真正带上专辑高斯色，同时保持向内快速衰减。
+            shape
+                .fill(
+                    LinearGradient(
+                        stops: [
+                            .init(color: glowColor.opacity((darkMode ? 0.160 : 0.130) * spill), location: 0),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.085 : 0.068) * spill), location: nearStop),
+                            .init(color: accentColor.opacity((darkMode ? 0.034 : 0.027) * spill), location: midStop),
+                            .init(color: .clear, location: fadeStop)
+                        ],
+                        startPoint: startPoint,
+                        endPoint: endPoint
+                    )
+                )
+                .blendMode(.normal)
+
             // 受光边缘细描边：被封面发光照亮的一小段边缘，快速淡出。
             shape
                 .strokeBorder(
                     LinearGradient(
                         stops: [
-                            .init(color: glowColor.opacity((darkMode ? 0.68 : 0.50) * spill), location: 0),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.38 : 0.28) * spill), location: nearStop + 0.04),
-                            .init(color: accentColor.opacity((darkMode ? 0.15 : 0.11) * spill), location: midStop + 0.06),
-                            .init(color: accentColor.opacity((darkMode ? 0.050 : 0.036) * spill), location: min(fadeStop + 0.10, 0.78)),
+                            .init(color: glowColor.opacity((darkMode ? 0.86 : 0.74) * spill), location: 0),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.50 : 0.42) * spill), location: nearStop + 0.04),
+                            .init(color: accentColor.opacity((darkMode ? 0.22 : 0.18) * spill), location: midStop + 0.06),
+                            .init(color: accentColor.opacity((darkMode ? 0.082 : 0.066) * spill), location: min(fadeStop + 0.10, 0.78)),
                             .init(color: .clear, location: min(tailStop + 0.02, 0.96)),
                             .init(color: .clear, location: 1.0)
                         ],
@@ -3208,10 +3198,26 @@ private struct AlbumLightSpillOverlay: View {
                 .strokeBorder(
                     LinearGradient(
                         stops: [
-                            .init(color: glowColor.opacity((darkMode ? 0.28 : 0.23) * spill), location: 0),
-                            .init(color: glowColor.opacity((darkMode ? 0.13 : 0.095) * spill), location: 0.050),
-                            .init(color: .white.opacity((darkMode ? 0.014 : 0.016) * spill), location: 0.080),
-                            .init(color: glowColor.opacity((darkMode ? 0.045 : 0.032) * spill), location: 0.26),
+                            .init(color: glowColor.opacity((darkMode ? 0.34 : 0.28) * spill), location: 0),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.17 : 0.14) * spill), location: nearStop + 0.04),
+                            .init(color: accentColor.opacity((darkMode ? 0.058 : 0.045) * spill), location: midStop + 0.06),
+                            .init(color: .clear, location: min(fadeStop + 0.08, 0.76))
+                        ],
+                        startPoint: startPoint,
+                        endPoint: endPoint
+                    ),
+                    lineWidth: CGFloat(1.15 + 0.45 * spill)
+                )
+                .blendMode(.normal)
+
+            shape
+                .strokeBorder(
+                    LinearGradient(
+                        stops: [
+                            .init(color: glowColor.opacity((darkMode ? 0.40 : 0.34) * spill), location: 0),
+                            .init(color: glowColor.opacity((darkMode ? 0.20 : 0.160) * spill), location: 0.050),
+                            .init(color: .white.opacity((darkMode ? 0.030 : 0.034) * spill), location: 0.080),
+                            .init(color: glowColor.opacity((darkMode ? 0.080 : 0.062) * spill), location: 0.26),
                             .init(color: .clear, location: 0.42)
                         ],
                         startPoint: startPoint,
@@ -6514,15 +6520,18 @@ private struct MusicExpandedLayout {
     let leftRect: CGRect
     let lyricsRect: CGRect
     let posterSize: CGFloat
+    /// 实际显示的封面边长（stacked 布局下被压到 ≤230）。
+    let coverDisplaySide: CGFloat
+    /// 真·封面发光（模糊大封面）的画布边长 = coverDisplaySide × 几何 reach。
+    let glowBlurSide: CGFloat
+    /// 从封面光心到目标受光边界的真实半径，等于歌词卡左缘/控制栏上沿距离 + overshoot。
+    let albumGlowRadius: CGFloat
     let minimizeButtonRect: CGRect
     let albumLightCenter: CGPoint
     let stackedLyricsHeight: CGFloat
     // §2.1 封面外层环境光的目标 reach（相对 posterSize 的倍数）：按"光心→歌词卡左缘 / 控制栏上边界"
     // 的较远几何距离驱动，让发光以同一半径自然触达关键玻璃面。
     let albumGlowReach: CGFloat
-    /// 页面底层的封面复制光：与封面中心同心，作为等距扩散的环境光池。
-    let projectedGlowReach: CGFloat
-    let projectedGlowFrame: CGRect
 
     init(size: CGSize) {
         let width = max(size.width, 1)
@@ -6578,6 +6587,8 @@ private struct MusicExpandedLayout {
         let heightBoundedPoster = max(174.0, availableHeight - reservedForTitleAndControls)
         let resolvedPosterSize = min(leftWidth - 58.0, heightBoundedPoster, availableHeight * 0.455, compactWidth ? 404.0 : 458.0)
         posterSize = resolvedPosterSize
+        let shownCoverSize = stackedLayout ? min(resolvedPosterSize, 230.0) : resolvedPosterSize
+        coverDisplaySide = shownCoverSize
 
         let controlsEstimate = MusicPlayerVisualTokens.Controls.expandedHeight
         let posterBlockHeight = resolvedPosterSize + 16.0 + 82.0 + 16.0 + controlsEstimate
@@ -6595,8 +6606,10 @@ private struct MusicExpandedLayout {
         // stacked 布局下歌词卡随 ScrollView 浮动、位置不稳定，改用兜底倍数（vibrancy 增益仍在视图层叠加）。
         let overshoot = MusicPlayerVisualTokens.Glow.edgeOvershoot
         let resolvedAlbumGlowReach: CGFloat
+        let resolvedAlbumGlowRadius: CGFloat
         if stackedLayout {
             resolvedAlbumGlowReach = MusicPlayerVisualTokens.Glow.fallbackReach
+            resolvedAlbumGlowRadius = shownCoverSize * MusicPlayerVisualTokens.Glow.fallbackReach * 0.5
         } else {
             let controlsTop = posterTop + resolvedPosterSize + 16.0 + 82.0 + 16.0
             let horizontalGap = max(lyricsFrame.minX - resolvedAlbumLightCenter.x, resolvedPosterSize * 0.5)
@@ -6605,19 +6618,14 @@ private struct MusicExpandedLayout {
             let denom = max(resolvedPosterSize * MusicPlayerVisualTokens.Glow.bloomVisibleFraction, 1)
             let geometricReach = (2 * targetDistance) / denom
             resolvedAlbumGlowReach = min(max(geometricReach, MusicPlayerVisualTokens.Glow.minReach), MusicPlayerVisualTokens.Glow.maxReach)
+            resolvedAlbumGlowRadius = targetDistance
         }
         albumGlowReach = resolvedAlbumGlowReach
+        albumGlowRadius = resolvedAlbumGlowRadius
 
-        let projectedReach = min(max(resolvedAlbumGlowReach * 1.12, resolvedAlbumGlowReach + 0.44), MusicPlayerVisualTokens.Glow.maxReach + 0.72)
-        projectedGlowReach = projectedReach
-        let projectedSide = min(max(resolvedPosterSize * projectedReach, resolvedPosterSize * 2.4), max(width, height) * 1.24)
-        let projectedCenter = resolvedAlbumLightCenter
-        projectedGlowFrame = CGRect(
-            x: projectedCenter.x - projectedSide / 2,
-            y: projectedCenter.y - projectedSide / 2,
-            width: projectedSide,
-            height: projectedSide
-        )
+        // 发光画布 = 封面边长 × 几何 reach（少量余量）：光程触达歌词卡左缘 / 控制栏并略超出，
+        // 羽化衰减在烘焙阶段按同一几何完成，不再需要额外的投影光池层。
+        glowBlurSide = shownCoverSize * min(max(resolvedAlbumGlowReach * 1.02, 2.45), 6.2)
     }
 }
 
@@ -6703,13 +6711,23 @@ private struct FloatingLyricsGlass: ViewModifier {
         let strokeMidColor = usesNeutralMaterial
             ? albumEffectTint.color.opacity(isDark ? 0.18 : 0.22)
             : palette.glowPrimary.color.opacity(MusicPlayerVisualTokens.Glass.strokeMidAlbum(dark: isDark))
+        // §需求3 玻璃受光彩色化：高光/描边的"白"统一替换为带封面主色的镜面色——
+        // 光照在玻璃上呈现的是光本身的颜色，而不是无色相的白边。
+        let specular = palette.glowPrimary.adjustedPreservingHue(
+            saturationMultiplier: 0.66,
+            brightnessMultiplier: 1.12,
+            minSaturation: 0.10,
+            maxSaturation: isDark ? 0.36 : 0.30,
+            minBrightness: 0.84,
+            maxBrightness: 0.97
+        ).color
 
         let frostWhite = MusicPlayerVisualTokens.Glass.frostWhite(dark: isDark)
         let edgeFrostWhite = frostWhite * (centerClarity ? 1.14 : 1.0)
         let textureOpacity = frostTextureOpacity * role.textureMultiplier(centerClarity: centerClarity)
         return content
             .background {
-                fillLayer(shape: shape, color: .white, opacity: edgeFrostWhite, centerMultiplier: centerClarity ? 0.40 : 0.56)
+                fillLayer(shape: shape, color: .white, opacity: edgeFrostWhite, centerMultiplier: centerClarity ? 0.38 : 0.62)
             }
             .background {
                 // 统一玻璃面板：歌词卡与控制栏/收起按钮使用更干净的局部 popover material。
@@ -6722,10 +6740,10 @@ private struct FloatingLyricsGlass: ViewModifier {
                     .allowsHitTesting(false)
             }
             .background {
-                fillLayer(shape: shape, color: glassTint, opacity: 1, centerMultiplier: 0.68)
+                fillLayer(shape: shape, color: glassTint, opacity: 1, centerMultiplier: centerClarity ? 0.58 : 0.74)
             }
             .background {
-                fillLayer(shape: shape, color: albumTint, opacity: 1, centerMultiplier: 0.72)
+                fillLayer(shape: shape, color: albumTint, opacity: 1, centerMultiplier: centerClarity ? 0.60 : 0.78)
             }
             .background {
                 FrostedGlassTextureOverlay(opacity: textureOpacity)
@@ -6751,19 +6769,21 @@ private struct FloatingLyricsGlass: ViewModifier {
                 .fill(
                     LinearGradient(
                         stops: [
+                            // 顶部受光收窄成贴边细高光（之前 16.5% 高度的亮带 + 静态玻璃层顶部渐变
+                            // 叠出一片"被照亮"的错误观感）：只保留玻璃上沿一条细的受光线。
                             .init(
-                                    color: .white.opacity(MusicPlayerVisualTokens.Glass.topHighlight(dark: isDark) * 0.52),
+                                    color: specular.opacity(MusicPlayerVisualTokens.Glass.topHighlight(dark: isDark) * 0.50),
                                     location: 0.00
                                 ),
                                 .init(
-                                    color: palette.glowPrimary.color.opacity(MusicPlayerVisualTokens.Glass.topHighlight(dark: isDark) * 0.14),
-                                    location: 0.042
+                                    color: palette.glowPrimary.color.opacity(MusicPlayerVisualTokens.Glass.topHighlight(dark: isDark) * 0.12),
+                                    location: 0.026
                                 ),
                                 .init(
-                                    color: .white.opacity(MusicPlayerVisualTokens.Glass.topHighlight(dark: isDark) * 0.060),
-                                    location: 0.090
+                                    color: specular.opacity(MusicPlayerVisualTokens.Glass.topHighlight(dark: isDark) * 0.045),
+                                    location: 0.058
                                 ),
-                                .init(color: .clear, location: 0.165)
+                                .init(color: .clear, location: 0.105)
                             ],
                             startPoint: .top,
                             endPoint: .bottom
@@ -6793,7 +6813,7 @@ private struct FloatingLyricsGlass: ViewModifier {
                 shape.strokeBorder(
                     LinearGradient(
                         colors: [
-                            .white.opacity(MusicPlayerVisualTokens.Glass.strokeTopWhite(dark: isDark)),
+                            specular.opacity(MusicPlayerVisualTokens.Glass.strokeTopWhite(dark: isDark)),
                             strokeMidColor,
                             .black.opacity(MusicPlayerVisualTokens.Glass.strokeBottomBlack(dark: isDark))
                         ],
@@ -8128,6 +8148,13 @@ enum AlbumPaletteCache {
         let vibrancy = min(max(colorfulFraction / MusicPlayerVisualTokens.Palette.vibrancyNormalizer, 0), 1)
 
         let hueRanks = rankedHues(in: samples)
+#if DEBUG
+        if path == MusicPlayerVisualDebugVariant.realCoverTestPath {
+            let neutral = colorfulFraction < MusicPlayerVisualTokens.Palette.colorfulFractionThreshold
+            let topHue = hueRanks.first.map { String(format: "%.2f(w%.2f)", $0.hue, $0.weight) } ?? "none"
+            NSLog("🎨REAL palette: colorfulFraction=\(String(format: "%.3f", colorfulFraction)) vibrancy=\(String(format: "%.2f", vibrancy)) regime=\(neutral ? "NEUTRAL" : "colorful") topHue=\(topHue)")
+        }
+#endif
 
         // 中性封面：用整体平均做柔和中性底色，不强行上色。阈值略放宽，避免白/灰封面里
         // 少量暖色噪声或印刷边缘被误判为彩色封面，导致底板偏粉/肉色。
@@ -8336,7 +8363,9 @@ enum AlbumPaletteCache {
         // 近黑不是光源。平滑阈值保留夜景里的月光、灯光和金属字，
         // 但让黑底只贡献深度，避免被后续 glow / backdrop 误当成可发光颜色。
         let lightRamp = smoothstep((brightness - 0.135) / 0.285)
-        let colorRamp = 0.72 + min(max(saturation, 0), 1) * 0.28
+        // 饱和度因子加大：让鲜艳像素在"彩色判定 + 主色选择"里更有发言权，
+        // 中性背景不至于把制服/霓虹等鲜艳块淹没成灰底（仍乘面积权重，纯小块鲜艳不会独占）。
+        let colorRamp = 0.60 + min(max(saturation, 0), 1) * 0.62
         return max(0.012, lightRamp * colorRamp)
     }
 
@@ -8348,7 +8377,9 @@ enum AlbumPaletteCache {
         // 这样占据大面积的颜色稳居前列，极少量的高饱和像素（指甲油等）不会排到主色。
         for sample in samples where sample.saturation >= 0.18 && sample.brightness >= 0.12 && sample.brightness <= 0.97 {
             let bucket = min(bucketCount - 1, max(0, Int(sample.hue * Double(bucketCount))))
-            let saturationNudge = 0.70 + min(max(sample.saturation, 0), 1) * 0.30
+            // 饱和度偏好加强：占比相近时，更鲜艳的色相簇更可能成为主色，
+            // 让发光取到封面里真正鲜艳的颜色（而非被大面积中性背景拉成灰）。
+            let saturationNudge = 0.52 + min(max(sample.saturation, 0), 1) * 0.78
             buckets[bucket] += sample.weight * saturationNudge
         }
         return buckets.enumerated()

@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import Foundation
+import MediaLibCore
 
 private struct MpvRenderParam {
     var type: Int32
@@ -75,6 +76,7 @@ final class LibMpvClient {
         startTime: Double,
         volume: Float,
         speed: Float,
+        hardwareDecodingMode: VideoHardwareDecodingMode,
         onRenderUpdate: @escaping () -> Void
     ) throws {
         libraryHandle = try Self.openLibrary()
@@ -110,7 +112,7 @@ final class LibMpvClient {
         try setOptionString("keepaspect-window", "yes")
         try setOptionString("audio-display", "no")
         try setOptionString("sub-auto", "fuzzy")
-        try setOptionString("hwdec", "auto-safe")
+        try setOptionString("hwdec", hardwareDecodingMode.mpvValue)
         try setOptionString("vo", "libmpv")
         // 弱网远程视频优先保留更长前向缓存。使用 try? 是为了兼容不同 libmpv 构建的可用选项。
         try? setOptionString("cache", "yes")

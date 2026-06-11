@@ -26,7 +26,7 @@ public final class DatabaseManager {
         try execute("PRAGMA journal_mode = WAL")
         let storedVersion = try schemaVersion()
         guard storedVersion <= Self.currentSchemaVersion else {
-            throw DatabaseError.incompatibleSchema(found: storedVersion, supported: Self.currentSchemaVersion)
+            throw DatabaseError.databaseNewerThanApp(found: storedVersion, supported: Self.currentSchemaVersion)
         }
         if existingDatabase, storedVersion < Self.currentSchemaVersion, let backupDirectory {
             _ = try createBackup(in: backupDirectory, reason: "auto-pre-migration-v\(storedVersion)-to-v\(Self.currentSchemaVersion)")
@@ -194,7 +194,7 @@ public final class DatabaseManager {
     private func migrate() throws {
         var version = try schemaVersion()
         guard version <= Self.currentSchemaVersion else {
-            throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
+            throw DatabaseError.databaseNewerThanApp(found: version, supported: Self.currentSchemaVersion)
         }
         if version < 1 {
             try transaction {

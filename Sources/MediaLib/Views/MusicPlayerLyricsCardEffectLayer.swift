@@ -18,16 +18,18 @@ enum MusicGlassSurfaceRole: Hashable {
     }
 
     func materialOpacity(dark: Bool, centerClarity: Bool) -> Double {
+        // 平衡点：material 是"高斯玻璃"的主体；白霜只提亮，专辑色只染边。
+        // 提高 material 参与度、压低实色色层，避免看起来像一块半透明亚克力色板。
         if centerClarity {
-            return dark ? 0.58 : 0.46
+            return dark ? 0.60 : 0.64
         }
         switch self {
         case .lyrics:
-            return dark ? 0.60 : 0.50
+            return dark ? 0.60 : 0.64
         case .controls:
-            return dark ? 0.61 : 0.52
+            return dark ? 0.58 : 0.61
         case .chrome:
-            return dark ? 0.60 : 0.50
+            return dark ? 0.58 : 0.61
         case .popover:
             return dark ? 0.70 : 0.62
         case .mini:
@@ -51,14 +53,15 @@ enum MusicGlassSurfaceRole: Hashable {
     }
 
     func albumTintOpacity(dark: Bool) -> Double {
-        if usesNeutralFloatingMaterial { return 0 }
+        // 中性玻璃也要带一层很轻的专辑染色：完全归零会让 material 的灰白主导整块卡片，
+        // 看起来是闷灰板而不是"透亮的、透出底板颜色的玻璃"。
         switch self {
         case .lyrics:
-            return dark ? 0.285 : 0.175
+            return dark ? 0.108 : 0.064
         case .controls:
-            return dark ? 0.265 : 0.160
+            return dark ? 0.100 : 0.058
         case .chrome:
-            return dark ? 0.255 : 0.150
+            return dark ? 0.092 : 0.052
         case .popover:
             return dark ? 0.205 : 0.125
         case .mini:
@@ -389,7 +392,9 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
             let depth = CGFloat(min(max(edgeDepth, 0), 1.6))
             let clarity = centerClarity ? CGFloat(0.52) : CGFloat(1.0)
             let shade = centerClarity ? CGFloat(0.56) : CGFloat(1.0)
-            let upperTransition = centerClarity ? CGFloat(0.24) : CGFloat(0.16)
+            // 顶部渐变带收窄：与 FloatingLyricsGlass 顶高光叠加后曾在卡片顶部形成 ~20% 高度的
+            // "被照亮"错误亮带；现在静态层只保留很浅很窄的上沿过渡。
+            let upperTransition = centerClarity ? CGFloat(0.11) : CGFloat(0.09)
             let clearStart = centerClarity ? CGFloat(0.38) : CGFloat(0.36)
             let clearEnd = centerClarity ? CGFloat(0.62) : CGFloat(0.62)
             let lowerTransition = centerClarity ? CGFloat(0.76) : CGFloat(0.82)
@@ -404,13 +409,15 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
                 case .mini: return 0.50
                 }
             }()
+            // 受光彩色化（需求3）：tinted 比例上调 = 更多光色、更少无色白。
+            // 顶部 alpha 大幅压低：顶部"被照亮"的体感主要由这里贡献。
             let verticalColors = [
-                tinted(0.30, alpha: (isDark ? 0.044 : 0.088) * strength * depth * verticalScale),
-                tinted(0.20, alpha: (isDark ? 0.014 : 0.020) * strength * depth * clarity * verticalScale),
+                tinted(0.52, alpha: (isDark ? 0.024 : 0.038) * strength * depth * verticalScale),
+                tinted(0.38, alpha: (isDark ? 0.009 : 0.011) * strength * depth * clarity * verticalScale),
                 NSColor.white.withAlphaComponent(0).cgColor,
                 NSColor.white.withAlphaComponent(0).cgColor,
-                tinted(0.26, alpha: (isDark ? 0.016 : 0.020) * strength * depth * clarity * verticalScale),
-                tinted(0.34, alpha: (isDark ? 0.040 : 0.052) * strength * depth * verticalScale)
+                tinted(0.46, alpha: (isDark ? 0.014 : 0.017) * strength * depth * clarity * verticalScale),
+                tinted(0.56, alpha: (isDark ? 0.032 : 0.040) * strength * depth * verticalScale)
             ] as CFArray
             if let gradient = CGGradient(
                 colorsSpace: colorSpace,
@@ -435,8 +442,8 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
                 }
             }()
             let leftColors = [
-                tinted(0.70, alpha: (isDark ? 0.105 : 0.082) * strength * depth * verticalScale),
-                tinted(0.48, alpha: (isDark ? 0.040 : 0.030) * strength * depth * verticalScale),
+                tinted(0.80, alpha: (isDark ? 0.110 : 0.088) * strength * depth * verticalScale),
+                tinted(0.60, alpha: (isDark ? 0.042 : 0.032) * strength * depth * verticalScale),
                 NSColor.clear.cgColor
             ] as CFArray
             if let gradient = CGGradient(colorsSpace: colorSpace, colors: leftColors, locations: [0.0, 0.14, 1.0]) {
@@ -466,9 +473,9 @@ struct LyricsCardEffectLayerView: NSViewRepresentable {
             context.setBlendMode(.screen)
             let strokeScale: CGFloat = role == .mini ? 0.58 : 1.0
             let strokeColors = [
-                tinted(0.32, alpha: (isDark ? 0.28 : 0.54) * strength * strokeScale),
-                tinted(0.54, alpha: (isDark ? 0.15 : 0.22) * strength * strokeScale),
-                NSColor.white.withAlphaComponent((isDark ? 0.052 : 0.105) * strength * strokeScale).cgColor
+                tinted(0.48, alpha: (isDark ? 0.28 : 0.54) * strength * strokeScale),
+                tinted(0.64, alpha: (isDark ? 0.15 : 0.22) * strength * strokeScale),
+                tinted(0.40, alpha: (isDark ? 0.052 : 0.105) * strength * strokeScale)
             ] as CFArray
             if let gradient = CGGradient(colorsSpace: colorSpace, colors: strokeColors, locations: [0.0, 0.48, 1.0]) {
                 context.saveGState()
@@ -538,8 +545,8 @@ final class PointerHighlightLayer: BaseGlassLayer {
             let firstAlpha = (isDark ? 0.18 : 0.34) * strength * roleScale
             let secondAlpha = (isDark ? 0.055 : 0.110) * strength * roleScale
             let colors = [
-                tinted(0.22, alpha: firstAlpha),
-                tinted(0.44, alpha: secondAlpha),
+                tinted(0.40, alpha: firstAlpha),
+                tinted(0.56, alpha: secondAlpha),
                 NSColor.white.withAlphaComponent(0).cgColor
             ] as CFArray
             if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 0.46, 1]) {
@@ -561,8 +568,8 @@ final class PointerHighlightLayer: BaseGlassLayer {
             let edgeAlpha = (isDark ? 0.28 : 0.48) * strength * roleScale
             let edgeFadeAlpha = (isDark ? 0.075 : 0.130) * strength * roleScale
             let edgeColors = [
-                tinted(0.58, alpha: edgeAlpha),
-                tinted(0.70, alpha: edgeFadeAlpha),
+                tinted(0.68, alpha: edgeAlpha),
+                tinted(0.78, alpha: edgeFadeAlpha),
                 NSColor.white.withAlphaComponent(0).cgColor
             ] as CFArray
             let opposite = CGPoint(x: bounds.width - pointer.x, y: bounds.height - pointer.y)

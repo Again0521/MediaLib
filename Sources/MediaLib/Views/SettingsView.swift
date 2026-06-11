@@ -83,6 +83,8 @@ struct SettingsView: View {
 
     private var videoPlaybackSettings: some View {
         SettingsSection(title: "视频播放与缓存", subtitle: "设置视频启动方式、观看规则和离线缓存。", systemImage: "play.rectangle") {
+            SettingsSubsectionHeader(title: "启动方式", systemImage: "play.rectangle")
+
             SettingsRow(title: "视频播放器", systemImage: "play.rectangle") {
                 Picker("视频播放器", selection: Binding(get: {
                     appState.settings.videoDefaultPlayer
@@ -110,7 +112,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsDescription(text: "内置视频播放器的窗口宽度、预览图、默认倍速和跳转间隔可在播放窗口齿轮菜单中调整；这里保留默认启动方式，避免切到系统播放器后无法回到内置。")
+            SettingsDescription(text: "这里只决定视频默认交给内置播放器还是系统播放器打开。内置播放器的窗口、时间轴、倍速、片头片尾和输入习惯在播放窗口齿轮菜单中调整。")
 
             SettingsSubsectionHeader(title: "观看规则", systemImage: "slider.horizontal.3")
 
@@ -118,25 +120,20 @@ struct SettingsView: View {
             SettingsToggleRow(title: "自动播放下一集", systemImage: "forward.end", isOn: binding(\.autoPlayNextEpisode))
             SettingsToggleRow(title: "播放完成自动标记已看", systemImage: "checkmark.circle", isOn: binding(\.autoMarkWatched))
 
-            if appState.settings.videoDefaultPlayer == .builtIn {
-                SettingsRow(title: "默认倍速", systemImage: "speedometer") {
-                    Picker("默认倍速", selection: binding(\.defaultPlaybackRate)) {
-                        Text("0.75x").tag(0.75)
-                        Text("1.00x").tag(1.0)
-                        Text("1.25x").tag(1.25)
-                        Text("1.50x").tag(1.5)
-                        Text("2.00x").tag(2.0)
-                    }
-                    .labelsHidden()
-                    .settingsMenuControl(selectedTitle: settingsPlaybackRateTitle(appState.settings.defaultPlaybackRate))
+            SettingsRow(title: "已看判定", systemImage: "checkmark.seal") {
+                Picker("已看判定", selection: Binding(get: {
+                    appState.settings.watchedThreshold
+                }, set: { value in
+                    appState.settings.watchedThreshold = value
+                    appState.saveSettings()
+                })) {
+                    Text("播放 70%").tag(0.7)
+                    Text("播放 80%").tag(0.8)
+                    Text("播放 90%").tag(0.9)
+                    Text("播放 95%").tag(0.95)
                 }
-
-                SettingsRow(title: "快进/快退", systemImage: "gobackward.5") {
-                    Slider(value: binding(\.skipInterval), in: 5...30, step: 5)
-                    Text("\(Int(appState.settings.skipInterval)) 秒")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 54, alignment: .trailing)
-                }
+                .labelsHidden()
+                .settingsMenuControl(selectedTitle: "\(Int((appState.settings.watchedThreshold * 100).rounded()))%")
             }
 
             SettingsSubsectionHeader(title: "离线缓存", systemImage: "externaldrive.badge.arrow.down")

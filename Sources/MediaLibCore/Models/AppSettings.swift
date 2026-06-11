@@ -263,6 +263,125 @@ public enum VideoTrackpadGestureSensitivity: String, Codable, CaseIterable, Iden
     }
 }
 
+public enum VideoMarkerSkipBehavior: String, Codable, CaseIterable, Identifiable {
+    case off
+    case prompt
+    case automatic
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .off: return "关闭"
+        case .prompt: return "显示按钮"
+        case .automatic: return "自动跳过"
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .off:
+            return "不显示片头/片尾跳过入口，章节和手动标记仍会保留。"
+        case .prompt:
+            return "进入完整片头或片尾范围时显示跳过按钮，由你手动确认。"
+        case .automatic:
+            return "进入已确认的片头或片尾范围后直接跳到结束位置。"
+        }
+    }
+}
+
+public enum VideoHardwareDecodingMode: String, Codable, CaseIterable, Identifiable {
+    case safe
+    case automatic
+    case off
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .safe: return "兼容"
+        case .automatic: return "自动"
+        case .off: return "关闭"
+        }
+    }
+
+    public var mpvValue: String {
+        switch self {
+        case .safe: return "auto-safe"
+        case .automatic: return "auto"
+        case .off: return "no"
+        }
+    }
+}
+
+public enum VideoDebandMode: String, Codable, CaseIterable, Identifiable {
+    case off
+    case light
+    case strong
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .off: return "关闭"
+        case .light: return "轻微"
+        case .strong: return "明显"
+        }
+    }
+
+    public var isEnabled: Bool {
+        self != .off
+    }
+
+    public var threshold: Double {
+        switch self {
+        case .off: return 64
+        case .light: return 32
+        case .strong: return 48
+        }
+    }
+
+    public var range: Double {
+        switch self {
+        case .off: return 16
+        case .light: return 12
+        case .strong: return 18
+        }
+    }
+
+    public var grain: Double {
+        switch self {
+        case .off: return 48
+        case .light: return 24
+        case .strong: return 36
+        }
+    }
+}
+
+public enum VideoScreenshotMode: String, Codable, CaseIterable, Identifiable {
+    case subtitles
+    case video
+    case window
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .subtitles: return "带字幕"
+        case .video: return "纯视频"
+        case .window: return "窗口所见"
+        }
+    }
+
+    public var mpvArgument: String {
+        switch self {
+        case .subtitles: return "subtitles"
+        case .video: return "video"
+        case .window: return "window"
+        }
+    }
+}
+
 public struct VideoShortcutModifiers: OptionSet, Codable, Hashable, Sendable {
     public let rawValue: Int
 
@@ -292,8 +411,22 @@ public struct VideoKeyboardShortcut: Codable, Hashable, Sendable {
 
     public init(keyCode: Int, characters: String = "", modifiers: VideoShortcutModifiers = []) {
         self.keyCode = keyCode
-        self.characters = characters.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self.characters = Self.normalizedCharacters(characters)
         self.modifiers = modifiers
+    }
+
+    private static func normalizedCharacters(_ characters: String) -> String {
+        let trimmed = characters.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return "" }
+        let shouldIgnoreCharacters = trimmed.unicodeScalars.allSatisfy { scalar in
+            CharacterSet.controlCharacters.contains(scalar) ||
+                (0xF700...0xF8FF).contains(Int(scalar.value))
+        }
+        return shouldIgnoreCharacters ? "" : trimmed
+    }
+
+    fileprivate var normalized: VideoKeyboardShortcut {
+        VideoKeyboardShortcut(keyCode: keyCode, characters: characters, modifiers: modifiers)
     }
 
     public var isEnabled: Bool {
@@ -1019,6 +1152,14 @@ public struct AppSettings: Codable, Hashable {
     public var videoScrubberPreviewMode: VideoScrubberPreviewMode
     public var videoPlayerPreferredWidth: Double
     public var videoPlayerAlwaysOnTop: Bool
+    public var videoShowRemainingTime: Bool
+    public var videoResumeRewindSeconds: Double
+    public var videoMarkerSkipBehavior: VideoMarkerSkipBehavior
+    public var videoDoubleClickFullscreen: Bool
+    public var videoMouseWheelVolumeEnabled: Bool
+    public var videoHardwareDecodingMode: VideoHardwareDecodingMode
+    public var videoDebandMode: VideoDebandMode
+    public var videoScreenshotMode: VideoScreenshotMode
     public var videoKeyboardShortcuts: [VideoPlayerShortcutAction: [VideoKeyboardShortcut]]
     public var videoTrackpadGesturesEnabled: Bool
     public var videoTrackpadHorizontalSeekEnabled: Bool
@@ -1034,6 +1175,10 @@ public struct AppSettings: Codable, Hashable {
     public var videoDeinterlaceMode: VideoDeinterlaceMode
     public var videoRotationMode: VideoRotationMode
     public var videoLoopCurrentItem: Bool
+    /// 画面色彩微调（亮度 / 对比度 / 饱和度 / 伽马 / 色相）。
+    public var videoColorAdjustments: VideoColorAdjustments
+    /// 变速播放时保持音调（libmpv `audio-pitch-correction`），默认开启。
+    public var videoPitchCorrectionEnabled: Bool
     public var enabledHomeTabs: [HomeTab]
     public var videoDefaultPlayer: DefaultPlayer
     public var musicDefaultPlayer: DefaultPlayer
@@ -1118,6 +1263,14 @@ public struct AppSettings: Codable, Hashable {
         videoScrubberPreviewMode: VideoScrubberPreviewMode = .performance,
         videoPlayerPreferredWidth: Double = 1120,
         videoPlayerAlwaysOnTop: Bool = false,
+        videoShowRemainingTime: Bool = false,
+        videoResumeRewindSeconds: Double = 5,
+        videoMarkerSkipBehavior: VideoMarkerSkipBehavior = .prompt,
+        videoDoubleClickFullscreen: Bool = true,
+        videoMouseWheelVolumeEnabled: Bool = false,
+        videoHardwareDecodingMode: VideoHardwareDecodingMode = .safe,
+        videoDebandMode: VideoDebandMode = .off,
+        videoScreenshotMode: VideoScreenshotMode = .subtitles,
         videoKeyboardShortcuts: [VideoPlayerShortcutAction: [VideoKeyboardShortcut]] = [:],
         videoTrackpadGesturesEnabled: Bool = true,
         videoTrackpadHorizontalSeekEnabled: Bool = true,
@@ -1133,6 +1286,8 @@ public struct AppSettings: Codable, Hashable {
         videoDeinterlaceMode: VideoDeinterlaceMode = .off,
         videoRotationMode: VideoRotationMode = .source,
         videoLoopCurrentItem: Bool = false,
+        videoColorAdjustments: VideoColorAdjustments = .neutral,
+        videoPitchCorrectionEnabled: Bool = true,
         enabledHomeTabs: [HomeTab] = AppSettings.defaultHomeTabs,
         videoDefaultPlayer: DefaultPlayer? = nil,
         musicDefaultPlayer: DefaultPlayer = .builtIn,
@@ -1202,6 +1357,14 @@ public struct AppSettings: Codable, Hashable {
         self.videoScrubberPreviewMode = videoScrubberPreviewMode
         self.videoPlayerPreferredWidth = videoPlayerPreferredWidth
         self.videoPlayerAlwaysOnTop = videoPlayerAlwaysOnTop
+        self.videoShowRemainingTime = videoShowRemainingTime
+        self.videoResumeRewindSeconds = Self.clampedVideoResumeRewind(videoResumeRewindSeconds)
+        self.videoMarkerSkipBehavior = videoMarkerSkipBehavior
+        self.videoDoubleClickFullscreen = videoDoubleClickFullscreen
+        self.videoMouseWheelVolumeEnabled = videoMouseWheelVolumeEnabled
+        self.videoHardwareDecodingMode = videoHardwareDecodingMode
+        self.videoDebandMode = videoDebandMode
+        self.videoScreenshotMode = videoScreenshotMode
         self.videoKeyboardShortcuts = Self.sanitizedVideoKeyboardShortcuts(videoKeyboardShortcuts)
         self.videoTrackpadGesturesEnabled = videoTrackpadGesturesEnabled
         self.videoTrackpadHorizontalSeekEnabled = videoTrackpadHorizontalSeekEnabled
@@ -1217,6 +1380,8 @@ public struct AppSettings: Codable, Hashable {
         self.videoDeinterlaceMode = videoDeinterlaceMode
         self.videoRotationMode = videoRotationMode
         self.videoLoopCurrentItem = videoLoopCurrentItem
+        self.videoColorAdjustments = videoColorAdjustments
+        self.videoPitchCorrectionEnabled = videoPitchCorrectionEnabled
         self.enabledHomeTabs = Self.normalizedEnabledHomeTabs(enabledHomeTabs)
         self.videoDefaultPlayer = videoDefaultPlayer ?? defaultPlayer
         self.musicDefaultPlayer = musicDefaultPlayer
@@ -1288,6 +1453,14 @@ public struct AppSettings: Codable, Hashable {
         case videoScrubberPreviewMode
         case videoPlayerPreferredWidth
         case videoPlayerAlwaysOnTop
+        case videoShowRemainingTime
+        case videoResumeRewindSeconds
+        case videoMarkerSkipBehavior
+        case videoDoubleClickFullscreen
+        case videoMouseWheelVolumeEnabled
+        case videoHardwareDecodingMode
+        case videoDebandMode
+        case videoScreenshotMode
         case videoKeyboardShortcuts
         case videoTrackpadGesturesEnabled
         case videoTrackpadHorizontalSeekEnabled
@@ -1303,6 +1476,8 @@ public struct AppSettings: Codable, Hashable {
         case videoDeinterlaceMode
         case videoRotationMode
         case videoLoopCurrentItem
+        case videoColorAdjustments
+        case videoPitchCorrectionEnabled
         case enabledHomeTabs
         case videoDefaultPlayer
         case musicDefaultPlayer
@@ -1385,6 +1560,14 @@ public struct AppSettings: Codable, Hashable {
             videoScrubberPreviewMode: try container.decodeIfPresent(VideoScrubberPreviewMode.self, forKey: .videoScrubberPreviewMode) ?? defaults.videoScrubberPreviewMode,
             videoPlayerPreferredWidth: try container.decodeIfPresent(Double.self, forKey: .videoPlayerPreferredWidth) ?? defaults.videoPlayerPreferredWidth,
             videoPlayerAlwaysOnTop: try container.decodeIfPresent(Bool.self, forKey: .videoPlayerAlwaysOnTop) ?? defaults.videoPlayerAlwaysOnTop,
+            videoShowRemainingTime: try container.decodeIfPresent(Bool.self, forKey: .videoShowRemainingTime) ?? defaults.videoShowRemainingTime,
+            videoResumeRewindSeconds: try container.decodeIfPresent(Double.self, forKey: .videoResumeRewindSeconds) ?? defaults.videoResumeRewindSeconds,
+            videoMarkerSkipBehavior: try container.decodeIfPresent(VideoMarkerSkipBehavior.self, forKey: .videoMarkerSkipBehavior) ?? defaults.videoMarkerSkipBehavior,
+            videoDoubleClickFullscreen: try container.decodeIfPresent(Bool.self, forKey: .videoDoubleClickFullscreen) ?? defaults.videoDoubleClickFullscreen,
+            videoMouseWheelVolumeEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoMouseWheelVolumeEnabled) ?? defaults.videoMouseWheelVolumeEnabled,
+            videoHardwareDecodingMode: try container.decodeIfPresent(VideoHardwareDecodingMode.self, forKey: .videoHardwareDecodingMode) ?? defaults.videoHardwareDecodingMode,
+            videoDebandMode: try container.decodeIfPresent(VideoDebandMode.self, forKey: .videoDebandMode) ?? defaults.videoDebandMode,
+            videoScreenshotMode: try container.decodeIfPresent(VideoScreenshotMode.self, forKey: .videoScreenshotMode) ?? defaults.videoScreenshotMode,
             videoKeyboardShortcuts: try container.decodeIfPresent([VideoPlayerShortcutAction: [VideoKeyboardShortcut]].self, forKey: .videoKeyboardShortcuts) ?? defaults.videoKeyboardShortcuts,
             videoTrackpadGesturesEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoTrackpadGesturesEnabled) ?? defaults.videoTrackpadGesturesEnabled,
             videoTrackpadHorizontalSeekEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoTrackpadHorizontalSeekEnabled) ?? defaults.videoTrackpadHorizontalSeekEnabled,
@@ -1400,6 +1583,8 @@ public struct AppSettings: Codable, Hashable {
             videoDeinterlaceMode: try container.decodeIfPresent(VideoDeinterlaceMode.self, forKey: .videoDeinterlaceMode) ?? defaults.videoDeinterlaceMode,
             videoRotationMode: try container.decodeIfPresent(VideoRotationMode.self, forKey: .videoRotationMode) ?? defaults.videoRotationMode,
             videoLoopCurrentItem: try container.decodeIfPresent(Bool.self, forKey: .videoLoopCurrentItem) ?? defaults.videoLoopCurrentItem,
+            videoColorAdjustments: try container.decodeIfPresent(VideoColorAdjustments.self, forKey: .videoColorAdjustments) ?? defaults.videoColorAdjustments,
+            videoPitchCorrectionEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoPitchCorrectionEnabled) ?? defaults.videoPitchCorrectionEnabled,
             enabledHomeTabs: try container.decodeIfPresent([HomeTab].self, forKey: .enabledHomeTabs) ?? defaults.enabledHomeTabs,
             videoDefaultPlayer: decodedVideoDefaultPlayer ?? legacyDefaultPlayer ?? defaults.videoDefaultPlayer,
             musicDefaultPlayer: try container.decodeIfPresent(DefaultPlayer.self, forKey: .musicDefaultPlayer) ?? defaults.musicDefaultPlayer,
@@ -1452,15 +1637,30 @@ public struct AppSettings: Codable, Hashable {
     }
 
     public func videoPlayerShortcutAction(for shortcut: VideoKeyboardShortcut) -> VideoPlayerShortcutAction? {
+        let shortcut = shortcut.normalized
         guard shortcut.isEnabled else { return nil }
         return VideoPlayerShortcutAction.allCases.first { action in
-            resolvedVideoKeyboardShortcuts(for: action).contains(shortcut)
+            resolvedVideoKeyboardShortcuts(for: action).map(\.normalized).contains(shortcut)
+        }
+    }
+
+    /// 查询某个组合键当前是否已被「除 `action` 之外」的其它动作占用，返回冲突动作。
+    /// 用于在录制快捷键时先给出冲突提示，而不是静默把按键从其它动作上抢过来。
+    public func videoPlayerShortcutConflict(
+        for shortcut: VideoKeyboardShortcut,
+        excluding action: VideoPlayerShortcutAction
+    ) -> VideoPlayerShortcutAction? {
+        let shortcut = shortcut.normalized
+        guard shortcut.isEnabled else { return nil }
+        return VideoPlayerShortcutAction.allCases.first { other in
+            other != action && resolvedVideoKeyboardShortcuts(for: other).map(\.normalized).contains(shortcut)
         }
     }
 
     public mutating func setVideoKeyboardShortcuts(_ shortcuts: [VideoKeyboardShortcut], for action: VideoPlayerShortcutAction) {
         let enabledShortcuts = shortcuts
             .filter(\.isEnabled)
+            .map(\.normalized)
             .reduce(into: [VideoKeyboardShortcut]()) { result, shortcut in
                 if !result.contains(shortcut) {
                     result.append(shortcut)
@@ -1520,10 +1720,16 @@ public struct AppSettings: Codable, Hashable {
         return min(max(value.rounded(), 70), 100)
     }
 
+    public static func clampedVideoResumeRewind(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max((value / 5).rounded() * 5, 0), 30)
+    }
+
     private static func sanitizedVideoKeyboardShortcuts(_ shortcuts: [VideoPlayerShortcutAction: [VideoKeyboardShortcut]]) -> [VideoPlayerShortcutAction: [VideoKeyboardShortcut]] {
         shortcuts.reduce(into: [VideoPlayerShortcutAction: [VideoKeyboardShortcut]]()) { result, element in
             let unique = element.value
                 .filter(\.isEnabled)
+                .map(\.normalized)
                 .reduce(into: [VideoKeyboardShortcut]()) { list, shortcut in
                     if !list.contains(shortcut) {
                         list.append(shortcut)
