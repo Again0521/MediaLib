@@ -12,7 +12,11 @@
   <img src="https://img.shields.io/badge/Media-Library-blue" alt="Media Library" />
   <img src="https://img.shields.io/badge/Local%20First-Privacy%20Friendly-green" alt="Local First" />
 </p>
+<div align="center">
 
+<a href="https://ifdian.net/a/0521zn">喜欢的话可以赞助！</a>
+
+</div>
 </div>
 
 MediaLIB 可以把散落在本地硬盘、移动硬盘、NAS、SMB/FTP 网络目录，以及 Emby、Jellyfin、Plex 里的电影、剧集、动漫、纪录片、综艺和音乐整理到一起。你可以在一个统一的界面里浏览、搜索、收藏、继续观看和直接播放。
