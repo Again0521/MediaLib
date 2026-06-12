@@ -1,4 +1,10 @@
-# MediaLIB
+<div align="center">
+
+# MediaLib
+
+一个现代化的 macOS 本地媒体播放器
+
+</div>
 
 MediaLIB 是一款 macOS 原生家庭影音库。它可以把本地硬盘、移动硬盘、NAS、SMB/FTP 网络目录，以及 Emby、Jellyfin、Plex 里的电影、剧集、动漫、纪录片、综艺和音乐整理到一起，用一个干净的界面浏览、搜索、收藏、继续观看和直接播放。
 
