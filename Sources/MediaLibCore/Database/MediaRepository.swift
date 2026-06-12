@@ -261,17 +261,19 @@ public final class MediaRepository {
 
     public func updatePlayback(id: String, position: Double, duration: Double?, watchedThreshold: Double) throws {
         let progress = duration.map { $0 > 0 ? min(max(position / $0, 0), 1) : 0 } ?? 0
-        let watched = progress >= watchedThreshold
+        // 已看只置位、不复位：重看一部已看影片的开头不应把「已看」刷回未看
+        // （主流媒体库 Plex/Emby 的口径）。取消已看走显式的标记接口。
+        let reachedThreshold = progress >= watchedThreshold
         try database.execute(
             """
             UPDATE media_items
-            SET play_position = ?, play_progress = ?, watched = ?, last_played_at = ?, updated_at = ?
+            SET play_position = ?, play_progress = ?, watched = CASE WHEN ? THEN 1 ELSE watched END, last_played_at = ?, updated_at = ?
             WHERE id = ?
             """,
             bindings: [
                 .double(position),
                 .double(progress),
-                .bool(watched),
+                .bool(reachedThreshold),
                 .optionalDate(Date()),
                 .optionalDate(Date()),
                 .text(id)

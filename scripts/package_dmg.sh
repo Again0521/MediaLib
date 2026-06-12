@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="MediaLib"
 DISPLAY_NAME="MediaLIB"
 BUNDLE_ID="com.local.MediaLib"
-VERSION="1.0.0"
-BUILD="1"
+VERSION="1.1.0"
+BUILD="2"
 DIST_DIR="$ROOT_DIR/dist"
 BUILD_ROOT="/private/tmp/MediaLib-package"
 APP_BUNDLE="$BUILD_ROOT/$DISPLAY_NAME.app"
@@ -227,6 +227,51 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <!-- 声明可打开的媒体文档类型：作为「系统默认视频/音乐播放器」的前提，
+       设置页的「设为默认」按钮按这些声明向 LaunchServices 注册。 -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Video File</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Default</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.movie</string>
+        <string>public.video</string>
+        <string>public.mpeg-4</string>
+        <string>com.apple.quicktime-movie</string>
+        <string>public.avi</string>
+        <string>org.matroska.mkv</string>
+        <string>public.mpeg</string>
+        <string>public.mpeg-2-transport-stream</string>
+        <string>org.webmproject.webm</string>
+        <string>com.microsoft.windows-media-wmv</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Audio File</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Default</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.audio</string>
+        <string>public.mp3</string>
+        <string>public.mpeg-4-audio</string>
+        <string>org.xiph.flac</string>
+        <string>com.apple.m4a-audio</string>
+        <string>public.aiff-audio</string>
+        <string>com.microsoft.waveform-audio</string>
+        <string>org.xiph.ogg</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>
 PLIST

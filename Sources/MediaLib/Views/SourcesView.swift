@@ -173,23 +173,25 @@ private struct AddMediaSourceWizardSheet: View {
     }
 
     private var stepIndicator: some View {
+        // 三步对称排布：来源贴左、设置贴右（左右留白相等）、连接居中；
+        // 两段连接线等宽伸缩，保证中间步骤恰好在水平中点。
         HStack(spacing: 8) {
-            wizardStepPill(title: "来源", index: 1, active: step == .source, completed: step.order > AddMediaSourceWizardStep.source.order)
+            wizardStepPill(title: "来源", index: 1, active: step == .source, completed: step.order > AddMediaSourceWizardStep.source.order, alignment: .leading)
             Capsule()
                 .fill(Color.primary.opacity(0.14))
                 .frame(height: 2)
-            wizardStepPill(title: "连接", index: 2, active: step == .configure, completed: step.order > AddMediaSourceWizardStep.configure.order)
+            wizardStepPill(title: "连接", index: 2, active: step == .configure, completed: step.order > AddMediaSourceWizardStep.configure.order, alignment: .center)
             Capsule()
                 .fill(Color.primary.opacity(0.14))
                 .frame(height: 2)
-            wizardStepPill(title: "设置", index: 3, active: step == .settings, completed: false)
+            wizardStepPill(title: "设置", index: 3, active: step == .settings, completed: false, alignment: .trailing)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .staticSurfaceBackground(cornerRadius: 16, thickness: 0.9)
     }
 
-    private func wizardStepPill(title: String, index: Int, active: Bool, completed: Bool) -> some View {
+    private func wizardStepPill(title: String, index: Int, active: Bool, completed: Bool, alignment: Alignment) -> some View {
         HStack(spacing: 7) {
             Image(systemName: completed ? "checkmark.circle.fill" : "\(index).circle.fill")
                 .font(.callout.weight(.semibold))
@@ -198,7 +200,7 @@ private struct AddMediaSourceWizardSheet: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(active ? .primary : .secondary)
         }
-        .frame(width: 92, alignment: .leading)
+        .frame(width: 92, alignment: alignment)
     }
 
     @ViewBuilder

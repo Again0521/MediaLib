@@ -358,6 +358,168 @@ public enum VideoDebandMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// HDR 色调映射曲线（libmpv `tone-mapping`），SDR 显示器观看 HDR 片源时生效。
+public enum VideoToneMappingMode: String, Codable, CaseIterable, Identifiable {
+    case auto
+    case bt2390 = "bt.2390"
+    case hable
+    case mobius
+    case reinhard
+    case clip
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .auto: return "自动"
+        case .bt2390: return "BT.2390"
+        case .hable: return "Hable"
+        case .mobius: return "Mobius"
+        case .reinhard: return "Reinhard"
+        case .clip: return "裁剪"
+        }
+    }
+}
+
+/// 鼠标中键在播放画面上的动作。
+public enum VideoMiddleClickAction: String, Codable, CaseIterable, Identifiable {
+    case none
+    case playPause
+    case fullscreen
+    case mute
+    case contextMenu
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .none: return "无"
+        case .playPause: return "播放/暂停"
+        case .fullscreen: return "全屏"
+        case .mute: return "静音"
+        case .contextMenu: return "右键菜单"
+        }
+    }
+}
+
+/// 鼠标侧键（后退/前进键）在播放画面上的动作。
+public enum VideoSideButtonAction: String, Codable, CaseIterable, Identifiable {
+    case none
+    case seek
+    case episode
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .none: return "无"
+        case .seek: return "快退/快进"
+        case .episode: return "上集/下集"
+        }
+    }
+}
+
+/// 视频播放结束后的行为。
+public enum VideoPlaybackEndAction: String, Codable, CaseIterable, Identifiable {
+    case nextEpisode
+    case holdLastFrame
+    case closeWindow
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .nextEpisode: return "自动下一集"
+        case .holdLastFrame: return "停在结尾"
+        case .closeWindow: return "关闭窗口"
+        }
+    }
+}
+
+/// 镜像翻转（libmpv vf `hflip` / `vflip`）。
+public enum VideoFlipMode: String, Codable, CaseIterable, Identifiable {
+    case none
+    case horizontal
+    case vertical
+    case both
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .none: return "关闭"
+        case .horizontal: return "水平"
+        case .vertical: return "垂直"
+        case .both: return "双向"
+        }
+    }
+
+    public var mpvFilters: [String] {
+        switch self {
+        case .none: return []
+        case .horizontal: return ["hflip"]
+        case .vertical: return ["vflip"]
+        case .both: return ["hflip", "vflip"]
+        }
+    }
+}
+
+/// 画面锐化（libmpv 经 lavfi 桥接的 `unsharp` 滤镜）。
+public enum VideoSharpenMode: String, Codable, CaseIterable, Identifiable {
+    case off
+    case light
+    case medium
+    case strong
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .off: return "关闭"
+        case .light: return "轻微"
+        case .medium: return "适中"
+        case .strong: return "明显"
+        }
+    }
+
+    public var mpvFilter: String? {
+        switch self {
+        case .off: return nil
+        case .light: return "unsharp=la=0.4"
+        case .medium: return "unsharp=la=0.8"
+        case .strong: return "unsharp=la=1.2"
+        }
+    }
+}
+
+/// 画面降噪（libmpv 经 lavfi 桥接的 `hqdn3d` 滤镜）。
+public enum VideoDenoiseMode: String, Codable, CaseIterable, Identifiable {
+    case off
+    case light
+    case medium
+    case strong
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .off: return "关闭"
+        case .light: return "轻微"
+        case .medium: return "适中"
+        case .strong: return "明显"
+        }
+    }
+
+    public var mpvFilter: String? {
+        switch self {
+        case .off: return nil
+        case .light: return "hqdn3d=2:1.5:3:2.25"
+        case .medium: return "hqdn3d=4:3:6:4.5"
+        case .strong: return "hqdn3d=7:5:10:7.5"
+        }
+    }
+}
+
 public enum VideoScreenshotMode: String, Codable, CaseIterable, Identifiable {
     case subtitles
     case video
@@ -522,6 +684,7 @@ public enum VideoPlayerShortcutAction: String, Codable, CaseIterable, Identifiab
     case seekTo90Percent
     case toggleControlsLock
     case showAdvancedSettings
+    case toggleMiniMode
 
     public var id: String { rawValue }
 
@@ -586,6 +749,7 @@ public enum VideoPlayerShortcutAction: String, Codable, CaseIterable, Identifiab
         case .seekTo90Percent: return "跳到 90%"
         case .toggleControlsLock: return "锁定 / 显示控制栏"
         case .showAdvancedSettings: return "打开更多设置"
+        case .toggleMiniMode: return "迷你悬浮窗"
         }
     }
 
@@ -599,7 +763,7 @@ public enum VideoPlayerShortcutAction: String, Codable, CaseIterable, Identifiab
              .seekTo0Percent, .seekTo10Percent, .seekTo20Percent, .seekTo30Percent, .seekTo40Percent,
              .seekTo50Percent, .seekTo60Percent, .seekTo70Percent, .seekTo80Percent, .seekTo90Percent:
             return "跳转"
-        case .volumeUp, .volumeDown, .mute, .toggleFullscreen, .toggleControlsLock, .showAdvancedSettings:
+        case .volumeUp, .volumeDown, .mute, .toggleFullscreen, .toggleControlsLock, .showAdvancedSettings, .toggleMiniMode:
             return "窗口与控制"
         case .speedDown, .speedUp, .resetSpeed, .frameBackward, .frameForward,
              .cycleAspectRatio, .cycleCropMode, .cycleDeinterlaceMode, .rotateVideoLeft, .rotateVideoRight:
@@ -748,6 +912,8 @@ public enum VideoPlayerShortcutAction: String, Codable, CaseIterable, Identifiab
             return []
         case .showAdvancedSettings:
             return [VideoKeyboardShortcut(keyCode: 43, characters: ",", modifiers: .command)]
+        case .toggleMiniMode:
+            return [VideoKeyboardShortcut(keyCode: 35, characters: "p")]
         }
     }
 
@@ -1131,7 +1297,34 @@ public struct AppSettings: Codable, Hashable {
     public var themeHighlightHex: String?
     public var themeLightHex: String?
     public var rememberPlaybackPosition: Bool
+    /// 旧的「自动下一集」开关，仅用于向 videoPlaybackEndAction 迁移，不再被 UI 读取。
     public var autoPlayNextEpisode: Bool
+    /// 视频播放结束后的行为（自动下一集 / 停在结尾 / 关闭窗口）。
+    public var videoPlaybackEndAction: VideoPlaybackEndAction
+    /// 按系列/影片记忆播放倍速（恢复 1.0 即清除记忆）。
+    public var videoRememberPlaybackRate: Bool
+    /// 鼠标中键动作。
+    public var videoMiddleClickAction: VideoMiddleClickAction
+    /// 鼠标侧键（后退/前进）动作。
+    public var videoMouseBackForwardAction: VideoSideButtonAction
+    /// 启动时使用固定窗口宽度（关闭则记忆上次拖拽后的宽度）。
+    public var videoUseFixedLaunchWidth: Bool
+    /// 启动窗口宽度占屏幕可用宽度的比例 0.45…1.0（1.0 = 占满屏幕宽度）。
+    public var videoLaunchWidthRatio: Double
+    /// 启动时把音量调整为固定值（关闭则沿用上次音量）。
+    public var videoUseLaunchVolume: Bool
+    /// 启动音量 0…1。
+    public var videoLaunchVolume: Double
+    /// 用户选择跳过的更新版本 tag（静默检查不再提示该版本）。
+    public var updateSkippedVersion: String?
+    /// 永不提醒更新（手动检查不受影响）。
+    public var updateRemindersDisabled: Bool
+    /// HDR 色调映射曲线。
+    public var videoToneMappingMode: VideoToneMappingMode
+    /// 视频音频均衡器开关（libmpv af 链，复用音乐均衡器预设）。
+    public var videoEqualizerEnabled: Bool
+    /// 视频音频均衡器预设。
+    public var videoEqualizerPreset: MusicEqualizerPreset
     public var autoMarkWatched: Bool
     public var watchedThreshold: Double
     public var skipInterval: Double
@@ -1159,6 +1352,12 @@ public struct AppSettings: Codable, Hashable {
     public var videoMouseWheelVolumeEnabled: Bool
     public var videoHardwareDecodingMode: VideoHardwareDecodingMode
     public var videoDebandMode: VideoDebandMode
+    /// 镜像翻转（水平 / 垂直 / 双向）。
+    public var videoFlipMode: VideoFlipMode
+    /// 画面锐化档位。
+    public var videoSharpenMode: VideoSharpenMode
+    /// 画面降噪档位。
+    public var videoDenoiseMode: VideoDenoiseMode
     public var videoScreenshotMode: VideoScreenshotMode
     public var videoKeyboardShortcuts: [VideoPlayerShortcutAction: [VideoKeyboardShortcut]]
     public var videoTrackpadGesturesEnabled: Bool
@@ -1179,6 +1378,10 @@ public struct AppSettings: Codable, Hashable {
     public var videoColorAdjustments: VideoColorAdjustments
     /// 变速播放时保持音调（libmpv `audio-pitch-correction`），默认开启。
     public var videoPitchCorrectionEnabled: Bool
+    /// 字幕样式（字体 / 粗体 / 颜色 / 描边 / 背景）。
+    public var videoSubtitleStyle: VideoSubtitleStyle
+    /// 视频音量增强倍率 1.0…2.0（libmpv `volume-max` 路径），1.0 表示不增强。
+    public var videoVolumeBoost: Double
     public var enabledHomeTabs: [HomeTab]
     public var videoDefaultPlayer: DefaultPlayer
     public var musicDefaultPlayer: DefaultPlayer
@@ -1243,6 +1446,19 @@ public struct AppSettings: Codable, Hashable {
         themeLightHex: String? = nil,
         rememberPlaybackPosition: Bool = true,
         autoPlayNextEpisode: Bool = true,
+        videoPlaybackEndAction: VideoPlaybackEndAction = .nextEpisode,
+        videoRememberPlaybackRate: Bool = true,
+        videoMiddleClickAction: VideoMiddleClickAction = .playPause,
+        videoMouseBackForwardAction: VideoSideButtonAction = .seek,
+        updateSkippedVersion: String? = nil,
+        updateRemindersDisabled: Bool = false,
+        videoUseFixedLaunchWidth: Bool = false,
+        videoLaunchWidthRatio: Double = 0.7,
+        videoUseLaunchVolume: Bool = false,
+        videoLaunchVolume: Double = 0.8,
+        videoToneMappingMode: VideoToneMappingMode = .auto,
+        videoEqualizerEnabled: Bool = false,
+        videoEqualizerPreset: MusicEqualizerPreset = .flat,
         autoMarkWatched: Bool = true,
         watchedThreshold: Double = 0.9,
         skipInterval: Double = 5,
@@ -1270,6 +1486,9 @@ public struct AppSettings: Codable, Hashable {
         videoMouseWheelVolumeEnabled: Bool = false,
         videoHardwareDecodingMode: VideoHardwareDecodingMode = .safe,
         videoDebandMode: VideoDebandMode = .off,
+        videoFlipMode: VideoFlipMode = .none,
+        videoSharpenMode: VideoSharpenMode = .off,
+        videoDenoiseMode: VideoDenoiseMode = .off,
         videoScreenshotMode: VideoScreenshotMode = .subtitles,
         videoKeyboardShortcuts: [VideoPlayerShortcutAction: [VideoKeyboardShortcut]] = [:],
         videoTrackpadGesturesEnabled: Bool = true,
@@ -1288,6 +1507,8 @@ public struct AppSettings: Codable, Hashable {
         videoLoopCurrentItem: Bool = false,
         videoColorAdjustments: VideoColorAdjustments = .neutral,
         videoPitchCorrectionEnabled: Bool = true,
+        videoSubtitleStyle: VideoSubtitleStyle = .standard,
+        videoVolumeBoost: Double = 1.0,
         enabledHomeTabs: [HomeTab] = AppSettings.defaultHomeTabs,
         videoDefaultPlayer: DefaultPlayer? = nil,
         musicDefaultPlayer: DefaultPlayer = .builtIn,
@@ -1337,6 +1558,19 @@ public struct AppSettings: Codable, Hashable {
         self.themeLightHex = themeLightHex
         self.rememberPlaybackPosition = rememberPlaybackPosition
         self.autoPlayNextEpisode = autoPlayNextEpisode
+        self.videoPlaybackEndAction = videoPlaybackEndAction
+        self.videoRememberPlaybackRate = videoRememberPlaybackRate
+        self.videoMiddleClickAction = videoMiddleClickAction
+        self.videoMouseBackForwardAction = videoMouseBackForwardAction
+        self.updateSkippedVersion = updateSkippedVersion
+        self.updateRemindersDisabled = updateRemindersDisabled
+        self.videoUseFixedLaunchWidth = videoUseFixedLaunchWidth
+        self.videoLaunchWidthRatio = Self.clampedVideoLaunchWidthRatio(videoLaunchWidthRatio)
+        self.videoUseLaunchVolume = videoUseLaunchVolume
+        self.videoLaunchVolume = Self.clampedVideoLaunchVolume(videoLaunchVolume)
+        self.videoToneMappingMode = videoToneMappingMode
+        self.videoEqualizerEnabled = videoEqualizerEnabled
+        self.videoEqualizerPreset = videoEqualizerPreset
         self.autoMarkWatched = autoMarkWatched
         self.watchedThreshold = watchedThreshold
         self.skipInterval = skipInterval
@@ -1364,6 +1598,9 @@ public struct AppSettings: Codable, Hashable {
         self.videoMouseWheelVolumeEnabled = videoMouseWheelVolumeEnabled
         self.videoHardwareDecodingMode = videoHardwareDecodingMode
         self.videoDebandMode = videoDebandMode
+        self.videoFlipMode = videoFlipMode
+        self.videoSharpenMode = videoSharpenMode
+        self.videoDenoiseMode = videoDenoiseMode
         self.videoScreenshotMode = videoScreenshotMode
         self.videoKeyboardShortcuts = Self.sanitizedVideoKeyboardShortcuts(videoKeyboardShortcuts)
         self.videoTrackpadGesturesEnabled = videoTrackpadGesturesEnabled
@@ -1382,6 +1619,8 @@ public struct AppSettings: Codable, Hashable {
         self.videoLoopCurrentItem = videoLoopCurrentItem
         self.videoColorAdjustments = videoColorAdjustments
         self.videoPitchCorrectionEnabled = videoPitchCorrectionEnabled
+        self.videoSubtitleStyle = videoSubtitleStyle
+        self.videoVolumeBoost = Self.clampedVideoVolumeBoost(videoVolumeBoost)
         self.enabledHomeTabs = Self.normalizedEnabledHomeTabs(enabledHomeTabs)
         self.videoDefaultPlayer = videoDefaultPlayer ?? defaultPlayer
         self.musicDefaultPlayer = musicDefaultPlayer
@@ -1433,6 +1672,19 @@ public struct AppSettings: Codable, Hashable {
         case themeLightHex
         case rememberPlaybackPosition
         case autoPlayNextEpisode
+        case videoPlaybackEndAction
+        case videoRememberPlaybackRate
+        case videoMiddleClickAction
+        case videoMouseBackForwardAction
+        case updateSkippedVersion
+        case updateRemindersDisabled
+        case videoUseFixedLaunchWidth
+        case videoLaunchWidthRatio
+        case videoUseLaunchVolume
+        case videoLaunchVolume
+        case videoToneMappingMode
+        case videoEqualizerEnabled
+        case videoEqualizerPreset
         case autoMarkWatched
         case watchedThreshold
         case skipInterval
@@ -1460,6 +1712,9 @@ public struct AppSettings: Codable, Hashable {
         case videoMouseWheelVolumeEnabled
         case videoHardwareDecodingMode
         case videoDebandMode
+        case videoFlipMode
+        case videoSharpenMode
+        case videoDenoiseMode
         case videoScreenshotMode
         case videoKeyboardShortcuts
         case videoTrackpadGesturesEnabled
@@ -1478,6 +1733,8 @@ public struct AppSettings: Codable, Hashable {
         case videoLoopCurrentItem
         case videoColorAdjustments
         case videoPitchCorrectionEnabled
+        case videoSubtitleStyle
+        case videoVolumeBoost
         case enabledHomeTabs
         case videoDefaultPlayer
         case musicDefaultPlayer
@@ -1540,6 +1797,21 @@ public struct AppSettings: Codable, Hashable {
             themeLightHex: try container.decodeIfPresent(String.self, forKey: .themeLightHex) ?? defaults.themeLightHex,
             rememberPlaybackPosition: try container.decodeIfPresent(Bool.self, forKey: .rememberPlaybackPosition) ?? defaults.rememberPlaybackPosition,
             autoPlayNextEpisode: try container.decodeIfPresent(Bool.self, forKey: .autoPlayNextEpisode) ?? defaults.autoPlayNextEpisode,
+            // 旧配置迁移：没存过结束行为时，沿用旧「自动下一集」开关的语义。
+            videoPlaybackEndAction: try container.decodeIfPresent(VideoPlaybackEndAction.self, forKey: .videoPlaybackEndAction)
+                ?? (((try? container.decodeIfPresent(Bool.self, forKey: .autoPlayNextEpisode)) ?? true) ?? true ? .nextEpisode : .holdLastFrame),
+            videoRememberPlaybackRate: try container.decodeIfPresent(Bool.self, forKey: .videoRememberPlaybackRate) ?? defaults.videoRememberPlaybackRate,
+            videoMiddleClickAction: try container.decodeIfPresent(VideoMiddleClickAction.self, forKey: .videoMiddleClickAction) ?? defaults.videoMiddleClickAction,
+            videoMouseBackForwardAction: try container.decodeIfPresent(VideoSideButtonAction.self, forKey: .videoMouseBackForwardAction) ?? defaults.videoMouseBackForwardAction,
+            updateSkippedVersion: try container.decodeIfPresent(String.self, forKey: .updateSkippedVersion) ?? defaults.updateSkippedVersion,
+            updateRemindersDisabled: try container.decodeIfPresent(Bool.self, forKey: .updateRemindersDisabled) ?? defaults.updateRemindersDisabled,
+            videoUseFixedLaunchWidth: try container.decodeIfPresent(Bool.self, forKey: .videoUseFixedLaunchWidth) ?? defaults.videoUseFixedLaunchWidth,
+            videoLaunchWidthRatio: try container.decodeIfPresent(Double.self, forKey: .videoLaunchWidthRatio) ?? defaults.videoLaunchWidthRatio,
+            videoUseLaunchVolume: try container.decodeIfPresent(Bool.self, forKey: .videoUseLaunchVolume) ?? defaults.videoUseLaunchVolume,
+            videoLaunchVolume: try container.decodeIfPresent(Double.self, forKey: .videoLaunchVolume) ?? defaults.videoLaunchVolume,
+            videoToneMappingMode: try container.decodeIfPresent(VideoToneMappingMode.self, forKey: .videoToneMappingMode) ?? defaults.videoToneMappingMode,
+            videoEqualizerEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoEqualizerEnabled) ?? defaults.videoEqualizerEnabled,
+            videoEqualizerPreset: try container.decodeIfPresent(MusicEqualizerPreset.self, forKey: .videoEqualizerPreset) ?? defaults.videoEqualizerPreset,
             autoMarkWatched: try container.decodeIfPresent(Bool.self, forKey: .autoMarkWatched) ?? defaults.autoMarkWatched,
             watchedThreshold: try container.decodeIfPresent(Double.self, forKey: .watchedThreshold) ?? defaults.watchedThreshold,
             skipInterval: try container.decodeIfPresent(Double.self, forKey: .skipInterval) ?? defaults.skipInterval,
@@ -1567,6 +1839,9 @@ public struct AppSettings: Codable, Hashable {
             videoMouseWheelVolumeEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoMouseWheelVolumeEnabled) ?? defaults.videoMouseWheelVolumeEnabled,
             videoHardwareDecodingMode: try container.decodeIfPresent(VideoHardwareDecodingMode.self, forKey: .videoHardwareDecodingMode) ?? defaults.videoHardwareDecodingMode,
             videoDebandMode: try container.decodeIfPresent(VideoDebandMode.self, forKey: .videoDebandMode) ?? defaults.videoDebandMode,
+            videoFlipMode: try container.decodeIfPresent(VideoFlipMode.self, forKey: .videoFlipMode) ?? defaults.videoFlipMode,
+            videoSharpenMode: try container.decodeIfPresent(VideoSharpenMode.self, forKey: .videoSharpenMode) ?? defaults.videoSharpenMode,
+            videoDenoiseMode: try container.decodeIfPresent(VideoDenoiseMode.self, forKey: .videoDenoiseMode) ?? defaults.videoDenoiseMode,
             videoScreenshotMode: try container.decodeIfPresent(VideoScreenshotMode.self, forKey: .videoScreenshotMode) ?? defaults.videoScreenshotMode,
             videoKeyboardShortcuts: try container.decodeIfPresent([VideoPlayerShortcutAction: [VideoKeyboardShortcut]].self, forKey: .videoKeyboardShortcuts) ?? defaults.videoKeyboardShortcuts,
             videoTrackpadGesturesEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoTrackpadGesturesEnabled) ?? defaults.videoTrackpadGesturesEnabled,
@@ -1585,6 +1860,8 @@ public struct AppSettings: Codable, Hashable {
             videoLoopCurrentItem: try container.decodeIfPresent(Bool.self, forKey: .videoLoopCurrentItem) ?? defaults.videoLoopCurrentItem,
             videoColorAdjustments: try container.decodeIfPresent(VideoColorAdjustments.self, forKey: .videoColorAdjustments) ?? defaults.videoColorAdjustments,
             videoPitchCorrectionEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoPitchCorrectionEnabled) ?? defaults.videoPitchCorrectionEnabled,
+            videoSubtitleStyle: try container.decodeIfPresent(VideoSubtitleStyle.self, forKey: .videoSubtitleStyle) ?? defaults.videoSubtitleStyle,
+            videoVolumeBoost: try container.decodeIfPresent(Double.self, forKey: .videoVolumeBoost) ?? defaults.videoVolumeBoost,
             enabledHomeTabs: try container.decodeIfPresent([HomeTab].self, forKey: .enabledHomeTabs) ?? defaults.enabledHomeTabs,
             videoDefaultPlayer: decodedVideoDefaultPlayer ?? legacyDefaultPlayer ?? defaults.videoDefaultPlayer,
             musicDefaultPlayer: try container.decodeIfPresent(DefaultPlayer.self, forKey: .musicDefaultPlayer) ?? defaults.musicDefaultPlayer,
@@ -1718,6 +1995,21 @@ public struct AppSettings: Codable, Hashable {
     public static func clampedVideoSubtitlePosition(_ value: Double) -> Double {
         guard value.isFinite else { return 100 }
         return min(max(value.rounded(), 70), 100)
+    }
+
+    public static func clampedVideoVolumeBoost(_ value: Double) -> Double {
+        guard value.isFinite else { return 1 }
+        return min(max(value, 1.0), 2.0)
+    }
+
+    public static func clampedVideoLaunchWidthRatio(_ value: Double) -> Double {
+        guard value.isFinite else { return 0.7 }
+        return min(max(value, 0.45), 1.0)
+    }
+
+    public static func clampedVideoLaunchVolume(_ value: Double) -> Double {
+        guard value.isFinite else { return 0.8 }
+        return min(max(value, 0), 1)
     }
 
     public static func clampedVideoResumeRewind(_ value: Double) -> Double {

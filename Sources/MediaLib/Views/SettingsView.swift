@@ -112,13 +112,37 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsDescription(text: "这里只决定视频默认交给内置播放器还是系统播放器打开。内置播放器的窗口、时间轴、倍速、片头片尾和输入习惯在播放窗口齿轮菜单中调整。")
+            SettingsRow(title: "系统默认视频播放器", systemImage: "checkmark.seal") {
+                Button {
+                    registerAsSystemDefault(forMusic: false)
+                } label: {
+                    Label("设为默认", systemImage: "star")
+                }
+                .settingsActionButton()
+            }
+
+            SettingsDescription(text: "选「内置」用 MediaLIB 自带的播放器看视频；选「系统」交给你常用的播放器打开。播放中的窗口、倍速、字幕等设置都在播放窗口的齿轮菜单里。点「设为默认」后，在访达中双击视频也会用 MediaLIB 打开。")
 
             SettingsSubsectionHeader(title: "观看规则", systemImage: "slider.horizontal.3")
 
             SettingsToggleRow(title: "记忆播放进度", systemImage: "clock.arrow.circlepath", isOn: binding(\.rememberPlaybackPosition))
-            SettingsToggleRow(title: "自动播放下一集", systemImage: "forward.end", isOn: binding(\.autoPlayNextEpisode))
             SettingsToggleRow(title: "播放完成自动标记已看", systemImage: "checkmark.circle", isOn: binding(\.autoMarkWatched))
+
+            SettingsRow(title: "播放结束行为", systemImage: "forward.end") {
+                Picker("播放结束行为", selection: Binding(get: {
+                    appState.settings.videoPlaybackEndAction
+                }, set: { action in
+                    appState.settings.videoPlaybackEndAction = action
+                    appState.settings.autoPlayNextEpisode = action == .nextEpisode
+                    appState.saveSettings()
+                })) {
+                    ForEach(VideoPlaybackEndAction.allCases) { action in
+                        Text(action.displayName).tag(action)
+                    }
+                }
+                .labelsHidden()
+                .settingsMenuControl(selectedTitle: appState.settings.videoPlaybackEndAction.displayName)
+            }
 
             SettingsRow(title: "已看判定", systemImage: "checkmark.seal") {
                 Picker("已看判定", selection: Binding(get: {
@@ -157,7 +181,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsDescription(text: "离线视频会保存到该位置的 VideoCache 子目录。删除缓存只会移除 MediaLIB 记录的缓存文件，不会改动媒体源。")
+            SettingsDescription(text: "离线视频会保存在这个位置。删除缓存只清理这些离线副本，不会动你原来的文件。")
 
             SettingsRow(title: "视频缓存占用", systemImage: "internaldrive") {
                 Text(appState.videoCacheStorageDisplayText)
@@ -183,7 +207,7 @@ struct SettingsView: View {
                 .settingsMenuControl(selectedTitle: appState.videoCacheSizeLimitDisplayText)
             }
 
-            SettingsDescription(text: "设置上限后，一键清理会优先整理失效记录和无引用文件，再回收已看或较久未播放的离线缓存。")
+            SettingsDescription(text: "设定上限后，会优先清理已经看完的和很久没看的缓存，为新内容腾出空间。")
         }
     }
 
@@ -214,6 +238,15 @@ struct SettingsView: View {
                     }
                     .settingsActionButton()
                 }
+            }
+
+            SettingsRow(title: "系统默认音乐播放器", systemImage: "checkmark.seal") {
+                Button {
+                    registerAsSystemDefault(forMusic: true)
+                } label: {
+                    Label("设为默认", systemImage: "star")
+                }
+                .settingsActionButton()
             }
 
             SettingsRow(title: "歌词同步", systemImage: "text.badge.checkmark") {
@@ -275,7 +308,7 @@ struct SettingsView: View {
                         .labelsHidden()
                         .settingsMenuControl(selectedTitle: appState.settings.musicEqualizerPreset.displayName)
                     }
-                    SettingsDescription(text: "5 段均衡（60 / 230 / 910 / 3.6k / 14k Hz）作用于本地与在线音乐，调整在下一首切换时生效。")
+                    SettingsDescription(text: "从低音到高音五段调节，对所有音乐生效；新的设置从下一首开始。")
                 }
             }
         }
@@ -300,7 +333,7 @@ struct SettingsView: View {
                 .settingsMenuControl(selectedTitle: appState.settings.automaticScanInterval.displayName)
             }
 
-            SettingsDescription(text: "本机来源会优先增量更新，并按所选间隔完整校验。移动硬盘和网络挂载使用周期扫描；不可访问的来源会暂时跳过。")
+            SettingsDescription(text: "本机文件夹有变动会很快更新；移动硬盘和网络位置按固定间隔检查。暂时连不上的来源会先跳过，之后自动再试。")
 
             SettingsRow(title: "完成后发送通知", systemImage: "bell.badge") {
                 Toggle("", isOn: Binding(get: {
@@ -312,7 +345,7 @@ struct SettingsView: View {
                 .toggleStyle(.switch)
             }
 
-            SettingsDescription(text: "完整扫描或 Emby 同步结束、或出现错误时，在 App 切到后台时通过系统通知中心提醒（首次开启会请求通知权限）。")
+            SettingsDescription(text: "扫描或同步完成时，如果你不在 MediaLIB 里，会通过通知中心提醒你（首次开启会请求通知权限）。")
         }
     }
 
@@ -401,7 +434,7 @@ struct SettingsView: View {
                 .settingsMenuControl(selectedTitle: appState.settings.metadataMatchTolerance.displayName)
             }
 
-            SettingsDescription(text: "影视宽容度决定剧集 TMDB 自动套用所需置信度：\(appState.settings.metadataMatchTolerance.summary)。宽松模式会使用清洗后的剧名、原名和目录名变体搜索。")
+            SettingsDescription(text: "决定自动匹配需要多大把握：\(appState.settings.metadataMatchTolerance.summary)。越宽松越容易自动配上信息，但偶尔可能认错；拿不准就保持默认。")
 
             SettingsRow(title: "剧集一键匹配", systemImage: "wand.and.stars") {
                 Button {
@@ -468,7 +501,7 @@ struct SettingsView: View {
                 .settingsMenuControl(selectedTitle: appState.settings.musicMetadataMatchTolerance.displayName)
             }
 
-            SettingsDescription(text: "音乐宽容度仅影响自动补充和音乐工作台的候选置信度：\(appState.settings.musicMetadataMatchTolerance.summary)。")
+            SettingsDescription(text: "决定自动补全音乐信息时需要多大把握：\(appState.settings.musicMetadataMatchTolerance.summary)。")
 
             SettingsRow(title: "音乐增量补充", systemImage: "sparkles") {
                 if !appState.musicMetadataFetchProgress.isEmpty {
@@ -649,7 +682,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsDescription(text: "配色作用于除音乐展开页以外的全部界面：页面底色、卡片、高亮选中色与左上角光线。预设已收敛为 5 套低饱和 macOS 原生风格，选「自定义」可分别调整三种颜色。")
+            SettingsDescription(text: "挑一套喜欢的配色，界面的底色、卡片和高亮会一起换上新衣。五套预设都经过细心调配；想要更个性，选「自定义」可以分别调整三种颜色。")
 
             SettingsRow(title: "海报最小宽度", systemImage: "rectangle.compress.vertical") {
                 Slider(value: binding(\.posterMinWidth), in: 130...220, step: 10)
@@ -742,7 +775,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsDescription(text: "在 trakt.tv 创建应用获取 Client ID 与 Secret。连接时会打开网页让你输入验证码。仅处理已匹配 TMDB 的公开视频：本机改动会推送已看 / 想看；从 Trakt 导入会生成同步冲突，采用远端后写入 MediaLIB 内部索引。")
+            SettingsDescription(text: "在 trakt.tv 创建应用获取 Client ID 与 Secret，连接时会打开网页输入验证码。之后你的「已看」和「想看」会在两边保持同步；两边记录有出入时，会先放进同步冲突，由你决定以哪边为准。")
         }
     }
 
@@ -774,7 +807,7 @@ struct SettingsView: View {
                 .settingsActionButton(width: 92)
                 .disabled(appState.metadataCorrectionRecordCount == 0)
             }
-            SettingsDescription(text: "同步冲突队列中采用远端会把已看、想看、喜欢和用户评级写入 MediaLIB 内部索引；Trakt 冲突选择保留本地会把本机已看/想看写回 Trakt。Plex/Jellyfin/Emby 的更多远端写回、评分冲突来源接入和多字段合并仍由后续连接器执行。该分组不提供多档案隔离，所有播放记录、喜欢、想看和评分都使用全局本机索引。")
+            SettingsDescription(text: "在同步冲突里选「采用远端」，会把对方的已看、想看、喜欢和评分记到本机；选「保留本地」则把你这边的记录写回去。所有设备上的播放和评分记录共用同一份。")
         }
     }
 
@@ -826,7 +859,7 @@ struct SettingsView: View {
                     }
                     .settingsActionButton(width: 126, prominent: true)
                 }
-                SettingsDescription(text: "清理失效缓存记录、已不存在条目的离线缓存、无引用的缓存文件和过旧任务历史；不会删除、移动或改名媒体源里的文件。")
+                SettingsDescription(text: "清理不再使用的缓存和过旧的任务记录，给磁盘腾点空间；你的媒体文件不会被删除、移动或改名。")
             }
         }
     }
@@ -841,12 +874,70 @@ struct SettingsView: View {
                 }
                 .settingsActionButton(width: 142, prominent: true)
             }
+
+            SettingsRow(title: "软件更新", systemImage: "arrow.down.circle") {
+                Text("当前版本 \(AppVersion.current)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button {
+                    appState.checkForUpdates(manual: true)
+                } label: {
+                    if appState.isCheckingForUpdates {
+                        Label("检查中…", systemImage: "arrow.triangle.2.circlepath")
+                    } else {
+                        Label("检查更新", systemImage: "arrow.down.circle")
+                    }
+                }
+                .settingsActionButton(width: 142)
+                .disabled(appState.isCheckingForUpdates)
+            }
+
+            if appState.settings.updateRemindersDisabled || appState.settings.updateSkippedVersion != nil {
+                SettingsRow(title: "更新提醒", systemImage: "bell.badge") {
+                    Button {
+                        appState.settings.updateRemindersDisabled = false
+                        appState.settings.updateSkippedVersion = nil
+                        appState.saveSettings()
+                    } label: {
+                        Label("恢复自动提醒", systemImage: "bell")
+                    }
+                    .settingsActionButton(width: 142)
+                }
+            }
         }
     }
 
     private var privacySettings: some View {
         SettingsSection(title: "保险库", subtitle: "管理私密内容的解锁方式。", systemImage: "lock.shield") {
             PrivacySettingsPanel()
+        }
+    }
+
+    private func registerAsSystemDefault(forMusic: Bool) {
+        guard SystemDefaultPlayerRegistrar.runningFromAppBundle else {
+            appState.alert = AppAlert(
+                title: "无法设置默认播放器",
+                message: "请使用安装到「应用程序」的 MediaLIB.app 进行此操作。"
+            )
+            return
+        }
+        let extensions = forMusic
+            ? SystemDefaultPlayerRegistrar.musicExtensions
+            : SystemDefaultPlayerRegistrar.videoExtensions
+        Task { @MainActor in
+            let result = await SystemDefaultPlayerRegistrar.register(extensions: extensions)
+            let kind = forMusic ? "音乐" : "视频"
+            if result.succeeded > 0 {
+                appState.alert = AppAlert(
+                    title: "已设为默认\(kind)播放器",
+                    message: "已接管 \(result.succeeded) 种常见\(kind)格式" + (result.failed > 0 ? "，另有 \(result.failed) 种格式未能设置（可能被系统保留）。" : "。现在在访达中双击这些文件会用 MediaLIB 打开。")
+                )
+            } else {
+                appState.alert = AppAlert(
+                    title: "设置默认\(kind)播放器失败",
+                    message: "没有格式注册成功，请确认 MediaLIB.app 位于「应用程序」文件夹并重试。"
+                )
+            }
         }
     }
 

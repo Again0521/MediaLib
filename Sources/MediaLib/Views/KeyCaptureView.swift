@@ -12,9 +12,11 @@ import SwiftUI
 struct KeyCaptureView: NSViewRepresentable {
     var settings: AppSettings
     var onKey: (VideoPlayerShortcutAction) -> Void
+    /// 「快进」键被按住（系统键重复）/松开时回调，承载长按临时倍速；nil 时保持逐次快进的旧行为。
+    var onSeekForwardHold: ((Bool) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(settings: settings, onKey: onKey)
+        Coordinator(settings: settings, onKey: onKey, onSeekForwardHold: onSeekForwardHold)
     }
 
     func makeNSView(context: Context) -> NSView {
@@ -26,6 +28,7 @@ struct KeyCaptureView: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.settings = settings
         context.coordinator.onKey = onKey
+        context.coordinator.onSeekForwardHold = onSeekForwardHold
         context.coordinator.attach(to: nsView)
     }
 
@@ -36,24 +39,33 @@ struct KeyCaptureView: NSViewRepresentable {
     final class Coordinator {
         var settings: AppSettings
         var onKey: (VideoPlayerShortcutAction) -> Void
+        var onSeekForwardHold: ((Bool) -> Void)?
         private weak var hostView: NSView?
         private var monitor: Any?
+        /// 正在长按的「快进」键 keyCode；非 nil 表示临时倍速生效中。
+        private var holdingSeekForwardKeyCode: Int?
 
-        init(settings: AppSettings, onKey: @escaping (VideoPlayerShortcutAction) -> Void) {
+        init(
+            settings: AppSettings,
+            onKey: @escaping (VideoPlayerShortcutAction) -> Void,
+            onSeekForwardHold: ((Bool) -> Void)?
+        ) {
             self.settings = settings
             self.onKey = onKey
+            self.onSeekForwardHold = onSeekForwardHold
         }
 
         func attach(to view: NSView) {
             hostView = view
             guard monitor == nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
                 guard let self else { return event }
                 return self.handle(event)
             }
         }
 
         func detach() {
+            endSeekForwardHoldIfNeeded()
             if let monitor {
                 NSEvent.removeMonitor(monitor)
             }
@@ -73,12 +85,38 @@ struct KeyCaptureView: NSViewRepresentable {
             if let textView = hostWindow.firstResponder as? NSTextView, textView.isEditable {
                 return event
             }
-            let shortcut = event.videoKeyboardShortcut
-            if let action = settings.videoPlayerShortcutAction(for: shortcut) {
-                onKey(action)
-                return nil
+
+            if event.type == .keyUp {
+                if holdingSeekForwardKeyCode == Int(event.keyCode) {
+                    endSeekForwardHoldIfNeeded()
+                    return nil
+                }
+                return event
             }
-            return event
+
+            let shortcut = event.videoKeyboardShortcut
+            guard let action = settings.videoPlayerShortcutAction(for: shortcut) else {
+                return event
+            }
+            // 长按「快进」键（系统键重复）→ 临时倍速；松开在 keyUp 里恢复。
+            // 第一次按下仍是普通快进；其余动作的键重复保持原样逐次触发。
+            if action == .seekForward, let onSeekForwardHold {
+                if event.isARepeat {
+                    if holdingSeekForwardKeyCode == nil {
+                        holdingSeekForwardKeyCode = Int(event.keyCode)
+                        onSeekForwardHold(true)
+                    }
+                    return nil
+                }
+            }
+            onKey(action)
+            return nil
+        }
+
+        private func endSeekForwardHoldIfNeeded() {
+            guard holdingSeekForwardKeyCode != nil else { return }
+            holdingSeekForwardKeyCode = nil
+            onSeekForwardHold?(false)
         }
     }
 }

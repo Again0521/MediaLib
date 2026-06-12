@@ -54,25 +54,21 @@ enum MusicPlayerVisualTokens {
 
     /// 封面光浸染到玻璃卡边缘（§2.3）。
     enum Spill {
-        // 向参考图靠拢（封面光真正漫进歌词卡左缘 / 控制栏上沿）：左侧浸染强度与 reach 上调，
-        // 让歌词卡左边缘明确接住封面色；右侧仍保留更弱的主色平衡光，强度不接近左侧。
-        static let lyricsIntensity: Double = 1.78
-        static let lyricsTrailingIntensity: Double = 0.34
-        static let controlsIntensity: Double = 1.38
-        static let chromeIntensity: Double = 1.08
-        // §2.3 reach 决定浸染向卡片内部延伸的归一化宽度（也撑开 near/mid/fade 三段渐变 → 更柔的羽化）。
-        // reach 调大 = 浸染漫得更深、过渡更长更柔（边缘羽化），与“光软软漫进卡片”的参考观感一致。
-        static let lyricsReach: Double = 0.46
-        static let lyricsTrailingReach: Double = 0.18
-        static let controlsReach: Double = 0.50
-        static let chromeReach: Double = 0.42
-        static let chromaTravelBase: Double = 0.50
-        static let chromaTravelVibrancy: Double = 0.38
+        // 组件染色不再固定铺满整条边，而是再乘以布局计算出的真实入射强度。
+        // 这些值只定义“玻璃吃到光后的材质反应”，光能不能到由 AlbumComponentLight 决定。
+        static let lyricsIntensity: Double = 0.0
+        static let controlsIntensity: Double = 0.42
+        static let chromeIntensity: Double = 0.18
+        static let lyricsReach: Double = 0.245
+        static let controlsReach: Double = 0.20
+        static let chromeReach: Double = 0.14
+        static let chromaTravelBase: Double = 0.30
+        static let chromaTravelVibrancy: Double = 0.16
         static let innerPeak: Double = 0.02
         static let innerPrimary: Double = 0.064
         static let innerSecondary: Double = 0.13
         static let innerFade: Double = 0.22
-        static let pausedResidual: Double = 0.12
+        static let pausedResidual: Double = 0.055
         static let pauseNearFadeDuration: Double = 0.22
         static let pauseFarDelay: UInt64 = 260_000_000
         static let pauseFarFadeDuration: Double = 0.28
@@ -734,30 +730,22 @@ struct MusicPlayerView: View {
                 .allowsHitTesting(false)
                 .zIndex(1)
 
-                AlbumPhysicalLightField(
-                    palette: albumPalette,
-                    controller: controller,
-                    center: layout.albumLightCenter,
-                    coverSide: layout.coverDisplaySide,
-                    radius: layout.albumGlowRadius,
-                    isEnabled: appState.settings.musicAlbumCoverGlowEnabled
-                )
-                .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
-                .allowsHitTesting(false)
-                .zIndex(1.1)
-
                 ZStack(alignment: .topLeading) {
                     if layout.stackedLayout {
                         ScrollView {
                             VStack(spacing: 28) {
-                                musicIdentityPanel(posterSize: min(layout.posterSize, 230), glowReach: layout.albumGlowReach)
+                                musicIdentityPanel(
+                                    posterSize: min(layout.posterSize, 230),
+                                    glowReach: layout.albumGlowReach,
+                                    controlsLight: layout.controlsLight
+                                )
                                     .frame(maxWidth: 360)
                                     .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
                                     .offset(y: reduceMotion || entrancePhase >= 1 ? 0 : 18)
                                     .scaleEffect(reduceMotion || entrancePhase >= 1 ? 1 : 0.982)
 
                                 if lyricsPanelReady {
-                                    lyricsPanel
+                                    lyricsPanel(light: layout.lyricsLight)
                                         .frame(height: layout.stackedLyricsHeight)
                                         .opacity(reduceMotion || entrancePhase >= 2 ? 1 : 0)
                                         .offset(y: reduceMotion || entrancePhase >= 2 ? 0 : 22)
@@ -773,14 +761,18 @@ struct MusicPlayerView: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
-                        musicIdentityPanel(posterSize: layout.posterSize, glowReach: layout.albumGlowReach)
+                        musicIdentityPanel(
+                            posterSize: layout.posterSize,
+                            glowReach: layout.albumGlowReach,
+                            controlsLight: layout.controlsLight
+                        )
                             .frame(width: layout.leftRect.width, height: layout.leftRect.height, alignment: .center)
                             .offset(x: layout.leftRect.minX, y: layout.leftRect.minY)
                             .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
                             .scaleEffect(reduceMotion || entrancePhase >= 1 ? 1 : 0.982, anchor: .center)
 
                         if lyricsPanelReady {
-                            lyricsPanel
+                            lyricsPanel(light: layout.lyricsLight)
                                 .frame(width: layout.lyricsRect.width, height: layout.lyricsRect.height)
                                 .offset(x: layout.lyricsRect.minX, y: layout.lyricsRect.minY)
                                 .opacity(reduceMotion || entrancePhase >= 2 ? 1 : 0)
@@ -806,7 +798,7 @@ struct MusicPlayerView: View {
         // 外层不再重复铺同色全屏底：内部背景已完全覆盖，减少一层全窗绘制。
     }
 
-    private func musicIdentityPanel(posterSize: CGFloat, glowReach: CGFloat) -> some View {
+    private func musicIdentityPanel(posterSize: CGFloat, glowReach: CGFloat, controlsLight: AlbumComponentLight) -> some View {
         VStack(spacing: 16) {
             Spacer(minLength: 0)
 
@@ -849,7 +841,7 @@ struct MusicPlayerView: View {
             }
             .frame(maxHeight: 82)
 
-            MusicExpandedControls(item: currentItem, controller: controller, palette: albumPalette)
+            MusicExpandedControls(item: currentItem, controller: controller, palette: albumPalette, light: controlsLight)
                 .layoutPriority(1)
 
             Spacer(minLength: 0)
@@ -869,7 +861,7 @@ struct MusicPlayerView: View {
         .accessibilityLabel("最小化播放器")
     }
 
-    private var lyricsPanel: some View {
+    private func lyricsPanel(light: AlbumComponentLight) -> some View {
         MusicExpandedLyricsPanel(
             controller: controller,
             lyrics: lyrics,
@@ -878,6 +870,7 @@ struct MusicPlayerView: View {
             hasDisplayLyrics: hasDisplayLyrics,
             isFetchingLyrics: isFetchingLyrics,
             palette: albumPalette,
+            light: light,
             userIsBrowsingLyrics: $userIsBrowsingLyrics,
             onFetchLyrics: {
                 Task { await fetchLyrics() }
@@ -1380,16 +1373,16 @@ private struct AlbumGlobalGlassVeil: View {
     var body: some View {
         ZStack {
             AppKitVisualEffectBackground(material: .hudWindow, blendingMode: .withinWindow)
-                .opacity(colorScheme == .dark ? 0.22 : 0.28)
+                .opacity(colorScheme == .dark ? 0.18 : 0.16)
 
             Rectangle()
-                .fill((colorScheme == .dark ? Color.black : Color.white).opacity(colorScheme == .dark ? 0.07 : 0.105))
+                .fill((colorScheme == .dark ? Color.black : Color.white).opacity(colorScheme == .dark ? 0.056 : 0.038))
 
             LinearGradient(
                 colors: [
-                    Color.white.opacity(colorScheme == .dark ? 0.075 : 0.145),
-                    Color.white.opacity(colorScheme == .dark ? 0.028 : 0.050),
-                    Color.black.opacity(colorScheme == .dark ? 0.075 : 0.012)
+                    Color.white.opacity(colorScheme == .dark ? 0.060 : 0.062),
+                    Color.white.opacity(colorScheme == .dark ? 0.020 : 0.020),
+                    Color.black.opacity(colorScheme == .dark ? 0.066 : 0.006)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -1397,7 +1390,7 @@ private struct AlbumGlobalGlassVeil: View {
 
             RadialGradient(
                 colors: [
-                    palette.glowPrimary.color.opacity(colorScheme == .dark ? 0.080 : 0.070),
+                    palette.glowPrimary.color.opacity(colorScheme == .dark ? 0.070 : 0.046),
                     .clear
                 ],
                 center: .topLeading,
@@ -1599,7 +1592,7 @@ private struct AlbumGlowBlurCover: View {
     }
 
     private var bakeKey: String {
-        "\(posterPath ?? "")|\(Int(displaySide.rounded()))|\(Int(coverSide.rounded()))"
+        "blurred-cover-projection-v7|\(posterPath ?? "")|\(Int(displaySide.rounded()))|\(Int(coverSide.rounded()))"
     }
 
     var body: some View {
@@ -1610,7 +1603,7 @@ private struct AlbumGlowBlurCover: View {
                     .resizable()
                     .interpolation(.medium)
                     .frame(width: displaySide, height: displaySide)
-                    .opacity(glowOpacity * (colorScheme == .dark ? 0.74 : 0.80))
+                    .opacity(glowOpacity * (colorScheme == .dark ? 0.82 : 0.78))
                     .scaleEffect(glowScale)
                     .blendMode(.normal)
 
@@ -1618,7 +1611,7 @@ private struct AlbumGlowBlurCover: View {
                     .resizable()
                     .interpolation(.medium)
                     .frame(width: displaySide, height: displaySide)
-                    .opacity(glowOpacity * (colorScheme == .dark ? 0.36 : 0.26))
+                    .opacity(glowOpacity * (colorScheme == .dark ? 0.46 : 0.38))
                     .scaleEffect(glowScale)
                     .blendMode(.screen)
 
@@ -1626,7 +1619,7 @@ private struct AlbumGlowBlurCover: View {
                     .resizable()
                     .interpolation(.medium)
                     .frame(width: displaySide, height: displaySide)
-                    .opacity(glowOpacity * (colorScheme == .dark ? 0.10 : 0.075))
+                    .opacity(glowOpacity * (colorScheme == .dark ? 0.13 : 0.095))
                     .scaleEffect(glowScale)
                     .blendMode(.plusLighter)
             }
@@ -1697,171 +1690,6 @@ private struct AlbumGlowBlurCover: View {
     }
 }
 
-/// 独立的封面光程层：不承担底板取色，只模拟“封面作为光源”向外均匀扩散。
-/// 半径由布局直接给出：光心到歌词卡左缘/控制栏上沿的距离 + overshoot，
-/// 因此光尾会真实抵达歌词卡左边缘并稍微超过一点。
-private struct AlbumPhysicalLightField: View {
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let palette: AlbumColorPalette
-    let controller: MpvPlayerController
-    let center: CGPoint
-    let coverSide: CGFloat
-    let radius: CGFloat
-    let isEnabled: Bool
-    @StateObject private var playbackObserver: MusicMiniTransportStateObserver
-    @State private var lightProgress: Double = 0
-    @State private var lightScale: Double = 1
-    @State private var collapseTask: Task<Void, Never>?
-
-    init(
-        palette: AlbumColorPalette,
-        controller: MpvPlayerController,
-        center: CGPoint,
-        coverSide: CGFloat,
-        radius: CGFloat,
-        isEnabled: Bool
-    ) {
-        self.palette = palette
-        self.controller = controller
-        self.center = center
-        self.coverSide = coverSide
-        self.radius = radius
-        self.isEnabled = isEnabled
-        _playbackObserver = StateObject(wrappedValue: MusicMiniTransportStateObserver(controller: controller))
-    }
-
-    var body: some View {
-        let isPlaying = playbackObserver.state.isPlaying
-        GeometryReader { proxy in
-            if isEnabled {
-                let safeRadius = max(radius, coverSide * 1.35, 1)
-                let edgeDistance = max(safeRadius - coverSide * 0.5, coverSide * 0.35)
-                // 高斯 blur 的可见尾部约为 2.6-3.0 个 radius；用目标光程反推 blur，
-                // 让 halo 正好到达歌词卡左缘并略过一点，而不是无限铺满整窗。
-                let coreBlur = min(max(edgeDistance * 0.36, 36), 180)
-                let tailBlur = min(max(edgeDistance * 0.54, 56), 240)
-                let isDark = colorScheme == .dark
-                let primary = palette.glowPrimary.adjustedPreservingHue(
-                    saturationMultiplier: 0.96,
-                    brightnessMultiplier: 1.18,
-                    minSaturation: 0.16,
-                    maxSaturation: isDark ? 0.62 : 0.54,
-                    minBrightness: isDark ? 0.58 : 0.72,
-                    maxBrightness: isDark ? 0.92 : 0.98
-                ).color
-                let secondary = palette.glowSecondary.adjustedPreservingHue(
-                    saturationMultiplier: 0.92,
-                    brightnessMultiplier: 1.16,
-                    minSaturation: 0.14,
-                    maxSaturation: isDark ? 0.58 : 0.50,
-                    minBrightness: isDark ? 0.56 : 0.70,
-                    maxBrightness: isDark ? 0.90 : 0.96
-                ).color
-                let accent = palette.glowAccent.adjustedPreservingHue(
-                    saturationMultiplier: 0.88,
-                    brightnessMultiplier: 1.14,
-                    minSaturation: 0.12,
-                    maxSaturation: isDark ? 0.54 : 0.46,
-                    minBrightness: isDark ? 0.54 : 0.68,
-                    maxBrightness: isDark ? 0.88 : 0.94
-                ).color
-                let progress = lightProgress
-                let lightShape = RoundedRectangle(cornerRadius: max(22, coverSide * 0.125), style: .continuous)
-                let albumField = LinearGradient(
-                    stops: [
-                        .init(color: secondary, location: 0.0),
-                        .init(color: primary, location: 0.46),
-                        .init(color: accent, location: 1.0)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-
-                ZStack {
-                    // 真实光源：与封面同尺寸、同圆角的色块向外高斯扩散。
-                    lightShape
-                        .fill(albumField)
-                        .frame(width: coverSide, height: coverSide)
-                        .position(center)
-                        .scaleEffect(lightScale)
-                        .blur(radius: coreBlur)
-                        .opacity(progress * (isDark ? 0.72 : 0.62))
-                        .blendMode(.normal)
-
-                    lightShape
-                        .fill(albumField)
-                        .frame(width: coverSide, height: coverSide)
-                        .position(center)
-                        .scaleEffect(lightScale * 1.04)
-                        .blur(radius: tailBlur)
-                        .opacity(progress * (isDark ? 0.48 : 0.40))
-                        .blendMode(.screen)
-
-                    lightShape
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [
-                                    secondary.opacity(progress * (isDark ? 0.38 : 0.32)),
-                                    primary.opacity(progress * (isDark ? 0.44 : 0.36)),
-                                    accent.opacity(progress * (isDark ? 0.28 : 0.24))
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ),
-                            lineWidth: max(4, coverSide * 0.018)
-                        )
-                        .frame(width: coverSide + coreBlur * 0.70, height: coverSide + coreBlur * 0.70)
-                        .position(center)
-                        .scaleEffect(lightScale)
-                        .blur(radius: max(14, coreBlur * 0.20))
-                        .blendMode(.screen)
-                }
-                .frame(width: proxy.size.width, height: proxy.size.height)
-            }
-        }
-        .onAppear { applyPlayback(isPlaying: isPlaying, animated: false) }
-        .onChange(of: isPlaying) { playing in
-            applyPlayback(isPlaying: playing, animated: true)
-        }
-        .onDisappear { collapseTask?.cancel() }
-    }
-
-    private var tuckedScale: Double {
-        guard radius > 1, coverSide > 1 else { return 0.34 }
-        return min(max(Double(coverSide * 0.42 / radius), 0.18), 0.42)
-    }
-
-    private func applyPlayback(isPlaying: Bool, animated: Bool) {
-        collapseTask?.cancel()
-        guard animated, !reduceMotion else {
-            lightProgress = isPlaying ? 1.0 : 0.0
-            lightScale = isPlaying ? 1.0 : tuckedScale
-            return
-        }
-        if isPlaying {
-            withAnimation(.easeOut(duration: 0.34)) {
-                lightProgress = 1.0
-                lightScale = 1.0
-            }
-        } else {
-            let tuck = tuckedScale
-            withAnimation(.easeInOut(duration: 0.24)) {
-                lightProgress = 0.28
-                lightScale = max(tuck * 1.85, 0.52)
-            }
-            collapseTask = Task { @MainActor in
-                do { try await Task.sleep(nanoseconds: 230_000_000) } catch { return }
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeOut(duration: 0.42)) {
-                    lightProgress = 0.0
-                    lightScale = tuck
-                }
-            }
-        }
-    }
-}
-
 private enum AlbumGlowBlurCoverBaker {
     private static let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     private static let cacheLock = NSLock()
@@ -1869,24 +1697,20 @@ private enum AlbumGlowBlurCoverBaker {
     private static var order: [String] = []
     private static let maxEntries = 8
 
-    /// 封面发光烘焙（2026-06-10 重写，对应需求 1/2）：
-    /// 物理模型 = 封面是一块发光体，边界颜色沿法线方向向外延伸（左上红则光左上红），
-    /// 经高斯扩散后按 SDF 圆角方形羽化衰减；亮度门控让黑色区域不发光。
+    /// 封面发光烘焙：
+    /// 物理模型 = 清晰封面下方垫一张“清洗后的封面副本”，再做重高斯模糊。
+    /// 边缘仍参与，但白/灰边缘低权重；彩色中心与彩色边缘共同扩散，避免白边抢光和竖向光柱。
     /// - `coverFraction`：真实封面边长 / 发光画布边长（光程由几何 reach 决定）。
     static func bake(path: String?, displaySide: CGFloat, coverFraction: CGFloat) -> NSImage? {
         guard let path, !path.isEmpty, displaySide > 8 else { return nil }
         let fraction = min(max(coverFraction, 0.10), 0.90)
-        // 发光是低频内容，画布像素无需跟随点尺寸：上限 720 足够。
-        let pixelSide = max(128, min(Int((displaySide * 0.55).rounded()), 720))
-        let key = "\(path)|\(pixelSide)|\(Int((fraction * 100).rounded()))"
+        let pixelSide = max(224, min(Int((displaySide * 0.70).rounded()), 1152))
+        let key = "blurred-cover-projection-v7|\(path)|\(pixelSide)|\(Int((fraction * 100).rounded()))"
         cacheLock.lock()
         if let cached = cache[key] { cacheLock.unlock(); return cached }
         cacheLock.unlock()
 
         guard let cover = loadCover(path: path) else { return nil }
-        let input = CIImage(cgImage: cover)
-        let src = input.extent
-        guard src.width > 1, src.height > 1 else { return nil }
         let canvas = CGRect(x: 0, y: 0, width: CGFloat(pixelSide), height: CGFloat(pixelSide))
         let coverSide = CGFloat(pixelSide) * fraction
         let coverRect = CGRect(
@@ -1895,52 +1719,34 @@ private enum AlbumGlowBlurCoverBaker {
             width: coverSide,
             height: coverSide
         )
-        // ① 封面 aspect-fill 进中心方形（与真实封面 1:1 对齐）。
-        let scale = max(coverRect.width / src.width, coverRect.height / src.height)
-        let placed = input.transformed(by: CGAffineTransform(
-            a: scale, b: 0, c: 0, d: scale,
-            tx: coverRect.midX - src.width * scale * 0.5,
-            ty: coverRect.midY - src.height * scale * 0.5
-        ))
-        // ② 边缘向外延伸：从真实可见封面边界 clamp，
-        //    每个方向向外延续的是最近边界的低频色。不能再内缩取样，否则边缘色会先被平均掉，
-        //    glow 看起来就不像封面颜色的直接延伸。
-        let inset = coverSide * 0.006
-        let extended = placed
-            .cropped(to: coverRect.insetBy(dx: inset, dy: inset))
-            .clampedToExtent()
+
+        guard let emissionSeed = makeEmissionSeed(cover: cover, pixelSide: pixelSide, coverRect: coverRect) else { return nil }
+        debugWrite(emissionSeed, name: "01-seed", sourcePath: path, rect: canvas)
+
+        // 多层真实封面投影：近场保留"底下还有一张大封面"的空间色彩，
+        // 远场再负责柔化扩散。这样不会被平均成单色阴影。
+        guard let lowFrequencyEmission = makeDistanceBlurredGlowField(seed: emissionSeed, pixelSide: pixelSide, coverRect: coverRect) else {
+            return nil
+        }
+        debugWrite(lowFrequencyEmission, name: "02-low-frequency", sourcePath: path, rect: canvas)
+
+        let directionalLight = lowFrequencyEmission
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: Double(coverSide) * 0.085])
             .cropped(to: canvas)
-        // ③ 高斯扩散：半径按封面边长走，光晕和封面尺寸保持比例。
-        //    半径不能太大：封面内部的大面积深色会被糊进边缘延伸区，把发光颜色污染暗、
-        //    再被亮度门控扣掉——表现为"深色占比高的封面几乎不发光"。
-        let blurRadius = Double(coverSide) * 0.108
-        let blurredBase = extended
-            .clampedToExtent()
-            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blurRadius])
-            .cropped(to: canvas)
-        // ④ 颜色链：发光的颜色 = 封面边缘色的"保色相提亮"版。
-        //    浅色底板亮度 ~0.85，比底板暗的颜色 normal 混合看起来是阴影不是光——
-        //    所以发光色必须亮过底板才"像光"。gamma(<1) + 曝光都是乘性映射：
-        //    中间调被抬亮成光色，黑色乘出来仍是黑，不会回退"黑发灰光"。
-        let glowColor = blurredBase
+        debugWrite(directionalLight, name: "03-light-field", sourcePath: path, rect: canvas)
+
+        let glowColor = directionalLight
             .applyingFilter("CIColorControls", parameters: [
-                kCIInputSaturationKey: 1.18,
-                kCIInputBrightnessKey: 0.0,
-                kCIInputContrastKey: 0.96
+                kCIInputSaturationKey: 0.96,
+                kCIInputBrightnessKey: -0.006,
+                kCIInputContrastKey: 0.94
             ])
-            .applyingFilter("CIGammaAdjust", parameters: ["inputPower": 0.72])
-            .applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: 0.18])
+            .applyingFilter("CIGammaAdjust", parameters: ["inputPower": 1.02])
             .cropped(to: canvas)
-        // ⑤ 羽化 = SDF 圆角方形衰减。颜色来源始终是封面本身；
-        //    运行期用 screen 混合，黑/深色不会把底板压暗，彩色区域会以保色相的方式照亮周围。
-        guard let falloff = sdfFalloffMask(pixelSide: pixelSide, coverSide: coverSide) else { return nil }
-        let combinedMask = CIImage(cgImage: falloff).cropped(to: canvas)
-        let clear = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 0)).cropped(to: canvas)
-        // CIBlendWithMask 按遮罩【灰度】插值；CIBlendWithAlphaMask 读 alpha 通道会让灰度羽化失效。
-        let feathered = glowColor.applyingFilter("CIBlendWithMask", parameters: [
-            kCIInputBackgroundImageKey: clear,
-            kCIInputMaskImageKey: combinedMask
-        ]).cropped(to: canvas)
+
+        // 此时的图像就是一张柔化后的封面副本；运行期只负责贴图和播放/暂停淡入淡出。
+        let feathered = applyCanvasEdgeFade(glowColor, pixelSide: pixelSide)
+        debugWrite(feathered, name: "04-final", sourcePath: path, rect: canvas)
 
         guard let cg = ciContext.createCGImage(feathered, from: canvas) else { return nil }
         let nsImage = NSImage(cgImage: cg, size: NSSize(width: displaySide, height: displaySide))
@@ -1955,6 +1761,706 @@ private enum AlbumGlowBlurCoverBaker {
         return nsImage
     }
 
+    private nonisolated static func makeCleanProjectionSource(cover: CGImage, pixelSide: Int) -> CIImage? {
+        let n = max(pixelSide, 1)
+        let bytesPerPixel = 4
+        let bytesPerRow = n * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: n * n * bytesPerPixel)
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+
+        pixels.withUnsafeMutableBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress,
+                  let context = CGContext(
+                    data: base,
+                    width: n,
+                    height: n,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: colorSpace,
+                    bitmapInfo: bitmapInfo
+                  ) else { return }
+            context.interpolationQuality = .high
+            let src = CGSize(width: cover.width, height: cover.height)
+            let scale = max(CGFloat(n) / max(src.width, 1), CGFloat(n) / max(src.height, 1))
+            let drawSize = CGSize(width: src.width * scale, height: src.height * scale)
+            let drawRect = CGRect(
+                x: (CGFloat(n) - drawSize.width) * 0.5,
+                y: (CGFloat(n) - drawSize.height) * 0.5,
+                width: drawSize.width,
+                height: drawSize.height
+            )
+            context.draw(cover, in: drawRect)
+        }
+
+        var weightedRed = 0.0
+        var weightedGreen = 0.0
+        var weightedBlue = 0.0
+        var chromaWeightSum = 0.0
+        var fallbackRed = 0.0
+        var fallbackGreen = 0.0
+        var fallbackBlue = 0.0
+        var fallbackWeight = 0.0
+
+        for y in 0..<n {
+            for x in 0..<n {
+                let index = (y * n + x) * bytesPerPixel
+                let alpha = max(Double(pixels[index + 3]) / 255, 0.0001)
+                let red = min(max((Double(pixels[index]) / 255) / alpha, 0), 1)
+                let green = min(max((Double(pixels[index + 1]) / 255) / alpha, 0), 1)
+                let blue = min(max((Double(pixels[index + 2]) / 255) / alpha, 0), 1)
+                let maxComponent = max(red, green, blue)
+                let minComponent = min(red, green, blue)
+                let chroma = maxComponent - minComponent
+                let saturation = maxComponent > 0.001 ? chroma / maxComponent : 0
+                let value = maxComponent
+                let chromaWeight = smoothstep(edge0: 0.035, edge1: 0.22, value: chroma) *
+                    max(smoothstep(edge0: 0.08, edge1: 0.42, value: saturation), smoothstep(edge0: 0.10, edge1: 0.42, value: value) * 0.35)
+                let darkColorWeight = smoothstep(edge0: 0.035, edge1: 0.18, value: chroma) *
+                    smoothstep(edge0: 0.20, edge1: 0.62, value: saturation) *
+                    (1 - smoothstep(edge0: 0.50, edge1: 0.90, value: value)) *
+                    0.40
+                let weight = max(chromaWeight, darkColorWeight) * alpha
+                weightedRed += red * weight
+                weightedGreen += green * weight
+                weightedBlue += blue * weight
+                chromaWeightSum += weight
+
+                let fallback = alpha * (0.12 + value * 0.12)
+                fallbackRed += red * fallback
+                fallbackGreen += green * fallback
+                fallbackBlue += blue * fallback
+                fallbackWeight += fallback
+            }
+        }
+
+        let globalRed: Double
+        let globalGreen: Double
+        let globalBlue: Double
+        if chromaWeightSum > 0.001 {
+            globalRed = weightedRed / chromaWeightSum
+            globalGreen = weightedGreen / chromaWeightSum
+            globalBlue = weightedBlue / chromaWeightSum
+        } else if fallbackWeight > 0.001 {
+            globalRed = fallbackRed / fallbackWeight
+            globalGreen = fallbackGreen / fallbackWeight
+            globalBlue = fallbackBlue / fallbackWeight
+        } else {
+            globalRed = 0.5
+            globalGreen = 0.5
+            globalBlue = 0.5
+        }
+
+        for y in 0..<n {
+            for x in 0..<n {
+                let index = (y * n + x) * bytesPerPixel
+                let alpha = max(Double(pixels[index + 3]) / 255, 0.0001)
+                let red = min(max((Double(pixels[index]) / 255) / alpha, 0), 1)
+                let green = min(max((Double(pixels[index + 1]) / 255) / alpha, 0), 1)
+                let blue = min(max((Double(pixels[index + 2]) / 255) / alpha, 0), 1)
+                let maxComponent = max(red, green, blue)
+                let minComponent = min(red, green, blue)
+                let chroma = maxComponent - minComponent
+                let saturation = maxComponent > 0.001 ? chroma / maxComponent : 0
+                let value = maxComponent
+                let colorWeight = smoothstep(edge0: 0.045, edge1: 0.24, value: chroma) *
+                    max(smoothstep(edge0: 0.10, edge1: 0.45, value: saturation), smoothstep(edge0: 0.08, edge1: 0.35, value: value) * 0.35)
+                let brightNeutral = smoothstep(edge0: 0.70, edge1: 0.98, value: value) *
+                    (1 - smoothstep(edge0: 0.025, edge1: 0.12, value: chroma))
+                let darkNeutral = (1 - smoothstep(edge0: 0.10, edge1: 0.28, value: value)) *
+                    (1 - smoothstep(edge0: 0.030, edge1: 0.16, value: chroma))
+                let originalMix = min(max(0.18 + colorWeight * 0.82 - brightNeutral * 0.16 - darkNeutral * 0.08, 0.10), 1.0)
+                let mixedRed = globalRed * (1 - originalMix) + red * originalMix
+                let mixedGreen = globalGreen * (1 - originalMix) + green * originalMix
+                let mixedBlue = globalBlue * (1 - originalMix) + blue * originalMix
+                let hsv = rgbToHSV(red: mixedRed, green: mixedGreen, blue: mixedBlue)
+                let cleanedSaturation = min(max(hsv.saturation * (1.08 + colorWeight * 0.18), 0.08 + colorWeight * 0.22), 0.92)
+                let cleanedValue = min(max(pow(max(hsv.value, 0), 0.86) * (0.92 + colorWeight * 0.16), 0.18), 0.98)
+                let cleaned = hsvToRGB(hue: hsv.hue, saturation: cleanedSaturation, value: cleanedValue)
+                pixels[index] = UInt8(min(max(cleaned.red * 255, 0), 255))
+                pixels[index + 1] = UInt8(min(max(cleaned.green * 255, 0), 255))
+                pixels[index + 2] = UInt8(min(max(cleaned.blue * 255, 0), 255))
+                pixels[index + 3] = 255
+            }
+        }
+
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let cgImage = CGImage(
+                width: n,
+                height: n,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+              ) else { return nil }
+        return CIImage(cgImage: cgImage)
+    }
+
+    private nonisolated static func applyProjectionFalloff(_ image: CIImage, pixelSide: Int, coverRect: CGRect) -> CIImage? {
+        let n = max(pixelSide, 1)
+        let bytesPerPixel = 4
+        let bytesPerRow = n * bytesPerPixel
+        let canvas = CGRect(x: 0, y: 0, width: CGFloat(n), height: CGFloat(n))
+        guard let cgImage = ciContext.createCGImage(image, from: canvas) else { return nil }
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        var source = [UInt8](repeating: 0, count: n * n * bytesPerPixel)
+        source.withUnsafeMutableBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress,
+                  let context = CGContext(
+                    data: base,
+                    width: n,
+                    height: n,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: colorSpace,
+                    bitmapInfo: bitmapInfo
+                  ) else { return }
+            context.clear(canvas)
+            context.interpolationQuality = .high
+            context.draw(cgImage, in: canvas)
+        }
+
+        var output = [UInt8](repeating: 0, count: n * n * bytesPerPixel)
+        let halfSide = max(Double(coverRect.width) * 0.5, 1)
+        let reach = max(Double(n) * 0.5 - halfSide, 1)
+        for y in 0..<n {
+            let py = Double(y) + 0.5
+            for x in 0..<n {
+                let px = Double(x) + 0.5
+                let projectedX = min(max(px, Double(coverRect.minX)), Double(coverRect.maxX))
+                let projectedY = min(max(py, Double(coverRect.minY)), Double(coverRect.maxY))
+                let outsideDistance = hypot(px - projectedX, py - projectedY)
+                let normalizedDistance = min(max(outsideDistance / reach, 0), 1)
+                let edgeDistance = min(min(px, Double(n) - px), min(py, Double(n) - py))
+                let canvasFade = smoothstep(edge0: Double(n) * 0.006, edge1: Double(n) * 0.32, value: edgeDistance)
+                let distanceWindow = max(1 - smoothstep(edge0: 0.82, edge1: 1.0, value: normalizedDistance), 0)
+                let falloff = exp(-pow(normalizedDistance * 1.28, 1.78)) * distanceWindow * canvasFade
+                let noise = ditherNoise(x: x, y: y) * (1.0 / 255.0)
+                let index = (y * n + x) * bytesPerPixel
+                let sourceAlpha = Double(source[index + 3]) / 255
+                let alpha = min(max(sourceAlpha * falloff * 1.18, 0), 0.86)
+                guard alpha > 0.0015 else { continue }
+                let red = min(max((Double(source[index]) / 255) / max(sourceAlpha, 0.0001) + noise, 0), 1)
+                let green = min(max((Double(source[index + 1]) / 255) / max(sourceAlpha, 0.0001) + noise, 0), 1)
+                let blue = min(max((Double(source[index + 2]) / 255) / max(sourceAlpha, 0.0001) + noise, 0), 1)
+                output[index] = UInt8(min(max(red * alpha * 255, 0), 255))
+                output[index + 1] = UInt8(min(max(green * alpha * 255, 0), 255))
+                output[index + 2] = UInt8(min(max(blue * alpha * 255, 0), 255))
+                output[index + 3] = UInt8(min(max(alpha * 255, 0), 255))
+            }
+        }
+
+        guard let provider = CGDataProvider(data: Data(output) as CFData),
+              let cgImage = CGImage(
+                width: n,
+                height: n,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+              ) else { return nil }
+        return CIImage(cgImage: cgImage)
+    }
+
+    private nonisolated static func makeDistanceBlurredGlowField(seed: CIImage, pixelSide: Int, coverRect: CGRect) -> CIImage? {
+        let n = max(pixelSide, 1)
+        let canvas = CGRect(x: 0, y: 0, width: CGFloat(n), height: CGFloat(n))
+        let centerX = coverRect.midX
+        let centerY = coverRect.midY
+        let transparent = CIImage(color: .clear).cropped(to: canvas)
+
+        let sourceFraction = min(max(coverRect.width / max(canvas.width, 1), 0.065), 0.72)
+
+        func projectedLayer(
+            targetFraction: CGFloat,
+            radiusFraction: Double,
+            strength: Double,
+            saturation: Double,
+            brightness: Double = 0.0
+        ) -> CIImage {
+            let target = min(max(targetFraction, sourceFraction), 1.35)
+            let scale = min(max(target / sourceFraction, 1.0), 14.0)
+            let blurRadius = max(Double(n) * Double(target) * radiusFraction, 1.0)
+            let transform = CGAffineTransform(
+                a: scale,
+                b: 0,
+                c: 0,
+                d: scale,
+                tx: centerX * (1 - scale),
+                ty: centerY * (1 - scale)
+            )
+            return attenuate(
+                seed
+                    .transformed(by: transform)
+                    .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blurRadius])
+                    .cropped(to: canvas)
+                    .applyingFilter("CIColorControls", parameters: [
+                        kCIInputSaturationKey: saturation,
+                        kCIInputBrightnessKey: brightness,
+                        kCIInputContrastKey: 1.0
+                    ]),
+                amount: strength
+            )
+        }
+
+        // 近场必须像“底下还有一张被重度虚化的封面”，不能只是一圈阴影。
+        // targetFraction 以整张发光画布计，按比例放大 seed，确保不同窗口和光程下投影仍有可见图像结构。
+        let farAura = projectedLayer(targetFraction: 1.22, radiusFraction: 0.22, strength: 0.28, saturation: 0.98, brightness: 0.002)
+        let broadProjection = projectedLayer(targetFraction: 0.96, radiusFraction: 0.115, strength: 0.48, saturation: 1.02)
+        let coverProjection = projectedLayer(targetFraction: 0.72, radiusFraction: 0.058, strength: 0.76, saturation: 1.08)
+        let contactProjection = projectedLayer(targetFraction: 0.42, radiusFraction: 0.026, strength: 0.44, saturation: 1.06)
+
+        let combined = contactProjection
+            .composited(over: coverProjection)
+            .composited(over: broadProjection)
+            .composited(over: farAura)
+            .composited(over: transparent)
+            .cropped(to: canvas)
+
+        return combined
+    }
+
+    private nonisolated static func attenuate(_ image: CIImage, amount: Double) -> CIImage {
+        let a = min(max(amount, 0), 1)
+        return image.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: a, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: a, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: a, w: 0),
+            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: a)
+        ])
+    }
+
+    private nonisolated static func applyCanvasEdgeFade(_ image: CIImage, pixelSide: Int) -> CIImage {
+        let n = max(pixelSide, 1)
+        let bytesPerPixel = 4
+        let bytesPerRow = n * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: n * n * bytesPerPixel)
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        let inner = Double(n) * 0.42
+        let outer = Double(n) * 0.012
+
+        for y in 0..<n {
+            let py = Double(y) + 0.5
+            for x in 0..<n {
+                let px = Double(x) + 0.5
+                let edgeDistance = min(min(px, Double(n) - px), min(py, Double(n) - py))
+                let baseFactor = smoothstep(edge0: outer, edge1: inner, value: edgeDistance)
+                let factor = baseFactor * baseFactor * (3 - 2 * baseFactor)
+                let byte = UInt8(min(max(factor * 255, 0), 255))
+                let index = (y * n + x) * bytesPerPixel
+                pixels[index] = byte
+                pixels[index + 1] = byte
+                pixels[index + 2] = byte
+                pixels[index + 3] = byte
+            }
+        }
+
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let cgMask = CGImage(
+                width: n,
+                height: n,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+              ),
+              let filter = CIFilter(name: "CIBlendWithAlphaMask") else {
+            return image
+        }
+
+        let canvas = CGRect(x: 0, y: 0, width: CGFloat(n), height: CGFloat(n))
+        filter.setValue(image, forKey: kCIInputImageKey)
+        filter.setValue(CIImage(color: .clear).cropped(to: canvas), forKey: kCIInputBackgroundImageKey)
+        filter.setValue(CIImage(cgImage: cgMask), forKey: kCIInputMaskImageKey)
+        return (filter.outputImage ?? image).cropped(to: canvas)
+    }
+
+    private nonisolated static func makeEmissionSeed(cover: CGImage, pixelSide: Int, coverRect: CGRect) -> CIImage? {
+        let n = max(pixelSide, 1)
+        let bytesPerPixel = 4
+        let bytesPerRow = n * bytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: n * n * bytesPerPixel)
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+
+        pixels.withUnsafeMutableBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress,
+                  let context = CGContext(
+                    data: base,
+                    width: n,
+                    height: n,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: colorSpace,
+                    bitmapInfo: bitmapInfo
+                  ) else { return }
+            context.clear(CGRect(x: 0, y: 0, width: n, height: n))
+            context.interpolationQuality = .high
+            context.saveGState()
+            context.clip(to: coverRect)
+            let src = CGSize(width: cover.width, height: cover.height)
+            let scale = max(coverRect.width / max(src.width, 1), coverRect.height / max(src.height, 1))
+            let drawSize = CGSize(width: src.width * scale, height: src.height * scale)
+            let drawRect = CGRect(
+                x: coverRect.midX - drawSize.width * 0.5,
+                y: coverRect.midY - drawSize.height * 0.5,
+                width: drawSize.width,
+                height: drawSize.height
+            )
+            context.draw(cover, in: drawRect)
+            context.restoreGState()
+        }
+
+        let minX = max(Int(floor(coverRect.minX)), 0)
+        let maxX = min(Int(ceil(coverRect.maxX)), n)
+        let minY = max(Int(floor(coverRect.minY)), 0)
+        let maxY = min(Int(ceil(coverRect.maxY)), n)
+
+        for y in 0..<n {
+            for x in 0..<n {
+                let index = (y * n + x) * bytesPerPixel
+                guard x >= minX, x < maxX, y >= minY, y < maxY else {
+                    pixels[index] = 0
+                    pixels[index + 1] = 0
+                    pixels[index + 2] = 0
+                    pixels[index + 3] = 0
+                    continue
+                }
+
+                let alpha = Double(pixels[index + 3]) / 255
+                guard alpha > 0.01 else {
+                    pixels[index] = 0
+                    pixels[index + 1] = 0
+                    pixels[index + 2] = 0
+                    pixels[index + 3] = 0
+                    continue
+                }
+
+                let red = min(max((Double(pixels[index]) / 255) / alpha, 0), 1)
+                let green = min(max((Double(pixels[index + 1]) / 255) / alpha, 0), 1)
+                let blue = min(max((Double(pixels[index + 2]) / 255) / alpha, 0), 1)
+                let maxComponent = max(red, green, blue)
+                let minComponent = min(red, green, blue)
+                let chroma = maxComponent - minComponent
+                let saturation = maxComponent > 0.001 ? chroma / maxComponent : 0
+                let value = maxComponent
+
+                let px = Double(x) + 0.5
+                let py = Double(y) + 0.5
+                let innerEdgeDistance = min(
+                    min(px - Double(minX), Double(maxX) - px),
+                    min(py - Double(minY), Double(maxY) - py)
+                )
+                let interiorWeight = smoothstep(
+                    edge0: Double(coverRect.width) * 0.035,
+                    edge1: Double(coverRect.width) * 0.22,
+                    value: innerEdgeDistance
+                )
+
+                let chromaGate = smoothstep(edge0: 0.035, edge1: 0.205, value: chroma)
+                let saturationGate = smoothstep(edge0: 0.08, edge1: 0.44, value: saturation)
+                let visibleValueGate = smoothstep(edge0: 0.055, edge1: 0.22, value: value)
+                let colorEnergy = min(max(chromaGate * max(saturationGate, visibleValueGate * 0.58), 0), 1)
+                let darkColorLift = smoothstep(edge0: 0.045, edge1: 0.18, value: chroma) *
+                    smoothstep(edge0: 0.20, edge1: 0.62, value: saturation) *
+                    (1 - smoothstep(edge0: 0.58, edge1: 0.96, value: value))
+                let colorfulEdgeLift = smoothstep(edge0: 0.08, edge1: 0.30, value: chroma) * 0.14
+                let colorParticipation = min(max(0.44 + interiorWeight * 0.56 + colorfulEdgeLift, 0), 1)
+                let neutralParticipation = pow(interiorWeight, 1.65)
+                let neutralEnergy = smoothstep(edge0: 0.78, edge1: 0.98, value: value) *
+                    (1 - smoothstep(edge0: 0.022, edge1: 0.095, value: chroma)) *
+                    0.006 *
+                    neutralParticipation
+                let energy = min(max(((colorEnergy * 0.98 + darkColorLift * 0.44) * colorParticipation + neutralEnergy) * alpha, 0), 1)
+
+                guard energy > 0.0015 else {
+                    pixels[index] = 0
+                    pixels[index + 1] = 0
+                    pixels[index + 2] = 0
+                    pixels[index + 3] = 0
+                    continue
+                }
+
+                let hsv = rgbToHSV(red: red, green: green, blue: blue)
+                let colorDominance = smoothstep(edge0: 0.08, edge1: 0.48, value: colorEnergy + darkColorLift * 0.45)
+                let outputSaturation = colorDominance > 0.001
+                    ? min(max(hsv.saturation * 1.28 + 0.075, 0.32), 0.88)
+                    : min(max(hsv.saturation * 0.82, 0), 0.18)
+                let outputValue = colorDominance > 0.001
+                    ? min(max(pow(max(hsv.value, 0), 0.70) * 1.04, 0.54), 0.96)
+                    : min(max(pow(max(hsv.value, 0), 0.82) * 0.99, 0.70), 0.94)
+                let output = hsvToRGB(hue: hsv.hue, saturation: outputSaturation, value: outputValue)
+                let alphaByte = UInt8(min(max(energy * 255, 0), 255))
+                pixels[index] = UInt8(min(max(output.red * energy * 255, 0), 255))
+                pixels[index + 1] = UInt8(min(max(output.green * energy * 255, 0), 255))
+                pixels[index + 2] = UInt8(min(max(output.blue * energy * 255, 0), 255))
+                pixels[index + 3] = alphaByte
+            }
+        }
+
+        let data = Data(pixels) as CFData
+        guard let provider = CGDataProvider(data: data),
+              let cgImage = CGImage(
+                width: n,
+                height: n,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+              ) else { return nil }
+        return CIImage(cgImage: cgImage)
+    }
+
+    private struct EmissionSample {
+        var red: Double
+        var green: Double
+        var blue: Double
+        var alpha: Double
+    }
+
+    private nonisolated static func makeDirectionalLightField(_ lowFrequency: CIImage, pixelSide: Int, coverRect: CGRect) -> CIImage? {
+        let n = max(pixelSide, 1)
+        let bytesPerPixel = 4
+        let bytesPerRow = n * bytesPerPixel
+        let canvas = CGRect(x: 0, y: 0, width: CGFloat(n), height: CGFloat(n))
+        guard let cgImage = ciContext.createCGImage(lowFrequency, from: canvas) else { return nil }
+
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        var source = [UInt8](repeating: 0, count: n * n * bytesPerPixel)
+        source.withUnsafeMutableBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress,
+                  let context = CGContext(
+                    data: base,
+                    width: n,
+                    height: n,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: colorSpace,
+                    bitmapInfo: bitmapInfo
+                  ) else { return }
+            context.clear(canvas)
+            context.interpolationQuality = .high
+            context.draw(cgImage, in: canvas)
+        }
+
+        let centerX = Double(coverRect.midX)
+        let centerY = Double(coverRect.midY)
+        let halfSide = max(Double(coverRect.width) * 0.5, 1)
+        let reach = max(Double(n) * 0.5 - halfSide, 1)
+        var output = [UInt8](repeating: 0, count: n * n * bytesPerPixel)
+
+        let averageSample: EmissionSample = {
+            var red = 0.0
+            var green = 0.0
+            var blue = 0.0
+            var energy = 0.0
+            let stops: [(Double, Double, Double)] = [
+                (0.50, 0.50, 0.30),
+                (0.34, 0.38, 0.18),
+                (0.66, 0.38, 0.18),
+                (0.34, 0.62, 0.18),
+                (0.66, 0.62, 0.18),
+                (0.50, 0.24, 0.08),
+                (0.50, 0.76, 0.08)
+            ]
+            for stop in stops {
+                let sx = Double(coverRect.minX) + Double(coverRect.width) * stop.0
+                let sy = Double(coverRect.minY) + Double(coverRect.height) * stop.1
+                accumulateSample(
+                    sample(source, width: n, height: n, x: sx, y: sy),
+                    weight: stop.2,
+                    red: &red,
+                    green: &green,
+                    blue: &blue,
+                    energy: &energy
+                )
+            }
+            guard energy > 0.001 else {
+                return sample(source, width: n, height: n, x: centerX, y: centerY)
+            }
+            return EmissionSample(red: red / energy, green: green / energy, blue: blue / energy, alpha: min(max(energy, 0), 1))
+        }()
+
+        for y in 0..<n {
+            let py = Double(y) + 0.5
+            for x in 0..<n {
+                let px = Double(x) + 0.5
+                let projectedX = min(max(px, Double(coverRect.minX)), Double(coverRect.maxX))
+                let projectedY = min(max(py, Double(coverRect.minY)), Double(coverRect.maxY))
+                let outsideDistance = hypot(px - projectedX, py - projectedY)
+                let normalizedDistance = min(max(outsideDistance / reach, 0), 1)
+                let edgeDistance = min(min(px, Double(n) - px), min(py, Double(n) - py))
+                let canvasFade = smoothstep(edge0: Double(n) * 0.012, edge1: Double(n) * 0.070, value: edgeDistance)
+                let distanceWindow = max(1 - smoothstep(edge0: 0.42, edge1: 1.0, value: normalizedDistance), 0)
+                let distanceFalloff = exp(-pow(normalizedDistance * 1.28, 1.85)) * pow(distanceWindow, 1.18)
+                let falloff = distanceFalloff * canvasFade
+                guard falloff > 0.002 else { continue }
+
+                let edgeBias = smoothstep(edge0: 0.02, edge1: 0.90, value: normalizedDistance)
+                let dx = projectedX - centerX
+                let dy = projectedY - centerY
+                let inset = halfSide * (0.09 + 0.15 * edgeBias)
+                let edgeX = min(max(projectedX, Double(coverRect.minX) + inset), Double(coverRect.maxX) - inset)
+                let edgeY = min(max(projectedY, Double(coverRect.minY) + inset), Double(coverRect.maxY) - inset)
+                let midX = centerX + dx * 0.66
+                let midY = centerY + dy * 0.66
+                let broadX = centerX + dx * 0.38
+                let broadY = centerY + dy * 0.38
+
+                var red = 0.0
+                var green = 0.0
+                var blue = 0.0
+                var energy = 0.0
+                accumulateSample(
+                    sample(source, width: n, height: n, x: edgeX, y: edgeY),
+                    weight: 0.50 * (1 - edgeBias) + 0.27 * edgeBias,
+                    red: &red,
+                    green: &green,
+                    blue: &blue,
+                    energy: &energy
+                )
+                accumulateSample(
+                    sample(source, width: n, height: n, x: midX, y: midY),
+                    weight: 0.30 * (1 - edgeBias) + 0.35 * edgeBias,
+                    red: &red,
+                    green: &green,
+                    blue: &blue,
+                    energy: &energy
+                )
+                accumulateSample(
+                    sample(source, width: n, height: n, x: broadX, y: broadY),
+                    weight: 0.14 + 0.19 * edgeBias,
+                    red: &red,
+                    green: &green,
+                    blue: &blue,
+                    energy: &energy
+                )
+                accumulateSample(
+                    averageSample,
+                    weight: 0.06 + 0.19 * edgeBias,
+                    red: &red,
+                    green: &green,
+                    blue: &blue,
+                    energy: &energy
+                )
+
+                guard energy > 0.001 else { continue }
+                red /= energy
+                green /= energy
+                blue /= energy
+                let liftedEnergy = min(max(pow(min(energy * 2.20, 1), 0.70), 0), 1)
+                let alpha = min(max(falloff * liftedEnergy * 0.66, 0), 0.70)
+                guard alpha > 0.002 else { continue }
+
+                let index = (y * n + x) * bytesPerPixel
+                output[index] = UInt8(min(max(red * alpha * 255, 0), 255))
+                output[index + 1] = UInt8(min(max(green * alpha * 255, 0), 255))
+                output[index + 2] = UInt8(min(max(blue * alpha * 255, 0), 255))
+                output[index + 3] = UInt8(min(max(alpha * 255, 0), 255))
+            }
+        }
+
+        let data = Data(output) as CFData
+        guard let provider = CGDataProvider(data: data),
+              let field = CGImage(
+                width: n,
+                height: n,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+              ) else { return nil }
+        return CIImage(cgImage: field)
+    }
+
+    private nonisolated static func accumulateSample(
+        _ sample: EmissionSample,
+        weight: Double,
+        red: inout Double,
+        green: inout Double,
+        blue: inout Double,
+        energy: inout Double
+    ) {
+        let sampleWeight = weight * sample.alpha
+        guard sampleWeight > 0.000_01 else { return }
+        red += sample.red * sampleWeight
+        green += sample.green * sampleWeight
+        blue += sample.blue * sampleWeight
+        energy += sampleWeight
+    }
+
+    private nonisolated static func sample(_ pixels: [UInt8], width: Int, height: Int, x: Double, y: Double) -> EmissionSample {
+        let clampedX = min(max(x, 0), Double(width - 1))
+        let clampedY = min(max(y, 0), Double(height - 1))
+        let x0 = Int(floor(clampedX))
+        let y0 = Int(floor(clampedY))
+        let x1 = min(x0 + 1, width - 1)
+        let y1 = min(y0 + 1, height - 1)
+        let tx = clampedX - Double(x0)
+        let ty = clampedY - Double(y0)
+        let a = sampleNearest(pixels, width: width, x: x0, y: y0)
+        let b = sampleNearest(pixels, width: width, x: x1, y: y0)
+        let c = sampleNearest(pixels, width: width, x: x0, y: y1)
+        let d = sampleNearest(pixels, width: width, x: x1, y: y1)
+        return mix(mix(a, b, tx), mix(c, d, tx), ty)
+    }
+
+    private nonisolated static func sampleNearest(_ pixels: [UInt8], width: Int, x: Int, y: Int) -> EmissionSample {
+        let index = (y * width + x) * 4
+        let alpha = Double(pixels[index + 3]) / 255
+        guard alpha > 0.000_1 else {
+            return EmissionSample(red: 0, green: 0, blue: 0, alpha: 0)
+        }
+        let red = min(max((Double(pixels[index]) / 255) / alpha, 0), 1)
+        let green = min(max((Double(pixels[index + 1]) / 255) / alpha, 0), 1)
+        let blue = min(max((Double(pixels[index + 2]) / 255) / alpha, 0), 1)
+        return EmissionSample(red: red, green: green, blue: blue, alpha: alpha)
+    }
+
+    private nonisolated static func mix(_ lhs: EmissionSample, _ rhs: EmissionSample, _ amount: Double) -> EmissionSample {
+        let t = min(max(amount, 0), 1)
+        return EmissionSample(
+            red: lhs.red * (1 - t) + rhs.red * t,
+            green: lhs.green * (1 - t) + rhs.green * t,
+            blue: lhs.blue * (1 - t) + rhs.blue * t,
+            alpha: lhs.alpha * (1 - t) + rhs.alpha * t
+        )
+    }
+
+    private nonisolated static func ditherNoise(x: Int, y: Int) -> Double {
+        var value = UInt32(truncatingIfNeeded: x &* 1973 ^ y &* 9277 ^ 0x9E37)
+        value = (value ^ (value >> 13)) &* 1_274_126_177
+        return (Double(value & 255) / 255) - 0.5
+    }
+
     private nonisolated static func loadCover(path: String) -> CGImage? {
 #if DEBUG
         if let debug = MusicPlayerVisualDebugFixtures.coverCGImage(forPath: path, size: 320) {
@@ -1967,55 +2473,70 @@ private enum AlbumGlowBlurCoverBaker {
         return bitmap.cgImage
     }
 
-    /// SDF 圆角方形衰减遮罩：封面矩形内 alpha=1，向外按 smoothstep^power 衰减到画布边缘为 0。
-    /// 光顺着【方形】封面边缘向外漫（方形封面的物理直觉），衰减曲线长而柔 = 边缘羽化。
-    private nonisolated static func sdfFalloffMask(pixelSide: Int, coverSide: CGFloat) -> CGImage? {
-        let n = max(pixelSide, 1)
-        let center = Double(n) * 0.5
-        let halfSide = Double(coverSide) * 0.5
-        let cornerRadius = Double(coverSide) * 0.155
-        let reach = max(Double(n) * 0.5 - halfSide, 1)
-        var pixels = [UInt8](repeating: 0, count: n * n)
-
-        for y in 0..<n {
-            let py = Double(y) + 0.5 - center
-            for x in 0..<n {
-                let px = Double(x) + 0.5 - center
-                // 圆角方形 signed distance。
-                let qx = abs(px) - halfSide + cornerRadius
-                let qy = abs(py) - halfSide + cornerRadius
-                let outside = (qx > 0 || qy > 0)
-                    ? (qx > 0 && qy > 0 ? (qx * qx + qy * qy).squareRoot() : max(qx, qy, 0))
-                    : 0
-                let distance = outside + min(max(qx, qy), 0) - cornerRadius
-                let alpha: Double
-                if distance <= 0 {
-                    alpha = 1
-                } else {
-                    let t = min(max(distance / reach, 0), 1)
-                    let smooth = t * t * (3 - 2 * t)
-                    alpha = pow(1 - smooth, 1.16)
-                }
-                pixels[y * n + x] = UInt8(min(max(alpha * 255, 0), 255))
-            }
-        }
-
-        let data = Data(pixels) as CFData
-        guard let provider = CGDataProvider(data: data) else { return nil }
-        return CGImage(
-            width: n,
-            height: n,
-            bitsPerComponent: 8,
-            bitsPerPixel: 8,
-            bytesPerRow: n,
-            space: CGColorSpaceCreateDeviceGray(),
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: true,
-            intent: .defaultIntent
-        )
+    private nonisolated static func debugWrite(_ image: CIImage, name: String, sourcePath: String, rect: CGRect) {
+        guard let directory = ProcessInfo.processInfo.environment["MEDIALIB_GLOW_DEBUG_DIR"],
+              !directory.isEmpty,
+              let cgImage = ciContext.createCGImage(image, from: rect) else { return }
+        let folder = URL(fileURLWithPath: directory, isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let sourceName = safeDebugName(sourcePath)
+        let url = folder.appendingPathComponent("\(sourceName)-\(name).png")
+        let rep = NSBitmapImageRep(cgImage: cgImage)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return }
+        try? data.write(to: url, options: .atomic)
     }
+
+    private nonisolated static func safeDebugName(_ path: String) -> String {
+        let last = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+        let raw = last.isEmpty ? String(abs(path.hashValue)) : last
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let scalars = raw.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        let name = String(scalars).trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        return name.isEmpty ? String(abs(path.hashValue)) : String(name.prefix(42))
+    }
+
+    private nonisolated static func smoothstep(edge0: Double, edge1: Double, value: Double) -> Double {
+        guard edge1 > edge0 else { return value >= edge1 ? 1 : 0 }
+        let t = min(max((value - edge0) / (edge1 - edge0), 0), 1)
+        return t * t * (3 - 2 * t)
+    }
+
+    private nonisolated static func rgbToHSV(red: Double, green: Double, blue: Double) -> (hue: Double, saturation: Double, value: Double) {
+        let maxComponent = max(red, green, blue)
+        let minComponent = min(red, green, blue)
+        let delta = maxComponent - minComponent
+        let hue: Double
+        if delta < 0.000_001 {
+            hue = 0
+        } else if maxComponent == red {
+            hue = ((green - blue) / delta).truncatingRemainder(dividingBy: 6) / 6
+        } else if maxComponent == green {
+            hue = (((blue - red) / delta) + 2) / 6
+        } else {
+            hue = (((red - green) / delta) + 4) / 6
+        }
+        let normalizedHue = hue < 0 ? hue + 1 : hue
+        let saturation = maxComponent <= 0 ? 0 : delta / maxComponent
+        return (normalizedHue, saturation, maxComponent)
+    }
+
+    private nonisolated static func hsvToRGB(hue: Double, saturation: Double, value: Double) -> (red: Double, green: Double, blue: Double) {
+        let h = (hue - floor(hue)) * 6
+        let c = value * saturation
+        let x = c * (1 - abs(h.truncatingRemainder(dividingBy: 2) - 1))
+        let m = value - c
+        let rgb: (Double, Double, Double)
+        switch h {
+        case 0..<1: rgb = (c, x, 0)
+        case 1..<2: rgb = (x, c, 0)
+        case 2..<3: rgb = (0, c, x)
+        case 3..<4: rgb = (0, x, c)
+        case 4..<5: rgb = (x, 0, c)
+        default: rgb = (c, 0, x)
+        }
+        return (rgb.0 + m, rgb.1 + m, rgb.2 + m)
+    }
+
 }
 
 // MARK: - 封面高斯模糊发光层
@@ -2459,6 +2980,7 @@ private struct MusicExpandedLyricsPanel: View {
     let hasDisplayLyrics: Bool
     let isFetchingLyrics: Bool
     let palette: AlbumColorPalette
+    let light: AlbumComponentLight
     @Binding var userIsBrowsingLyrics: Bool
     let onFetchLyrics: () -> Void
     let onPauseAutoScroll: () -> Void
@@ -2478,27 +3000,6 @@ private struct MusicExpandedLyricsPanel: View {
                 palette: palette,
                 cornerRadius: MusicPlayerVisualTokens.Radius.card,
                 maxOpacity: MusicPlayerVisualTokens.TextScrim.lyricsMaxOpacity
-            )
-            .allowsHitTesting(false)
-
-            AlbumLightSpillOverlay(
-                palette: palette,
-                controller: controller,
-                cornerRadius: MusicPlayerVisualTokens.Radius.card,
-                intensity: MusicPlayerVisualTokens.Spill.lyricsIntensity,
-                reach: MusicPlayerVisualTokens.Spill.lyricsReach,
-                sourceEdge: .leading
-            )
-            .allowsHitTesting(false)
-
-            AlbumLightSpillOverlay(
-                palette: palette,
-                controller: controller,
-                cornerRadius: MusicPlayerVisualTokens.Radius.card,
-                intensity: MusicPlayerVisualTokens.Spill.lyricsTrailingIntensity,
-                reach: MusicPlayerVisualTokens.Spill.lyricsTrailingReach,
-                sourceEdge: .trailing,
-                primaryOnly: true
             )
             .allowsHitTesting(false)
 
@@ -3015,6 +3516,68 @@ private struct LyricStageLightLayer: NSViewRepresentable {
 /// 封面发光照射到玻璃组件边缘的光晕渗入效果。
 /// 播放时：封面光沿指定入射边浸染入内，并产生柔和的彩色边缘高光。
 /// 暂停时：随封面收缩动画同步淡出（由 near-to-far 机制驱动）。
+private struct AlbumComponentLight: Equatable {
+    let strength: Double
+    /// 受光边上的相对焦点。leading/trailing = y，top = x。
+    let focus: Double
+    /// 受光边上的半宽度。数值越小，越像圆形光场只扫到边缘的一段。
+    let spread: Double
+
+    static let none = AlbumComponentLight(strength: 0, focus: 0.5, spread: 0.12)
+    static let fallbackLyrics = AlbumComponentLight(strength: 0.16, focus: 0.38, spread: 0.18)
+    static let fallbackControls = AlbumComponentLight(strength: 0.34, focus: 0.5, spread: 0.42)
+    static let fallbackChrome = AlbumComponentLight(strength: 0.20, focus: 0.5, spread: 0.28)
+
+    static func leading(rect: CGRect, center: CGPoint, radius: CGFloat, coverSide: CGFloat, overshoot: CGFloat) -> AlbumComponentLight {
+        guard rect.width > 1, rect.height > 1, radius > 1 else { return .none }
+        let dx = rect.minX - center.x
+        guard dx > 0 else { return .none }
+        let closestY = min(max(center.y, rect.minY), rect.maxY)
+        let distance = hypot(dx, closestY - center.y)
+        let focus = Double((center.y - rect.minY) / rect.height)
+        let halfIntersection = sqrt(max(radius * radius - dx * dx, 0))
+        let spread = Double(min(max((halfIntersection / rect.height) * 0.42, 0.055), 0.24))
+        let rawStrength = strength(distance: distance, radius: radius, coverSide: coverSide, overshoot: overshoot)
+        let edgeContact = smoothstep(Double((radius - distance) / max(overshoot + coverSide * 0.18, 1)))
+        return AlbumComponentLight(
+            strength: rawStrength * (0.34 + 0.28 * edgeContact),
+            focus: min(max(focus, 0.04), 0.96),
+            spread: spread
+        )
+    }
+
+    static func top(rect: CGRect, center: CGPoint, radius: CGFloat, coverSide: CGFloat, overshoot: CGFloat) -> AlbumComponentLight {
+        guard rect.width > 1, rect.height > 1, radius > 1 else { return .none }
+        let dy = rect.minY - center.y
+        guard dy > 0 else { return .none }
+        let closestX = min(max(center.x, rect.minX), rect.maxX)
+        let distance = hypot(closestX - center.x, dy)
+        let focus = Double((center.x - rect.minX) / rect.width)
+        let halfIntersection = sqrt(max(radius * radius - dy * dy, 0))
+        let spread = Double(min(max((halfIntersection / rect.width) * 0.72, 0.12), 0.58))
+        return AlbumComponentLight(
+            strength: strength(distance: distance, radius: radius, coverSide: coverSide, overshoot: overshoot) * 0.82,
+            focus: min(max(focus, 0.06), 0.94),
+            spread: spread
+        )
+    }
+
+    private static func strength(distance: CGFloat, radius: CGFloat, coverSide: CGFloat, overshoot: CGFloat) -> Double {
+        guard distance < radius else { return 0 }
+        let remaining = radius - distance
+        let contactWindow = max(overshoot * 1.45, coverSide * 0.155, 1)
+        let contact = smoothstep(Double(remaining / contactWindow))
+        let near = max(coverSide * 0.92, 1)
+        let falloff = pow(Double(min(max(near / max(distance, near), 0), 1)), 0.92)
+        return min(max(contact * (0.30 + 0.42 * falloff), 0), 1)
+    }
+
+    private static func smoothstep(_ value: Double) -> Double {
+        let t = min(max(value, 0), 1)
+        return t * t * (3 - 2 * t)
+    }
+}
+
 private enum AlbumLightSpillSourceEdge {
     case leading
     case trailing
@@ -3050,6 +3613,7 @@ private struct AlbumLightSpillOverlay: View {
     var reach: Double = MusicPlayerVisualTokens.Spill.lyricsReach
     var sourceEdge: AlbumLightSpillSourceEdge = .leading
     var primaryOnly: Bool = false
+    var light: AlbumComponentLight = .fallbackLyrics
     @StateObject private var playbackObserver: MusicMiniTransportStateObserver
     @State private var spillProgress: Double = 0
     @State private var collapseTask: Task<Void, Never>?
@@ -3061,7 +3625,8 @@ private struct AlbumLightSpillOverlay: View {
         intensity: Double = 1,
         reach: Double = 0.36,
         sourceEdge: AlbumLightSpillSourceEdge = .leading,
-        primaryOnly: Bool = false
+        primaryOnly: Bool = false,
+        light: AlbumComponentLight = .fallbackLyrics
     ) {
         self.palette = palette
         self.controller = controller
@@ -3070,6 +3635,7 @@ private struct AlbumLightSpillOverlay: View {
         self.reach = reach
         self.sourceEdge = sourceEdge
         self.primaryOnly = primaryOnly
+        self.light = light
         _playbackObserver = StateObject(wrappedValue: MusicMiniTransportStateObserver(controller: controller))
     }
 
@@ -3078,28 +3644,28 @@ private struct AlbumLightSpillOverlay: View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let darkMode = colorScheme == .dark
         let glowColor = palette.glowPrimary.adjustedPreservingHue(
-            saturationMultiplier: 0.96,
-            brightnessMultiplier: 1.14,
-            minSaturation: 0.16,
-            maxSaturation: 0.62,
-            minBrightness: darkMode ? 0.56 : 0.72,
-            maxBrightness: darkMode ? 0.88 : 0.96
+            saturationMultiplier: 0.94,
+            brightnessMultiplier: 1.04,
+            minSaturation: 0.14,
+            maxSaturation: 0.56,
+            minBrightness: darkMode ? 0.50 : 0.62,
+            maxBrightness: darkMode ? 0.78 : 0.86
         ).color
         let secondaryColor = (primaryOnly ? palette.glowPrimary : palette.glowSecondary).adjustedPreservingHue(
-            saturationMultiplier: 0.92,
-            brightnessMultiplier: 1.12,
-            minSaturation: 0.14,
-            maxSaturation: 0.58,
-            minBrightness: darkMode ? 0.54 : 0.70,
-            maxBrightness: darkMode ? 0.86 : 0.94
+            saturationMultiplier: 0.90,
+            brightnessMultiplier: 1.02,
+            minSaturation: 0.12,
+            maxSaturation: 0.52,
+            minBrightness: darkMode ? 0.48 : 0.60,
+            maxBrightness: darkMode ? 0.76 : 0.84
         ).color
         let accentColor = (primaryOnly ? palette.glowPrimary : palette.glowAccent).adjustedPreservingHue(
             saturationMultiplier: 0.88,
-            brightnessMultiplier: 1.10,
-            minSaturation: 0.12,
-            maxSaturation: 0.54,
-            minBrightness: darkMode ? 0.52 : 0.68,
-            maxBrightness: darkMode ? 0.84 : 0.92
+            brightnessMultiplier: 1.00,
+            minSaturation: 0.10,
+            maxSaturation: 0.48,
+            minBrightness: darkMode ? 0.46 : 0.58,
+            maxBrightness: darkMode ? 0.74 : 0.82
         ).color
         let startPoint = sourceEdge.startPoint
         let endPoint = sourceEdge.endPoint
@@ -3113,14 +3679,22 @@ private struct AlbumLightSpillOverlay: View {
         }()
         let chromaTravel = MusicPlayerVisualTokens.Spill.chromaTravelBase +
             palette.vibrancy * MusicPlayerVisualTokens.Spill.chromaTravelVibrancy
-        let spill = spillProgress * intensity * chromaTravel
-        let nearStop = min(max(reach * 0.30, 0.075), 0.18)
-        let midStop = min(max(reach * 0.58, 0.15), 0.36)
+        let spill = spillProgress * intensity * chromaTravel * light.strength
+        let lateralEdge: Bool = {
+            switch sourceEdge {
+            case .leading, .trailing:
+                return true
+            case .top, .topLeading:
+                return false
+            }
+        }()
+        let nearStop = min(max(reach * 0.24, lateralEdge ? 0.040 : 0.060), lateralEdge ? 0.105 : 0.16)
+        let midStop = min(max(reach * 0.48, lateralEdge ? 0.095 : 0.13), lateralEdge ? 0.22 : 0.31)
         // 放宽羽化终点上限，让更深的 reach 把浸染过渡铺得更长、更柔（向参考图的"光软软漫进卡片"靠拢）。
-        let fadeStop = min(max(reach, trailingPrimaryLight ? 0.20 : 0.28), trailingPrimaryLight ? 0.34 : 0.56)
-        let tailStop = min(max(fadeStop + (trailingPrimaryLight ? 0.08 : 0.16), trailingPrimaryLight ? 0.34 : 0.52), trailingPrimaryLight ? 0.44 : 0.78)
-        let innerSoftStop = min(max(reach * 0.62, trailingPrimaryLight ? 0.20 : 0.30), trailingPrimaryLight ? 0.38 : 0.56)
-        let innerTailStop = min(max(reach * 0.88, trailingPrimaryLight ? 0.30 : 0.42), trailingPrimaryLight ? 0.48 : 0.70)
+        let fadeStop = min(max(reach, trailingPrimaryLight ? 0.16 : (lateralEdge ? 0.18 : 0.24)), trailingPrimaryLight ? 0.26 : (lateralEdge ? 0.34 : 0.48))
+        let tailStop = min(max(fadeStop + (trailingPrimaryLight ? 0.06 : (lateralEdge ? 0.08 : 0.13)), trailingPrimaryLight ? 0.28 : (lateralEdge ? 0.26 : 0.44)), trailingPrimaryLight ? 0.36 : (lateralEdge ? 0.46 : 0.68))
+        let innerSoftStop = min(max(reach * 0.54, trailingPrimaryLight ? 0.16 : (lateralEdge ? 0.16 : 0.26)), trailingPrimaryLight ? 0.30 : (lateralEdge ? 0.34 : 0.50))
+        let innerTailStop = min(max(reach * 0.78, trailingPrimaryLight ? 0.24 : (lateralEdge ? 0.24 : 0.38)), trailingPrimaryLight ? 0.40 : (lateralEdge ? 0.46 : 0.62))
 
         ZStack {
             // §2.3 裹边内发光：让光看起来是绕过玻璃边缘渗进内部，而非只在边线上。
@@ -3129,10 +3703,10 @@ private struct AlbumLightSpillOverlay: View {
                 .fill(
                     LinearGradient(
                         stops: [
-                            .init(color: glowColor.opacity((darkMode ? 0.20 : 0.15) * spill), location: MusicPlayerVisualTokens.Spill.innerPeak),
-                            .init(color: glowColor.opacity((darkMode ? 0.225 : 0.185) * spill), location: MusicPlayerVisualTokens.Spill.innerPrimary),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.128 : 0.102) * spill), location: MusicPlayerVisualTokens.Spill.innerSecondary),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.058 : 0.046) * spill), location: innerSoftStop),
+                            .init(color: glowColor.opacity((darkMode ? 0.105 : 0.078) * spill), location: MusicPlayerVisualTokens.Spill.innerPeak),
+                            .init(color: glowColor.opacity((darkMode ? 0.120 : 0.095) * spill), location: MusicPlayerVisualTokens.Spill.innerPrimary),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.066 : 0.052) * spill), location: MusicPlayerVisualTokens.Spill.innerSecondary),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.028 : 0.022) * spill), location: innerSoftStop),
                             .init(color: .clear, location: innerTailStop)
                         ],
                         startPoint: startPoint,
@@ -3146,10 +3720,10 @@ private struct AlbumLightSpillOverlay: View {
                 .fill(
                     LinearGradient(
                         stops: [
-                            .init(color: glowColor.opacity((darkMode ? 0.62 : 0.52) * spill), location: 0),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.36 : 0.30) * spill), location: nearStop),
-                            .init(color: accentColor.opacity((darkMode ? 0.160 : 0.132) * spill), location: midStop),
-                            .init(color: accentColor.opacity((darkMode ? 0.066 : 0.054) * spill), location: fadeStop),
+                            .init(color: glowColor.opacity((darkMode ? 0.310 : 0.240) * spill), location: 0),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.160 : 0.125) * spill), location: nearStop),
+                            .init(color: accentColor.opacity((darkMode ? 0.068 : 0.052) * spill), location: midStop),
+                            .init(color: accentColor.opacity((darkMode ? 0.024 : 0.018) * spill), location: fadeStop),
                             .init(color: .clear, location: tailStop)
                         ],
                         startPoint: startPoint,
@@ -3164,9 +3738,9 @@ private struct AlbumLightSpillOverlay: View {
                 .fill(
                     LinearGradient(
                         stops: [
-                            .init(color: glowColor.opacity((darkMode ? 0.160 : 0.130) * spill), location: 0),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.085 : 0.068) * spill), location: nearStop),
-                            .init(color: accentColor.opacity((darkMode ? 0.034 : 0.027) * spill), location: midStop),
+                            .init(color: glowColor.opacity((darkMode ? 0.072 : 0.052) * spill), location: 0),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.034 : 0.026) * spill), location: nearStop),
+                            .init(color: accentColor.opacity((darkMode ? 0.012 : 0.009) * spill), location: midStop),
                             .init(color: .clear, location: fadeStop)
                         ],
                         startPoint: startPoint,
@@ -3180,17 +3754,17 @@ private struct AlbumLightSpillOverlay: View {
                 .strokeBorder(
                     LinearGradient(
                         stops: [
-                            .init(color: glowColor.opacity((darkMode ? 0.86 : 0.74) * spill), location: 0),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.50 : 0.42) * spill), location: nearStop + 0.04),
-                            .init(color: accentColor.opacity((darkMode ? 0.22 : 0.18) * spill), location: midStop + 0.06),
-                            .init(color: accentColor.opacity((darkMode ? 0.082 : 0.066) * spill), location: min(fadeStop + 0.10, 0.78)),
+                            .init(color: glowColor.opacity((darkMode ? 0.48 : 0.37) * spill), location: 0),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.24 : 0.19) * spill), location: nearStop + 0.035),
+                            .init(color: accentColor.opacity((darkMode ? 0.092 : 0.070) * spill), location: midStop + 0.045),
+                            .init(color: accentColor.opacity((darkMode ? 0.028 : 0.021) * spill), location: min(fadeStop + 0.075, 0.70)),
                             .init(color: .clear, location: min(tailStop + 0.02, 0.96)),
                             .init(color: .clear, location: 1.0)
                         ],
                         startPoint: startPoint,
                         endPoint: endPoint
                     ),
-                    lineWidth: CGFloat(1.0 + 0.35 * spill)
+                    lineWidth: CGFloat(0.82 + 0.24 * spill)
                 )
                 .blendMode(.screen)
 
@@ -3198,15 +3772,15 @@ private struct AlbumLightSpillOverlay: View {
                 .strokeBorder(
                     LinearGradient(
                         stops: [
-                            .init(color: glowColor.opacity((darkMode ? 0.34 : 0.28) * spill), location: 0),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.17 : 0.14) * spill), location: nearStop + 0.04),
-                            .init(color: accentColor.opacity((darkMode ? 0.058 : 0.045) * spill), location: midStop + 0.06),
+                            .init(color: glowColor.opacity((darkMode ? 0.145 : 0.110) * spill), location: 0),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.066 : 0.052) * spill), location: nearStop + 0.035),
+                            .init(color: accentColor.opacity((darkMode ? 0.020 : 0.016) * spill), location: midStop + 0.045),
                             .init(color: .clear, location: min(fadeStop + 0.08, 0.76))
                         ],
                         startPoint: startPoint,
                         endPoint: endPoint
                     ),
-                    lineWidth: CGFloat(1.15 + 0.45 * spill)
+                    lineWidth: CGFloat(0.90 + 0.22 * spill)
                 )
                 .blendMode(.normal)
 
@@ -3214,20 +3788,23 @@ private struct AlbumLightSpillOverlay: View {
                 .strokeBorder(
                     LinearGradient(
                         stops: [
-                            .init(color: glowColor.opacity((darkMode ? 0.40 : 0.34) * spill), location: 0),
-                            .init(color: glowColor.opacity((darkMode ? 0.20 : 0.160) * spill), location: 0.050),
-                            .init(color: .white.opacity((darkMode ? 0.030 : 0.034) * spill), location: 0.080),
-                            .init(color: glowColor.opacity((darkMode ? 0.080 : 0.062) * spill), location: 0.26),
+                            .init(color: glowColor.opacity((darkMode ? 0.165 : 0.125) * spill), location: 0),
+                            .init(color: glowColor.opacity((darkMode ? 0.078 : 0.056) * spill), location: 0.046),
+                            .init(color: .white.opacity((darkMode ? 0.010 : 0.012) * spill), location: 0.072),
+                            .init(color: glowColor.opacity((darkMode ? 0.026 : 0.019) * spill), location: 0.22),
                             .init(color: .clear, location: 0.42)
                         ],
                         startPoint: startPoint,
                         endPoint: endPoint
                     ),
-                    lineWidth: 0.7
+                    lineWidth: 0.55
                 )
                 .blendMode(.plusLighter)
         }
         .clipShape(shape)
+        .mask {
+            AlbumLightSpillFocusMask(sourceEdge: sourceEdge, focus: light.focus, spread: light.spread)
+        }
         .onAppear {
             spillProgress = isPlaying ? 1 : 0
         }
@@ -3266,6 +3843,55 @@ private struct AlbumLightSpillOverlay: View {
         .onDisappear {
             collapseTask?.cancel()
         }
+    }
+}
+
+private struct AlbumLightSpillFocusMask: View {
+    let sourceEdge: AlbumLightSpillSourceEdge
+    let focus: Double
+    let spread: Double
+
+    var body: some View {
+        switch sourceEdge {
+        case .leading, .trailing:
+            focusedLinearMask(startPoint: .top, endPoint: .bottom)
+        case .top:
+            focusedLinearMask(startPoint: .leading, endPoint: .trailing)
+        case .topLeading:
+            RadialGradient(
+                stops: [
+                    .init(color: .white, location: 0.0),
+                    .init(color: .white, location: min(max(spread, 0.10), 0.62)),
+                    .init(color: .clear, location: 1.0)
+                ],
+                center: UnitPoint(x: min(max(focus, 0.05), 0.95), y: 0.0),
+                startRadius: 0,
+                endRadius: 220
+            )
+        }
+    }
+
+    private func focusedLinearMask(startPoint: UnitPoint, endPoint: UnitPoint) -> LinearGradient {
+        let clampedFocus = min(max(focus, 0.0), 1.0)
+        let clampedSpread = min(max(spread, 0.06), 1.0)
+        let feather = min(max(clampedSpread * 0.28, 0.030), 0.12)
+        let lower = max(clampedFocus - clampedSpread, 0)
+        let upper = min(clampedFocus + clampedSpread, 1)
+        let lowerFeather = max(lower - feather, 0)
+        let upperFeather = min(upper + feather, 1)
+        return LinearGradient(
+            stops: [
+                .init(color: .clear, location: 0),
+                .init(color: .clear, location: lowerFeather),
+                .init(color: .white, location: lower),
+                .init(color: .white, location: clampedFocus),
+                .init(color: .white, location: upper),
+                .init(color: .clear, location: upperFeather),
+                .init(color: .clear, location: 1)
+            ],
+            startPoint: startPoint,
+            endPoint: endPoint
+        )
     }
 }
 
@@ -3705,11 +4331,13 @@ private struct MusicExpandedControls: View {
     let controller: MpvPlayerController
     let item: MediaItem
     let palette: AlbumColorPalette
+    let light: AlbumComponentLight
 
-    init(item: MediaItem, controller: MpvPlayerController, palette: AlbumColorPalette) {
+    init(item: MediaItem, controller: MpvPlayerController, palette: AlbumColorPalette, light: AlbumComponentLight) {
         self.item = item
         self.controller = controller
         self.palette = palette
+        self.light = light
     }
 
     var body: some View {
@@ -3728,7 +4356,8 @@ private struct MusicExpandedControls: View {
                     cornerRadius: MusicPlayerVisualTokens.Radius.control,
                     intensity: MusicPlayerVisualTokens.Spill.controlsIntensity,
                     reach: MusicPlayerVisualTokens.Spill.controlsReach,
-                    sourceEdge: .top
+                    sourceEdge: .top,
+                    light: light
                 )
                 .allowsHitTesting(false)
 
@@ -6495,7 +7124,8 @@ private struct MusicChromeButtonContent: View {
                 cornerRadius: MusicPlayerVisualTokens.Radius.chrome,
                 intensity: MusicPlayerVisualTokens.Spill.chromeIntensity,
                 reach: MusicPlayerVisualTokens.Spill.chromeReach,
-                sourceEdge: .topLeading
+                sourceEdge: .topLeading,
+                light: .fallbackChrome
             )
             .allowsHitTesting(false)
 
@@ -6519,6 +7149,7 @@ private struct MusicExpandedLayout {
     let verticalInset: CGFloat
     let leftRect: CGRect
     let lyricsRect: CGRect
+    let controlsRect: CGRect
     let posterSize: CGFloat
     /// 实际显示的封面边长（stacked 布局下被压到 ≤230）。
     let coverDisplaySide: CGFloat
@@ -6532,6 +7163,8 @@ private struct MusicExpandedLayout {
     // §2.1 封面外层环境光的目标 reach（相对 posterSize 的倍数）：按"光心→歌词卡左缘 / 控制栏上边界"
     // 的较远几何距离驱动，让发光以同一半径自然触达关键玻璃面。
     let albumGlowReach: CGFloat
+    let lyricsLight: AlbumComponentLight
+    let controlsLight: AlbumComponentLight
 
     init(size: CGSize) {
         let width = max(size.width, 1)
@@ -6593,6 +7226,15 @@ private struct MusicExpandedLayout {
         let controlsEstimate = MusicPlayerVisualTokens.Controls.expandedHeight
         let posterBlockHeight = resolvedPosterSize + 16.0 + 82.0 + 16.0 + controlsEstimate
         let posterTop = leftFrame.minY + max(0, (availableHeight - posterBlockHeight) / 2)
+        let controlsTop = posterTop + resolvedPosterSize + 16.0 + 82.0 + 16.0
+        let controlsWidth = min(MusicPlayerVisualTokens.Controls.expandedMaxWidth, leftFrame.width)
+        let controlsFrame = CGRect(
+            x: leftFrame.midX - controlsWidth * 0.5,
+            y: controlsTop,
+            width: controlsWidth,
+            height: controlsEstimate
+        )
+        controlsRect = controlsFrame
         let resolvedAlbumLightCenter: CGPoint
         if stackedLayout {
             resolvedAlbumLightCenter = CGPoint(x: width * 0.34, y: min(max(height * 0.32, 210), height * 0.50))
@@ -6611,7 +7253,6 @@ private struct MusicExpandedLayout {
             resolvedAlbumGlowReach = MusicPlayerVisualTokens.Glow.fallbackReach
             resolvedAlbumGlowRadius = shownCoverSize * MusicPlayerVisualTokens.Glow.fallbackReach * 0.5
         } else {
-            let controlsTop = posterTop + resolvedPosterSize + 16.0 + 82.0 + 16.0
             let horizontalGap = max(lyricsFrame.minX - resolvedAlbumLightCenter.x, resolvedPosterSize * 0.5)
             let verticalGap = max(controlsTop - resolvedAlbumLightCenter.y, resolvedPosterSize * 0.5)
             let targetDistance = max(horizontalGap, verticalGap) + overshoot
@@ -6622,10 +7263,29 @@ private struct MusicExpandedLayout {
         }
         albumGlowReach = resolvedAlbumGlowReach
         albumGlowRadius = resolvedAlbumGlowRadius
+        let componentLightRadius = resolvedAlbumGlowRadius * 2.0
+        lyricsLight = stackedLayout
+            ? .fallbackLyrics
+            : AlbumComponentLight.leading(
+                rect: lyricsFrame,
+                center: resolvedAlbumLightCenter,
+                radius: componentLightRadius,
+                coverSide: shownCoverSize,
+                overshoot: overshoot
+            )
+        controlsLight = stackedLayout
+            ? .fallbackControls
+            : AlbumComponentLight.top(
+                rect: controlsFrame,
+                center: resolvedAlbumLightCenter,
+                radius: componentLightRadius,
+                coverSide: shownCoverSize,
+                overshoot: overshoot
+            )
 
         // 发光画布 = 封面边长 × 几何 reach（少量余量）：光程触达歌词卡左缘 / 控制栏并略超出，
         // 羽化衰减在烘焙阶段按同一几何完成，不再需要额外的投影光池层。
-        glowBlurSide = shownCoverSize * min(max(resolvedAlbumGlowReach * 1.02, 2.45), 6.2)
+        glowBlurSide = shownCoverSize * min(max(resolvedAlbumGlowReach * 2.04, 3.8), 11.8)
     }
 }
 

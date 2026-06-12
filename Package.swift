@@ -27,6 +27,10 @@ let package = Package(
             path: "Sources/MediaLib",
             resources: [
                 .process("Resources")
+            ],
+            linkerSettings: [
+                .linkedFramework("CoreServices"),
+                .linkedFramework("MetalKit")
             ]
         ),
         .executableTarget(

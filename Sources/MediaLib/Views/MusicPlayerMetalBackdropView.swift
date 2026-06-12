@@ -261,18 +261,18 @@ struct MetalAlbumBackdropView: NSViewRepresentable {
                 let textureImage = await Task.detached(priority: .utility) {
                     let base: NSImage?
 #if DEBUG
-                    if let debugCover = MusicPlayerVisualDebugFixtures.coverImage(forPath: path, size: 160) {
+                    if let debugCover = MusicPlayerVisualDebugFixtures.coverImage(forPath: path, size: 192) {
                         base = debugCover
                     } else {
                         base = ArtworkImageCache.image(
                             path: path,
-                            targetSize: CGSize(width: 160, height: 160)
+                            targetSize: CGSize(width: 192, height: 192)
                         )
                     }
 #else
                     base = ArtworkImageCache.image(
                         path: path,
-                        targetSize: CGSize(width: 160, height: 160)
+                        targetSize: CGSize(width: 192, height: 192)
                     )
 #endif
                     // 封面 → 低频高斯颜料场：底板颜色的唯一来源。
@@ -536,7 +536,7 @@ private enum MusicAlbumBackdropImageBlur {
     /// ⚠ soften 不能大：40px 网格上 13px 高斯≈把整张封面平均成"全局均值色"，
     /// 对真实封面（黑外套+白底+暖色块）均值必然是脏粉/脏灰——这正是底板取色发脏的根因。
     /// 轻柔化只去锐边，保留色块的空间分离；中性区域由 shader 的角色色场接管。
-    static func paintPalette(_ image: NSImage?, grid: Int = 40, soften: Double = 4.5) -> NSImage? {
+    static func paintPalette(_ image: NSImage?, grid: Int = 48, soften: Double = 3.6) -> NSImage? {
         guard let image,
               let tiff = image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: tiff),
@@ -632,17 +632,17 @@ vertex VertexOut musicAlbumBackdropVertex(uint vertexID [[vertex_id]]) {
 
 // ───────────────── 底板观感总调参 ─────────────────
 // 浅色舒适带：底板"亮而不灰、彩而不扎眼"的硬边界。
-constant float kLightValueMin   = 0.745; // 浅色亮度下限（低于此提亮 → 透亮不发灰）
-constant float kLightValueMax   = 0.905; // 浅色亮度上限（高于此压回 → 不洗白）
-constant float kLightSatScale   = 1.06;  // 浅色饱和缩放（明亮颜料感，上限仍由 kLightSatMax 钳住）
-constant float kLightSatMax     = 0.420; // 浅色饱和上限（防"比封面还艳"刺眼）
+constant float kLightValueMin   = 0.675; // 浅色亮度下限：稍微提亮，避免底板发沉
+constant float kLightValueMax   = 0.855; // 浅色亮度上限：保留通透感但不把封面色洗白
+constant float kLightSatScale   = 0.94;  // 浅色饱和缩放：避免底板比封面本体更艳
+constant float kLightSatMax     = 0.355; // 浅色饱和上限（防"比封面还艳"刺眼）
 constant float kDarkValueMin    = 0.130;
 constant float kDarkValueMax    = 0.310;
 constant float kDarkSatScale    = 0.88;
 constant float kDarkSatMax      = 0.460;
 // 光池 / 柔光斑强度。
-constant float kPoolStrength    = 0.82;
-constant float kBlobStrength    = 0.56;
+constant float kPoolStrength    = 0.31;
+constant float kBlobStrength    = 0.19;
 
 static float luminance(float3 c) {
     return dot(c, float3(0.2126, 0.7152, 0.0722));
@@ -741,8 +741,8 @@ fragment float4 musicAlbumBackdropFragment(
     float nA = valueNoise(uv * float2(1.35, 1.02) + float2(4.21, 1.37));
     float nB = valueNoise(uv * float2(0.92, 1.38) + float2(8.05, 5.62));
     float nC = valueNoise(uv * float2(1.10, 0.86) + float2(1.19, 9.43));
-    float secondaryWeight = 0.235 + (nA - 0.5) * 0.045;
-    float accentWeight = 0.185 + (nB - 0.5) * 0.040;
+    float secondaryWeight = 0.175 + (nA - 0.5) * 0.030;
+    float accentWeight = 0.120 + (nB - 0.5) * 0.026;
     float primaryWeight = 1.0 - secondaryWeight - accentWeight;
     float3 roleField =
         u.glowPrimary.rgb * primaryWeight +
@@ -752,25 +752,25 @@ fragment float4 musicAlbumBackdropFragment(
         u.glowPrimary.rgb * 0.48 +
         u.glowSecondary.rgb * 0.28 +
         u.glowAccent.rgb * 0.24;
-    roleField = mix(roleField, harmonicWash, 0.68 + 0.10 * nC);
+    roleField = mix(roleField, harmonicWash, 0.50 + 0.08 * nC);
     // 低彩封面（vibrancy 低）让角色场向中性珍珠/墨色退让，不强行上色。
     float3 pearl = mix(
         float3(0.845, 0.862, 0.878),
         float3(0.085, 0.092, 0.110),
         isDark
     );
-    roleField = mix(pearl, roleField, 0.38 + 0.62 * vibrancy);
+    roleField = mix(pearl, roleField, 0.32 + 0.68 * vibrancy);
 
     // ── 2) 封面颜料注入：只允许"真正有彩度"的封面区域注入局部颜色 ──
     // 旋转/镜像采样保持方向解耦；样本的彩度（s×v）作为发言权——
     // 鲜艳区域（色块/插画主体）把真实封面色画进底板，中性/均值泥（黑、白、灰粉）
     // 一律让位给角色色场，从根上杜绝"底板颜色看起来不来自取色"。
-    float2 c0 = rotateAround(uv, float2(0.5), 1.95) * 0.84 + 0.08;
-    float2 c1 = rotateAround(float2(1.0 - uv.x, uv.y), float2(0.5), -0.85) * 0.84 + 0.08;
+    float2 c0 = uv * 0.74 + 0.13;
+    float2 c1 = rotateAround(uv * 0.80 + 0.10, float2(0.5), -0.32);
     float3 s0 = fieldSample(artwork, previousArtwork, fieldSampler, c0, u.textureMix);
     float3 s1 = fieldSample(artwork, previousArtwork, fieldSampler, c1, u.textureMix);
     float n0 = valueNoise(uv * float2(1.45, 1.10) + float2(7.31, 2.17));
-    float selectT = smoothstep(0.34, 0.66, n0);
+    float selectT = smoothstep(0.22, 0.86, n0) * 0.24;
     float3 coverSample = mix(s0, s1, selectT);
 
     // 色相向最近角色色收拢（旋转量封顶，不凭空造色）：注入的封面色也落在取色身份里。
@@ -786,8 +786,28 @@ fragment float4 musicAlbumBackdropFragment(
     if (abs(dA) < abs(dNearest)) { dNearest = dA; }
     float hueSnap = clamp(dNearest * 0.55, -0.085, 0.085);
     hsvSample.x = fract(hsvSample.x - hueSnap + 1.0);
-    float colorfulness = smoothstep(0.085, 0.240, hsvSample.y * hsvSample.z);
-    float3 field = mix(roleField, hsv2rgb(hsvSample), colorfulness * 0.34);
+    float colorfulness = smoothstep(0.075, 0.240, hsvSample.y * hsvSample.z);
+    float3 field = mix(roleField, hsv2rgb(hsvSample), colorfulness * (0.34 + 0.12 * vibrancy));
+
+    // ── 2.5) 封面低频投影：目标图里的"底下还有一个模糊封面"不是纯光斑，
+    // 而是一张围绕真实封面中心放大的颜料场。这里用 albumLightCenter 建立局部坐标，
+    // 把低频封面按空间方向投到底板上，再由后面的舒适带统一清洁化。
+    float projectionSpan = span * 0.58;
+    float2 rawProjectionUV = (point - u.albumLightCenter) / projectionSpan + float2(0.5);
+    float2 projectionUV = clamp(rawProjectionUV, float2(0.0), float2(1.0));
+    float2 projectionBox = abs(rawProjectionUV - float2(0.5)) * 2.0;
+    float projectionShape = 1.0 - smoothstep(0.72, 1.30, max(projectionBox.x, projectionBox.y));
+    float projectionDistance = 1.0 - radialT(point, u.albumLightCenter, projectionSpan * 0.92);
+    float projectionMask = projectionShape *
+        (0.50 + projectionDistance * projectionDistance * 0.40) *
+        (0.34 + 0.20 * vibrancy) *
+        clamp(u.artworkOpacity, 0.0, 1.0);
+    float3 projectedCover = fieldSample(artwork, previousArtwork, fieldSampler, projectionUV, u.textureMix);
+    float3 hsvProjection = rgb2hsv(projectedCover);
+    float projectionColorful = smoothstep(0.050, 0.220, hsvProjection.y * hsvProjection.z);
+    hsvProjection.y = clamp(hsvProjection.y * 1.02 + projectionColorful * 0.020, 0.0, 0.70);
+    hsvProjection.z = clamp(pow(max(hsvProjection.z, 0.0), 0.90) * 1.00, 0.18, 0.88);
+    field = mix(field, hsv2rgb(hsvProjection), projectionMask * (0.46 + projectionColorful * 0.14));
 
     // ── 3) 舒适带收敛（透亮、不扎眼、不发灰） ──
     // 亮度整体压缩映射进明亮带（保持封面明暗排序，但绝不跌出下限——
@@ -796,11 +816,11 @@ fragment float4 musicAlbumBackdropFragment(
     float satMax = mix(kLightSatMax, kDarkSatMax, isDark) * (0.82 + 0.18 * vibrancy);
     float satScale = mix(kLightSatScale, kDarkSatScale, isDark);
     // 彩色区域饱和地板：封面有明确颜色时底板不许退成灰白（低彩封面不受影响）。
-    float satFloor = smoothstep(0.10, 0.34, hsv.y) * mix(0.180, 0.105, isDark);
+    float satFloor = smoothstep(0.08, 0.32, hsv.y) * mix(0.110, 0.080, isDark);
     hsv.y = clamp(hsv.y * satScale, satFloor, satMax);
     float vMin = mix(kLightValueMin, kDarkValueMin, isDark);
     float vMax = mix(kLightValueMax, kDarkValueMax, isDark);
-    hsv.z = clamp(hsv.z * mix(0.34, 0.30, isDark) + mix(0.645, 0.105, isDark), vMin, vMax);
+    hsv.z = clamp(hsv.z * mix(0.400, 0.30, isDark) + mix(0.455, 0.105, isDark), vMin, vMax);
     field = hsv2rgb(hsv);
 
     // 无封面 / 纹理未就绪：退到 palette 清洁基色。
@@ -811,36 +831,36 @@ fragment float4 musicAlbumBackdropFragment(
     // 用 glowPrimary（保色相提亮版主色），受控滤色不会洗白。
     float poolT = 1.0 - radialT(point, u.albumLightCenter, span * 0.68);
     float pool = poolT * poolT;
-    color = controlledScreen(color, u.glowPrimary.rgb, pool * (isDark * 0.165 + isLight * 0.155) * kPoolStrength);
+    color = controlledScreen(color, u.glowPrimary.rgb, pool * (isDark * 0.130 + isLight * 0.088) * kPoolStrength);
     float2 poolLow = u.albumLightCenter + float2(span * 0.05, span * 0.16);
     float poolT2 = 1.0 - radialT(point, poolLow, span * 0.44);
-    color = controlledScreen(color, u.glowSecondary.rgb, poolT2 * poolT2 * (isDark * 0.085 + isLight * 0.060) * kPoolStrength);
+    color = controlledScreen(color, u.glowSecondary.rgb, poolT2 * poolT2 * (isDark * 0.060 + isLight * 0.038) * kPoolStrength);
 
     // ── 5) 两枚远端柔光斑 ──
     // 右上 secondary / 左下 accent，半径大、alpha 低：保住"绚丽多彩"的层次，
     // 但不再堆十几枚光斑互相打架。
     float blobA = 1.0 - radialT(point, float2(0.88, 0.16) * u.viewportSize, span * 0.74);
-    color = controlledPlus(color, u.glowSecondary.rgb, blobA * blobA * (isDark * 0.080 + isLight * 0.058) * kBlobStrength);
+    color = controlledPlus(color, u.glowSecondary.rgb, blobA * blobA * (isDark * 0.052 + isLight * 0.034) * kBlobStrength);
     float blobB = 1.0 - radialT(point, float2(0.14, 0.88) * u.viewportSize, span * 0.70);
-    color = controlledPlus(color, u.glowAccent.rgb, blobB * blobB * (isDark * 0.072 + isLight * 0.050) * kBlobStrength);
+    color = controlledPlus(color, u.glowAccent.rgb, blobB * blobB * (isDark * 0.046 + isLight * 0.030) * kBlobStrength);
 
     // ── 6) 整窗玻璃面（"被玻璃盖住"的空间感） ──
     float strength = clamp(u.glassIntensity, 0.0, 1.0);
     // 上沿受光：白里带一点封面主色（彩色光而非白光）。
     float3 glassLight = mix(u.glowPrimary.rgb, float3(1.0), 0.46);
-    float topLift = (1.0 - smoothstep(0.0, 0.46, uv.y)) * (isDark * 0.034 + isLight * 0.040) * strength;
+    float topLift = (1.0 - smoothstep(0.0, 0.46, uv.y)) * (isDark * 0.030 + isLight * 0.026) * strength;
     color = controlledScreen(color, glassLight, topLift);
     // 下沿入影：极轻压暗，形成玻璃厚度。
-    float bottomShade = smoothstep(0.58, 1.0, uv.y) * (isDark * 0.060 + isLight * 0.034) * strength;
+    float bottomShade = smoothstep(0.58, 1.0, uv.y) * (isDark * 0.060 + isLight * 0.022) * strength;
     color *= (1.0 - bottomShade);
     // 极薄空气纱（浅色限定）：让浅色底板带"隔着玻璃"的空气感，幅度小到不会发灰。
     float airT = 1.0 - smoothstep(0.0, 0.85, uv.y);
-    color = mix(color, min(color + float3(0.020), float3(1.0)), airT * isLight * 0.55 * strength);
+    color = mix(color, min(color + float3(0.014), float3(1.0)), airT * isLight * 0.18 * strength);
 
     // ── 7) 出图：抖动去断层 + 防纯白 clamp ──
     float dither = fract(sin(dot(point, float2(12.9898, 78.233))) * 43758.5453);
     color += (dither - 0.5) * (1.15 / 255.0);
-    color = clamp(color, float3(0.0), float3(0.940));
+    color = clamp(color, float3(0.0), float3(0.920));
     return float4(color, 1.0);
 }
 """#

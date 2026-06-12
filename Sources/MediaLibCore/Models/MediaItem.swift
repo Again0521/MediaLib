@@ -144,7 +144,8 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
               let scheme = URL(string: filePath)?.scheme?.lowercased() else {
             return false
         }
-        return scheme == "http" || scheme == "https"
+        // 除 Emby/Plex 的 http(s) 外，也认手动打开的常见串流协议（mpv 原生支持）。
+        return ["http", "https", "rtsp", "rtmp", "rtp", "mms", "srt", "udp", "ftp"].contains(scheme)
     }
 
     public var hasEmbeddedArtwork: Bool {

@@ -21,6 +21,28 @@ struct DetailView: View {
     private enum ArtworkKind { case poster, backdrop }
 
     @State private var selectedEpisodeID: MediaItem.ID?
+    /// 已展开的季（多季时进入默认全部折叠）。
+    @State private var expandedSeasonIDs: Set<String> = []
+
+    /// 按季分组（保持剧集原有排序）；nil 季排最后。
+    private struct SeasonGroup: Identifiable {
+        let season: Int?
+        let episodes: [MediaItem]
+
+        var id: String { season.map(String.init) ?? "unspecified" }
+
+        var title: String {
+            guard let season else { return "未分季" }
+            return season == 0 ? "特别篇" : "第 \(season) 季"
+        }
+    }
+
+    private func seasonGroups(for episodes: [MediaItem]) -> [SeasonGroup] {
+        let grouped = Dictionary(grouping: episodes) { $0.seasonNumber }
+        return grouped
+            .map { SeasonGroup(season: $0.key, episodes: $0.value) }
+            .sorted { ($0.season ?? Int.max) < ($1.season ?? Int.max) }
+    }
 
     var body: some View {
         let episodes = appState.children(for: item)
@@ -46,11 +68,28 @@ struct DetailView: View {
 
             if !episodes.isEmpty {
                 detailRow(top: 12, bottom: 6) { episodeHeader(episodes) }
-                ForEach(episodes) { episode in
-                    episodeRow(episode)
-                        .listRowInsets(EdgeInsets(top: 5, leading: AppSpacing.pageHorizontal, bottom: 5, trailing: AppSpacing.pageHorizontal))
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
+                let groups = seasonGroups(for: episodes)
+                if groups.count > 1 {
+                    // 多季：按季分组、可折叠；进入详情默认全部折叠。
+                    ForEach(groups) { group in
+                        detailRow(top: 5, bottom: 5) { seasonHeader(group) }
+                        if expandedSeasonIDs.contains(group.id) {
+                            ForEach(group.episodes) { episode in
+                                episodeRow(episode)
+                                    .listRowInsets(EdgeInsets(top: 5, leading: AppSpacing.pageHorizontal, bottom: 5, trailing: AppSpacing.pageHorizontal))
+                                    .listRowBackground(Color.clear)
+                                    .listRowSeparator(.hidden)
+                            }
+                        }
+                    }
+                } else {
+                    // 单季（或没有季信息）：直接平铺，不显示季分组。
+                    ForEach(episodes) { episode in
+                        episodeRow(episode)
+                            .listRowInsets(EdgeInsets(top: 5, leading: AppSpacing.pageHorizontal, bottom: 5, trailing: AppSpacing.pageHorizontal))
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                    }
                 }
                 detailRow(top: 6, bottom: 28) { Color.clear.frame(height: 1) }
             } else {
@@ -72,6 +111,7 @@ struct DetailView: View {
         .onChange(of: item.id) { _ in
             refreshFileStatus()
             selectedEpisodeID = nil
+            expandedSeasonIDs = []
         }
         .background {
             RawKeyCaptureView { key in
@@ -116,6 +156,44 @@ struct DetailView: View {
             }
             .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 9, minHeight: 28))
         }
+    }
+
+    private func seasonHeader(_ group: SeasonGroup) -> some View {
+        let expanded = expandedSeasonIDs.contains(group.id)
+        let watchedThreshold = appState.settings.watchedThreshold
+        let watchedCount = group.episodes.filter { $0.watched || $0.playProgress >= watchedThreshold }.count
+        return Button {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                if expanded {
+                    expandedSeasonIDs.remove(group.id)
+                } else {
+                    expandedSeasonIDs.insert(group.id)
+                }
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                Text(group.title)
+                    .font(.headline.weight(.semibold))
+                Text("\(group.episodes.count) 集")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if watchedCount > 0 {
+                    Text(watchedCount == group.episodes.count ? "已看完" : "已看 \(watchedCount) 集")
+                        .font(.caption)
+                        .foregroundStyle(watchedCount == group.episodes.count ? AppColors.selectedGlassTint.opacity(0.92) : Color.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .staticSurfaceBackground(selected: false, thickness: 1.12)
     }
 
     private func episodeRow(_ episode: MediaItem) -> some View {

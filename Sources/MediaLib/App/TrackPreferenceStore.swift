@@ -25,6 +25,10 @@ enum TrackPreferenceStore {
         "\(prefix).\(seriesKey(for: item)).audio"
     }
 
+    private static func rateKey(for item: MediaItem) -> String {
+        "\(prefix).\(seriesKey(for: item)).rate"
+    }
+
     private static func subtitleKey(for item: MediaItem) -> String {
         "\(prefix).\(seriesKey(for: item)).sub"
     }
@@ -44,6 +48,23 @@ enum TrackPreferenceStore {
     static func audioLanguage(for item: MediaItem) -> String? {
         let value = UserDefaults.standard.string(forKey: audioKey(for: item))
         return (value?.isEmpty == false) ? value : nil
+    }
+
+    // MARK: - 倍速
+
+    /// 记忆该系列/影片的播放倍速；恢复为 1.0 时清掉记忆，回落到全局默认倍速。
+    static func setPlaybackRate(_ rate: Double?, for item: MediaItem) {
+        let key = rateKey(for: item)
+        if let rate, rate.isFinite, rate > 0, abs(rate - 1.0) > 0.001 {
+            UserDefaults.standard.set(rate, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    static func playbackRate(for item: MediaItem) -> Double? {
+        let value = UserDefaults.standard.double(forKey: rateKey(for: item))
+        return value > 0 ? value : nil
     }
 
     // MARK: - 字幕

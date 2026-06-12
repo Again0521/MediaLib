@@ -3,9 +3,22 @@ import SwiftUI
 
 final class MediaLibAppDelegate: NSObject, NSApplicationDelegate {
     private var windowObservers: [NSObjectProtocol] = []
+    /// 双击文件/「打开方式」进入的媒体文件。SwiftUI 场景就绪前先缓存，就绪后由 App 拉取。
+    var onOpenFiles: (([URL]) -> Void)?
+    var pendingOpenFileURLs: [URL] = []
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        let fileURLs = urls.filter(\.isFileURL)
+        guard !fileURLs.isEmpty else { return }
+        if let onOpenFiles {
+            onOpenFiles(fileURLs)
+        } else {
+            pendingOpenFileURLs.append(contentsOf: fileURLs)
+        }
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -44,7 +57,9 @@ final class MediaLibAppDelegate: NSObject, NSApplicationDelegate {
     static func makeTitlebarSeamless(_ window: NSWindow) {
         // 只处理主内容窗口。NSOpenPanel / NSSavePanel / NSAlert 都是 NSPanel；
         // 它们同样可能带标题栏和可改尺寸，若误改成透明窗口会直接透出后方页面。
+        // 视频播放器窗口（ImmersivePlayerWindow）自行管理外观且刻意保持不透明，跳过。
         guard !(window is NSPanel),
+              !(window is ImmersivePlayerWindow),
               window.styleMask.contains(.titled),
               window.styleMask.contains(.resizable) else { return }
         if window.titlebarAppearsTransparent != true {
@@ -92,6 +107,15 @@ struct MediaLibApp: App {
                 .onAppear {
                     appState.applyAppearance()
                     SystemMediaCommandCenter.shared.configure(appState: appState)
+                    appDelegate.onOpenFiles = { [weak appState] urls in
+                        appState?.playExternalFiles(urls)
+                    }
+                    if !appDelegate.pendingOpenFileURLs.isEmpty {
+                        let pending = appDelegate.pendingOpenFileURLs
+                        appDelegate.pendingOpenFileURLs = []
+                        appState.playExternalFiles(pending)
+                    }
+                    appState.checkForUpdatesDailyIfNeeded()
                 }
                 .onChange(of: appState.settings.theme) { _ in
                     appState.applyAppearance()
@@ -131,6 +155,13 @@ struct MediaLibApp: App {
                 }
                 .keyboardShortcut(.rightArrow, modifiers: [.option])
                 .disabled(appState.activePlayerItem == nil)
+
+                Divider()
+
+                Button("打开网络串流…") {
+                    appState.showingNetworkStreamPrompt = true
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
 
                 Divider()
 

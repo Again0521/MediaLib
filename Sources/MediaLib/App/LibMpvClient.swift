@@ -107,7 +107,9 @@ final class LibMpvClient {
         try setOptionString("force-window", "no")
         try setOptionString("input-default-bindings", "yes")
         try setOptionString("input-vo-keyboard", "no")
-        try setOptionString("keep-open", "no")
+        // EOF 后暂停在最后一帧而不是卸载文件：播放结束行为（下一集/停留/关窗）
+        // 由控制器读取 eof-reached 后决定，卸载会让 time-pos 丢失、无法标记已看。
+        try setOptionString("keep-open", "yes")
         try setOptionString("keepaspect", "yes")
         try setOptionString("keepaspect-window", "yes")
         try setOptionString("audio-display", "no")
@@ -122,6 +124,8 @@ final class LibMpvClient {
         try? setOptionString("demuxer-max-back-bytes", "48MiB")
         try? setOptionString("cache-pause", "yes")
         try setOptionString("start", "\(max(startTime, 0))")
+        // 音量增强上限 200%：实际是否超过 100% 由控制器的 volumeBoost 决定。
+        try? setOptionString("volume-max", "200")
         try setOptionString("volume", "\(Int(volume * 100))")
         try setOptionString("speed", "\(speed)")
 

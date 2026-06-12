@@ -19,41 +19,52 @@ struct OnboardingView: View {
     private let pages: [Page] = [
         Page(
             systemImage: "play.rectangle.on.rectangle",
-            title: "欢迎使用 MediaLIB",
-            subtitle: "本地优先的影视与音乐媒体库 + 播放器。",
+            title: "你好，欢迎使用 MediaLIB",
+            subtitle: "你的电影、剧集、动漫和音乐，从此有一个家。",
             bullets: [
-                "电影、剧集、动漫与音乐统一管理",
-                "内置高性能播放器，原始文件不被修改"
+                "一切都在你的设备上：我们不会上传你的任何内容",
+                "只读你的文件、绝不移动或修改它们，随时可以放心卸载",
+                "海报墙、播放进度、收藏歌单——都围绕你的收藏展开"
             ]
         ),
         Page(
             systemImage: "externaldrive.badge.plus",
-            title: "添加媒体源",
-            subtitle: "把你的媒体接入媒体库。",
+            title: "先把收藏接进来",
+            subtitle: "本地硬盘、NAS、流媒体服务器，都可以。",
             bullets: [
-                "本地文件夹、移动硬盘、SMB / FTP 网络位置",
-                "也可连接 Emby 服务器，按来源拆分一级目录",
-                "自动扫描，本地来源优先增量更新"
+                "本地文件夹、移动硬盘和 SMB 网络位置直接扫描",
+                "有 Emby / Jellyfin / Plex 服务器？登录就能在这里看",
+                "之后新增的文件会自动增量更新，不用再手动整理"
             ]
         ),
         Page(
             systemImage: "sparkles.rectangle.stack",
-            title: "匹配元数据",
-            subtitle: "封面、简介、演职人员与歌词一键补全。",
+            title: "让海报墙好看起来",
+            subtitle: "封面、简介、评分和歌词，一键帮你补全。",
             bullets: [
-                "填写 TMDB Key 自动匹配影视，宽容度可调",
-                "音乐支持网易云 / QQ / Last.fm / Deezer 等来源",
-                "「片库健康」可检查失效路径、重复项与缺口"
+                "在设置里填一个免费的 TMDB Key，影视信息自动匹配",
+                "音乐标签和歌词支持网易云 / QQ / Last.fm 等来源",
+                "拿不准哪里出了问题？「片库健康」帮你查失效和重复"
             ]
         ),
         Page(
-            systemImage: "dot.radiowaves.left.and.right",
-            title: "尽情探索",
-            subtitle: "还有更多贴心功能等你发现。",
+            systemImage: "film.stack",
+            title: "想怎么看，就怎么看",
+            subtitle: "内置播放器很能打，不输你熟悉的桌面播放器。",
             bullets: [
-                "字幕在线搜索、音轨/字幕偏好记忆",
-                "艺人电台、相似度连续播放、Last.fm 听歌打卡",
-                "批量操作、智能集合与歌单"
+                "字幕在线搜索、双字幕对照、音轨和倍速都记得你的偏好",
+                "剧集自动续播下一集，迷你悬浮窗让你边看边做别的",
+                "远程视频可以离线缓存下来，出门没网也能接着看"
+            ]
+        ),
+        Page(
+            systemImage: "checkmark.seal",
+            title: "可以开始了",
+            subtitle: "先把媒体源加上，其它的慢慢来。",
+            bullets: [
+                "喜欢的话，可在设置中把 MediaLIB 设为系统默认播放器",
+                "按 ⌘⇧O 还能直接打开网络串流链接",
+                "所有选项都在「设置」里，随时回来调整"
             ]
         )
     ]
@@ -86,20 +97,23 @@ struct OnboardingView: View {
             }
             .padding(.horizontal, 32)
 
-            // 每条要点整行居中：图标+文字作为一个整体在页面水平居中，不再用 Spacer 把内容顶到左侧。
-            VStack(alignment: .center, spacing: 12) {
+            // 要点块：文字左对齐（首字竖向对齐）、对勾统一靠右竖向对齐；
+            // 块宽收缩到最长一行（fixedSize），整块居中后左右留白自然相等，
+            // 同时避免短句的文字和对勾被拉得太开。
+            VStack(alignment: .leading, spacing: 12) {
                 ForEach(page.bullets, id: \.self) { bullet in
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    HStack(alignment: .firstTextBaseline, spacing: 14) {
+                        Text(bullet)
+                            .font(.callout)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(AppColors.selectedGlassTint)
                             .font(.callout)
-                        Text(bullet)
-                            .font(.callout)
-                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
-            .frame(maxWidth: 420)
+            .fixedSize(horizontal: true, vertical: false)
+            .frame(maxWidth: 440)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.top, 4)
 

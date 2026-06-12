@@ -425,6 +425,14 @@ struct ContentView: View {
             QuickPreviewView(item: item)
                 .environmentObject(appState)
         }
+        .sheet(isPresented: $appState.showingNetworkStreamPrompt) {
+            NetworkStreamPromptSheet()
+                .environmentObject(appState)
+        }
+        .sheet(item: $appState.availableUpdate) { update in
+            AppUpdatePromptSheet(update: update)
+                .environmentObject(appState)
+        }
         .sheet(item: $smartCollectionEditor) { request in
             VideoSmartCollectionSheet(
                 request: request,
@@ -2314,5 +2322,108 @@ private struct FloatingNoticeCapsule: View {
 
     private var kindTint: Color {
         AppColors.selectedGlassTint
+    }
+}
+
+/// 「打开网络串流」输入弹窗：粘贴 http(s)/rtsp/rtmp 等地址直接用内置播放器播放，不写入媒体库。
+struct NetworkStreamPromptSheet: View {
+    @EnvironmentObject private var appState: AppState
+    @State private var urlText = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("打开网络串流", systemImage: "globe.desk")
+                .font(.headline)
+
+            TextField("https://example.com/stream.m3u8", text: $urlText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 420)
+                .onSubmit(play)
+
+            Text("支持 http / https / rtsp / rtmp 等 mpv 原生协议，仅本次播放，不会加入媒体库。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button("取消") {
+                    appState.showingNetworkStreamPrompt = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("播放") {
+                    play()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(urlText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+    }
+
+    private func play() {
+        let text = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        appState.playNetworkStream(text)
+    }
+}
+
+/// 发现新版本的提示弹窗：展示版本与更新内容，提供跳过/永不提醒/前往更新。
+struct AppUpdatePromptSheet: View {
+    @EnvironmentObject private var appState: AppState
+    let update: AppUpdateInfo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "sparkles")
+                    .font(.title2)
+                    .foregroundStyle(AppColors.selectedGlassTint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("发现新版本 \(update.version)")
+                        .font(.headline)
+                    Text("当前版本 \(AppVersion.current)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if !update.releaseNotes.isEmpty {
+                ScrollView {
+                    Text(update.releaseNotes)
+                        .font(.callout)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(width: 460, height: 200)
+                .padding(10)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+            } else {
+                Text("可前往 GitHub Release 页查看本次更新内容。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 460, alignment: .leading)
+            }
+
+            HStack {
+                Button("跳过当前版本") {
+                    appState.settings.updateSkippedVersion = update.tagName
+                    appState.saveSettings()
+                    appState.availableUpdate = nil
+                }
+                Button("永不提醒") {
+                    appState.settings.updateRemindersDisabled = true
+                    appState.saveSettings()
+                    appState.availableUpdate = nil
+                }
+                Spacer()
+                Button("前往更新") {
+                    NSWorkspace.shared.open(update.releaseURL)
+                    appState.availableUpdate = nil
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
     }
 }

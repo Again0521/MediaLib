@@ -345,6 +345,14 @@ final class AppState: ObservableObject {
     @Published var selectedItem: MediaItem?
     @Published var selectedItemReturnAnchorID: String?
     @Published var activePlayerItem: MediaItem?
+    /// 视频播放队列（播放器内剧集列表）：播放系列中的某一集时，
+    /// 自动装入「当前集 + 之后的同系列剧集」；独立影片只含自身。
+    @Published var videoQueue: [MediaItem] = []
+    /// 「打开网络串流」输入弹窗。
+    @Published var showingNetworkStreamPrompt = false
+    /// 可用的新版本（驱动更新提示弹窗）。
+    @Published var availableUpdate: AppUpdateInfo?
+    @Published var isCheckingForUpdates = false
     @Published var quickPreviewItem: MediaItem?
     @Published var scanProgress: ScanProgress?
     @Published var isScanning = false
@@ -5748,6 +5756,12 @@ final class AppState: ObservableObject {
         play(adjacent, preserveSelection: item.parentID != nil)
     }
 
+    /// 上一集/下一集是否存在：播放器在 teardown 当前播放前必须先确认，
+    /// 否则越界切换会把当前播放拆掉却没有新内容顶上（窗口卡死在黑屏）。
+    func hasAdjacentItem(to item: MediaItem, direction: Int) -> Bool {
+        adjacentItem(to: item, direction: direction) != nil
+    }
+
     func nextMusicItemForPreloading(after item: MediaItem) -> MediaItem? {
         guard item.type == .music,
               let nextID = MusicQueuePreloadPolicy.nextItemID(
@@ -5967,7 +5981,110 @@ final class AppState: ObservableObject {
             triggerSakuraEasterEggIfNeeded(for: item)
             return
         }
+        videoQueue = videoQueueItems(startingAt: item)
         activePlayerItem = item
+    }
+
+    /// 检查 GitHub Releases 是否有新版本。手动检查总是反馈结果；
+    /// 静默检查（每日首启）尊重「跳过该版本 / 永不提醒」。
+    func checkForUpdates(manual: Bool) {
+        guard !isCheckingForUpdates else { return }
+        isCheckingForUpdates = true
+        Task { @MainActor in
+            defer { isCheckingForUpdates = false }
+            do {
+                guard let info = try await AppUpdateChecker.fetchLatestRelease(),
+                      AppVersion.isVersion(info.version, newerThan: AppVersion.current) else {
+                    if manual {
+                        alert = AppAlert(title: "已是最新版本", message: "当前版本 \(AppVersion.current)。")
+                    }
+                    return
+                }
+                if !manual {
+                    guard !settings.updateRemindersDisabled,
+                          settings.updateSkippedVersion != info.tagName else { return }
+                }
+                availableUpdate = info
+            } catch {
+                if manual {
+                    alert = AppAlert(title: "检查更新失败", message: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    /// 每天第一次启动时静默检查一次更新。
+    func checkForUpdatesDailyIfNeeded() {
+        let key = "MediaLib.update.lastCheckDay"
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let today = formatter.string(from: Date())
+        guard UserDefaults.standard.string(forKey: key) != today else { return }
+        UserDefaults.standard.set(today, forKey: key)
+        checkForUpdates(manual: false)
+    }
+
+    /// 从访达双击/「打开方式」进入的本地媒体文件：在库内则播放库内条目
+    /// （保留进度、剧集队列等），否则构造临时条目直接播放，不写入媒体库。
+    func playExternalFiles(_ urls: [URL]) {
+        guard let url = urls.first(where: \.isFileURL) else { return }
+        let path = url.path
+        if let existing = items.first(where: { $0.filePath == path }) {
+            play(existing)
+            return
+        }
+        let ext = url.pathExtension.lowercased()
+        let isMusic = SystemDefaultPlayerRegistrar.musicExtensions.contains(ext)
+        let item = MediaItem(
+            id: "external-file:\(path)",
+            type: isMusic ? .music : .other,
+            title: url.deletingPathExtension().lastPathComponent,
+            filePath: path
+        )
+        if isMusic {
+            musicQueue = [item]
+        }
+        presentBuiltInPlayer(item)
+    }
+
+    /// 直接播放网络串流地址（不入库）：构造临时 MediaItem 交给内置播放器，
+    /// mpv 原生支持 http(s)/rtsp/rtmp 等协议；进度按未知 id 落库为 no-op，不污染媒体库。
+    func playNetworkStream(_ urlString: String) {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https", "rtsp", "rtmp", "rtp", "mms", "srt", "udp", "ftp"].contains(scheme) else {
+            alert = AppAlert(title: "无法播放", message: "请输入合法的串流地址（http / https / rtsp / rtmp 等）。")
+            return
+        }
+        let title: String = {
+            let name = url.lastPathComponent
+            if !name.isEmpty, name != "/" {
+                return name.removingPercentEncoding ?? name
+            }
+            return url.host ?? trimmed
+        }()
+        let item = MediaItem(
+            id: "url-stream:\(trimmed)",
+            type: .other,
+            title: title,
+            filePath: trimmed
+        )
+        showingNetworkStreamPrompt = false
+        presentBuiltInPlayer(item)
+    }
+
+    /// 构建剧集播放队列：当前集 + 同系列中排在它之后的剧集（沿用剧集页的排序）。
+    private func videoQueueItems(startingAt item: MediaItem) -> [MediaItem] {
+        guard let parentID = item.parentID,
+              let parent = items.first(where: { $0.id == parentID }) else {
+            return [item]
+        }
+        let siblings = children(for: parent).filter { $0.filePath != nil }
+        guard let index = siblings.firstIndex(where: { $0.id == item.id }) else {
+            return [item]
+        }
+        return Array(siblings[index...])
     }
 
     /// #14 当播放的歌曲歌名包含「アゲイン」时，触发樱花纷飞特效（持续 5 秒），
@@ -6117,11 +6234,13 @@ final class AppState: ObservableObject {
         guard settings.rememberPlaybackPosition else { return }
         guard !shouldIgnoreStalePlaybackSave(from: item) else { return }
         do {
+            // 「播放完成自动标记已看」关闭时传一个不可达阈值：仍记录进度，
+            // 但永不自动置已看（此前该开关只有设置项、无任何行为）。
             try mediaRepository?.updatePlayback(
                 id: item.id,
                 position: position,
                 duration: duration,
-                watchedThreshold: settings.watchedThreshold
+                watchedThreshold: settings.autoMarkWatched ? settings.watchedThreshold : 2.0
             )
             playbackClearRevisionByItemID.removeValue(forKey: item.id)
             if reloadLibrary {
