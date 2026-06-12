@@ -353,6 +353,8 @@ final class AppState: ObservableObject {
     /// 可用的新版本（驱动更新提示弹窗）。
     @Published var availableUpdate: AppUpdateInfo?
     @Published var isCheckingForUpdates = false
+    /// 第三次启动时弹出的赞赏邀请。
+    @Published var showingSponsorPrompt = false
     @Published var quickPreviewItem: MediaItem?
     @Published var scanProgress: ScanProgress?
     @Published var isScanning = false
@@ -6011,6 +6013,17 @@ final class AppState: ObservableObject {
                 }
             }
         }
+    }
+
+    /// 记录启动次数；恰好第三次启动时邀请用户赞赏（只弹一次）。
+    func registerLaunchAndMaybeInvite() {
+        let countKey = "MediaLib.launchCount"
+        let invitedKey = "MediaLib.sponsorInvited"
+        let count = UserDefaults.standard.integer(forKey: countKey) + 1
+        UserDefaults.standard.set(count, forKey: countKey)
+        guard count == 3, !UserDefaults.standard.bool(forKey: invitedKey) else { return }
+        UserDefaults.standard.set(true, forKey: invitedKey)
+        showingSponsorPrompt = true
     }
 
     /// 每天第一次启动时静默检查一次更新。

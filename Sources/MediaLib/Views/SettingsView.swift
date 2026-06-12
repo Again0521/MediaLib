@@ -1029,6 +1029,7 @@ private struct AboutMediaLIBSheet: View {
 
     private let githubURL = URL(string: "https://github.com/Again0521/MediaLib")!
     private let emailURL = URL(string: "mailto:zonn.l@foxmail.com")!
+    private let sponsorURL = URL(string: "https://ifdian.net/a/0521zn/plan")!
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sheetContent) {
@@ -1067,6 +1068,11 @@ private struct AboutMediaLIBSheet: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(AppColors.selectedGlassTint)
                 }
+                AboutInfoRow(title: "投喂作者", systemImage: "heart") {
+                    Link("请作者喝杯咖啡", destination: sponsorURL)
+                        .buttonStyle(.plain)
+                        .foregroundStyle(AppColors.selectedGlassTint)
+                }
             }
             .padding(14)
             .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 0.94)
@@ -1086,8 +1092,18 @@ private struct AboutMediaLIBSheet: View {
 
 private struct AboutAppLogoView: View {
     private static let logo: NSImage? = {
-        guard let url = Bundle.module.url(forResource: "AppIcon", withExtension: "png") else { return nil }
-        return NSImage(contentsOf: url)
+        // 直接用运行中 App 的图标：零文件访问、不触发任何权限弹窗，也最快。
+        // 旧实现走 Bundle.module，会在可执行文件同级目录（开发/解包时可能位于
+        // ~/Documents 下）探测 *.bundle，从而弹出「请求访问文稿」的系统授权框。
+        let appIcon = NSApplication.shared.applicationIconImage
+        if let appIcon, appIcon.size.width > 1 {
+            return appIcon
+        }
+        // 退回到 App 自身 Resources（不探测同级 bundle）。
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png") {
+            return NSImage(contentsOf: url)
+        }
+        return nil
     }()
 
     var body: some View {

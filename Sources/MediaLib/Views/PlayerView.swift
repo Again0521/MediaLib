@@ -853,8 +853,10 @@ struct PlayerView: View {
             }
         }
         .frame(
+            minWidth: VideoWindowSizing.minimumControlSafeWidth,
             idealWidth: preferredSize.width,
             maxWidth: .infinity,
+            minHeight: VideoWindowSizing.minimumControlSafeHeight,
             idealHeight: preferredSize.height,
             maxHeight: .infinity
         )
@@ -10037,12 +10039,23 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
             window.contentViewController = hostingController
             window.contentView?.wantsLayer = true
             window.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
+            // ★ 关键：assign contentViewController 时 AppKit 会把窗口缩到 SwiftUI 视图的
+            // fittingSize（PlayerView 用 idealWidth + maxWidth:.infinity、无 minWidth，
+            // 压缩尺寸近乎为 0，于是窗口每次都开得很小）。这里在 VC 赋值「之后」把目标
+            // 内容尺寸显式钉回去，覆盖 fitting 尺寸——启动宽度/记忆宽度才会真正生效。
+            window.setContentSize(preferredSize)
+            window.contentAspectRatio = preferredSize
             window.contentView?.layoutSubtreeIfNeeded()
             Self.centerWindow(window, on: sourceScreen)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             DispatchQueue.main.async { [weak window] in
                 guard let window, !window.styleMask.contains(.fullScreen) else { return }
+                // 再钉一次：SwiftUI 首帧布局可能在本回合后才回灌 fitting 尺寸。
+                let currentWidth = window.contentView?.frame.width ?? preferredSize.width
+                if abs(currentWidth - preferredSize.width) > 2 {
+                    window.setContentSize(preferredSize)
+                }
                 Self.centerWindow(window, on: sourceScreen, tolerance: 3)
             }
             self.window = window

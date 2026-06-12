@@ -116,6 +116,7 @@ struct MediaLibApp: App {
                         appState.playExternalFiles(pending)
                     }
                     appState.checkForUpdatesDailyIfNeeded()
+                    appState.registerLaunchAndMaybeInvite()
                 }
                 .onChange(of: appState.settings.theme) { _ in
                     appState.applyAppearance()

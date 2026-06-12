@@ -433,6 +433,10 @@ struct ContentView: View {
             AppUpdatePromptSheet(update: update)
                 .environmentObject(appState)
         }
+        .sheet(isPresented: $appState.showingSponsorPrompt) {
+            SponsorInviteSheet()
+                .environmentObject(appState)
+        }
         .sheet(item: $smartCollectionEditor) { request in
             VideoSmartCollectionSheet(
                 request: request,
@@ -2425,5 +2429,46 @@ struct AppUpdatePromptSheet: View {
             }
         }
         .padding(20)
+    }
+}
+
+/// 第三次启动时的赞赏邀请。
+struct SponsorInviteSheet: View {
+    @EnvironmentObject private var appState: AppState
+    private let sponsorURL = URL(string: "https://ifdian.net/a/0521zn/plan")!
+
+    var body: some View {
+        VStack(spacing: 18) {
+            PlayfulSymbolIcon(systemImage: "cup.and.saucer.fill", size: 60)
+                .padding(.top, 8)
+
+            VStack(spacing: 6) {
+                Text("觉得软件不错？投喂我！")
+                    .font(.title3.weight(.semibold))
+                    .multilineTextAlignment(.center)
+                Text("MediaLIB 由我一个人利用业余时间打磨。如果它帮到了你，一杯咖啡的鼓励能让它走得更远。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 24)
+
+            HStack(spacing: 12) {
+                Button("下次一定") {
+                    appState.showingSponsorPrompt = false
+                }
+                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 16, minHeight: 36, thickness: 0.94))
+
+                Button("现在就去！") {
+                    NSWorkspace.shared.open(sponsorURL)
+                    appState.showingSponsorPrompt = false
+                }
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 18, minHeight: 36, prominent: true))
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 420)
     }
 }
