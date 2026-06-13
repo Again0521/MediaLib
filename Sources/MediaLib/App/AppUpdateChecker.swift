@@ -17,7 +17,7 @@ struct AppUpdateInfo: Identifiable, Equatable {
 enum AppVersion {
     /// 打包版从 Info.plist 读取；swift run 裸二进制兜底用当前发布版本。
     static var current: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.2"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.3"
     }
 
     /// 从任意文本里提取版本号：抓出第一段「点分数字」，如 v1.1.1 / 1.20.01 / 标题里的 1.1.11。

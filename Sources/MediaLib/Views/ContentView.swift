@@ -2395,46 +2395,46 @@ struct NetworkStreamPromptSheet: View {
 struct AppUpdatePromptSheet: View {
     @EnvironmentObject private var appState: AppState
     let update: AppUpdateInfo
-    private let dateFormatter: DateFormatter = {
+    private var dateFormatter: DateFormatter {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.locale = Locale(identifier: appState.settings.appLanguage.localeIdentifier)
         formatter.dateStyle = .medium
         formatter.timeStyle = .none
         return formatter
-    }()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sheetContent) {
             AppSheetHeader(
-                title: "发现新版本 \(update.version)",
-                subtitle: "当前版本 \(AppVersion.current)。\(releaseMetaText)",
+                title: "\(appState.localized("发现新版本")) \(update.version)",
+                subtitle: "\(appState.localized("当前版本")) \(AppVersion.current)。\(releaseMetaText)",
                 systemImage: "sparkles",
                 subtitleLineLimit: 2
             )
 
             AppInfoNote(
-                text: "后台更新检查只读取 GitHub Releases 元数据；跳过当前版本后，静默检查不会再提示这一版，手动检查仍可看到结果。",
+                text: appState.localized("后台更新检查只读取 GitHub Releases 元数据；跳过当前版本后，静默检查不会再提示这一版，手动检查仍可看到结果。"),
                 systemImage: "arrow.triangle.2.circlepath"
             )
 
             releaseNotesView
 
             AppSheetActionFooter {
-                Button("跳过此版") {
+                Button(appState.localized("跳过此版")) {
                     appState.settings.updateSkippedVersion = update.tagName
                     appState.saveSettings()
                     appState.availableUpdate = nil
                 }
                 .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 34))
 
-                Button("不再自动提醒") {
+                Button(appState.localized("不再自动提醒")) {
                     appState.settings.updateRemindersDisabled = true
                     appState.saveSettings()
                     appState.availableUpdate = nil
                 }
                 .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 34))
 
-                Button(update.downloadURL == nil ? "打开 Release" : "下载更新") {
+                Button(appState.localized(update.downloadURL == nil ? "打开 Release" : "下载更新")) {
                     NSWorkspace.shared.open(update.downloadURL ?? update.releaseURL)
                     appState.availableUpdate = nil
                 }
@@ -2457,13 +2457,13 @@ struct AppUpdatePromptSheet: View {
     private var releaseNotesView: some View {
         let sections = AppUpdateNoteSection.parse(update.releaseNotes)
         if sections.isEmpty {
-            AppInfoNote(text: "此版本未提供更新日志，可前往 Release 页面查看详情。", systemImage: "doc.text")
+            AppInfoNote(text: appState.localized("此版本未提供更新日志，可前往 Release 页面查看详情。"), systemImage: "doc.text")
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(sections) { section in
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(section.title)
+                            Text(appState.localized(section.title))
                                 .font(.callout.weight(.semibold))
                             ForEach(section.items, id: \.self) { item in
                                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -2528,7 +2528,6 @@ private struct AppUpdateNoteSection: Identifiable {
 /// 第三次启动时的赞赏邀请。
 struct SponsorInviteSheet: View {
     @EnvironmentObject private var appState: AppState
-    private let sponsorURL = URL(string: "https://ifdian.net/a/0521zn/plan")!
 
     var body: some View {
         VStack(spacing: 18) {
@@ -2536,10 +2535,10 @@ struct SponsorInviteSheet: View {
                 .padding(.top, 8)
 
             VStack(spacing: 6) {
-                Text("觉得软件不错？投喂我！")
+                Text(appState.localized("觉得软件不错？投喂我！"))
                     .font(.title3.weight(.semibold))
                     .multilineTextAlignment(.center)
-                Text("MediaLIB 由我一个人利用业余时间打磨。如果它帮到了你，一杯咖啡的鼓励能让它走得更远。")
+                Text(appState.localized("MediaLIB 由我一个人利用业余时间打磨。如果它帮到了你，一杯咖啡的鼓励能让它走得更远。"))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -2548,13 +2547,13 @@ struct SponsorInviteSheet: View {
             .padding(.horizontal, 24)
 
             HStack(spacing: 12) {
-                Button("下次一定") {
+                Button(appState.localized("下次一定")) {
                     appState.showingSponsorPrompt = false
                 }
                 .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 16, minHeight: 36, thickness: 0.94))
 
-                Button("现在就去！") {
-                    NSWorkspace.shared.open(sponsorURL)
+                Button(appState.localized("现在就去！")) {
+                    NSWorkspace.shared.open(appState.sponsorURL)
                     appState.showingSponsorPrompt = false
                 }
                 .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 18, minHeight: 36, prominent: true))

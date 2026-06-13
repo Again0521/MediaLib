@@ -5993,7 +5993,10 @@ final class AppState: ObservableObject {
     func checkForUpdates(manual: Bool) {
         if isCheckingForUpdates {
             if manual {
-                alert = AppAlert(title: "正在检查更新", message: "MediaLIB 正在后台确认最新版本，请稍等。")
+                alert = AppAlert(
+                    title: localized("正在检查更新"),
+                    message: localized("MediaLIB 正在后台确认最新版本，请稍等。")
+                )
             }
             return
         }
@@ -6008,24 +6011,27 @@ final class AppState: ObservableObject {
             do {
                 guard let info = try await AppUpdateChecker.fetchLatestRelease(),
                       AppVersion.isVersion(info.version, newerThan: AppVersion.current) else {
-                    self.markUpdateCheckSucceeded()
-                    if manual {
-                        self.alert = AppAlert(title: "已是最新版本", message: "当前版本 \(AppVersion.current)。")
-                    }
-                    return
+                self.markUpdateCheckSucceeded()
+                if manual {
+                    self.alert = AppAlert(
+                        title: self.localized("已是最新版本"),
+                        message: "\(self.localized("当前版本")) \(AppVersion.current)。"
+                    )
                 }
+                return
+            }
                 self.markUpdateCheckSucceeded()
                 if !manual {
                     guard !self.settings.updateRemindersDisabled,
                           self.settings.updateSkippedVersion != info.tagName else { return }
                 }
                 self.availableUpdate = info
-            } catch {
-                if manual {
-                    self.alert = AppAlert(title: "检查更新失败", message: error.localizedDescription)
-                }
+        } catch {
+            if manual {
+                self.alert = AppAlert(title: self.localized("检查更新失败"), message: error.localizedDescription)
             }
         }
+    }
     }
 
     private func markUpdateCheckSucceeded() {
@@ -8340,6 +8346,13 @@ final class AppState: ObservableObject {
         }
         configureAutomaticScan()
         configureAutomaticTMDBMatch()
+    }
+
+    func setAppLanguage(_ language: AppLanguage) {
+        guard settings.appLanguage != language else { return }
+        settings.appLanguage = language
+        saveSettings()
+        alert = AppAlert(title: language.nativeRestartTitle, message: language.nativeRestartMessage)
     }
 
     func rememberPlayerVolume(_ volume: Float, for mediaType: MediaType) {

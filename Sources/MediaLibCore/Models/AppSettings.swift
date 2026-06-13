@@ -30,6 +30,41 @@ public enum AppTheme: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+public enum AppLanguage: String, Codable, CaseIterable, Identifiable, Sendable {
+    case zhHans
+    case en
+    case ja
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .zhHans: return "简体中文"
+        case .en: return "English"
+        case .ja: return "日本語"
+        }
+    }
+
+    public var nativeRestartTitle: String {
+        switch self {
+        case .zhHans: return "语言已切换"
+        case .en: return "Language updated"
+        case .ja: return "言語を変更しました"
+        }
+    }
+
+    public var nativeRestartMessage: String {
+        switch self {
+        case .zhHans:
+            return "重启 MediaLIB 后，界面会完整切换为简体中文。"
+        case .en:
+            return "Restart MediaLIB to finish switching the interface to English."
+        case .ja:
+            return "MediaLIB を再起動すると、画面表示が日本語に切り替わります。"
+        }
+    }
+}
+
 public enum ArtworkFallbackMode: String, Codable, CaseIterable, Identifiable {
     case videoFrame
     case generatedDefault
@@ -1290,6 +1325,7 @@ public struct AppSettings: Codable, Hashable {
     }
 
     public var defaultPlayer: DefaultPlayer
+    public var appLanguage: AppLanguage
     public var theme: AppTheme
     /// 配色预设 + 自定义颜色（十六进制，不含 #）。
     public var themePreset: AppThemePreset
@@ -1440,6 +1476,7 @@ public struct AppSettings: Codable, Hashable {
 
     public init(
         defaultPlayer: DefaultPlayer = .builtIn,
+        appLanguage: AppLanguage = .zhHans,
         theme: AppTheme = .light,
         themePreset: AppThemePreset = .classic,
         themeBaseHex: String? = nil,
@@ -1553,6 +1590,7 @@ public struct AppSettings: Codable, Hashable {
         traktSyncEnabled: Bool = false
     ) {
         self.defaultPlayer = defaultPlayer
+        self.appLanguage = appLanguage
         self.theme = theme
         self.themePreset = themePreset
         self.themeBaseHex = themeBaseHex
@@ -1668,6 +1706,7 @@ public struct AppSettings: Codable, Hashable {
 
     private enum CodingKeys: String, CodingKey {
         case defaultPlayer
+        case appLanguage
         case theme
         case themePreset
         case themeBaseHex
@@ -1794,6 +1833,7 @@ public struct AppSettings: Codable, Hashable {
 
         self.init(
             defaultPlayer: legacyDefaultPlayer ?? defaults.defaultPlayer,
+            appLanguage: try container.decodeIfPresent(AppLanguage.self, forKey: .appLanguage) ?? defaults.appLanguage,
             theme: try container.decodeIfPresent(AppTheme.self, forKey: .theme) ?? defaults.theme,
             themePreset: try container.decodeIfPresent(AppThemePreset.self, forKey: .themePreset) ?? defaults.themePreset,
             themeBaseHex: try container.decodeIfPresent(String.self, forKey: .themeBaseHex) ?? defaults.themeBaseHex,

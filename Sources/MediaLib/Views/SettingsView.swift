@@ -47,8 +47,11 @@ struct SettingsView: View {
         .glassPerformanceMode(.balanced)
         .preferStaticGlassSurfaces(true)
         .suppressListHighlight()
+        .transaction { transaction in
+            transaction.animation = nil
+        }
         .background(AppPageBackground())
-        .navigationTitle("设置")
+        .navigationTitle(appState.localized("设置"))
         .sheet(isPresented: $showingMusicTagSheet) {
             MusicTagScraperSheet(
                 autoStart: autoStartMusicMetadataConsole,
@@ -93,11 +96,11 @@ struct SettingsView: View {
                     appState.saveSettings()
                 })) {
                     ForEach(DefaultPlayer.allCases) { player in
-                        Text(player.displayName).tag(player)
+                        Text(appState.localized(player.displayName)).tag(player)
                     }
                 }
                 .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.settings.videoDefaultPlayer.displayName)
+                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.videoDefaultPlayer.displayName))
             }
 
             if appState.settings.videoDefaultPlayer == .external {
@@ -137,11 +140,11 @@ struct SettingsView: View {
                     appState.saveSettings()
                 })) {
                     ForEach(VideoPlaybackEndAction.allCases) { action in
-                        Text(action.displayName).tag(action)
+                        Text(appState.localized(action.displayName)).tag(action)
                     }
                 }
                 .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.settings.videoPlaybackEndAction.displayName)
+                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.videoPlaybackEndAction.displayName))
             }
 
             SettingsRow(title: "已看判定", systemImage: "checkmark.seal") {
@@ -221,11 +224,11 @@ struct SettingsView: View {
                     appState.saveSettings()
                 })) {
                     ForEach(DefaultPlayer.allCases) { player in
-                        Text(player.displayName).tag(player)
+                        Text(appState.localized(player.displayName)).tag(player)
                     }
                 }
                 .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.settings.musicDefaultPlayer.displayName)
+                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.musicDefaultPlayer.displayName))
             }
 
             if appState.settings.musicDefaultPlayer == .external {
@@ -252,11 +255,11 @@ struct SettingsView: View {
             SettingsRow(title: "歌词同步", systemImage: "text.badge.checkmark") {
                 Picker("歌词同步", selection: binding(\.lyricSyncAlgorithm)) {
                     ForEach(LyricSyncAlgorithm.allCases) { algorithm in
-                        Text(algorithm.displayName).tag(algorithm)
+                        Text(appState.localized(algorithm.displayName)).tag(algorithm)
                     }
                 }
                 .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.settings.lyricSyncAlgorithm.displayName)
+                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.lyricSyncAlgorithm.displayName))
             }
 
             SettingsDescription(text: appState.settings.lyricSyncAlgorithm.description)
@@ -268,11 +271,11 @@ struct SettingsView: View {
                 SettingsRow(title: "音乐响度均衡", systemImage: "waveform.badge.magnifyingglass") {
                     Picker("音乐响度均衡", selection: binding(\.musicLoudnessNormalization)) {
                         ForEach(MusicLoudnessNormalization.allCases) { mode in
-                            Text(mode.displayName).tag(mode)
+                            Text(appState.localized(mode.displayName)).tag(mode)
                         }
                     }
                     .labelsHidden()
-                    .settingsMenuControl(selectedTitle: appState.settings.musicLoudnessNormalization.displayName)
+                    .settingsMenuControl(selectedTitle: appState.localized(appState.settings.musicLoudnessNormalization.displayName))
                 }
 
                 SettingsDescription(text: "按歌曲已有的 ReplayGain / R128 标签均衡音量，并保留峰值保护。不会修改音乐文件。")
@@ -280,11 +283,11 @@ struct SettingsView: View {
                 SettingsRow(title: "跨曲过渡", systemImage: "arrow.right.to.line.compact") {
                     Picker("跨曲过渡", selection: binding(\.musicTransitionMode)) {
                         ForEach(MusicTransitionMode.allCases) { mode in
-                            Text(mode.displayName).tag(mode)
+                            Text(appState.localized(mode.displayName)).tag(mode)
                         }
                     }
                     .labelsHidden()
-                    .settingsMenuControl(selectedTitle: appState.settings.musicTransitionMode.displayName)
+                    .settingsMenuControl(selectedTitle: appState.localized(appState.settings.musicTransitionMode.displayName))
                 }
 
                 if appState.settings.musicTransitionMode == .softFade {
@@ -302,11 +305,11 @@ struct SettingsView: View {
                     SettingsRow(title: "均衡器预设", systemImage: "dial.medium") {
                         Picker("均衡器预设", selection: binding(\.musicEqualizerPreset)) {
                             ForEach(MusicEqualizerPreset.allCases) { preset in
-                                Text(preset.displayName).tag(preset)
+                                Text(appState.localized(preset.displayName)).tag(preset)
                             }
                         }
                         .labelsHidden()
-                        .settingsMenuControl(selectedTitle: appState.settings.musicEqualizerPreset.displayName)
+                        .settingsMenuControl(selectedTitle: appState.localized(appState.settings.musicEqualizerPreset.displayName))
                     }
                     SettingsDescription(text: "从低音到高音五段调节，对所有音乐生效；新的设置从下一首开始。")
                 }
@@ -326,11 +329,11 @@ struct SettingsView: View {
             SettingsRow(title: "自动扫描", systemImage: "clock.arrow.circlepath") {
                 Picker("自动扫描", selection: binding(\.automaticScanInterval)) {
                     ForEach(AutomaticScanInterval.allCases) { interval in
-                        Text(interval.displayName).tag(interval)
+                        Text(appState.localized(interval.displayName)).tag(interval)
                     }
                 }
                 .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.settings.automaticScanInterval.displayName)
+                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.automaticScanInterval.displayName))
             }
 
             SettingsDescription(text: "本机文件夹有变动会很快更新；移动硬盘和网络位置按固定间隔检查。暂时连不上的来源会先跳过，之后自动再试。")
@@ -427,11 +430,11 @@ struct SettingsView: View {
             SettingsRow(title: "影视匹配宽容度", systemImage: "scope") {
                 Picker("影视匹配宽容度", selection: binding(\.metadataMatchTolerance)) {
                     ForEach(MetadataMatchTolerance.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
+                        Text(appState.localized(mode.displayName)).tag(mode)
                     }
                 }
                 .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.settings.metadataMatchTolerance.displayName)
+                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.metadataMatchTolerance.displayName))
             }
 
             SettingsDescription(text: "决定自动匹配需要多大把握：\(appState.settings.metadataMatchTolerance.summary)。越宽松越容易自动配上信息，但偶尔可能认错；拿不准就保持默认。")
@@ -452,11 +455,11 @@ struct SettingsView: View {
             SettingsRow(title: "自动拉取周期", systemImage: "clock.arrow.circlepath") {
                 Picker("自动拉取周期", selection: binding(\.automaticTMDBMatchInterval)) {
                     ForEach(AutomaticScanInterval.allCases) { interval in
-                        Text(interval.displayName).tag(interval)
+                        Text(appState.localized(interval.displayName)).tag(interval)
                     }
                 }
                 .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.settings.automaticTMDBMatchInterval.displayName)
+                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.automaticTMDBMatchInterval.displayName))
             }
 
             SettingsDescription(text: "立即匹配会补全尚未匹配的电视剧和动漫；自动拉取只处理之后新增且未匹配的内容。")
@@ -466,11 +469,11 @@ struct SettingsView: View {
             SettingsRow(title: "音乐数据源", systemImage: "music.note.list") {
                 Picker("音乐数据源", selection: binding(\.musicMetadataProvider)) {
                     ForEach(MusicMetadataProvider.allCases) { provider in
-                        Text(provider.displayName).tag(provider)
+                        Text(appState.localized(provider.displayName)).tag(provider)
                     }
                 }
                 .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.settings.musicMetadataProvider.displayName)
+                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.musicMetadataProvider.displayName))
             }
 
             if appState.settings.musicMetadataProvider.requiresAPIKey {
@@ -494,11 +497,11 @@ struct SettingsView: View {
             SettingsRow(title: "音乐匹配宽容度", systemImage: "scope") {
                 Picker("音乐匹配宽容度", selection: binding(\.musicMetadataMatchTolerance)) {
                     ForEach(MetadataMatchTolerance.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
+                        Text(appState.localized(mode.displayName)).tag(mode)
                     }
                 }
                 .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.settings.musicMetadataMatchTolerance.displayName)
+                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.musicMetadataMatchTolerance.displayName))
             }
 
             SettingsDescription(text: "决定自动补全音乐信息时需要多大把握：\(appState.settings.musicMetadataMatchTolerance.summary)。")
@@ -640,6 +643,22 @@ struct SettingsView: View {
 
     private var appearanceSettings: some View {
         SettingsSection(title: "外观与布局", subtitle: "调整主题、配色和海报尺寸。", systemImage: "paintbrush.pointed") {
+            SettingsRow(title: "界面语言", systemImage: "globe") {
+                Picker("界面语言", selection: Binding(get: {
+                    appState.settings.appLanguage
+                }, set: { language in
+                    appState.setAppLanguage(language)
+                })) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(language.displayName).tag(language)
+                    }
+                }
+                .labelsHidden()
+                .settingsMenuControl(selectedTitle: appState.settings.appLanguage.displayName)
+            }
+
+            SettingsDescription(text: "切换后会在下次启动时完整生效，当前窗口会先更新设置页和提示文案。")
+
             SettingsRow(title: "主题", systemImage: "circle.lefthalf.filled") {
                 Picker("主题", selection: Binding(get: {
                     appState.settings.theme
@@ -648,11 +667,11 @@ struct SettingsView: View {
                     appState.saveSettings()
                 })) {
                     ForEach(AppTheme.allCases) { theme in
-                        Text(theme.displayName).tag(theme)
+                        Text(appState.localized(theme.displayName)).tag(theme)
                     }
                 }
                 .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.settings.theme.displayName)
+                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.theme.displayName))
             }
 
             SettingsRow(title: "配色", systemImage: "paintpalette") {
@@ -660,11 +679,11 @@ struct SettingsView: View {
                     appState.settings.themePreset
                 }, set: { appState.setThemePreset($0) })) {
                     ForEach(AppThemePreset.allCases) { preset in
-                        Text(preset.displayName).tag(preset)
+                        Text(appState.localized(preset.displayName)).tag(preset)
                     }
                 }
                 .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.settings.themePreset.displayName)
+                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.themePreset.displayName))
             }
 
             if appState.settings.themePreset.isCustom {
@@ -1025,11 +1044,11 @@ struct SettingsView: View {
 }
 
 private struct AboutMediaLIBSheet: View {
+    @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
 
     private let githubURL = URL(string: "https://github.com/Again0521/MediaLib")!
     private let emailURL = URL(string: "mailto:zonn.l@foxmail.com")!
-    private let sponsorURL = URL(string: "https://ifdian.net/a/0521zn/plan")!
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.sheetContent) {
@@ -1038,9 +1057,9 @@ private struct AboutMediaLIBSheet: View {
                     .frame(width: 78, height: 78, alignment: .center)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("关于 MediaLIB")
+                    Text(appState.localized("关于 MediaLIB"))
                         .font(.title3.weight(.semibold))
-                    Text("MediaLIB 是一款面向 macOS 的个人影音媒体库应用，帮助你整理、播放和管理本地、Emby 与网络来源的视频和音乐收藏。")
+                    Text(appState.localized("MediaLIB 是一款面向 macOS 的个人影音媒体库应用，帮助你整理、播放和管理本地、Emby 与网络来源的视频和音乐收藏。"))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineSpacing(2)
@@ -1057,7 +1076,7 @@ private struct AboutMediaLIBSheet: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(AppColors.selectedGlassTint)
                 }
-                AboutInfoRow(title: "作者", systemImage: "person.crop.circle") {
+                AboutInfoRow(title: appState.localized("作者"), systemImage: "person.crop.circle") {
                     Text("ZonnL")
                 }
                 AboutInfoRow(title: "QQ群", systemImage: "bubble.left.and.bubble.right") {
@@ -1068,8 +1087,8 @@ private struct AboutMediaLIBSheet: View {
                         .buttonStyle(.plain)
                         .foregroundStyle(AppColors.selectedGlassTint)
                 }
-                AboutInfoRow(title: "投喂作者", systemImage: "heart") {
-                    Link("请作者喝杯咖啡", destination: sponsorURL)
+                AboutInfoRow(title: appState.localized("投喂作者"), systemImage: "heart") {
+                    Link(appState.localized("请作者喝杯咖啡"), destination: appState.sponsorURL)
                         .buttonStyle(.plain)
                         .foregroundStyle(AppColors.selectedGlassTint)
                 }
@@ -1081,7 +1100,7 @@ private struct AboutMediaLIBSheet: View {
                 Button {
                     dismiss()
                 } label: {
-                    Label("关闭", systemImage: "xmark")
+                    Label(appState.localized("关闭按钮"), systemImage: "xmark")
                 }
                 .settingsActionButton(width: 104, prominent: true)
             }
@@ -1152,6 +1171,7 @@ private struct AboutInfoRow<Content: View>: View {
 }
 
 struct SettingsSection<Content: View>: View {
+    @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     let title: String
     let subtitle: String
@@ -1164,11 +1184,15 @@ struct SettingsSection<Content: View>: View {
                 PlayfulSymbolIcon(systemImage: systemImage, size: 38)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
+                    Text(appState.localized(title))
                         .font(.title3.weight(.semibold))
-                    Text(subtitle)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.88)
+                    Text(appState.localized(subtitle))
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(.horizontal, 2)
@@ -1187,11 +1211,12 @@ struct SettingsSection<Content: View>: View {
 }
 
 struct SettingsSubsectionHeader: View {
+    @EnvironmentObject private var appState: AppState
     let title: String
     let systemImage: String
 
     var body: some View {
-        Label(title, systemImage: systemImage)
+        Label(appState.localized(title), systemImage: systemImage)
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
             .padding(.top, 4)
@@ -1429,12 +1454,19 @@ struct PrivacySettingsPanel: View {
 }
 
 struct SettingsHeader: View {
+    @EnvironmentObject private var appState: AppState
+
     var body: some View {
-        PageHeader(title: "设置", subtitle: "调整播放、媒体库、界面与隐私设置。", systemImage: "gearshape")
+        PageHeader(
+            title: appState.localized("设置"),
+            subtitle: appState.localized("调整播放、媒体库、界面与隐私设置。"),
+            systemImage: "gearshape"
+        )
     }
 }
 
 struct SettingsRow<Content: View>: View {
+    @EnvironmentObject private var appState: AppState
     let title: String
     let systemImage: String
     let contentSpacing: CGFloat
@@ -1456,9 +1488,11 @@ struct SettingsRow<Content: View>: View {
         HStack(spacing: 14) {
             PlayfulSymbolIcon(systemImage: systemImage, size: 26)
 
-            Text(title)
+            Text(appState.localized(title))
                 .font(.callout.weight(.medium))
-                .frame(width: 132, alignment: .leading)
+                .lineLimit(2)
+                .minimumScaleFactor(0.86)
+                .frame(width: 148, alignment: .leading)
 
             HStack(spacing: contentSpacing) {
                 content
@@ -1563,10 +1597,11 @@ struct SettingsToggleRow: View {
 }
 
 struct SettingsDescription: View {
+    @EnvironmentObject private var appState: AppState
     let text: String
 
     var body: some View {
-        AppInfoNote(text: text)
+        AppInfoNote(text: appState.localized(text))
     }
 }
 
