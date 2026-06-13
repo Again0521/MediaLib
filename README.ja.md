@@ -20,7 +20,11 @@
   <a href="./README.en.md">English</a> ·
   <a href="./README.ja.md">日本語</a>
 </p>
+<div align="center">
 
+<a href="https://www.patreon.com/c/feiniaoqianshan/membership">Buy Me a Coffee！</a>
+
+</div>
 MediaLIB は、ローカルディスク、外付けドライブ、NAS、SMB/FTP のネットワークフォルダ、そして Emby、Jellyfin、Plex に散らばった映画、ドラマ、アニメ、ドキュメンタリー、バラエティ、音楽をひとつにまとめます。ひとつの画面から、閲覧、検索、お気に入り、続きを見る、再生まで自然に扱えます。
 
 フォルダを勝手に管理したり、メディアファイルを移動・変更したりすることはありません。MediaLIB は、きれいに整った「メディアの索引センター」のようなものです。ファイルは元の場所にそのまま残り、分類、カバー画像、再生履歴、お気に入り、プレイリスト、オフラインキャッシュ、メタデータの修正は App のローカルデータとして保存されます。
