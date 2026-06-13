@@ -14,17 +14,17 @@
 </p>
 
 </div>
-
-<p align="center">
-  <a href="./README.md">中文</a> ·
-  <a href="./README.en.md">English</a> ·
-  <a href="./README.ja.md">日本語</a>
-</p>
 <div align="center">
 
 <a href="https://ifdian.net/a/0521zn/plan">本软件完全免费，如果喜欢的话可以点击这里投喂作者哦</a>
 
 </div>
+<p align="center">
+  <a href="./README.md">中文</a> ·
+  <a href="./README.en.md">English</a> ·
+  <a href="./README.ja.md">日本語</a>
+</p>
+
 MediaLIB 可以把散落在本地硬盘、移动硬盘、NAS、SMB/FTP 网络目录，以及 Emby、Jellyfin、Plex 里的电影、剧集、动漫、纪录片、综艺和音乐整理到一起。你可以在一个统一的界面里浏览、搜索、收藏、继续观看和直接播放。
 
 它不会替你接管文件夹，也不会擅自移动或修改你的媒体文件。MediaLIB 更像是一个漂亮的“媒体索引中心”：你的文件继续留在原来的位置，分类、封面、播放记录、收藏、歌单、离线缓存和元数据修正都保存在 App 自己的本机数据里。
