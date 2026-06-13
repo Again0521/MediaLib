@@ -3003,15 +3003,18 @@ private struct MusicExpandedLyricsPanel: View {
             )
             .allowsHitTesting(false)
 
+            // 需求3：歌词卡右侧回归"平衡光"——从右边界向卡内非常柔和地漫入，
+            // 颜色取封面高斯模糊主色（glowPrimary，primaryOnly），给右边界一条
+            // 均匀的轮廓受光 + 极淡染色；随播放与封面光同亮同灭（spillProgress←isPlaying）。
             AlbumLightSpillOverlay(
                 palette: palette,
                 controller: controller,
                 cornerRadius: MusicPlayerVisualTokens.Radius.card,
-                intensity: 0.72,
-                reach: 0.34,
+                intensity: 1.58,
+                reach: 0.58,
                 sourceEdge: .trailing,
                 primaryOnly: true,
-                light: AlbumComponentLight(strength: 0.88, focus: 0.5, spread: 1.0)
+                light: AlbumComponentLight(strength: 1.0, focus: 0.5, spread: 1.0)
             )
             .allowsHitTesting(false)
 
@@ -3348,11 +3351,14 @@ private struct LyricCenterSpotlight: View {
         GeometryReader { geo in
             // 舞台光（需求7）：特别柔和——峰值压低、平台收窄、衰减拉到更长，
             // 看起来是"中心慢慢亮起来"而不是一束突然的光；只提亮背景，不冲淡歌词颜色。
-            let radius = min(max(min(geo.size.width, geo.size.height) * 0.72, 260), 430)
-            let peak = colorScheme == .dark ? 0.044 : 0.068
-            let stagePeak = colorScheme == .dark ? 0.056 : 0.082
+            // 需求4：中心舞台光照亮当前播放行——主体用专辑色（提一档，让中心更亮），
+            // 但白色镜面层保持很薄、不提高，避免把歌词中心冲成白雾、淡化字色；
+            // 半径更大、羽化更长，使光"尽可能柔和"地铺开。
+            let radius = min(max(min(geo.size.width, geo.size.height) * 0.86, 320), 540)
+            let peak = colorScheme == .dark ? 0.092 : 0.135
+            let stagePeak = colorScheme == .dark ? 0.120 : 0.178
             // 白色均匀舞台光只保留薄薄一层镜面亮度，主体交给专辑色，避免把歌词中心冲成白雾。
-            let stageWhite = colorScheme == .dark ? 0.034 : 0.048
+            let stageWhite = colorScheme == .dark ? 0.050 : 0.074
             ZStack {
                 Ellipse()
                     .fill(
@@ -3369,11 +3375,11 @@ private struct LyricCenterSpotlight: View {
                         )
                     )
                     .frame(
-                        width: min(max(geo.size.width * 0.68, 360), 700),
-                        height: min(max(geo.size.height * 0.20, 112), 190)
+                        width: min(max(geo.size.width * 0.76, 420), 820),
+                        height: min(max(geo.size.height * 0.24, 138), 230)
                     )
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                    .blur(radius: 32)
+                    .blur(radius: 38)
                     .blendMode(.screen)
 
                 RadialGradient(
@@ -3703,10 +3709,10 @@ private struct AlbumLightSpillOverlay: View {
         let nearStop = min(max(reach * 0.24, lateralEdge ? 0.040 : 0.060), lateralEdge ? 0.105 : 0.16)
         let midStop = min(max(reach * 0.48, lateralEdge ? 0.095 : 0.13), lateralEdge ? 0.22 : 0.31)
         // 放宽羽化终点上限，让更深的 reach 把浸染过渡铺得更长、更柔（向参考图的"光软软漫进卡片"靠拢）。
-        let fadeStop = min(max(reach, trailingPrimaryLight ? 0.16 : (lateralEdge ? 0.18 : 0.24)), trailingPrimaryLight ? 0.26 : (lateralEdge ? 0.34 : 0.48))
-        let tailStop = min(max(fadeStop + (trailingPrimaryLight ? 0.06 : (lateralEdge ? 0.08 : 0.13)), trailingPrimaryLight ? 0.28 : (lateralEdge ? 0.26 : 0.44)), trailingPrimaryLight ? 0.36 : (lateralEdge ? 0.46 : 0.68))
-        let innerSoftStop = min(max(reach * 0.54, trailingPrimaryLight ? 0.16 : (lateralEdge ? 0.16 : 0.26)), trailingPrimaryLight ? 0.30 : (lateralEdge ? 0.34 : 0.50))
-        let innerTailStop = min(max(reach * 0.78, trailingPrimaryLight ? 0.24 : (lateralEdge ? 0.24 : 0.38)), trailingPrimaryLight ? 0.40 : (lateralEdge ? 0.46 : 0.62))
+        let fadeStop = min(max(reach, trailingPrimaryLight ? 0.24 : (lateralEdge ? 0.18 : 0.24)), trailingPrimaryLight ? 0.52 : (lateralEdge ? 0.34 : 0.48))
+        let tailStop = min(max(fadeStop + (trailingPrimaryLight ? 0.12 : (lateralEdge ? 0.08 : 0.13)), trailingPrimaryLight ? 0.40 : (lateralEdge ? 0.26 : 0.44)), trailingPrimaryLight ? 0.72 : (lateralEdge ? 0.46 : 0.68))
+        let innerSoftStop = min(max(reach * 0.62, trailingPrimaryLight ? 0.26 : (lateralEdge ? 0.16 : 0.26)), trailingPrimaryLight ? 0.52 : (lateralEdge ? 0.34 : 0.50))
+        let innerTailStop = min(max(reach * 0.88, trailingPrimaryLight ? 0.40 : (lateralEdge ? 0.24 : 0.38)), trailingPrimaryLight ? 0.72 : (lateralEdge ? 0.46 : 0.62))
 
         ZStack {
             // §2.3 裹边内发光：让光看起来是绕过玻璃边缘渗进内部，而非只在边线上。
@@ -3715,10 +3721,10 @@ private struct AlbumLightSpillOverlay: View {
                 .fill(
                     LinearGradient(
                         stops: [
-                            .init(color: glowColor.opacity((darkMode ? 0.105 : 0.078) * spill), location: MusicPlayerVisualTokens.Spill.innerPeak),
-                            .init(color: glowColor.opacity((darkMode ? 0.120 : 0.095) * spill), location: MusicPlayerVisualTokens.Spill.innerPrimary),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.066 : 0.052) * spill), location: MusicPlayerVisualTokens.Spill.innerSecondary),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.028 : 0.022) * spill), location: innerSoftStop),
+                            .init(color: glowColor.opacity((darkMode ? 0.150 : 0.118) * spill), location: MusicPlayerVisualTokens.Spill.innerPeak),
+                            .init(color: glowColor.opacity((darkMode ? 0.168 : 0.135) * spill), location: MusicPlayerVisualTokens.Spill.innerPrimary),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.092 : 0.074) * spill), location: MusicPlayerVisualTokens.Spill.innerSecondary),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.042 : 0.034) * spill), location: innerSoftStop),
                             .init(color: .clear, location: innerTailStop)
                         ],
                         startPoint: startPoint,
@@ -3732,10 +3738,10 @@ private struct AlbumLightSpillOverlay: View {
                 .fill(
                     LinearGradient(
                         stops: [
-                            .init(color: glowColor.opacity((darkMode ? 0.310 : 0.240) * spill), location: 0),
-                            .init(color: secondaryColor.opacity((darkMode ? 0.160 : 0.125) * spill), location: nearStop),
-                            .init(color: accentColor.opacity((darkMode ? 0.068 : 0.052) * spill), location: midStop),
-                            .init(color: accentColor.opacity((darkMode ? 0.024 : 0.018) * spill), location: fadeStop),
+                            .init(color: glowColor.opacity((darkMode ? 0.420 : 0.335) * spill), location: 0),
+                            .init(color: secondaryColor.opacity((darkMode ? 0.225 : 0.178) * spill), location: nearStop),
+                            .init(color: accentColor.opacity((darkMode ? 0.098 : 0.078) * spill), location: midStop),
+                            .init(color: accentColor.opacity((darkMode ? 0.040 : 0.032) * spill), location: fadeStop),
                             .init(color: .clear, location: tailStop)
                         ],
                         startPoint: startPoint,
@@ -4717,16 +4723,18 @@ private final class MusicExpandedProgressStateObserver: ObservableObject {
             controller.$isPreparing,
             controller.$errorMessage
         )
-        .combineLatest(controller.$isPlaying)
-        .sink { [weak self] progressState, isPlaying in
+        .combineLatest(Publishers.CombineLatest(controller.$isPlaying, controller.$seekState))
+        .sink { [weak self] progressState, playbackState in
             guard let self else { return }
             let (currentTime, duration, isPreparing, errorMessage) = progressState
+            let (isPlaying, seekState) = playbackState
             let nextState = Self.makeState(
                 currentTime: currentTime,
                 duration: duration,
                 isPlaying: isPlaying,
                 isPreparing: isPreparing,
-                errorMessage: errorMessage
+                errorMessage: errorMessage,
+                seekState: seekState
             )
             guard nextState != self.state else { return }
             self.state = nextState
@@ -4739,7 +4747,8 @@ private final class MusicExpandedProgressStateObserver: ObservableObject {
             duration: controller.duration,
             isPlaying: controller.isPlaying,
             isPreparing: controller.isPreparing,
-            errorMessage: controller.errorMessage
+            errorMessage: controller.errorMessage,
+            seekState: controller.seekState
         )
     }
 
@@ -4748,16 +4757,30 @@ private final class MusicExpandedProgressStateObserver: ObservableObject {
         duration: Double,
         isPlaying: Bool,
         isPreparing: Bool,
-        errorMessage: String?
+        errorMessage: String?,
+        seekState: PlaybackSeekState?
     ) -> MusicExpandedProgressState {
-        MusicExpandedProgressState(
-            currentTime: currentTime,
+        let displayTime = timelineDisplayTime(currentTime: currentTime, seekState: seekState)
+        return MusicExpandedProgressState(
+            currentTime: displayTime,
             duration: duration,
             isPlaying: isPlaying,
             canControl: errorMessage == nil && !isPreparing,
-            formattedCurrentTime: formatTime(currentTime),
+            formattedCurrentTime: formatTime(displayTime),
             formattedDuration: duration > 0 ? formatTime(duration) : "--:--"
         )
+    }
+
+    fileprivate static func timelineDisplayTime(currentTime: Double, seekState: PlaybackSeekState?) -> Double {
+        guard let seekState else { return currentTime }
+        switch seekState.phase {
+        case .scrubbing:
+            return seekState.presentationTime
+        case .seeking:
+            return seekState.presentationTime
+        case .settled:
+            return seekState.resolvedTime ?? currentTime
+        }
     }
 
     private static func formatTime(_ seconds: Double) -> String {
@@ -5110,7 +5133,7 @@ private struct MusicLyricRenderState: Equatable {
 
     var isSeekPreviewActive: Bool {
         guard let phase = seekState?.phase else { return false }
-        return phase == .scrubbing || phase == .seeking
+        return phase == .scrubbing
     }
 }
 
@@ -5184,18 +5207,30 @@ private final class MusicLyricRenderObserver: ObservableObject {
     ) -> MusicLyricRenderState {
         let isSeekPreviewActive: Bool
         if let phase = seekState?.phase {
-            isSeekPreviewActive = phase == .scrubbing || phase == .seeking
+            isSeekPreviewActive = phase == .scrubbing
         } else {
             isSeekPreviewActive = false
         }
         let selectionTime = isSeekPreviewActive ? (seekState?.presentationTime ?? lyricTime) : max(lyricTime, 0)
         let activeLineIndex = TimedLyricLine.playbackPosition(in: timedLyrics, at: selectionTime)?.lineIndex
         let seekRenderState = seekState.map { state in
-            MusicLyricSeekRenderState(
+            let renderTime: Double
+            switch state.phase {
+            case .scrubbing:
+                renderTime = state.presentationTime
+            case .seeking:
+                renderTime = max(lyricTime, 0)
+            case .settled:
+                renderTime = state.resolvedTime ?? max(lyricTime, 0)
+            }
+            let targetLineIndex = state.phase == .seeking
+                ? nil
+                : TimedLyricLine.playbackPosition(in: timedLyrics, at: renderTime)?.lineIndex
+            return MusicLyricSeekRenderState(
                 revision: state.revision,
                 phase: state.phase,
-                targetLineIndex: TimedLyricLine.playbackPosition(in: timedLyrics, at: state.presentationTime)?.lineIndex,
-                presentationTime: state.presentationTime
+                targetLineIndex: targetLineIndex,
+                presentationTime: renderTime
             )
         }
         return MusicLyricRenderState(
@@ -5323,7 +5358,7 @@ private final class MusicLyricActiveLineProgressObserver: ObservableObject {
     ) -> MusicLyricActiveLineProgressState {
         let isSeekPreviewActive: Bool
         if let phase = seekState?.phase {
-            isSeekPreviewActive = phase == .scrubbing || phase == .seeking
+            isSeekPreviewActive = phase == .scrubbing
         } else {
             isSeekPreviewActive = false
         }
@@ -5650,25 +5685,30 @@ private final class MusicMiniCollapsedProgressObserver: ObservableObject {
     init(controller: MpvPlayerController) {
         self.controller = controller
         state = Self.makeState(from: controller)
-        cancellable = Publishers.CombineLatest(
+        cancellable = Publishers.CombineLatest3(
             controller.$currentTime,
-            controller.$duration
-        ).sink { [weak self] currentTime, duration in
+            controller.$duration,
+            controller.$seekState
+        ).sink { [weak self] currentTime, duration, seekState in
             guard let self else { return }
-            let next = Self.makeState(currentTime: currentTime, duration: duration)
+            let next = Self.makeState(currentTime: currentTime, duration: duration, seekState: seekState)
             guard next != self.state else { return }
             self.state = next
         }
     }
 
     private static func makeState(from controller: MpvPlayerController) -> MusicMiniCollapsedProgressState {
-        makeState(currentTime: controller.currentTime, duration: controller.duration)
+        makeState(currentTime: controller.currentTime, duration: controller.duration, seekState: controller.seekState)
     }
 
-    private static func makeState(currentTime: Double, duration: Double) -> MusicMiniCollapsedProgressState {
+    private static func makeState(currentTime: Double, duration: Double, seekState: PlaybackSeekState?) -> MusicMiniCollapsedProgressState {
+        let displayTime = MusicExpandedProgressStateObserver.timelineDisplayTime(
+            currentTime: currentTime,
+            seekState: seekState
+        )
         let progress: Double
-        if duration.isFinite, duration > 0, currentTime.isFinite {
-            progress = min(max(currentTime / duration, 0), 1)
+        if duration.isFinite, duration > 0, displayTime.isFinite {
+            progress = min(max(displayTime / duration, 0), 1)
         } else {
             progress = 0
         }
@@ -7982,11 +8022,11 @@ private struct SegmentedLyricFlowText: View {
     }
 
     private func verticalOffset(for index: Int) -> CGFloat {
-        // 未播放词略低(+1.8)，已播放词略上浮(-1.8)，减小同一行内的高低差但保留上升感。
-        if index < activeSegmentIndex { return -1.8 }
-        if index > activeSegmentIndex { return 1.8 }
+        // 未播放词略低、已播放词略上浮；继续收窄高低差，让同一行更像平滑流动。
+        if index < activeSegmentIndex { return -1.25 }
+        if index > activeSegmentIndex { return 1.25 }
         let eased = easeOutCubic(riseProgress(for: index))
-        return CGFloat(1.8 - eased * 3.6)
+        return CGFloat(1.25 - eased * 2.5)
     }
 
     private func localProgress(for index: Int) -> Double {
@@ -8083,12 +8123,12 @@ private struct LyricProgressWrappingText: View {
     }
 
     private func verticalOffset(for offset: Int) -> CGFloat {
-        // Apple Music 式：未播放字在基线（略低，+1.8），已播放字整体上浮（-1.8），
+        // Apple Music 式：未播放字在基线附近，已播放字轻微上浮；
         // 播放头处平滑过渡。已播放的字保持上浮，不回落。
         let distance = Double(offset) - timing.headOriginalPosition
         let t = min(max((0.4 - distance) / 1.2, 0), 1)   // distance≤-0.8→1(已播放), ≥0.4→0(未播放)
         let eased = t * t * (3 - 2 * t)
-        return CGFloat(1.8 - eased * 3.6)                 // +1.8(未播放) → -1.8(已播放)
+        return CGFloat(1.25 - eased * 2.5)                // +1.25(未播放) → -1.25(已播放)
     }
 }
 

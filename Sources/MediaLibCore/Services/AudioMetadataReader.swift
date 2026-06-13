@@ -21,7 +21,10 @@ public final class AudioMetadataReader {
     public init() {}
 
     public func metadata(for url: URL, artworkDirectory: URL? = nil, mediaID: String? = nil) async -> AudioMetadata {
-        let asset = AVURLAsset(url: url)
+        let asset = AVURLAsset(
+            url: url,
+            options: url.isFileURL ? [AVURLAssetPreferPreciseDurationAndTimingKey: true] : nil
+        )
         let commonMetadata = (try? await asset.load(.commonMetadata)) ?? []
         let formatMetadata = await metadataByFormat(for: asset)
         let allMetadata = commonMetadata + formatMetadata

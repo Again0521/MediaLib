@@ -145,18 +145,6 @@ struct MediaLibApp: App {
                 .keyboardShortcut(.rightArrow, modifiers: [.command])
                 .disabled(appState.activePlayerItem == nil)
 
-                Button("快退 15 秒") {
-                    appState.sendPlaybackCommand(.seekBackward)
-                }
-                .keyboardShortcut(.leftArrow, modifiers: [.option])
-                .disabled(appState.activePlayerItem == nil)
-
-                Button("快进 15 秒") {
-                    appState.sendPlaybackCommand(.seekForward)
-                }
-                .keyboardShortcut(.rightArrow, modifiers: [.option])
-                .disabled(appState.activePlayerItem == nil)
-
                 Divider()
 
                 Button("打开网络串流…") {

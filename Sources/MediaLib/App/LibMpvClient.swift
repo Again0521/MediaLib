@@ -30,6 +30,15 @@ final class LibMpvClient {
         static let double: Int32 = 5
     }
 
+    private enum NetworkMemoryBuffer {
+        static let cacheSeconds = 90.0
+        static let maxBytes = "256MiB"
+        static let maxBackBytes = "96MiB"
+        static let fallbackCacheSeconds = 20.0
+        static let fallbackMaxBytes = "96MiB"
+        static let fallbackMaxBackBytes = "24MiB"
+    }
+
     private enum RenderParam {
         static let invalid: Int32 = 0
         static let apiType: Int32 = 1
@@ -77,6 +86,7 @@ final class LibMpvClient {
         volume: Float,
         speed: Float,
         hardwareDecodingMode: VideoHardwareDecodingMode,
+        networkMemoryBufferingEnabled: Bool,
         onRenderUpdate: @escaping () -> Void
     ) throws {
         libraryHandle = try Self.openLibrary()
@@ -116,13 +126,9 @@ final class LibMpvClient {
         try setOptionString("sub-auto", "fuzzy")
         try setOptionString("hwdec", hardwareDecodingMode.mpvValue)
         try setOptionString("vo", "libmpv")
-        // 弱网远程视频优先保留更长前向缓存。使用 try? 是为了兼容不同 libmpv 构建的可用选项。
-        try? setOptionString("cache", "yes")
-        try? setOptionString("cache-secs", "35")
-        try? setOptionString("demuxer-readahead-secs", "35")
-        try? setOptionString("demuxer-max-bytes", "160MiB")
-        try? setOptionString("demuxer-max-back-bytes", "48MiB")
-        try? setOptionString("cache-pause", "yes")
+        if networkMemoryBufferingEnabled {
+            applyNetworkMemoryBufferingOptions()
+        }
         try setOptionString("start", "\(max(startTime, 0))")
         // 音量增强上限 200%：实际是否超过 100% 由控制器的 volumeBoost 决定。
         try? setOptionString("volume-max", "200")
@@ -148,6 +154,24 @@ final class LibMpvClient {
 
     func loadFile(_ path: String) throws {
         try command(["loadfile", path])
+    }
+
+    func setNetworkMemoryBufferingEnabled(_ enabled: Bool) {
+        if enabled {
+            setString("cache", "yes")
+            setDouble("cache-secs", NetworkMemoryBuffer.cacheSeconds)
+            setDouble("demuxer-readahead-secs", NetworkMemoryBuffer.cacheSeconds)
+            setString("demuxer-max-bytes", NetworkMemoryBuffer.maxBytes)
+            setString("demuxer-max-back-bytes", NetworkMemoryBuffer.maxBackBytes)
+            setString("cache-pause", "yes")
+        } else {
+            setString("cache", "auto")
+            setDouble("cache-secs", NetworkMemoryBuffer.fallbackCacheSeconds)
+            setDouble("demuxer-readahead-secs", NetworkMemoryBuffer.fallbackCacheSeconds)
+            setString("demuxer-max-bytes", NetworkMemoryBuffer.fallbackMaxBytes)
+            setString("demuxer-max-back-bytes", NetworkMemoryBuffer.fallbackMaxBackBytes)
+            setString("cache-pause", "no")
+        }
     }
 
     func stopPlayback() {
@@ -282,6 +306,16 @@ final class LibMpvClient {
                 try check(setOptionStringFunction(handle, namePointer, valuePointer))
             }
         }
+    }
+
+    private func applyNetworkMemoryBufferingOptions() {
+        // libmpv 不同构建可用选项略有差异；缓存是弱网增强项，失败时保持默认播放路径。
+        try? setOptionString("cache", "yes")
+        try? setOptionString("cache-secs", "\(Int(NetworkMemoryBuffer.cacheSeconds))")
+        try? setOptionString("demuxer-readahead-secs", "\(Int(NetworkMemoryBuffer.cacheSeconds))")
+        try? setOptionString("demuxer-max-bytes", NetworkMemoryBuffer.maxBytes)
+        try? setOptionString("demuxer-max-back-bytes", NetworkMemoryBuffer.maxBackBytes)
+        try? setOptionString("cache-pause", "yes")
     }
 
     private func check(_ code: Int32) throws {

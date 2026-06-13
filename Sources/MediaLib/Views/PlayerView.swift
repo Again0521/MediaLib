@@ -43,6 +43,84 @@ enum VideoWindowSizing {
     }
 }
 
+private final class MemoryAudioResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
+    let queue = DispatchQueue(label: "MediaLIB.memory-audio-resource-loader", qos: .userInitiated)
+
+    private let data: Data
+    private let preferredContentType: String
+
+    init(fileURL: URL, data: Data) {
+        self.data = data
+        preferredContentType = UTType(filenameExtension: fileURL.pathExtension)?.identifier ?? UTType.data.identifier
+        super.init()
+    }
+
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
+    ) -> Bool {
+        if let info = loadingRequest.contentInformationRequest {
+            info.contentType = contentType(allowedTypes: info.allowedContentTypes)
+            info.contentLength = Int64(data.count)
+            info.isByteRangeAccessSupported = true
+        }
+
+        if let request = loadingRequest.dataRequest {
+            respond(to: request)
+        }
+
+        loadingRequest.finishLoading()
+        return true
+    }
+
+    func resourceLoader(
+        _ resourceLoader: AVAssetResourceLoader,
+        didCancel loadingRequest: AVAssetResourceLoadingRequest
+    ) {}
+
+    private func contentType(allowedTypes: [String]?) -> String {
+        guard let allowedTypes, !allowedTypes.isEmpty else {
+            return preferredContentType
+        }
+        if allowedTypes.contains(preferredContentType) {
+            return preferredContentType
+        }
+        return allowedTypes.first ?? preferredContentType
+    }
+
+    private func respond(to request: AVAssetResourceLoadingDataRequest) {
+        let requestedOffset = max(Int(request.requestedOffset), 0)
+        let currentOffset = max(Int(request.currentOffset), requestedOffset)
+        let offset = min(max(currentOffset, requestedOffset), data.count)
+        let requestedLength = request.requestsAllDataToEndOfResource
+            ? data.count - offset
+            : request.requestedLength
+        let length = min(max(requestedLength, 0), max(data.count - offset, 0))
+        guard length > 0 else { return }
+        request.respond(with: data.subdata(in: offset..<(offset + length)))
+    }
+}
+
+private struct MemoryAudioAsset {
+    let asset: AVURLAsset
+    let loader: MemoryAudioResourceLoader
+
+    init(fileURL: URL, data: Data) {
+        loader = MemoryAudioResourceLoader(fileURL: fileURL, data: data)
+        let assetURL = Self.assetURL(for: fileURL)
+        asset = AVURLAsset(
+            url: assetURL,
+            options: [AVURLAssetPreferPreciseDurationAndTimingKey: true]
+        )
+        asset.resourceLoader.setDelegate(loader, queue: loader.queue)
+    }
+
+    private static func assetURL(for fileURL: URL) -> URL {
+        let ext = fileURL.pathExtension.isEmpty ? "audio" : fileURL.pathExtension
+        return URL(string: "medialib-memory-audio://track/\(UUID().uuidString).\(ext)")!
+    }
+}
+
 /// 视频播放期间阻止显示器休眠/屏保（主流播放器的基本行为，此前缺失）。
 /// 播放开始持锁、暂停或关闭窗口立即释放；只挂在视频 PlayerView 上，音乐不受影响。
 @MainActor
@@ -4732,6 +4810,17 @@ private struct PlayerAdvancedSettingsOverlay: View {
             }
 
             PlayerSettingsGroup(title: "播放性能", palette: palette) {
+                PlayerSettingToggleRow(
+                    title: "弱网内存缓冲",
+                    systemImage: "memorychip",
+                    isOn: appState.settings.videoMemoryBufferingEnabled,
+                    palette: palette
+                ) {
+                    appState.settings.videoMemoryBufferingEnabled.toggle()
+                    appState.saveSettings()
+                    controller.setVideoMemoryBufferingEnabled(appState.settings.videoMemoryBufferingEnabled)
+                }
+
                 PlayerSettingRow(title: "硬件解码", systemImage: "cpu", palette: palette) {
                     PlayerChoiceGroup {
                         ForEach(VideoHardwareDecodingMode.allCases) { mode in
@@ -5212,6 +5301,17 @@ private struct PlayerSettingsPopover: View {
                 PlayerSettingsGroup(title: "播放", palette: palette) {
                     PlayerSettingRow(title: "倍速", systemImage: "speedometer", palette: palette) {
                         PlayerInlineSpeedControl(controller: controller, palette: palette)
+                    }
+
+                    PlayerSettingToggleRow(
+                        title: "弱网内存缓冲",
+                        systemImage: "memorychip",
+                        isOn: appState.settings.videoMemoryBufferingEnabled,
+                        palette: palette
+                    ) {
+                        appState.settings.videoMemoryBufferingEnabled.toggle()
+                        appState.saveSettings()
+                        controller.setVideoMemoryBufferingEnabled(appState.settings.videoMemoryBufferingEnabled)
                     }
                 }
 
@@ -7057,6 +7157,12 @@ final class MpvPlayerController: ObservableObject {
         let itemID: String
         let filePath: String
         let playerItem: AVPlayerItem
+        let memoryAsset: MemoryAudioAsset?
+    }
+
+    private struct PreparedMusicPlayerItem {
+        let playerItem: AVPlayerItem
+        let memoryAsset: MemoryAudioAsset?
     }
 
     @Published var errorMessage: String?
@@ -7205,6 +7311,8 @@ final class MpvPlayerController: ObservableObject {
     private var didReportPlaybackStart = false
     /// 视频 EOF（keep-open 停在最后一帧）只通知一次；用户回拖后复位。
     private var didNotifyPlaybackEnd = false
+    /// 音乐到达结尾、已通知一次「播放完成」（驱动自动下一曲）；切歌/重播时复位。
+    private var didReachAudioEnd = false
     /// 是否按系列/影片记忆倍速（configure 时从设置读取）。
     private var rememberPlaybackRateEnabled = false
     private var lastPlaybackProgressReportDate = Date.distantPast
@@ -7219,11 +7327,14 @@ final class MpvPlayerController: ObservableObject {
     private var activeVideoQualityOption: VideoStreamQualityOption?
     /// 清晰度档位写入的基础 vf（缩放），与翻转/锐化/降噪一起经 rebuildVideoFilterChain 合成。
     private var baseVideoFilter: String?
+    private var videoMemoryBufferingEnabled = true
     private var initialRedrawTask: Task<Void, Never>?
     private var audioSpectrumTask: Task<Void, Never>?
     private var audioTransitionTask: Task<Void, Never>?
+    private var musicMemoryLoadTask: Task<Void, Never>?
     private var musicPreloadTask: Task<Void, Never>?
     private var preloadedMusicItem: PreloadedMusicItem?
+    private var currentMemoryAudioAsset: MemoryAudioAsset?
     private var seekSyncCorrectionTask: Task<Void, Never>?
     private var clearSeekStateTask: Task<Void, Never>?
     private var pendingTimelineSeek: PendingTimelineSeek?
@@ -7287,6 +7398,7 @@ final class MpvPlayerController: ObservableObject {
         playbackTimelineOffset = 0
         activeVideoQualityOption = nil
         baseVideoFilter = nil
+        currentMemoryAudioAsset = nil
         updateBuffering(active: false, progress: nil)
         lastTrackRefreshDate = .distantPast
 
@@ -7370,24 +7482,24 @@ final class MpvPlayerController: ObservableObject {
 
         clearPreloadedMusicItem()
         let generation = playbackGeneration
-        let asset = AVURLAsset(url: URL(fileURLWithPath: nextPath))
+        let nextURL = URL(fileURLWithPath: nextPath)
         musicPreloadTask = Task { @MainActor [weak self, weak player] in
             guard let self, let player else { return }
             do {
-                let playable = try await asset.load(.isPlayable)
-                _ = try await asset.load(.duration)
-                guard playable,
-                      !Task.isCancelled,
+                let prepared = try await self.prepareMusicPlayerItem(url: nextURL, preloaded: true)
+                prepared.playerItem.preferredForwardBufferDuration = self.preferredMusicPreloadBufferDuration(for: nextItem)
+                guard !Task.isCancelled,
                       self.playbackGeneration == generation,
                       self.audioPlayer === player,
                       self.item?.id != nextItem.id else { return }
-                let playerItem = self.makeAudioPlayerItem(asset: asset, isLocal: true, preloaded: true)
+                let playerItem = prepared.playerItem
                 guard player.canInsert(playerItem, after: player.items().last) else { return }
                 player.insert(playerItem, after: player.items().last)
                 self.preloadedMusicItem = PreloadedMusicItem(
                     itemID: nextItem.id,
                     filePath: nextPath,
-                    playerItem: playerItem
+                    playerItem: playerItem,
+                    memoryAsset: prepared.memoryAsset
                 )
             } catch {
                 return
@@ -7429,7 +7541,8 @@ final class MpvPlayerController: ObservableObject {
                 startTime: currentTime,
                 volume: volume * Float(volumeBoost),
                 speed: playbackRate,
-                hardwareDecodingMode: hardwareDecodingMode
+                hardwareDecodingMode: hardwareDecodingMode,
+                networkMemoryBufferingEnabled: videoMemoryBufferingEnabled
             ) { [weak renderView] in
                 renderView?.needsDisplay = true
             }
@@ -7464,7 +7577,41 @@ final class MpvPlayerController: ObservableObject {
         }
 
         let generation = playbackGeneration
+        if url.isFileURL {
+            statusMessage = "正在将歌曲载入内存。"
+            musicMemoryLoadTask?.cancel()
+            musicMemoryLoadTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let prepared = try await self.prepareMusicPlayerItem(url: url)
+                    guard !Task.isCancelled,
+                          self.playbackGeneration == generation,
+                          self.audioPlayer == nil,
+                          self.libMpvClient == nil else { return }
+                    self.musicMemoryLoadTask = nil
+                    self.installInitialNativeAudioPlayer(
+                        playerItem: prepared.playerItem,
+                        generation: generation,
+                        memoryAsset: prepared.memoryAsset
+                    )
+                } catch {
+                    guard self.playbackGeneration == generation else { return }
+                    self.fail("音频内存缓存失败：\(error.localizedDescription)")
+                }
+            }
+            return
+        }
+
         let playerItem = makeAudioPlayerItem(url: url)
+        installInitialNativeAudioPlayer(playerItem: playerItem, generation: generation, memoryAsset: nil)
+    }
+
+    private func installInitialNativeAudioPlayer(
+        playerItem: AVPlayerItem,
+        generation: Int,
+        memoryAsset: MemoryAudioAsset?
+    ) {
+        currentMemoryAudioAsset = memoryAsset
         let player = AVQueuePlayer(items: [playerItem])
         player.allowsExternalPlayback = true
         player.automaticallyWaitsToMinimizeStalling = false
@@ -7474,6 +7621,7 @@ final class MpvPlayerController: ObservableObject {
         observeAudioEnd(for: playerItem, generation: generation)
         observeAudioExternalPlayback(for: player)
 
+        didReachAudioEnd = false
         audioPlayer = player
         isPreparing = false
         isReady = true
@@ -7511,7 +7659,11 @@ final class MpvPlayerController: ObservableObject {
         refreshMusicAirPlayRoute(afterRoutePicker: true)
     }
 
-    private func switchNativeAudio(to nextItem: MediaItem, settings: AppSettings) {
+    private func switchNativeAudio(
+        to nextItem: MediaItem,
+        settings: AppSettings,
+        preparedOverride: PreparedMusicPlayerItem? = nil
+    ) {
         guard let player = audioPlayer else {
             configure(item: nextItem, settings: settings)
             return
@@ -7531,12 +7683,46 @@ final class MpvPlayerController: ObservableObject {
             return preloaded
         }
         let alreadyAdvancedToPreload = queuedPreload.map { player.currentItem === $0.playerItem } == true
+
+        if preparedOverride == nil,
+           queuedPreload == nil,
+           !nextItem.isRemoteResource,
+           url.isFileURL {
+            let loadGeneration = playbackGeneration
+            musicMemoryLoadTask?.cancel()
+            player.pause()
+            audioLocalMirrorPlayer?.pause()
+            audioRouteProxyPlayer?.pause()
+            isPlaying = false
+            isPreparing = true
+            statusMessage = "正在将歌曲载入内存。"
+            updateSystemNowPlaying()
+            musicMemoryLoadTask = Task { @MainActor [weak self, weak player] in
+                guard let self, let player else { return }
+                do {
+                    let prepared = try await self.prepareMusicPlayerItem(url: url)
+                    guard !Task.isCancelled,
+                          self.playbackGeneration == loadGeneration,
+                          self.audioPlayer === player else { return }
+                    self.musicMemoryLoadTask = nil
+                    self.switchNativeAudio(to: nextItem, settings: settings, preparedOverride: prepared)
+                } catch {
+                    guard self.playbackGeneration == loadGeneration else { return }
+                    self.fail("音频内存缓存失败：\(error.localizedDescription)")
+                }
+            }
+            return
+        }
+
         reportPlayback(.stopped, force: true)
+        didReachAudioEnd = false
         playbackGeneration += 1
         let generation = playbackGeneration
         removeAudioEndObserver()
         seekSyncCorrectionTask?.cancel()
         seekSyncCorrectionTask = nil
+        musicMemoryLoadTask?.cancel()
+        musicMemoryLoadTask = nil
         musicPreloadTask?.cancel()
         musicPreloadTask = nil
         if alreadyAdvancedToPreload {
@@ -7585,7 +7771,8 @@ final class MpvPlayerController: ObservableObject {
             }
         }
 
-        let playerItem = queuedPreload?.playerItem ?? makeAudioPlayerItem(url: url)
+        let playerItem = queuedPreload?.playerItem ?? preparedOverride?.playerItem ?? makeAudioPlayerItem(url: url)
+        currentMemoryAudioAsset = queuedPreload?.memoryAsset ?? preparedOverride?.memoryAsset
         observeAudioEnd(for: playerItem, generation: generation)
         player.allowsExternalPlayback = true
         player.automaticallyWaitsToMinimizeStalling = false
@@ -7656,14 +7843,68 @@ final class MpvPlayerController: ObservableObject {
         return URL(fileURLWithPath: filePath)
     }
 
-    private func makeAudioPlayerItem(url: URL, applyEqualizer: Bool = true) -> AVPlayerItem {
-        makeAudioPlayerItem(asset: AVURLAsset(url: url), isLocal: url.isFileURL, applyEqualizer: applyEqualizer)
+    private nonisolated static func loadMusicFileData(fileURL: URL) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) {
+            try Data(contentsOf: fileURL)
+        }.value
+    }
+
+    private func prepareMusicPlayerItem(
+        url: URL,
+        preloaded: Bool = false,
+        applyEqualizer: Bool = true
+    ) async throws -> PreparedMusicPlayerItem {
+        guard url.isFileURL else {
+            return PreparedMusicPlayerItem(
+                playerItem: makeAudioPlayerItem(url: url, applyEqualizer: applyEqualizer),
+                memoryAsset: nil
+            )
+        }
+
+        let data = try await Self.loadMusicFileData(fileURL: url)
+        try Task.checkCancellation()
+        let memoryAsset = MemoryAudioAsset(fileURL: url, data: data)
+        let playable = try await memoryAsset.asset.load(.isPlayable)
+        guard playable else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        _ = try await memoryAsset.asset.load(.duration)
+        let playerItem = makeAudioPlayerItem(
+            asset: memoryAsset.asset,
+            isLocal: true,
+            preloaded: preloaded,
+            applyEqualizer: applyEqualizer
+        )
+        return PreparedMusicPlayerItem(playerItem: playerItem, memoryAsset: memoryAsset)
+    }
+
+    private func makeAudioAsset(url: URL, preferPreciseTiming: Bool) -> AVURLAsset {
+        guard preferPreciseTiming, url.isFileURL else {
+            return AVURLAsset(url: url)
+        }
+        return AVURLAsset(
+            url: url,
+            options: [AVURLAssetPreferPreciseDurationAndTimingKey: true]
+        )
+    }
+
+    private func makeAudioPlayerItem(
+        url: URL,
+        applyEqualizer: Bool = true,
+        preferPreciseTiming: Bool? = nil
+    ) -> AVPlayerItem {
+        let usePreciseTiming = preferPreciseTiming ?? (item?.type == .music)
+        return makeAudioPlayerItem(
+            asset: makeAudioAsset(url: url, preferPreciseTiming: usePreciseTiming),
+            isLocal: url.isFileURL,
+            applyEqualizer: applyEqualizer
+        )
     }
 
     private func makeAudioPlayerItem(asset: AVAsset, isLocal: Bool, preloaded: Bool = false, applyEqualizer: Bool = true) -> AVPlayerItem {
         let playerItem = AVPlayerItem(asset: asset)
         if isLocal {
-            playerItem.preferredForwardBufferDuration = preloaded ? 6 : 0
+            playerItem.preferredForwardBufferDuration = preloaded ? 120 : 0
         } else {
             playerItem.preferredForwardBufferDuration = 2
         }
@@ -7677,6 +7918,13 @@ final class MpvPlayerController: ObservableObject {
             }
         }
         return playerItem
+    }
+
+    private func preferredMusicPreloadBufferDuration(for item: MediaItem) -> TimeInterval {
+        guard let duration = item.duration, duration.isFinite, duration > 0 else {
+            return 120
+        }
+        return min(max(duration, 60), 240)
     }
 
     private func clearPreloadedMusicItem() {
@@ -7873,7 +8121,7 @@ final class MpvPlayerController: ObservableObject {
         }
     }
 
-    private func syncAudioRouteProxyPlayback(probing: Bool = false) {
+    private func syncAudioRouteProxyPlayback(probing: Bool = false, timelineTime: Double? = nil) {
         guard item?.type == .music,
               keepLocalAudioWithAirPlay,
               let proxy = audioRouteProxyPlayer else { return }
@@ -7884,10 +8132,11 @@ final class MpvPlayerController: ObservableObject {
         proxy.allowsExternalPlayback = true
         proxy.isMuted = probing || !audioRouteProxyIsActive
         proxy.volume = audioRouteProxyIsActive ? effectiveMusicVolume : 0
+        let syncTime = timelineTime ?? currentTime
         proxy.seek(
-            to: CMTime(seconds: max(currentTime, 0), preferredTimescale: 600),
-            toleranceBefore: CMTime(seconds: 0.20, preferredTimescale: 600),
-            toleranceAfter: CMTime(seconds: 0.20, preferredTimescale: 600)
+            to: CMTime(seconds: max(syncTime, 0), preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
         ) { [weak self, weak proxy] _ in
             Task { @MainActor in
                 guard let self,
@@ -7916,7 +8165,7 @@ final class MpvPlayerController: ObservableObject {
                     self.audioPlayer?.currentItem === $0.playerItem
                 } == true
                 self.isPlaying = advancedToPreloaded || (self.audioPlayer?.rate ?? 0) > 0
-                self.onPlaybackFinished?()
+                self.notifyAudioPlaybackFinishedOnce()
             }
         }
     }
@@ -8014,13 +8263,14 @@ final class MpvPlayerController: ObservableObject {
         audioLocalMirrorPlayer = mirror
     }
 
-    private func syncAudioLocalMirrorPlayback() {
+    private func syncAudioLocalMirrorPlayback(timelineTime: Double? = nil) {
         guard let mirror = audioLocalMirrorPlayer else { return }
         mirror.volume = effectiveMusicVolume
+        let syncTime = timelineTime ?? currentTime
         mirror.seek(
-            to: CMTime(seconds: max(currentTime, 0), preferredTimescale: 600),
-            toleranceBefore: CMTime(seconds: 0.20, preferredTimescale: 600),
-            toleranceAfter: CMTime(seconds: 0.20, preferredTimescale: 600)
+            to: CMTime(seconds: max(syncTime, 0), preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
         ) { [weak self, weak mirror] _ in
             Task { @MainActor in
                 guard let self,
@@ -8087,7 +8337,9 @@ final class MpvPlayerController: ObservableObject {
 
     func seek(to seconds: Double) {
         guard canControl else { return }
-        let target = min(max(seconds, 0), max(duration, 0))
+        let target = item?.type == .music
+            ? clampedTimelineTime(seconds)
+            : min(max(seconds, 0), max(duration, 0))
         commitTimelineSeek(to: target)
     }
 
@@ -8132,7 +8384,6 @@ final class MpvPlayerController: ObservableObject {
         seekSyncCorrectionTask?.cancel()
         seekSyncCorrectionTask = nil
         pendingTimelineSeek = nil
-        currentTime = target
         seekState = PlaybackSeekState(
             revision: revision,
             phase: .scrubbing,
@@ -8147,6 +8398,7 @@ final class MpvPlayerController: ObservableObject {
         let seekRevision = beginTimelineSeek(to: target, generation: generation)
         if let audioPlayer {
             scheduleSeekSyncCorrection(for: generation)
+            audioPlayer.currentItem?.cancelPendingSeeks()
             audioPlayer.seek(
                 to: CMTime(seconds: target, preferredTimescale: 600),
                 toleranceBefore: .zero,
@@ -8163,6 +8415,15 @@ final class MpvPlayerController: ObservableObject {
                         return
                     }
                     let actualTime = audioPlayer.currentTime().seconds
+                    guard self.isSeekClockSettled(actualTime, target: target) else {
+                        self.reissuePendingSeekIfNeeded(
+                            observedTime: actualTime,
+                            generation: generation,
+                            audioPlayer: audioPlayer
+                        )
+                        self.scheduleSeekSyncCorrection(for: generation)
+                        return
+                    }
                     if self.applyPlaybackClock(
                         actualTime,
                         generation: generation,
@@ -8175,8 +8436,8 @@ final class MpvPlayerController: ObservableObject {
                     self.scheduleSeekSyncCorrection(for: generation)
                 }
             }
-            syncAudioLocalMirrorPlayback()
-            syncAudioRouteProxyPlayback()
+            syncAudioLocalMirrorPlayback(timelineTime: target)
+            syncAudioRouteProxyPlayback(timelineTime: target)
             updateSystemNowPlaying()
             return
         }
@@ -8198,16 +8459,52 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func clampedTimelineTime(_ seconds: Double) -> Double {
-        min(max(seconds, 0), max(duration, 0))
+        min(max(seconds, 0), max(seekableDuration, 0))
+    }
+
+    private var seekableDuration: Double {
+        if duration.isFinite, duration > 0 {
+            return duration
+        }
+        return nativeAudioItemDuration ?? 0
+    }
+
+    private var nativeAudioItemDuration: Double? {
+        guard let itemDuration = audioPlayer?.currentItem?.duration.seconds,
+              itemDuration.isFinite,
+              itemDuration > 0 else { return nil }
+        return itemDuration
+    }
+
+    @discardableResult
+    private func refreshNativeAudioDuration() -> Double {
+        var resolvedDuration = duration.isFinite && duration > 0 ? duration : 0
+        if resolvedDuration <= 0, let itemDuration = nativeAudioItemDuration {
+            resolvedDuration = itemDuration
+        }
+        if resolvedDuration > 0, abs(duration - resolvedDuration) > 0.05 {
+            duration = resolvedDuration
+        }
+        return resolvedDuration
     }
 
     private func nextSeekRevision() -> Int {
         (seekState?.revision ?? 0) &+ 1
     }
 
+    /// 音乐播放到结尾的唯一出口：保证一首歌只触发一次自动下一曲。
+    /// 只由 `AVPlayerItemDidPlayToEndTime` 这类真实播放结束事件驱动，不再让进度条
+    /// duration 阈值猜测结尾，避免 VBR/错误元数据把歌曲提前切到下一首。
+    private func notifyAudioPlaybackFinishedOnce() {
+        guard !didReachAudioEnd else { return }
+        didReachAudioEnd = true
+        onPlaybackFinished?()
+    }
+
     func restartFromBeginning() {
         currentTime = 0
         lyricTime = 0
+        didReachAudioEnd = false
         clearSeekStateTask?.cancel()
         clearSeekStateTask = nil
         seekState = nil
@@ -8293,6 +8590,7 @@ final class MpvPlayerController: ObservableObject {
         sharpenMode = settings.videoSharpenMode
         denoiseMode = settings.videoDenoiseMode
         toneMappingMode = settings.videoToneMappingMode
+        videoMemoryBufferingEnabled = settings.videoMemoryBufferingEnabled
         videoEqualizerEnabled = settings.videoEqualizerEnabled
         videoEqualizerPreset = settings.videoEqualizerPreset
         secondarySubtitleID = nil
@@ -8322,6 +8620,7 @@ final class MpvPlayerController: ObservableObject {
         client.setString("tone-mapping", toneMappingMode.rawValue)
         client.setFlag("audio-pitch-correction", pitchCorrectionEnabled)
         client.setString("loop-file", loopCurrentItem ? "inf" : "no")
+        client.setNetworkMemoryBufferingEnabled(videoMemoryBufferingEnabled)
         applyABLoop(to: client)
     }
 
@@ -8366,6 +8665,11 @@ final class MpvPlayerController: ObservableObject {
     func setToneMappingMode(_ mode: VideoToneMappingMode) {
         toneMappingMode = mode
         libMpvClient?.setString("tone-mapping", mode.rawValue)
+    }
+
+    func setVideoMemoryBufferingEnabled(_ enabled: Bool) {
+        videoMemoryBufferingEnabled = enabled
+        libMpvClient?.setNetworkMemoryBufferingEnabled(enabled)
     }
 
     /// 视频音频均衡器（lavfi firequalizer，按音乐均衡器同一组 5 段预设）。
@@ -8727,7 +9031,6 @@ final class MpvPlayerController: ObservableObject {
             originTime: originTime,
             resolvedTime: nil
         )
-        currentTime = target
         seekSyncRevision &+= 1
         return revision
     }
@@ -8796,7 +9099,7 @@ final class MpvPlayerController: ObservableObject {
         let distanceFromTarget = abs(time - pending.targetTime)
         let distanceFromOrigin = abs(time - pending.originTime)
         let requestedDistance = abs(pending.targetTime - pending.originTime)
-        let targetTolerance = item?.type == .music ? 0.30 : 0.24
+        let targetTolerance = item?.type == .music ? 0.08 : 0.24
         let originLeaveDistance = min(max(requestedDistance * 0.45, 0.12), 0.85)
         let didActuallyLeaveOrigin = requestedDistance <= 0.08 || distanceFromOrigin >= originLeaveDistance
         if distanceFromTarget <= targetTolerance, didActuallyLeaveOrigin {
@@ -8812,6 +9115,18 @@ final class MpvPlayerController: ObservableObject {
         return false
     }
 
+    private func isSeekClockSettled(_ time: Double, target: Double) -> Bool {
+        guard time.isFinite, time >= 0 else { return false }
+        let targetTolerance = item?.type == .music ? 0.08 : 0.24
+        if abs(time - target) <= targetTolerance {
+            return true
+        }
+        guard item?.type != .music else { return false }
+        guard duration.isFinite, duration > 0 else { return false }
+        let nearEndTolerance = 0.35
+        return target >= duration - nearEndTolerance && time >= duration - nearEndTolerance
+    }
+
     private func reissuePendingSeekIfNeeded(
         observedTime: Double,
         generation: Int,
@@ -8820,8 +9135,9 @@ final class MpvPlayerController: ObservableObject {
     ) {
         guard observedTime.isFinite,
               var pending = pendingTimelineSeek,
-              pending.generation == generation,
-              abs(observedTime - pending.targetTime) > 0.20,
+              pending.generation == generation else { return }
+        let reissueTolerance = item?.type == .music ? 0.08 : 0.20
+        guard abs(observedTime - pending.targetTime) > reissueTolerance,
               abs(pending.targetTime - pending.originTime) > 0.08,
               pending.reissueCount < 4 else { return }
 
@@ -9217,7 +9533,10 @@ final class MpvPlayerController: ObservableObject {
         initialRedrawTask = nil
         audioTransitionTask?.cancel()
         audioTransitionTask = nil
+        musicMemoryLoadTask?.cancel()
+        musicMemoryLoadTask = nil
         clearPreloadedMusicItem()
+        currentMemoryAudioAsset = nil
         seekSyncCorrectionTask?.cancel()
         seekSyncCorrectionTask = nil
         clearSeekStateTask?.cancel()
@@ -9262,7 +9581,10 @@ final class MpvPlayerController: ObservableObject {
         initialRedrawTask = nil
         audioTransitionTask?.cancel()
         audioTransitionTask = nil
+        musicMemoryLoadTask?.cancel()
+        musicMemoryLoadTask = nil
         clearPreloadedMusicItem()
+        currentMemoryAudioAsset = nil
         seekSyncCorrectionTask?.cancel()
         seekSyncCorrectionTask = nil
         clearSeekStateTask?.cancel()
@@ -9368,13 +9690,11 @@ final class MpvPlayerController: ObservableObject {
                         )
                         self.refreshAudioSpectrumIfNeeded(at: audioTime)
                     }
-                    let audioDuration = audioPlayer.currentItem?.duration.seconds ?? 0
-                    if audioDuration.isFinite, audioDuration > 0, abs(self.duration - audioDuration) > 0.05 {
-                        self.duration = audioDuration
-                    }
-                    if self.duration > 0, self.currentTime >= self.duration - 0.2, self.isPlaying {
-                        self.isPlaying = false
-                        audioPlayer.pause()
+                    let effectiveDuration = self.refreshNativeAudioDuration()
+                    // 往回拖出结尾区后允许再次判定结束。
+                    if self.didReachAudioEnd, effectiveDuration > 0, audioTime.isFinite,
+                       audioTime < effectiveDuration - 1.0 {
+                        self.didReachAudioEnd = false
                     }
                     self.reportPlayback(.progress)
                     return

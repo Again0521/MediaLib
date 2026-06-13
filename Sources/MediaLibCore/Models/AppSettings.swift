@@ -1345,6 +1345,7 @@ public struct AppSettings: Codable, Hashable {
     public var videoScrubberPreviewMode: VideoScrubberPreviewMode
     public var videoPlayerPreferredWidth: Double
     public var videoPlayerAlwaysOnTop: Bool
+    public var videoMemoryBufferingEnabled: Bool
     public var videoShowRemainingTime: Bool
     public var videoResumeRewindSeconds: Double
     public var videoMarkerSkipBehavior: VideoMarkerSkipBehavior
@@ -1479,6 +1480,7 @@ public struct AppSettings: Codable, Hashable {
         videoScrubberPreviewMode: VideoScrubberPreviewMode = .performance,
         videoPlayerPreferredWidth: Double = 1120,
         videoPlayerAlwaysOnTop: Bool = false,
+        videoMemoryBufferingEnabled: Bool = true,
         videoShowRemainingTime: Bool = false,
         videoResumeRewindSeconds: Double = 5,
         videoMarkerSkipBehavior: VideoMarkerSkipBehavior = .prompt,
@@ -1591,6 +1593,7 @@ public struct AppSettings: Codable, Hashable {
         self.videoScrubberPreviewMode = videoScrubberPreviewMode
         self.videoPlayerPreferredWidth = videoPlayerPreferredWidth
         self.videoPlayerAlwaysOnTop = videoPlayerAlwaysOnTop
+        self.videoMemoryBufferingEnabled = videoMemoryBufferingEnabled
         self.videoShowRemainingTime = videoShowRemainingTime
         self.videoResumeRewindSeconds = Self.clampedVideoResumeRewind(videoResumeRewindSeconds)
         self.videoMarkerSkipBehavior = videoMarkerSkipBehavior
@@ -1705,6 +1708,7 @@ public struct AppSettings: Codable, Hashable {
         case videoScrubberPreviewMode
         case videoPlayerPreferredWidth
         case videoPlayerAlwaysOnTop
+        case videoMemoryBufferingEnabled
         case videoShowRemainingTime
         case videoResumeRewindSeconds
         case videoMarkerSkipBehavior
@@ -1832,6 +1836,7 @@ public struct AppSettings: Codable, Hashable {
             videoScrubberPreviewMode: try container.decodeIfPresent(VideoScrubberPreviewMode.self, forKey: .videoScrubberPreviewMode) ?? defaults.videoScrubberPreviewMode,
             videoPlayerPreferredWidth: try container.decodeIfPresent(Double.self, forKey: .videoPlayerPreferredWidth) ?? defaults.videoPlayerPreferredWidth,
             videoPlayerAlwaysOnTop: try container.decodeIfPresent(Bool.self, forKey: .videoPlayerAlwaysOnTop) ?? defaults.videoPlayerAlwaysOnTop,
+            videoMemoryBufferingEnabled: try container.decodeIfPresent(Bool.self, forKey: .videoMemoryBufferingEnabled) ?? defaults.videoMemoryBufferingEnabled,
             videoShowRemainingTime: try container.decodeIfPresent(Bool.self, forKey: .videoShowRemainingTime) ?? defaults.videoShowRemainingTime,
             videoResumeRewindSeconds: try container.decodeIfPresent(Double.self, forKey: .videoResumeRewindSeconds) ?? defaults.videoResumeRewindSeconds,
             videoMarkerSkipBehavior: try container.decodeIfPresent(VideoMarkerSkipBehavior.self, forKey: .videoMarkerSkipBehavior) ?? defaults.videoMarkerSkipBehavior,
