@@ -156,6 +156,15 @@ check(
     MusicQueuePreloadPolicy.nextItemID(
         queueIDs: ["a", "b", "c"],
         currentItemID: "c",
+        repeatModeRawValue: "sequential",
+        shuffleEnabled: false
+    ) == nil,
+    "Music preload policy should stop at the end of a sequential queue"
+)
+check(
+    MusicQueuePreloadPolicy.nextItemID(
+        queueIDs: ["a", "b", "c"],
+        currentItemID: "c",
         repeatModeRawValue: "repeatAll",
         shuffleEnabled: false
     ) == "a",

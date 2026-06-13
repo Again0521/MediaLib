@@ -3003,6 +3003,18 @@ private struct MusicExpandedLyricsPanel: View {
             )
             .allowsHitTesting(false)
 
+            AlbumLightSpillOverlay(
+                palette: palette,
+                controller: controller,
+                cornerRadius: MusicPlayerVisualTokens.Radius.card,
+                intensity: 0.72,
+                reach: 0.34,
+                sourceEdge: .trailing,
+                primaryOnly: true,
+                light: AlbumComponentLight(strength: 0.88, focus: 0.5, spread: 1.0)
+            )
+            .allowsHitTesting(false)
+
             LyricsCardEdgeFrost(palette: palette, cornerRadius: MusicPlayerVisualTokens.Radius.card)
                 .allowsHitTesting(false)
 
@@ -3061,7 +3073,7 @@ private struct MusicExpandedLyricsPanel: View {
             GeometryReader { geometry in
                 ScrollView(.vertical, showsIndicators: false) {
                     Text(MusicPlayerView.cleanedLyrics(lyrics))
-                        .font(.system(size: 17, weight: .medium))
+                        .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(.primary.opacity(0.86))
                         .lineSpacing(9)
                         .multilineTextAlignment(.center)
@@ -3336,11 +3348,11 @@ private struct LyricCenterSpotlight: View {
         GeometryReader { geo in
             // 舞台光（需求7）：特别柔和——峰值压低、平台收窄、衰减拉到更长，
             // 看起来是"中心慢慢亮起来"而不是一束突然的光；只提亮背景，不冲淡歌词颜色。
-            let radius = min(max(min(geo.size.width, geo.size.height) * 0.66, 240), 390)
-            let peak = colorScheme == .dark ? 0.040 : 0.060
-            let stagePeak = colorScheme == .dark ? 0.052 : 0.074
-            // 白色均匀舞台光强度（反馈3）。
-            let stageWhite = colorScheme == .dark ? 0.050 : 0.068
+            let radius = min(max(min(geo.size.width, geo.size.height) * 0.72, 260), 430)
+            let peak = colorScheme == .dark ? 0.044 : 0.068
+            let stagePeak = colorScheme == .dark ? 0.056 : 0.082
+            // 白色均匀舞台光只保留薄薄一层镜面亮度，主体交给专辑色，避免把歌词中心冲成白雾。
+            let stageWhite = colorScheme == .dark ? 0.034 : 0.048
             ZStack {
                 Ellipse()
                     .fill(
@@ -3357,11 +3369,11 @@ private struct LyricCenterSpotlight: View {
                         )
                     )
                     .frame(
-                        width: min(max(geo.size.width * 0.62, 320), 640),
-                        height: min(max(geo.size.height * 0.17, 96), 164)
+                        width: min(max(geo.size.width * 0.68, 360), 700),
+                        height: min(max(geo.size.height * 0.20, 112), 190)
                     )
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                    .blur(radius: 26)
+                    .blur(radius: 32)
                     .blendMode(.screen)
 
                 RadialGradient(
@@ -4547,7 +4559,7 @@ private struct MusicExpandedTransportRow: View {
     }
 
     private func playPreviousTrack() {
-        if appState.musicRepeatMode == .repeatOne {
+        if shouldRestartCurrentTrackForAdjacentCommand {
             controller.restartFromBeginning()
         } else {
             appState.playAdjacent(to: item, direction: -1)
@@ -4555,11 +4567,16 @@ private struct MusicExpandedTransportRow: View {
     }
 
     private func playNextTrack() {
-        if appState.musicRepeatMode == .repeatOne {
+        if shouldRestartCurrentTrackForAdjacentCommand {
             controller.restartFromBeginning()
         } else {
             appState.playAdjacent(to: item, direction: 1)
         }
+    }
+
+    private var shouldRestartCurrentTrackForAdjacentCommand: Bool {
+        appState.musicRepeatMode == .repeatOne ||
+            (appState.musicRepeatMode == .repeatAll && appState.musicQueue.count <= 1)
     }
 }
 
@@ -4937,7 +4954,7 @@ struct MusicPlaybackHost: View {
     let item: MediaItem
     let controller: MpvPlayerController
     @State private var configuredItem: MediaItem?
-    @State private var didAutoAdvance = false
+    @State private var handledFinishedItemID: String?
 
     var body: some View {
         Color.clear
@@ -5011,20 +5028,13 @@ struct MusicPlaybackHost: View {
             appState.syncEmbyPlayback(report)
         }
         controller.onPlaybackFinished = {
-            guard !didAutoAdvance else { return }
-            if appState.musicRepeatMode == .repeatOne ||
-                (appState.musicRepeatMode == .repeatAll && appState.musicQueue.count == 1) {
-                controller.restartFromBeginning()
-                return
-            }
-            didAutoAdvance = true
-            appState.playAdjacent(to: targetItem, direction: 1)
+            handlePlaybackFinished()
         }
         guard configuredItem?.id != targetItem.id else { return }
         let previousItem = configuredItem
         let previousDuration = controller.duration
         configuredItem = targetItem
-        didAutoAdvance = false
+        handledFinishedItemID = nil
         controller.configureMusic(item: targetItem, settings: appState.settings)
         refreshNextMusicPreload(for: targetItem)
         if let previousItem {
@@ -5035,6 +5045,20 @@ struct MusicPlaybackHost: View {
                 reloadLibrary: false
             )
         }
+    }
+
+    private func handlePlaybackFinished() {
+        guard let finishedItem = currentActiveMusicItem ?? configuredItem else { return }
+        if appState.musicRepeatMode == .repeatOne ||
+            (appState.musicRepeatMode == .repeatAll && appState.musicQueue.count <= 1) {
+            handledFinishedItemID = nil
+            controller.restartFromBeginning()
+            refreshNextMusicPreload(for: finishedItem)
+            return
+        }
+        guard handledFinishedItemID != finishedItem.id else { return }
+        handledFinishedItemID = finishedItem.id
+        appState.playAdjacent(to: finishedItem, direction: 1)
     }
 
     private func refreshNextMusicPreload(for item: MediaItem? = nil) {
@@ -5902,7 +5926,7 @@ private struct MusicMiniTransportControls: View {
     }
 
     private func playPreviousTrack() {
-        if appState.musicRepeatMode == .repeatOne {
+        if shouldRestartCurrentTrackForAdjacentCommand {
             controller.restartFromBeginning()
         } else {
             appState.playAdjacent(to: item, direction: -1)
@@ -5910,11 +5934,16 @@ private struct MusicMiniTransportControls: View {
     }
 
     private func playNextTrack() {
-        if appState.musicRepeatMode == .repeatOne {
+        if shouldRestartCurrentTrackForAdjacentCommand {
             controller.restartFromBeginning()
         } else {
             appState.playAdjacent(to: item, direction: 1)
         }
+    }
+
+    private var shouldRestartCurrentTrackForAdjacentCommand: Bool {
+        appState.musicRepeatMode == .repeatOne ||
+            (appState.musicRepeatMode == .repeatAll && appState.musicQueue.count <= 1)
     }
 }
 
@@ -6311,23 +6340,9 @@ private struct MusicMiniSeekSlider: View {
                     .frame(height: trackHeight)
 
                 Capsule()
-                    .fill(
-                        // 已播放段使用专辑主色的同色相纵向渐变（顶部稍亮→底部主色），实心玻璃填充。
-                        LinearGradient(
-                            colors: fillColors(isEnabled: isEnabled),
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
+                    // 已播放段只使用专辑高斯主色本身，避免上下双色或白色顶沿把进度条切成两层。
+                    .fill(progressFillColor(isEnabled: isEnabled))
                     .frame(width: fillWidth, height: trackHeight)
-                    .overlay(alignment: .top) {
-                        // 已播放段顶沿的窄玻璃高光，强化"凸起玻璃填充"立体感。
-                        Capsule()
-                            .fill(.white.opacity(isEnabled ? (colorScheme == .dark ? 0.20 : 0.30) : 0))
-                            .frame(width: max(fillWidth - 2, 0), height: max(trackHeight * 0.40, 1.4))
-                            .blendMode(.screen)
-                            .allowsHitTesting(false)
-                    }
                     .overlay(alignment: .leading) {
                         if sheenActive {
                             playingSheen(fillWidth: fillWidth)
@@ -6401,12 +6416,13 @@ private struct MusicMiniSeekSlider: View {
             max(fillWidth * MusicPlayerVisualTokens.Progress.sheenWidthRatio, MusicPlayerVisualTokens.Progress.sheenWidthMin),
             MusicPlayerVisualTokens.Progress.sheenWidthMax
         )
+        let sheenColor = usesPaletteTint ? palette.progressLight.color : AppColors.pointerLightTint
         Capsule()
             .fill(
                 LinearGradient(
                     colors: [
                         .clear,
-                        .white.opacity(MusicPlayerVisualTokens.Progress.sheenOpacity(dark: colorScheme == .dark)),
+                        sheenColor.opacity(MusicPlayerVisualTokens.Progress.sheenOpacity(dark: colorScheme == .dark) * 0.78),
                         .clear
                     ],
                     startPoint: .leading,
@@ -6442,25 +6458,11 @@ private struct MusicMiniSeekSlider: View {
         min(max(value, 0), 1)
     }
 
-    private func fillColors(isEnabled: Bool) -> [Color] {
+    private func progressFillColor(isEnabled: Bool) -> Color {
         if usesPaletteTint {
-            // 同色相纵向渐变：顶部稍亮的主色 → 底部主色。严格保持专辑主色色相（不混入第二色相），
-            // 仅靠亮度差制造玻璃填充的立体层次。
-            let lightTop = palette.primary.adjustedPreservingHue(
-                saturationMultiplier: 0.90,
-                brightnessMultiplier: 1.20,
-                minSaturation: 0.20,
-                maxSaturation: 0.80,
-                minBrightness: 0.52,
-                maxBrightness: 0.94
-            ).color.opacity(isEnabled ? 0.98 : 0.42)
-            let base = palette.primary.color.opacity(isEnabled ? 0.98 : 0.42)
-            return [lightTop, base]
+            return palette.primary.color.opacity(isEnabled ? 0.98 : 0.42)
         }
-        return [
-            AppColors.selectedGlassTint.opacity(isEnabled ? 0.94 : 0.38),
-            AppColors.pointerLightTint.opacity(isEnabled ? 0.78 : 0.30)
-        ]
+        return AppColors.selectedGlassTint.opacity(isEnabled ? 0.94 : 0.38)
     }
 }
 
@@ -7754,7 +7756,7 @@ private struct KaraokeLyricLine: View, Equatable {
 
     // 所有行（含被播放行）共用完全相同的字号与字重，杜绝"激活时整行放大、播放完突然缩小"的跳变。
     // 被播放行的突出感只来自字级 scaleEffect（见 LyricProgressWrappingText / SegmentedLyricFlowText）。
-    private static let baseFont = Font.system(size: 22, weight: .semibold, design: .rounded)
+    private static let baseFont = Font.system(size: 23, weight: .semibold, design: .rounded)
 
     var body: some View {
         if isActive {
@@ -7980,11 +7982,11 @@ private struct SegmentedLyricFlowText: View {
     }
 
     private func verticalOffset(for index: Int) -> CGFloat {
-        // 未播放词在基线(+2.5)，已播放词整体上浮(-2.5)，当前词按进度平滑过渡并保持上浮。
-        if index < activeSegmentIndex { return -2.5 }
-        if index > activeSegmentIndex { return 2.5 }
+        // 未播放词略低(+1.8)，已播放词略上浮(-1.8)，减小同一行内的高低差但保留上升感。
+        if index < activeSegmentIndex { return -1.8 }
+        if index > activeSegmentIndex { return 1.8 }
         let eased = easeOutCubic(riseProgress(for: index))
-        return CGFloat(2.5 - eased * 5.0)
+        return CGFloat(1.8 - eased * 3.6)
     }
 
     private func localProgress(for index: Int) -> Double {
@@ -8081,12 +8083,12 @@ private struct LyricProgressWrappingText: View {
     }
 
     private func verticalOffset(for offset: Int) -> CGFloat {
-        // Apple Music 式：未播放字在基线（略低，+2.5），已播放字整体上浮（-2.5），
+        // Apple Music 式：未播放字在基线（略低，+1.8），已播放字整体上浮（-1.8），
         // 播放头处平滑过渡。已播放的字保持上浮，不回落。
         let distance = Double(offset) - timing.headOriginalPosition
         let t = min(max((0.4 - distance) / 1.2, 0), 1)   // distance≤-0.8→1(已播放), ≥0.4→0(未播放)
         let eased = t * t * (3 - 2 * t)
-        return CGFloat(2.5 - eased * 5.0)                 // +2.5(未播放) → -2.5(已播放)
+        return CGFloat(1.8 - eased * 3.6)                 // +1.8(未播放) → -1.8(已播放)
     }
 }
 

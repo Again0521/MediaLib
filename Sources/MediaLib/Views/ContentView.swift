@@ -1071,13 +1071,13 @@ struct ContentView: View {
                 musicController.togglePlay()
             }
         case .previous:
-            if appState.musicRepeatMode == .repeatOne {
+            if shouldRestartCurrentMusicForAdjacentCommand {
                 musicController.restartFromBeginning()
             } else {
                 appState.playAdjacent(to: item, direction: -1)
             }
         case .next:
-            if appState.musicRepeatMode == .repeatOne {
+            if shouldRestartCurrentMusicForAdjacentCommand {
                 musicController.restartFromBeginning()
             } else {
                 appState.playAdjacent(to: item, direction: 1)
@@ -1089,6 +1089,11 @@ struct ContentView: View {
         case .toggleShuffle, .cycleRepeat:
             break
         }
+    }
+
+    private var shouldRestartCurrentMusicForAdjacentCommand: Bool {
+        appState.musicRepeatMode == .repeatOne ||
+            (appState.musicRepeatMode == .repeatAll && appState.musicQueue.count <= 1)
     }
 
     private func sidebarRow(_ destination: SidebarDestination) -> some View {
