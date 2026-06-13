@@ -20,7 +20,11 @@
   <a href="./README.en.md">English</a> ·
   <a href="./README.ja.md">日本語</a>
 </p>
+<div align="center">
 
+<a href="https://www.patreon.com/c/feiniaoqianshan/membership">Buy Me a Coffee！</a>
+
+</div>
 MediaLIB brings together movies, TV shows, anime, documentaries, variety shows, and music scattered across your local drive, external drives, NAS, SMB/FTP folders, and Emby, Jellyfin, or Plex servers. You can browse, search, favorite, continue watching, and play everything from one unified place.
 
 It does not take over your folders, and it will not move or change your media files without permission. Think of MediaLIB as a polished “media index center”: your files stay exactly where they are, while categories, artwork, watch history, favorites, playlists, offline cache, and metadata fixes are stored locally inside the app.
