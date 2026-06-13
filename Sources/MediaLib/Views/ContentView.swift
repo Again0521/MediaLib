@@ -294,6 +294,7 @@ struct ContentView: View {
     @State private var themeSwitchTask: Task<Void, Never>?
     @Namespace private var musicPlayerNamespace
     @AppStorage("MediaLib.sidebar.selection") private var storedSelectionID = "home"
+    @AppStorage("MediaLib.music.albumGlowPerformanceNoticeShown") private var albumGlowPerformanceNoticeShown = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -886,6 +887,7 @@ struct ContentView: View {
     // chrome 隐藏在覆盖层挂上后再执行，恢复则等覆盖层收起后执行，避免中间帧露出系统白底。
     private func expandMusicPlayer() {
         musicTransitionTask?.cancel()
+        showAlbumGlowPerformanceNoticeIfNeeded()
         var immediate = Transaction()
         immediate.disablesAnimations = true
         withTransaction(immediate) {
@@ -926,6 +928,18 @@ struct ContentView: View {
             }
             musicTransitionSuppressesBackground = false
         }
+    }
+
+    private func showAlbumGlowPerformanceNoticeIfNeeded() {
+        guard !albumGlowPerformanceNoticeShown,
+              appState.settings.musicAlbumCoverGlowEnabled else { return }
+        albumGlowPerformanceNoticeShown = true
+        appState.showFloatingNotice(
+            title: "封面发光已开启",
+            message: "这项效果会增加渲染开销；如果展开播放器时卡顿，可在设置中关闭封面发光。",
+            kind: .tip,
+            duration: 7.2
+        )
     }
 
     private func presentMusicMiniPlayer() {
@@ -2381,59 +2395,133 @@ struct NetworkStreamPromptSheet: View {
 struct AppUpdatePromptSheet: View {
     @EnvironmentObject private var appState: AppState
     let update: AppUpdateInfo
+    private let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                Image(systemName: "sparkles")
-                    .font(.title2)
-                    .foregroundStyle(AppColors.selectedGlassTint)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("发现新版本 \(update.version)")
-                        .font(.headline)
-                    Text("当前版本 \(AppVersion.current)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+        VStack(alignment: .leading, spacing: AppSpacing.sheetContent) {
+            AppSheetHeader(
+                title: "发现新版本 \(update.version)",
+                subtitle: "当前版本 \(AppVersion.current)。\(releaseMetaText)",
+                systemImage: "sparkles",
+                subtitleLineLimit: 2
+            )
 
-            if !update.releaseNotes.isEmpty {
-                ScrollView {
-                    Text(update.releaseNotes)
-                        .font(.callout)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                }
-                .frame(width: 460, height: 200)
-                .padding(10)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-            } else {
-                Text("可前往 GitHub Release 页查看本次更新内容。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 460, alignment: .leading)
-            }
+            AppInfoNote(
+                text: "后台更新检查只读取 GitHub Releases 元数据；跳过当前版本后，静默检查不会再提示这一版，手动检查仍可看到结果。",
+                systemImage: "arrow.triangle.2.circlepath"
+            )
 
-            HStack {
-                Button("跳过当前版本") {
+            releaseNotesView
+
+            AppSheetActionFooter {
+                Button("跳过此版") {
                     appState.settings.updateSkippedVersion = update.tagName
                     appState.saveSettings()
                     appState.availableUpdate = nil
                 }
-                Button("永不提醒") {
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 34))
+
+                Button("不再自动提醒") {
                     appState.settings.updateRemindersDisabled = true
                     appState.saveSettings()
                     appState.availableUpdate = nil
                 }
-                Spacer()
-                Button("前往更新") {
-                    NSWorkspace.shared.open(update.releaseURL)
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 34))
+
+                Button(update.downloadURL == nil ? "打开 Release" : "下载更新") {
+                    NSWorkspace.shared.open(update.downloadURL ?? update.releaseURL)
                     appState.availableUpdate = nil
                 }
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 18, minHeight: 34, prominent: true))
                 .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(20)
+        .appSheetChrome(width: 560, maxHeight: 640)
+    }
+
+    private var releaseMetaText: String {
+        var parts = [update.title]
+        if let publishedAt = update.publishedAt {
+            parts.append(dateFormatter.string(from: publishedAt))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    @ViewBuilder
+    private var releaseNotesView: some View {
+        let sections = AppUpdateNoteSection.parse(update.releaseNotes)
+        if sections.isEmpty {
+            AppInfoNote(text: "此版本未提供更新日志，可前往 Release 页面查看详情。", systemImage: "doc.text")
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(sections) { section in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(section.title)
+                                .font(.callout.weight(.semibold))
+                            ForEach(section.items, id: \.self) { item in
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Circle()
+                                        .fill(AppColors.selectedGlassTint.opacity(0.72))
+                                        .frame(width: 4.5, height: 4.5)
+                                    Text(item)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .staticSurfaceBackground(cornerRadius: 14, thickness: 0.92)
+                    }
+                }
+                .padding(2)
+            }
+            .frame(maxHeight: 292)
+        }
+    }
+}
+
+private struct AppUpdateNoteSection: Identifiable {
+    let id = UUID()
+    var title: String
+    var items: [String]
+
+    static func parse(_ raw: String) -> [AppUpdateNoteSection] {
+        let lines = raw.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var sections: [AppUpdateNoteSection] = []
+        var current = AppUpdateNoteSection(title: "更新内容", items: [])
+
+        func flush() {
+            guard !current.items.isEmpty else { return }
+            sections.append(current)
+        }
+
+        for line in lines where !line.isEmpty {
+            if line.hasPrefix("#") {
+                flush()
+                let title = line.trimmingCharacters(in: CharacterSet(charactersIn: "# ")).trimmingCharacters(in: .whitespacesAndNewlines)
+                current = AppUpdateNoteSection(title: title.isEmpty ? "更新内容" : title, items: [])
+                continue
+            }
+            let item = line
+                .replacingOccurrences(of: #"^[-*+]\s+"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: #"^\d+\.\s+"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !item.isEmpty {
+                current.items.append(item)
+            }
+        }
+        flush()
+        return sections
     }
 }
 

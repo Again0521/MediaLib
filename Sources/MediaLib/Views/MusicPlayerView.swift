@@ -2990,12 +2990,6 @@ private struct MusicExpandedLyricsPanel: View {
             LyricStageLight(palette: palette)
                 .allowsHitTesting(false)
 
-            // 正在播放行的聚光灯：当前行始终自动滚到卡片中心，故在中心放一束半径受控的柔光，
-            // 让卡片中心更亮、聚焦当前行。放在文字层之下（plusLighter 只提亮背景），文字在其上渲染，
-            // 字体颜色完全不受影响，也不会被冲淡。
-            LyricCenterSpotlight(palette: palette)
-                .allowsHitTesting(false)
-
             MusicAdaptiveTextScrim(
                 palette: palette,
                 cornerRadius: MusicPlayerVisualTokens.Radius.card,
@@ -3010,8 +3004,8 @@ private struct MusicExpandedLyricsPanel: View {
                 palette: palette,
                 controller: controller,
                 cornerRadius: MusicPlayerVisualTokens.Radius.card,
-                intensity: 1.58,
-                reach: 0.58,
+                intensity: 2.05,
+                reach: 0.68,
                 sourceEdge: .trailing,
                 primaryOnly: true,
                 light: AlbumComponentLight(strength: 1.0, focus: 0.5, spread: 1.0)
@@ -3019,6 +3013,11 @@ private struct MusicExpandedLyricsPanel: View {
             .allowsHitTesting(false)
 
             LyricsCardEdgeFrost(palette: palette, cornerRadius: MusicPlayerVisualTokens.Radius.card)
+                .allowsHitTesting(false)
+
+            // 正在播放行的聚光灯必须位于文字正下方、其它柔化遮罩之上；
+            // 否则会被上下景深/边缘霜层吃掉，看起来像完全没有亮起来。
+            LyricCenterSpotlight(palette: palette)
                 .allowsHitTesting(false)
 
             lyricsView
@@ -3355,10 +3354,10 @@ private struct LyricCenterSpotlight: View {
             // 但白色镜面层保持很薄、不提高，避免把歌词中心冲成白雾、淡化字色；
             // 半径更大、羽化更长，使光"尽可能柔和"地铺开。
             let radius = min(max(min(geo.size.width, geo.size.height) * 0.86, 320), 540)
-            let peak = colorScheme == .dark ? 0.092 : 0.135
-            let stagePeak = colorScheme == .dark ? 0.120 : 0.178
-            // 白色均匀舞台光只保留薄薄一层镜面亮度，主体交给专辑色，避免把歌词中心冲成白雾。
-            let stageWhite = colorScheme == .dark ? 0.050 : 0.074
+            let peak = colorScheme == .dark ? 0.104 : 0.148
+            let stagePeak = colorScheme == .dark ? 0.132 : 0.188
+            // 白色均匀舞台光需要可见，但只在背景层用 plusLighter 提亮，不直接参与文字前景。
+            let stageWhite = colorScheme == .dark ? 0.102 : 0.155
             ZStack {
                 Ellipse()
                     .fill(
@@ -3402,16 +3401,16 @@ private struct LyricCenterSpotlight: View {
                 RadialGradient(
                     stops: [
                         .init(color: .white.opacity(stageWhite), location: 0.00),
-                        .init(color: .white.opacity(stageWhite * 0.97), location: 0.40),
-                        .init(color: .white.opacity(stageWhite * 0.72), location: 0.62),
-                        .init(color: .white.opacity(stageWhite * 0.30), location: 0.82),
+                        .init(color: .white.opacity(stageWhite * 0.98), location: 0.24),
+                        .init(color: .white.opacity(stageWhite * 0.76), location: 0.50),
+                        .init(color: .white.opacity(stageWhite * 0.32), location: 0.78),
                         .init(color: .clear, location: 1.00)
                     ],
                     center: .center,
                     startRadius: 0,
-                    endRadius: radius * 1.04
+                    endRadius: radius * 0.92
                 )
-                .blendMode(.screen)
+                .blendMode(.plusLighter)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -7180,7 +7179,7 @@ private struct MusicChromeButtonContent: View {
         }
         .foregroundStyle(Color.primary.opacity(0.82))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .modifier(FloatingLyricsGlass(palette: palette, cornerRadius: MusicPlayerVisualTokens.Radius.chrome, tintStrength: 1.0, role: .chrome))
+        .modifier(FloatingLyricsGlass(palette: palette, cornerRadius: MusicPlayerVisualTokens.Radius.chrome, tintStrength: 1.0, role: .lyrics))
         .pointerLiquidEdge(cornerRadius: MusicPlayerVisualTokens.Radius.chrome, tint: .white, intensity: 0.72)
     }
 }
@@ -7715,7 +7714,7 @@ private struct MusicControlGlass: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .modifier(FloatingLyricsGlass(palette: palette, cornerRadius: cornerRadius, tintStrength: tintStrength, role: .controls))
+            .modifier(FloatingLyricsGlass(palette: palette, cornerRadius: cornerRadius, tintStrength: tintStrength, role: .lyrics))
     }
 }
 

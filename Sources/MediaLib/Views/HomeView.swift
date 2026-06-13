@@ -576,16 +576,21 @@ struct HomeView: View {
             visibleVideos: visibleVideos,
             profile: profile
         )
+        let recommendedIDs = Set(recommendedItems.map(\.id))
         let themeItems = themedHighRatedItems(
             daySeed: daySeed,
             visibleVideos: visibleVideos,
-            profile: profile
+            profile: profile,
+            excludedIDs: recommendedIDs
         )
+        let themeIDs = Set(themeItems.map(\.id))
         let highRatedSeriesItems = highRatedSeriesOverviewItems(
             daySeed: daySeed,
             visibleVideos: visibleVideos,
-            profile: profile
+            profile: profile,
+            excludedIDs: recommendedIDs.union(themeIDs)
         )
+        let seriesIDs = Set(highRatedSeriesItems.map(\.id))
         let watchlistItems = watchlistOverviewItems(
             daySeed: daySeed,
             visibleVideos: visibleVideos,
@@ -594,7 +599,8 @@ struct HomeView: View {
         let recentHighRatedItems = recentHighRatedOverviewItems(
             daySeed: daySeed,
             visibleVideos: visibleVideos,
-            profile: profile
+            profile: profile,
+            excludedIDs: recommendedIDs.union(seriesIDs)
         )
         let offlineItems = offlineOverviewItems(
             daySeed: daySeed,
@@ -671,8 +677,8 @@ struct HomeView: View {
             defaultBoards.append(
                 HomeOverviewBoardModel(
                     id: "recent-high-rated",
-                    title: "近期高分",
-                    subtitle: "最近入库或更新的高评分内容。",
+                    title: "高分精选",
+                    subtitle: "避开上方推荐，优先展示电影、纪录片和综艺里的高评分内容。",
                     systemImage: "clock.badge.star",
                     items: recentHighRatedItems,
                     emptyMessage: ""
@@ -789,10 +795,12 @@ struct HomeView: View {
     private func themedHighRatedItems(
         daySeed: Int,
         visibleVideos: [MediaItem],
-        profile: HomeRecommendationProfile
+        profile: HomeRecommendationProfile,
+        excludedIDs: Set<String>
     ) -> [MediaItem] {
         guard let strongestGenre = profile.strongestGenre else { return [] }
         let candidates = visibleVideos.filter { item in
+            !excludedIDs.contains(item.id) &&
             overviewGenres(for: item).contains { $0.key == strongestGenre } &&
             isHighRatedForOverview(item) &&
             !isFinishedForRecommendation(item)
@@ -805,9 +813,11 @@ struct HomeView: View {
     private func highRatedSeriesOverviewItems(
         daySeed: Int,
         visibleVideos: [MediaItem],
-        profile: HomeRecommendationProfile
+        profile: HomeRecommendationProfile,
+        excludedIDs: Set<String>
     ) -> [MediaItem] {
         let candidates = visibleVideos.filter { item in
+            !excludedIDs.contains(item.id) &&
             seriesRecommendationTypes.contains(item.type) &&
             isHighRatedForOverview(item) &&
             !isFinishedForRecommendation(item)
@@ -831,15 +841,27 @@ struct HomeView: View {
     private func recentHighRatedOverviewItems(
         daySeed: Int,
         visibleVideos: [MediaItem],
-        profile: HomeRecommendationProfile
+        profile: HomeRecommendationProfile,
+        excludedIDs: Set<String>
     ) -> [MediaItem] {
-        let candidates = visibleVideos.filter { item in
+        let primaryCandidates = visibleVideos.filter { item in
+            !excludedIDs.contains(item.id) &&
+            !seriesRecommendationTypes.contains(item.type) &&
             isHighRatedForOverview(item) &&
             !isFinishedForRecommendation(item)
         }
+        let candidates = primaryCandidates.count >= 6
+            ? primaryCandidates
+            : visibleVideos.filter { item in
+                !excludedIDs.contains(item.id) &&
+                isHighRatedForOverview(item) &&
+                !isFinishedForRecommendation(item)
+            }
         return rankedOverviewItems(from: candidates, limit: 12) { item in
-            recommendationScore(for: item, profile: profile, daySeed: daySeed) +
-            recencyScore(for: item.updatedAt, horizonDays: 180) * 2.2
+            normalizedProviderScore(item.rating) * 1.8 +
+            normalizedUserScore(item.userRating) * 1.4 +
+            recencyScore(for: item.updatedAt, horizonDays: 240) * 1.2 +
+            stableDailyVariation(for: item, daySeed: daySeed) * 0.35
         }
     }
 

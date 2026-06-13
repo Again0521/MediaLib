@@ -5,8 +5,11 @@ import Foundation
 struct AppUpdateInfo: Identifiable, Equatable {
     let version: String
     let tagName: String
+    let title: String
     let releaseNotes: String
     let releaseURL: URL
+    let downloadURL: URL?
+    let publishedAt: Date?
 
     var id: String { tagName }
 }
@@ -14,7 +17,7 @@ struct AppUpdateInfo: Identifiable, Equatable {
 enum AppVersion {
     /// 打包版从 Info.plist 读取；swift run 裸二进制兜底用当前发布版本。
     static var current: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.1"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.1.2"
     }
 
     /// 从任意文本里提取版本号：抓出第一段「点分数字」，如 v1.1.1 / 1.20.01 / 标题里的 1.1.11。
@@ -49,6 +52,16 @@ enum AppVersion {
 /// 用官方 Releases API + dmg 资产判定，避免引入第三方更新框架）。
 enum AppUpdateChecker {
     static let repositoryPage = URL(string: "https://github.com/Again0521/MediaLib/releases")!
+    private static let releaseDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let fallbackReleaseDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 
     /// 拉取 releases 列表，从每个 release 的「标签 + 标题」里提取版本号，
     /// 在带 .dmg 资产的 release 中选出版本号最大的一个返回。
@@ -70,16 +83,20 @@ enum AppUpdateChecker {
             guard let version = AppVersion.extractVersion(from: tag)
                 ?? AppVersion.extractVersion(from: title) else { continue }
             let assets = release["assets"] as? [[String: Any]] ?? []
-            let hasDMGAsset = assets.contains { asset in
+            let dmgAsset = assets.first { asset in
                 ((asset["name"] as? String) ?? "").lowercased().hasSuffix(".dmg")
             }
-            guard hasDMGAsset else { continue }
+            guard let dmgAsset else { continue }
             guard let pageURL = (release["html_url"] as? String).flatMap(URL.init(string:)) else { continue }
+            let publishedAt = (release["published_at"] as? String).flatMap(parseReleaseDate)
             let info = AppUpdateInfo(
                 version: version,
                 tagName: tag.isEmpty ? version : tag,
+                title: title.isEmpty ? "MediaLIB \(version)" : title,
                 releaseNotes: (release["body"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
-                releaseURL: pageURL
+                releaseURL: pageURL,
+                downloadURL: (dmgAsset["browser_download_url"] as? String).flatMap(URL.init(string:)),
+                publishedAt: publishedAt
             )
             if let current = best {
                 if AppVersion.isVersion(version, newerThan: current.version) {
@@ -90,5 +107,9 @@ enum AppUpdateChecker {
             }
         }
         return best?.info
+    }
+
+    private static func parseReleaseDate(_ text: String) -> Date? {
+        releaseDateFormatter.date(from: text) ?? fallbackReleaseDateFormatter.date(from: text)
     }
 }

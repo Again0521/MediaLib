@@ -1440,7 +1440,7 @@ public struct AppSettings: Codable, Hashable {
 
     public init(
         defaultPlayer: DefaultPlayer = .builtIn,
-        theme: AppTheme = .system,
+        theme: AppTheme = .light,
         themePreset: AppThemePreset = .classic,
         themeBaseHex: String? = nil,
         themeHighlightHex: String? = nil,

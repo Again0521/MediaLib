@@ -5293,7 +5293,7 @@ private struct PlayerSettingsPopover: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 13) {
+            LazyVStack(alignment: .leading, spacing: 13) {
                 Label("播放器设置", systemImage: "gearshape")
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(palette.primary)
@@ -5363,6 +5363,7 @@ private struct PlayerSettingsPopover: View {
         .frame(maxHeight: 520)
         .fixedSize(horizontal: true, vertical: false)
         .playerPopoverGlass(palette: palette, liveMaterial: false)
+        .transaction { $0.animation = nil }
     }
 }
 
@@ -5784,7 +5785,7 @@ private struct PlayerMarkerPopover: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
+            LazyVStack(alignment: .leading, spacing: 10) {
                 Label("章节与播放标记", systemImage: "bookmark")
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(palette.primary)
@@ -5896,6 +5897,7 @@ private struct PlayerMarkerPopover: View {
         .frame(maxHeight: 480)
         .fixedSize(horizontal: true, vertical: false)
         .playerPopoverGlass(palette: palette, liveMaterial: false)
+        .transaction { $0.animation = nil }
     }
 
     private func markerAction(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
@@ -5980,8 +5982,13 @@ private struct PlayerEpisodeListPopover: View {
                     }
                 }
                 .frame(maxHeight: 380)
+                .transaction { $0.animation = nil }
                 .onAppear {
-                    proxy.scrollTo(currentItem.id, anchor: .center)
+                    var transaction = Transaction(animation: nil)
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        proxy.scrollTo(currentItem.id, anchor: .center)
+                    }
                 }
             }
         }
@@ -6058,44 +6065,47 @@ private struct PlayerAudioTrackPopover: View {
     var body: some View {
         let state = tracks.value
         let audioTracks = state.audioTracks
-        VStack(alignment: .leading, spacing: 10) {
-            Label("音轨", systemImage: "waveform.circle")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(palette.primary)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                Label("音轨", systemImage: "waveform.circle")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(palette.primary)
 
-            Button {
-                controller.selectDefaultAudioTrack()
-            } label: {
-                PlayerTrackRow(title: "自动选择", subtitle: "由播放器选择默认音轨", selected: audioTracks.allSatisfy { !$0.isSelected }, palette: palette)
-            }
-            .buttonStyle(.plain)
+                Button {
+                    controller.selectDefaultAudioTrack()
+                } label: {
+                    PlayerTrackRow(title: "自动选择", subtitle: "由播放器选择默认音轨", selected: audioTracks.allSatisfy { !$0.isSelected }, palette: palette)
+                }
+                .buttonStyle(.plain)
 
-            if audioTracks.isEmpty {
-                Text("播放器暂未回传音轨列表。")
-                    .font(.caption)
-                    .foregroundStyle(palette.secondary)
-                    .padding(.vertical, 4)
-            } else {
-                ForEach(audioTracks) { track in
-                    Button {
-                        controller.selectAudioTrack(track.id)
-                    } label: {
-                        PlayerTrackRow(
-                            title: track.displayName,
-                            subtitle: "ID \(track.id)",
-                            selected: track.isSelected,
-                            palette: palette
-                        )
+                if audioTracks.isEmpty {
+                    Text("播放器暂未回传音轨列表。")
+                        .font(.caption)
+                        .foregroundStyle(palette.secondary)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(audioTracks) { track in
+                        Button {
+                            controller.selectAudioTrack(track.id)
+                        } label: {
+                            PlayerTrackRow(
+                                title: track.displayName,
+                                subtitle: "ID \(track.id)",
+                                selected: track.isSelected,
+                                palette: palette
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
-
         }
         .padding(12)
         .frame(width: 300)
-        .fixedSize(horizontal: true, vertical: true)
+        .frame(maxHeight: 420)
+        .fixedSize(horizontal: true, vertical: false)
         .playerPopoverGlass(palette: palette, liveMaterial: false)
+        .transaction { $0.animation = nil }
     }
 }
 
@@ -6132,7 +6142,7 @@ private struct PlayerSubtitlePopover: View {
         let embeddedSubtitleTracks = trackState.subtitleTracks.filter { !$0.isExternal }
         let externalSubtitleTracks = trackState.subtitleTracks.filter(\.isExternal)
         ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
+            LazyVStack(alignment: .leading, spacing: 10) {
                 // Header
                 Label("字幕", systemImage: "captions.bubble")
                     .font(.callout.weight(.semibold))
@@ -6303,6 +6313,7 @@ private struct PlayerSubtitlePopover: View {
         .frame(maxHeight: 540)
         .fixedSize(horizontal: true, vertical: false)
         .playerPopoverGlass(palette: palette, liveMaterial: false)
+        .transaction { $0.animation = nil }
         .onAppear {
             guard !didAutoSearch else { return }
             didAutoSearch = true
