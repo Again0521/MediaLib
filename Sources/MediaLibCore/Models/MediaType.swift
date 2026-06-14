@@ -7,6 +7,7 @@ public enum MediaType: String, Codable, CaseIterable, Identifiable, Sendable {
     case anime
     case documentary
     case variety
+    case homeVideo
     case music
     case other
     case privateCollection = "private"
@@ -22,6 +23,7 @@ public enum MediaType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .anime: return "动漫"
         case .documentary: return "纪录片"
         case .variety: return "综艺"
+        case .homeVideo: return "家庭录像"
         case .music: return "音乐"
         case .other: return "其他"
         case .privateCollection: return "保险库"
@@ -37,6 +39,7 @@ public enum MediaType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .anime: return "sparkles.tv"
         case .documentary: return "books.vertical"
         case .variety: return "music.mic"
+        case .homeVideo: return "video"
         case .music: return "music.note"
         case .other: return "tray"
         case .privateCollection: return "lock.rectangle.stack"

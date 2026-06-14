@@ -136,6 +136,6 @@ struct VideoItemContextMenuItems: View {
     }
 
     private static var reclassificationTypes: [MediaType] {
-        [.movie, .tvShow, .anime, .documentary, .variety, .music, .other, .privateCollection]
+        [.movie, .tvShow, .anime, .documentary, .variety, .homeVideo, .music, .other, .privateCollection]
     }
 }

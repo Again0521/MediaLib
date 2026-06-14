@@ -2183,8 +2183,69 @@ private struct PlayerVideoAspectRatioReporter: View {
         Color.clear
             .onChange(of: aspectRatio.value) { aspect in
                 guard let aspect else { return }
+                PlayerWindowActions.updateMiniModeAspect(aspect)
                 onChange?(aspect)
             }
+    }
+}
+
+private struct PlayerWindowFullscreenReader: NSViewRepresentable {
+    @Binding var isFullscreen: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isFullscreen: $isFullscreen)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            context.coordinator.attach(to: view.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.attach(to: nsView.window)
+    }
+
+    final class Coordinator {
+        @Binding var isFullscreen: Bool
+        private weak var window: NSWindow?
+        private var observers: [NSObjectProtocol] = []
+
+        init(isFullscreen: Binding<Bool>) {
+            _isFullscreen = isFullscreen
+        }
+
+        deinit {
+            observers.forEach(NotificationCenter.default.removeObserver)
+        }
+
+        func attach(to window: NSWindow?) {
+            guard self.window !== window else {
+                refresh()
+                return
+            }
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers.removeAll()
+            self.window = window
+            guard let window else {
+                isFullscreen = false
+                return
+            }
+            let center = NotificationCenter.default
+            observers.append(center.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                self?.refresh()
+            })
+            observers.append(center.addObserver(forName: NSWindow.didExitFullScreenNotification, object: window, queue: .main) { [weak self] _ in
+                self?.refresh()
+            })
+            refresh()
+        }
+
+        private func refresh() {
+            isFullscreen = window?.styleMask.contains(.fullScreen) == true
+        }
     }
 }
 
@@ -2235,6 +2296,7 @@ private struct PlayerControlsBar: View {
     @State private var showingMarkerPopover = false
     @State private var showingSettingsPopover = false
     @State private var showingEpisodeListPopover = false
+    @State private var isWindowFullscreen = false
 
     init(
         controller: MpvPlayerController,
@@ -2396,10 +2458,10 @@ private struct PlayerControlsBar: View {
                     Button {
                         controller.toggleFullscreen()
                     } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        Image(systemName: isWindowFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                             .playerControlIcon(palette: palette)
                     }
-                    .help("全屏")
+                    .help(isWindowFullscreen ? "退出全屏" : "全屏")
                 }
                 .frame(width: 200, alignment: .trailing)
             }
@@ -2411,6 +2473,10 @@ private struct PlayerControlsBar: View {
         .frame(maxWidth: 568)
         .playerGlass(cornerRadius: 14, palette: palette)
         .padding(.bottom, 5)
+        .background {
+            PlayerWindowFullscreenReader(isFullscreen: $isWindowFullscreen)
+                .frame(width: 0, height: 0)
+        }
     }
 
     private var subtitleButton: some View {
@@ -7358,6 +7424,7 @@ final class MpvPlayerController: ObservableObject {
     private var musicEqualizerEnabled = false
     private var musicEqualizerGains: [Double] = MusicEqualizerPreset.flat.gainsDB
     private var audioTransitionVolumeScale: Float = 1
+    private var musicOutputRecoveryTask: Task<Void, Never>?
     private(set) var spectrumSuppressedDuringWindowDrag = false
 
     /// 窗口拖动/缩放期间临时挂起频谱解码（拖动结束立即恢复）。
@@ -7628,6 +7695,7 @@ final class MpvPlayerController: ObservableObject {
         player.automaticallyWaitsToMinimizeStalling = false
         player.actionAtItemEnd = .advance
         player.volume = effectiveMusicVolume
+        player.isMuted = false
 
         observeAudioEnd(for: playerItem, generation: generation)
         observeAudioExternalPlayback(for: player)
@@ -7656,6 +7724,7 @@ final class MpvPlayerController: ObservableObject {
                           player.currentItem === playerItem else { return }
                     player.playImmediately(atRate: self.playbackRate)
                     self.isPlaying = true
+                    self.scheduleMusicOutputRecovery(generation: generation, shouldPlay: true)
                     self.updateSystemNowPlaying()
                     self.reportPlayback(.started, force: true)
                 }
@@ -7663,6 +7732,7 @@ final class MpvPlayerController: ObservableObject {
         } else {
             player.playImmediately(atRate: playbackRate)
             isPlaying = true
+            scheduleMusicOutputRecovery(generation: generation, shouldPlay: true)
             updateSystemNowPlaying()
             reportPlayback(.started, force: true)
         }
@@ -7732,6 +7802,8 @@ final class MpvPlayerController: ObservableObject {
         removeAudioEndObserver()
         seekSyncCorrectionTask?.cancel()
         seekSyncCorrectionTask = nil
+        musicOutputRecoveryTask?.cancel()
+        musicOutputRecoveryTask = nil
         musicMemoryLoadTask?.cancel()
         musicMemoryLoadTask = nil
         musicPreloadTask?.cancel()
@@ -7799,10 +7871,9 @@ final class MpvPlayerController: ObservableObject {
             }
         }
         applyAudioOutputVolume()
+        normalizeMusicPlaybackOutput(generation: generation, shouldPlay: false)
         updateSystemNowPlaying()
-        if !alreadyAdvancedToPreload {
-            configureMusicRouteProxyIfNeeded()
-        }
+        configureMusicRouteProxyIfNeeded()
 
         let startSeconds = max(currentTime, 0)
         if alreadyAdvancedToPreload {
@@ -7812,6 +7883,7 @@ final class MpvPlayerController: ObservableObject {
                 isPlaying = true
             }
             startSoftFadeInIfNeeded(generation: generation)
+            scheduleMusicOutputRecovery(generation: generation, shouldPlay: true)
             updateSystemNowPlaying()
             reportPlayback(.started, force: true)
             startTimer()
@@ -7832,6 +7904,7 @@ final class MpvPlayerController: ObservableObject {
                     player.playImmediately(atRate: self.playbackRate)
                     self.isPlaying = true
                     self.startSoftFadeInIfNeeded(generation: generation)
+                    self.scheduleMusicOutputRecovery(generation: generation, shouldPlay: true)
                     self.updateSystemNowPlaying()
                     self.reportPlayback(.started, force: true)
                 }
@@ -7840,6 +7913,7 @@ final class MpvPlayerController: ObservableObject {
             player.playImmediately(atRate: playbackRate)
             isPlaying = true
             startSoftFadeInIfNeeded(generation: generation)
+            scheduleMusicOutputRecovery(generation: generation, shouldPlay: true)
             updateSystemNowPlaying()
             reportPlayback(.started, force: true)
         }
@@ -8905,6 +8979,43 @@ final class MpvPlayerController: ObservableObject {
         audioRouteProxyPlayer?.volume = audioRouteProxyIsActive ? outputVolume : 0
     }
 
+    private func normalizeMusicPlaybackOutput(generation: Int, shouldPlay: Bool) {
+        guard playbackGeneration == generation,
+              item?.type == .music,
+              let player = audioPlayer else { return }
+        player.isMuted = false
+        applyAudioOutputVolume()
+        if keepLocalAudioWithAirPlay {
+            syncAudioLocalMirrorPlayback()
+            syncAudioRouteProxyPlayback()
+        } else {
+            stopAudioLocalMirror()
+            audioRouteProxyPlayer?.pause()
+            audioRouteProxyPlayer?.isMuted = true
+        }
+        guard shouldPlay, player.currentItem != nil else { return }
+        if player.rate == 0 {
+            player.playImmediately(atRate: playbackRate)
+        }
+        isPlaying = true
+    }
+
+    private func scheduleMusicOutputRecovery(generation: Int, shouldPlay: Bool) {
+        musicOutputRecoveryTask?.cancel()
+        musicOutputRecoveryTask = Task { @MainActor [weak self] in
+            for delay in [140_000_000, 720_000_000] as [UInt64] {
+                do {
+                    try await Task.sleep(nanoseconds: delay)
+                } catch {
+                    return
+                }
+                guard let self, self.playbackGeneration == generation else { return }
+                self.normalizeMusicPlaybackOutput(generation: generation, shouldPlay: shouldPlay)
+            }
+            self?.musicOutputRecoveryTask = nil
+        }
+    }
+
     private func startSoftFadeInIfNeeded(generation: Int) {
         audioTransitionTask?.cancel()
         audioTransitionTask = nil
@@ -9544,6 +9655,8 @@ final class MpvPlayerController: ObservableObject {
         initialRedrawTask = nil
         audioTransitionTask?.cancel()
         audioTransitionTask = nil
+        musicOutputRecoveryTask?.cancel()
+        musicOutputRecoveryTask = nil
         musicMemoryLoadTask?.cancel()
         musicMemoryLoadTask = nil
         clearPreloadedMusicItem()
@@ -9592,6 +9705,8 @@ final class MpvPlayerController: ObservableObject {
         initialRedrawTask = nil
         audioTransitionTask?.cancel()
         audioTransitionTask = nil
+        musicOutputRecoveryTask?.cancel()
+        musicOutputRecoveryTask = nil
         musicMemoryLoadTask?.cancel()
         musicMemoryLoadTask = nil
         clearPreloadedMusicItem()
@@ -10186,6 +10301,38 @@ enum PlayerWindowActions {
         }
         window.setFrame(frame, display: true, animate: false)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    static func updateMiniModeAspect(_ aspect: CGFloat) {
+        guard aspect.isFinite, aspect > 0,
+              let window = NSApp.windows.compactMap({ $0 as? ImmersivePlayerWindow }).first(where: \.isMiniMode),
+              !window.styleMask.contains(.fullScreen) else { return }
+        let safeAspect = max(aspect, 0.01)
+        let currentContent = window.contentLayoutRect.size
+        let targetContent = NSSize(
+            width: max(currentContent.width, 240),
+            height: (max(currentContent.width, 240) / safeAspect).rounded()
+        )
+        guard abs(currentContent.width - targetContent.width) > 1 ||
+                abs(currentContent.height - targetContent.height) > 1 else {
+            window.contentAspectRatio = targetContent
+            return
+        }
+        let oldFrame = window.frame
+        let targetFrameSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: targetContent)).size
+        window.contentAspectRatio = targetContent
+        window.contentMinSize = NSSize(width: 240, height: (240 / safeAspect).rounded())
+        window.minSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: window.contentMinSize)).size
+        window.setFrame(
+            NSRect(
+                x: oldFrame.maxX - targetFrameSize.width,
+                y: oldFrame.minY,
+                width: targetFrameSize.width,
+                height: targetFrameSize.height
+            ),
+            display: true,
+            animate: false
+        )
     }
 
     static func resizeCurrentWindow(toContentSize contentSize: NSSize, animate: Bool = false) {

@@ -121,8 +121,6 @@ struct MusicSmartPlaylistSheet: View {
         @ViewBuilder content: () -> Content
     ) -> some View {
         Picker("", selection: selection, content: content)
-            .labelsHidden()
-            .pickerStyle(.menu)
             .adaptiveMenuControl(selectedTitle: selectedTitle, minWidth: Self.optionMenuMinWidth, maxWidth: Self.optionMenuMaxWidth)
     }
 

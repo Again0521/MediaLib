@@ -45,6 +45,21 @@ public enum AppLanguage: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    public static var systemDefault: AppLanguage {
+        let preferredIdentifier = Locale.preferredLanguages.first ?? ""
+        let preferred = preferredIdentifier.lowercased()
+        let locale = Locale(identifier: preferredIdentifier)
+        let region = (locale.region?.identifier ?? Locale.current.region?.identifier ?? "").uppercased()
+        let chineseRegions: Set<String> = ["CN", "HK", "MO", "TW", "SG", "MY"]
+        if preferred.hasPrefix("zh") || chineseRegions.contains(region) {
+            return .zhHans
+        }
+        if preferred.hasPrefix("ja") || region == "JP" {
+            return .ja
+        }
+        return .en
+    }
+
     public var nativeRestartTitle: String {
         switch self {
         case .zhHans: return "语言已切换"
@@ -980,6 +995,7 @@ public enum HomeTab: String, Codable, CaseIterable, Identifiable {
     case anime
     case documentaries
     case variety
+    case homeVideos
     case music
     case other
     case favorites
@@ -1000,6 +1016,7 @@ public enum HomeTab: String, Codable, CaseIterable, Identifiable {
         case .anime: return "动漫"
         case .documentaries: return "纪录片"
         case .variety: return "综艺"
+        case .homeVideos: return "家庭录像"
         case .music: return "音乐"
         case .other: return "其他"
         case .favorites: return "喜欢"
@@ -1020,6 +1037,7 @@ public enum HomeTab: String, Codable, CaseIterable, Identifiable {
         case .anime: return "sparkles.tv"
         case .documentaries: return "books.vertical"
         case .variety: return "music.mic"
+        case .homeVideos: return "video"
         case .music: return "music.note.list"
         case .other: return "tray"
         case .favorites: return "heart"
@@ -1313,6 +1331,7 @@ public struct AppSettings: Codable, Hashable {
         .anime,
         .documentaries,
         .variety,
+        .homeVideos,
         .music,
         .other,
         .favorites,
@@ -1476,7 +1495,7 @@ public struct AppSettings: Codable, Hashable {
 
     public init(
         defaultPlayer: DefaultPlayer = .builtIn,
-        appLanguage: AppLanguage = .zhHans,
+        appLanguage: AppLanguage = AppLanguage.systemDefault,
         theme: AppTheme = .light,
         themePreset: AppThemePreset = .classic,
         themeBaseHex: String? = nil,

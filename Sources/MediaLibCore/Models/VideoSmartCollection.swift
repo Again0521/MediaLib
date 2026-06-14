@@ -7,6 +7,7 @@ public enum VideoSmartCollectionMediaScope: String, Codable, CaseIterable, Ident
     case anime
     case documentaries
     case variety
+    case homeVideos
     case other
 
     public var id: String { rawValue }
@@ -19,6 +20,7 @@ public enum VideoSmartCollectionMediaScope: String, Codable, CaseIterable, Ident
         case .anime: return "动漫"
         case .documentaries: return "纪录片"
         case .variety: return "综艺"
+        case .homeVideos: return "家庭录像"
         case .other: return "其他"
         }
     }
@@ -31,6 +33,7 @@ public enum VideoSmartCollectionMediaScope: String, Codable, CaseIterable, Ident
         case .anime: return type == .anime
         case .documentaries: return type == .documentary
         case .variety: return type == .variety
+        case .homeVideos: return type == .homeVideo
         case .other: return type == .other
         }
     }

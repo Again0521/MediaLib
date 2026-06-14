@@ -654,6 +654,7 @@ struct MusicPlayerView: View {
             // 切歌不再重跑 scheduleBackdropAnimation：它会把 glassLayerReady 先置 false 再置 true，
             // 令整窗封面/玻璃底层瞬间卸载再挂载，正是切歌时顶部颜色断层（取色色斑随之闪没再现）的来源。
             // 玻璃底层全程常驻，封面与取色由下面的 loadAlbumPalette / .task(id: posterPath) 直接平滑换图。
+            resetLyricPlaybackViewportState()
             loadLyricsForCurrentItem()
             loadAlbumPalette()
         }
@@ -862,9 +863,10 @@ struct MusicPlayerView: View {
     }
 
     private func lyricsPanel(light: AlbumComponentLight) -> some View {
-        MusicExpandedLyricsPanel(
-            controller: controller,
-            lyrics: lyrics,
+            MusicExpandedLyricsPanel(
+                controller: controller,
+                itemID: currentItem.id,
+                lyrics: lyrics,
             timedLyrics: timedLyrics,
             timingSource: lyricTimingSource,
             hasDisplayLyrics: hasDisplayLyrics,
@@ -899,6 +901,15 @@ struct MusicPlayerView: View {
         timedLyrics = displayLines
         lyricTimingSource = TimedLyricLine.bestTimingSource(in: displayLines)
         scheduleLyricAlignmentIfNeeded(lyricsText: text, parsedLines: parsed)
+    }
+
+    private func resetLyricPlaybackViewportState() {
+        resumeAutoScrollTask?.cancel()
+        lyricsAlignmentTask?.cancel()
+        userIsBrowsingLyrics = false
+        lyricTimingSource = .estimated
+        timedLyrics = []
+        lyrics = "暂无歌词"
     }
 
     private func scheduleLyricAlignmentIfNeeded(lyricsText: String, parsedLines: [TimedLyricLine]) {
@@ -2974,6 +2985,7 @@ private struct MusicExpandedArtworkShadowLayer: NSViewRepresentable {
 private struct MusicExpandedLyricsPanel: View {
     @Environment(\.colorScheme) private var colorScheme
     let controller: MpvPlayerController
+    let itemID: String
     let lyrics: String
     let timedLyrics: [TimedLyricLine]
     let timingSource: LyricTimingSource
@@ -3017,7 +3029,11 @@ private struct MusicExpandedLyricsPanel: View {
 
             // 正在播放行的聚光灯必须位于文字正下方、其它柔化遮罩之上；
             // 否则会被上下景深/边缘霜层吃掉，看起来像完全没有亮起来。
-            LyricCenterSpotlight(palette: palette)
+            LyricCenterSpotlight(
+                controller: controller,
+                palette: palette,
+                coverGlowEnabled: light.strength > 0.001
+            )
                 .allowsHitTesting(false)
 
             lyricsView
@@ -3091,6 +3107,7 @@ private struct MusicExpandedLyricsPanel: View {
         } else {
             MusicTimedLyricsScrollView(
                 controller: controller,
+                itemID: itemID,
                 timedLyrics: timedLyrics,
                 palette: palette,
                 userIsBrowsingLyrics: $userIsBrowsingLyrics,
@@ -3344,7 +3361,15 @@ private struct LyricStageLight: View {
 /// 白色只保留很薄的镜面高光，主体受光跟随封面色，避免歌词卡中心被白光冲淡。
 private struct LyricCenterSpotlight: View {
     @Environment(\.colorScheme) private var colorScheme
+    @ObservedObject var controller: MpvPlayerController
     let palette: AlbumColorPalette
+    let coverGlowEnabled: Bool
+
+    init(controller: MpvPlayerController, palette: AlbumColorPalette, coverGlowEnabled: Bool) {
+        self.controller = controller
+        self.palette = palette
+        self.coverGlowEnabled = coverGlowEnabled
+    }
 
     var body: some View {
         GeometryReader { geo in
@@ -3353,11 +3378,12 @@ private struct LyricCenterSpotlight: View {
             // 需求4：中心舞台光照亮当前播放行——主体用专辑色（提一档，让中心更亮），
             // 但白色镜面层保持很薄、不提高，避免把歌词中心冲成白雾、淡化字色；
             // 半径更大、羽化更长，使光"尽可能柔和"地铺开。
-            let radius = min(max(min(geo.size.width, geo.size.height) * 0.86, 320), 540)
-            let peak = colorScheme == .dark ? 0.104 : 0.148
-            let stagePeak = colorScheme == .dark ? 0.132 : 0.188
+            let lightLevel = coverGlowEnabled && controller.isPlaying ? 1.0 : 0.0
+            let radius = min(max(min(geo.size.width, geo.size.height) * 0.46, 190), 320)
+            let peak = (colorScheme == .dark ? 0.046 : 0.064) * lightLevel
+            let stagePeak = (colorScheme == .dark ? 0.052 : 0.072) * lightLevel
             // 白色均匀舞台光需要可见，但只在背景层用 plusLighter 提亮，不直接参与文字前景。
-            let stageWhite = colorScheme == .dark ? 0.102 : 0.155
+            let stageWhite = (colorScheme == .dark ? 0.030 : 0.044) * lightLevel
             ZStack {
                 Ellipse()
                     .fill(
@@ -3370,12 +3396,12 @@ private struct LyricCenterSpotlight: View {
                             ],
                             center: .center,
                             startRadius: 0,
-                            endRadius: radius * 0.84
+                            endRadius: radius * 0.72
                         )
                     )
                     .frame(
-                        width: min(max(geo.size.width * 0.76, 420), 820),
-                        height: min(max(geo.size.height * 0.24, 138), 230)
+                        width: min(max(geo.size.width * 0.42, 240), 470),
+                        height: min(max(geo.size.height * 0.16, 82), 138)
                     )
                     .position(x: geo.size.width / 2, y: geo.size.height / 2)
                     .blur(radius: 38)
@@ -3408,11 +3434,12 @@ private struct LyricCenterSpotlight: View {
                     ],
                     center: .center,
                     startRadius: 0,
-                    endRadius: radius * 0.92
+                    endRadius: radius * 0.82
                 )
                 .blendMode(.plusLighter)
             }
             .frame(width: geo.size.width, height: geo.size.height)
+            .animation(AppMotion.musicPlayer, value: controller.isPlaying)
         }
         .allowsHitTesting(false)
     }
@@ -3969,6 +3996,7 @@ private struct LyricsFadeMask: View {
 
 private struct MusicTimedLyricsScrollView: View {
     let controller: MpvPlayerController
+    let itemID: String
     let timedLyrics: [TimedLyricLine]
     let palette: AlbumColorPalette
     @Binding var userIsBrowsingLyrics: Bool
@@ -3986,12 +4014,14 @@ private struct MusicTimedLyricsScrollView: View {
 
     init(
         controller: MpvPlayerController,
+        itemID: String,
         timedLyrics: [TimedLyricLine],
         palette: AlbumColorPalette,
         userIsBrowsingLyrics: Binding<Bool>,
         onPauseAutoScroll: @escaping () -> Void
     ) {
         self.controller = controller
+        self.itemID = itemID
         self.timedLyrics = timedLyrics
         self.palette = palette
         _userIsBrowsingLyrics = userIsBrowsingLyrics
@@ -4075,6 +4105,9 @@ private struct MusicTimedLyricsScrollView: View {
                     lyricViewportStabilityTask?.cancel()
                     scrollToActiveLyric(proxy, force: true)
                     scheduleLyricViewportStabilityCheck(proxy)
+                }
+                .onChange(of: itemID) { _ in
+                    resetViewportForNewItem(proxy)
                 }
                 .onChange(of: userIsBrowsingLyrics) { browsing in
                     if browsing {
@@ -4230,6 +4263,23 @@ private struct MusicTimedLyricsScrollView: View {
         }
         forceAlignLyricViewport(proxy, to: lineIndex, animated: false)
         scheduleLyricViewportStabilityCheck(proxy, targetIndex: lineIndex)
+    }
+
+    private func resetViewportForNewItem(_ proxy: ScrollViewProxy) {
+        lyricViewportAlignTask?.cancel()
+        lyricViewportStabilityTask?.cancel()
+        programmaticLyricScrollTask?.cancel()
+        lyricBrowseRecoveryTask?.cancel()
+        isProgrammaticLyricScroll = false
+        userScrollRevision &+= 1
+        lastAutoScrolledIndex = nil
+        lyricBrowseBlurProgress = 1
+        if userIsBrowsingLyrics {
+            userIsBrowsingLyrics = false
+        }
+        renderObserver.updateTimedLyrics(timedLyrics)
+        scrollToActiveLyric(proxy, force: true, animated: false)
+        scheduleLyricViewportStabilityCheck(proxy)
     }
 
     private func scrollToActiveLyric(_ proxy: ScrollViewProxy, force: Bool = false, animated: Bool = true) {

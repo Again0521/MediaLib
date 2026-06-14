@@ -3036,7 +3036,10 @@ func adaptiveMenuControlWidth(
     for title: String,
     minWidth: CGFloat = 76,
     maxWidth: CGFloat = 360,
-    horizontalChrome: CGFloat = 72
+    // 玻璃下拉的实际外框宽度 = 文字宽 + 左右内边距(24) + 间隔 + 雪佛龙 + 安全余量。
+    // 既贴合当前选项（不再按最长选项或固定 chrome 留大片空白），又留足余量避免边界处把
+    // "English"/"Clear blue" 这类标题截断成 "Engli…"。
+    horizontalChrome: CGFloat = 64
 ) -> CGFloat {
     let font = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
     let measured = (title as NSString).size(withAttributes: [.font: font]).width + horizontalChrome
@@ -3044,15 +3047,22 @@ func adaptiveMenuControlWidth(
 }
 
 extension View {
+    /// 把任意 `Picker` 收进统一的玻璃下拉外壳：标题宽度随**当前选项**自适应，
+    /// 选项列表用 inline 样式直接挂在玻璃菜单里。这样设置页的原生 Picker 与
+    /// 媒体库/音乐的筛选下拉视觉统一，且不再按最长选项撑宽留白。
     func adaptiveMenuControl(
         selectedTitle: String,
         minWidth: CGFloat = 92,
         maxWidth: CGFloat = 360
     ) -> some View {
-        frame(
-            width: adaptiveMenuControlWidth(for: selectedTitle, minWidth: minWidth, maxWidth: maxWidth),
-            alignment: .trailing
-        )
+        GlassMenuButton(
+            title: selectedTitle,
+            width: adaptiveMenuControlWidth(for: selectedTitle, minWidth: minWidth, maxWidth: maxWidth)
+        ) {
+            self
+                .labelsHidden()
+                .pickerStyle(.inline)
+        }
     }
 }
 

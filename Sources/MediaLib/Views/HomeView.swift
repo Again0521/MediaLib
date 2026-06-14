@@ -272,9 +272,9 @@ struct HomeView: View {
     }
 
     private var header: some View {
-        PageHeader(title: "MediaLIB", subtitle: "家庭影音库", systemImage: "play.rectangle.on.rectangle") {
+        PageHeader(title: "MediaLIB", subtitle: appState.localized("家庭影音库"), systemImage: "play.rectangle.on.rectangle") {
             if appState.isScanning {
-                Label("队列 \(max(appState.scanQueueCount, 1))", systemImage: "waveform.path.ecg")
+                Label("\(appState.localized("队列")) \(max(appState.scanQueueCount, 1))", systemImage: "waveform.path.ecg")
                     .font(.callout.weight(.medium))
                     .foregroundStyle(.secondary)
             }
@@ -282,16 +282,16 @@ struct HomeView: View {
                 Button(role: .destructive) {
                     appState.clearPlaybackHistory(homePlaybackTraceItems)
                 } label: {
-                    Label("清除记录", systemImage: "clock.badge.xmark")
+                    Label(appState.localized("清除记录"), systemImage: "clock.badge.xmark")
                         .foregroundStyle(.red)
                 }
                 .disabled(homePlaybackTraceItems.isEmpty)
             }
-            GlassSearchField(placeholder: "搜索全部媒体", text: $searchText, minWidth: 178, maxWidth: 236)
+            GlassSearchField(placeholder: appState.localized("搜索全部媒体"), text: $searchText, minWidth: 178, maxWidth: 236)
             Button {
                 appState.scanSources(for: currentTab)
             } label: {
-                Label("扫描", systemImage: "arrow.clockwise")
+                Label(appState.localized("扫描"), systemImage: "arrow.clockwise")
             }
             .disabled(appState.sources.isEmpty || appState.isScanning)
         }
@@ -341,11 +341,12 @@ struct HomeView: View {
                 .frame(minHeight: 420)
         default:
             let items = displayedHomeItems(for: tab)
+            let tabName = displayName(for: tab)
             if (isPreparingHomeItems || visibleHomeItemsAreOutOfDate(for: tab)) && items.isEmpty {
-                AppLoadingView(title: "正在载入\(displayName(for: tab))", systemImage: tab.systemImage, rowCount: 4)
+                AppLoadingView(title: homePhrase(prefix: "正在载入", name: tabName), systemImage: tab.systemImage, rowCount: 4)
             } else if items.isEmpty {
 	                EmptyStateView(
-	                    title: "暂无\(displayName(for: tab))",
+	                    title: homePhrase(prefix: "暂无", name: tabName),
 	                    systemImage: tab.systemImage,
 	                    message: emptyMessage(for: tab)
 	                )
@@ -357,8 +358,20 @@ struct HomeView: View {
         }
     }
 
+    // 把"前缀 + 分区名"按语言拼成自然短语：中文紧贴，英文/日文按各自语序加分隔。
+    private func homePhrase(prefix: String, name: String) -> String {
+        switch appState.settings.appLanguage {
+        case .zhHans:
+            return "\(prefix)\(name)"
+        case .ja:
+            return "\(name)\(appState.localized(prefix))"
+        case .en:
+            return "\(appState.localized(prefix)) \(name)"
+        }
+    }
+
     private func displayName(for tab: HomeTab) -> String {
-        tab == .privacy ? appState.settings.privacyVaultName : tab.displayName
+        tab == .privacy ? appState.settings.privacyVaultName : appState.localized(tab.displayName)
     }
 
     private func baseHomeItems(for tab: HomeTab) -> [MediaItem] {
@@ -382,6 +395,8 @@ struct HomeView: View {
         case .documentaries:
             return appState.homeVideoItems
         case .variety:
+            return appState.homeVideoItems
+        case .homeVideos:
             return appState.homeVideoItems
         case .music:
             return appState.musicTracks
@@ -448,6 +463,8 @@ struct HomeView: View {
             return .mediaType(.documentary)
         case .variety:
             return .mediaType(.variety)
+        case .homeVideos:
+            return .mediaType(.homeVideo)
         case .other:
             return .mediaType(.other)
         case .favorites:
@@ -462,11 +479,11 @@ struct HomeView: View {
     private func emptyMessage(for tab: HomeTab) -> String {
         switch tab {
         case .privacy:
-            return "解锁后展示保险库内容。"
+            return appState.localized("解锁后展示保险库内容。")
         case .offline:
-            return "右键视频或单集选择缓存后，离线副本会出现在这里。"
+            return appState.localized("右键视频或单集选择缓存后，离线副本会出现在这里。")
         default:
-            return "接入媒体源并完成扫描后，内容会自动归入此页。"
+            return appState.localized("接入媒体源并完成扫描后，内容会自动归入此页。")
         }
     }
 
@@ -610,27 +627,27 @@ struct HomeView: View {
         var defaultBoards = [
             HomeOverviewBoardModel(
                 id: "continue",
-                title: "继续观看",
-                subtitle: "上次停下的地方还在这里。",
+                title: appState.localized("继续观看"),
+                subtitle: appState.localized("上次停下的地方还在这里。"),
                 systemImage: "play.circle",
                 items: Array(appState.continueWatchingItems.prefix(10)),
-                emptyMessage: "开始播放后，这里会留下继续观看的入口。"
+                emptyMessage: appState.localized("开始播放后，这里会留下继续观看的入口。")
             ),
             HomeOverviewBoardModel(
                 id: "nextUp",
-                title: "下一集",
-                subtitle: "把故事接着往下看。",
+                title: appState.localized("下一集"),
+                subtitle: appState.localized("把故事接着往下看。"),
                 systemImage: "forward.end.circle",
                 items: Array(appState.nextUpItems.prefix(10)),
-                emptyMessage: "看过系列剧集后，下一集会自动出现在这里。"
+                emptyMessage: appState.localized("看过系列剧集后，下一集会自动出现在这里。")
             ),
             HomeOverviewBoardModel(
                 id: "recommend",
-                title: "为你精选",
+                title: appState.localized("为你精选"),
                 subtitle: recommendationSubtitle(for: profile),
                 systemImage: "sparkles.tv",
                 items: recommendedItems,
-                emptyMessage: "看过、喜欢或标星一些内容后，推荐会更有方向。"
+                emptyMessage: appState.localized("看过、喜欢或标星一些内容后，推荐会更有方向。")
             )
         ]
 
@@ -638,8 +655,8 @@ struct HomeView: View {
             defaultBoards.append(
                 HomeOverviewBoardModel(
                     id: "theme-\(profile.strongestGenre ?? genreName)",
-                    title: "\(genreName)高分",
-                    subtitle: "沿着你最近常看的题材继续挑。",
+                    title: appState.settings.appLanguage == .zhHans ? "\(genreName)高分" : "\(appState.localized("高分")) · \(genreName)",
+                    subtitle: appState.localized("沿着你最近常看的题材继续挑。"),
                     systemImage: "tag",
                     items: themeItems,
                     emptyMessage: ""
@@ -651,8 +668,8 @@ struct HomeView: View {
             defaultBoards.append(
                 HomeOverviewBoardModel(
                     id: "high-rated-series",
-                    title: "高分剧集",
-                    subtitle: "优先展示评分较高、还没看完的系列。",
+                    title: appState.localized("高分剧集"),
+                    subtitle: appState.localized("优先展示评分较高、还没看完的系列。"),
                     systemImage: "star.circle",
                     items: highRatedSeriesItems,
                     emptyMessage: ""
@@ -664,8 +681,8 @@ struct HomeView: View {
             defaultBoards.append(
                 HomeOverviewBoardModel(
                     id: "watchlist",
-                    title: "想看清单",
-                    subtitle: "你之前留意过的内容，按适合度重新排好。",
+                    title: appState.localized("想看清单"),
+                    subtitle: appState.localized("你之前留意过的内容，按适合度重新排好。"),
                     systemImage: "bookmark.circle",
                     items: watchlistItems,
                     emptyMessage: ""
@@ -677,8 +694,8 @@ struct HomeView: View {
             defaultBoards.append(
                 HomeOverviewBoardModel(
                     id: "recent-high-rated",
-                    title: "高分精选",
-                    subtitle: "避开上方推荐，优先展示电影、纪录片和综艺里的高评分内容。",
+                    title: appState.localized("高分精选"),
+                    subtitle: appState.localized("避开上方推荐，优先展示电影、纪录片和综艺里的高评分内容。"),
                     systemImage: "clock.badge.star",
                     items: recentHighRatedItems,
                     emptyMessage: ""
@@ -690,8 +707,8 @@ struct HomeView: View {
             defaultBoards.append(
                 HomeOverviewBoardModel(
                     id: "offline-ready",
-                    title: "离线可看",
-                    subtitle: "已经缓存好的内容，离线也能打开。",
+                    title: appState.localized("离线可看"),
+                    subtitle: appState.localized("已经缓存好的内容，离线也能打开。"),
                     systemImage: "arrow.down.circle",
                     items: offlineItems,
                     emptyMessage: ""
@@ -718,9 +735,12 @@ struct HomeView: View {
 
     private func recommendationSubtitle(for profile: HomeRecommendationProfile) -> String {
         if let genreName = profile.strongestGenreDisplayName {
-            return "根据你的观看和标星偏好，优先挑 \(genreName) 与高分系列。"
+            if appState.settings.appLanguage == .zhHans {
+                return "根据你的观看和标星偏好，优先挑 \(genreName) 与高分系列。"
+            }
+            return appState.localized("根据你的观看和标星偏好，优先挑高分系列。")
         }
-        return "先从库内高分系列和近期偏好里挑一些适合看的。"
+        return appState.localized("先从库内高分系列和近期偏好里挑一些适合看的。")
     }
 
     private func recommendationProfile(from visibleVideos: [MediaItem]) -> HomeRecommendationProfile {
@@ -905,7 +925,7 @@ struct HomeView: View {
             return HomeOverviewBoardModel(
                 id: "manual-\(collection.id)",
                 title: collection.name,
-                subtitle: "手动整理的专题片单。",
+                subtitle: appState.localized("手动整理的专题片单。"),
                 systemImage: "rectangle.stack",
                 items: items,
                 emptyMessage: ""
@@ -919,7 +939,7 @@ struct HomeView: View {
             return HomeOverviewBoardModel(
                 id: "smart-\(collection.id)",
                 title: collection.name,
-                subtitle: "按规则自动更新。",
+                subtitle: appState.localized("按规则自动更新。"),
                 systemImage: "sparkles.rectangle.stack",
                 items: items,
                 emptyMessage: ""
@@ -1040,7 +1060,7 @@ struct HomeView: View {
             parts.append("★ \(String(format: "%.1f", rating))")
         }
         if item.playProgress > 0, item.playProgress < 0.98 {
-            parts.append("已看 \(Int((item.playProgress * 100).rounded()))%")
+            parts.append("\(appState.localized("已看")) \(Int((item.playProgress * 100).rounded()))%")
         }
         return parts.joined(separator: " · ")
     }
@@ -1102,6 +1122,7 @@ struct HomeView: View {
 }
 
 struct HomeTabBar: View {
+    @EnvironmentObject private var appState: AppState
     let tabs: [HomeTab]
     @Binding var selection: HomeTab
 
@@ -1126,23 +1147,19 @@ struct HomeTabBar: View {
         .fixedSize(horizontal: true, vertical: false)
     }
 
+    // 标签放不下时（英文 / 日文标签更长）不再换成挤在一起的两行网格，
+    // 而是退化成单行横向滚动的胶囊，和能放下时的单行外观一致，避免排版错乱。
     private var wrappedTabs: some View {
-        let rows = Array(
-            repeating: GridItem(.fixed(34), spacing: 8, alignment: .leading),
-            count: 2
-        )
-
-        return ScrollView(.horizontal, showsIndicators: false) {
-            LazyHGrid(rows: rows, alignment: .top, spacing: 10) {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
                 ForEach(tabs) { tab in
                     tabButton(tab)
                 }
             }
             .padding(4)
         }
-        .frame(height: 80)
+        .frame(height: 46)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .clipped()
     }
 
     private func tabButton(_ tab: HomeTab) -> some View {
@@ -1152,11 +1169,11 @@ struct HomeTabBar: View {
             }
         } label: {
             GlassCapsuleControl(isSelected: selection == tab, height: 30, horizontalPadding: 12) {
-                Label(tab.displayName, systemImage: tab.systemImage)
+                Label(appState.localized(tab.displayName), systemImage: tab.systemImage)
             }
         }
         .buttonStyle(.plain)
-        .help(tab.displayName)
+        .help(appState.localized(tab.displayName))
     }
 }
 
@@ -1168,30 +1185,30 @@ struct HomeStatsView: View {
 
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
             if stats.movieCount > 0 {
-                StatTile(title: "影片", value: "\(stats.movieCount)", systemImage: "film")
+                StatTile(title: appState.localized("影片"), value: "\(stats.movieCount)", systemImage: "film")
             }
             if stats.seriesCount > 0 {
-                StatTile(title: "系列", value: "\(stats.seriesCount)", systemImage: "rectangle.stack")
+                StatTile(title: appState.localized("系列"), value: "\(stats.seriesCount)", systemImage: "rectangle.stack")
             }
             if stats.episodeCount > 0 {
-                StatTile(title: "剧集", value: "\(stats.episodeCount)", systemImage: "play.square.stack")
+                StatTile(title: appState.localized("剧集"), value: "\(stats.episodeCount)", systemImage: "play.square.stack")
             }
             if stats.unwatchedCount > 0 {
-                StatTile(title: "未观看", value: "\(stats.unwatchedCount)", systemImage: "eye")
+                StatTile(title: appState.localized("未观看"), value: "\(stats.unwatchedCount)", systemImage: "eye")
             }
             if stats.favoriteCount > 0 {
-                StatTile(title: "喜欢", value: "\(stats.favoriteCount)", systemImage: "heart")
+                StatTile(title: appState.localized("喜欢"), value: "\(stats.favoriteCount)", systemImage: "heart")
             }
             if stats.watchedMovieCount > 0 {
-                StatTile(title: "已看影片", value: "\(stats.watchedMovieCount)", systemImage: "checkmark.circle")
+                StatTile(title: appState.localized("已看影片"), value: "\(stats.watchedMovieCount)", systemImage: "checkmark.circle")
             }
             if stats.watchedEpisodeCount > 0 {
-                StatTile(title: "已看剧集", value: "\(stats.watchedEpisodeCount)", systemImage: "checkmark.seal")
+                StatTile(title: appState.localized("已看剧集"), value: "\(stats.watchedEpisodeCount)", systemImage: "checkmark.seal")
             }
             if stats.totalWatchedMinutes >= 60 {
                 let hours = stats.totalWatchedMinutes / 60
                 let label = hours >= 10000 ? "\(hours / 1000)K+" : (hours >= 1000 ? "\(hours / 100 * 100)+" : "\(hours)")
-                StatTile(title: "已看时长(h)", value: label, systemImage: "clock.badge.checkmark")
+                StatTile(title: appState.localized("已看时长(h)"), value: label, systemImage: "clock.badge.checkmark")
             }
         }
     }
@@ -1461,6 +1478,17 @@ struct LibraryHealthView: View {
     let onOpen: () -> Void
     @State private var isHovering = false
 
+    private func libraryHealthSummary(offline: Int, missingFiles: Int, duplicateGroups: Int, missingMetadata: Int) -> String {
+        switch appState.settings.appLanguage {
+        case .zhHans:
+            return "\(offline) 个媒体源不可访问，\(missingFiles) 个文件/播放路径失效，\(duplicateGroups) 组疑似重复条目，\(missingMetadata) 个条目缺少核心信息。"
+        case .en:
+            return "\(offline) sources unreachable, \(missingFiles) broken files/paths, \(duplicateGroups) likely duplicate groups, \(missingMetadata) items missing key info."
+        case .ja:
+            return "アクセス不可のソース \(offline) 件、無効なファイル/パス \(missingFiles) 件、重複の疑い \(duplicateGroups) 組、主要情報が不足 \(missingMetadata) 件。"
+        }
+    }
+
     var body: some View {
         let offline = appState.offlineSources
         let missingFiles = appState.missingFileItems
@@ -1476,9 +1504,9 @@ struct LibraryHealthView: View {
                         .font(.title2)
                         .foregroundStyle(active ? tint.opacity(0.96) : tint.opacity(0.82))
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("媒体库需要处理")
+                        Text(appState.localized("媒体库需要处理"))
                             .font(.headline)
-                        Text("\(offline.count) 个媒体源不可访问，\(missingFiles.count) 个文件/播放路径失效，\(duplicateGroups.count) 组疑似重复条目，\(missingMetadata.count) 个条目缺少核心信息。")
+                        Text(libraryHealthSummary(offline: offline.count, missingFiles: missingFiles.count, duplicateGroups: duplicateGroups.count, missingMetadata: missingMetadata.count))
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -1533,6 +1561,7 @@ struct LibraryHealthView: View {
 }
 
 struct EmptyLibraryView: View {
+    @EnvironmentObject private var appState: AppState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var breathe = false
 
@@ -1545,16 +1574,16 @@ struct EmptyLibraryView: View {
                     reduceMotion ? nil : .easeInOut(duration: 2.2).repeatForever(autoreverses: true),
                     value: breathe
                 )
-	            Text("媒体源待添加")
+	            Text(appState.localized("媒体源待添加"))
 	                .font(.title2.weight(.semibold))
-	            Text("接入本地文件夹、移动硬盘、网络挂载或 Emby 媒体库后，MediaLIB 会整理索引。")
+	            Text(appState.localized("接入本地文件夹、移动硬盘、网络挂载或 Emby 媒体库后，MediaLIB 会整理索引。"))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 380)
             HStack(spacing: 8) {
                 Image(systemName: "arrow.right.circle.fill")
                     .foregroundStyle(AppColors.selectedGlassTint.opacity(0.90))
-                Text("前往 **媒体源** 添加")
+                Text((try? AttributedString(markdown: appState.localized("前往 **媒体源** 添加"))) ?? AttributedString(appState.localized("前往 **媒体源** 添加")))
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -1572,13 +1601,21 @@ struct ScanProgressView: View {
     @EnvironmentObject private var appState: AppState
     let progress: ScanProgress
 
+    private func scanningVaultTitle(_ name: String) -> String {
+        switch appState.settings.appLanguage {
+        case .zhHans: return "正在扫描\(name)媒体源"
+        case .en: return "Scanning \(name) source"
+        case .ja: return "\(name)ソースをスキャン中"
+        }
+    }
+
     var body: some View {
         let source = appState.sources.first { $0.id == progress.sourceID }
         let hidesPath = source?.mediaType == .privateCollection && !appState.privacyUnlocked
 
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(hidesPath ? "正在扫描\(appState.settings.privacyVaultName)媒体源" : "正在扫描")
+                Text(hidesPath ? scanningVaultTitle(appState.settings.privacyVaultName) : appState.localized("正在扫描"))
                     .font(.headline)
                 Spacer()
                 Text("\(progress.processedFiles)/\(progress.totalFiles)")
@@ -1587,7 +1624,7 @@ struct ScanProgressView: View {
             ProgressView(value: progress.fraction)
                 .tint(AppColors.selectedGlassTint)
             if hidesPath {
-                Text("扫描详情已隐藏")
+                Text(appState.localized("扫描详情已隐藏"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if let currentPath = progress.currentPath {

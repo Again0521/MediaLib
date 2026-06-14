@@ -1263,6 +1263,7 @@ struct HomeTabSettingsGrid: View {
 }
 
 private struct HomeTabSettingsTile: View {
+    @EnvironmentObject private var appState: AppState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let tab: HomeTab
     let isEnabled: Bool
@@ -1275,7 +1276,7 @@ private struct HomeTabSettingsTile: View {
             HStack(spacing: 8) {
                 Image(systemName: tab.systemImage)
                     .frame(width: 18)
-                Text(tab.displayName)
+                Text(appState.localized(tab.displayName))
                     .lineLimit(1)
                 Spacer()
                 Image(systemName: isEnabled ? "checkmark.circle.fill" : "circle")
@@ -1292,7 +1293,7 @@ private struct HomeTabSettingsTile: View {
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
         .animation(reduceMotion ? nil : AppMotion.listHover, value: isHovering)
-        .help(tab.displayName)
+        .help(appState.localized(tab.displayName))
     }
 }
 

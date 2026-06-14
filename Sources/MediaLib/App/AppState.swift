@@ -723,6 +723,8 @@ final class AppState: ObservableObject {
             base = topLevelItems.filter { $0.type == .documentary }
         case .video(.variety):
             base = topLevelItems.filter { $0.type == .variety }
+        case .video(.homeVideos):
+            base = topLevelItems.filter { $0.type == .homeVideo }
         case .video(.other):
             base = topLevelItems.filter { $0.type == .other }
         case .video(.privacy):
@@ -2815,6 +2817,8 @@ final class AppState: ObservableObject {
                 return cachedHomeVideoItems.contains { $0.type == .documentary }
             case .variety:
                 return cachedHomeVideoItems.contains { $0.type == .variety }
+            case .homeVideos:
+                return cachedHomeVideoItems.contains { $0.type == .homeVideo }
             case .music:
                 return !cachedMusicTracks.isEmpty
             case .other:
@@ -2840,6 +2844,8 @@ final class AppState: ObservableObject {
                 return availableVideoTypes.contains(.documentary)
             case .variety:
                 return availableVideoTypes.contains(.variety)
+            case .homeVideos:
+                return availableVideoTypes.contains(.homeVideo)
             case .other:
                 return availableVideoTypes.contains(.other)
             case .privacy:
@@ -2904,6 +2910,7 @@ final class AppState: ObservableObject {
             (.anime, ["动漫", "动画", "番剧", "新番", "国漫", "日漫", "anime", "animation", "bangumi", "cartoon"]),
             (.documentary, ["纪录", "纪实", "documentary", "docu"]),
             (.variety, ["综艺", "真人秀", "脱口秀", "variety", "reality", "talk show", "talkshow"]),
+            (.homeVideo, ["家庭录像", "家庭视频", "家庭影像", "自拍视频", "生活录像", "home video", "homevideo", "homevideos", "home movie", "home movies"]),
             (.movie, ["电影", "影片", "影院", "movie", "movies", "film", "cinema"]),
             (.tvShow, ["电视剧", "剧集", "连续剧", "美剧", "日剧", "韩剧", "英剧", "华语剧", "tv", "series", "drama", "shows"])
         ]
@@ -2913,6 +2920,7 @@ final class AppState: ObservableObject {
     private static func inferMediaType(fromCollectionType collectionType: String?) -> MediaType? {
         guard let normalized = normalizedClassifierText(collectionType), !normalized.isEmpty else { return nil }
         if normalized.contains("movies") || normalized == "movie" { return .movie }
+        if normalized.contains("homevideos") || normalized.contains("home video") || normalized.contains("homevideo") { return .homeVideo }
         if normalized.contains("music") { return .music }
         if normalized.contains("tvshows") || normalized.contains("series") { return .tvShow }
         return nil
@@ -2923,7 +2931,8 @@ final class AppState: ObservableObject {
         let rules: [(MediaType, [String])] = [
             (.anime, ["动画", "动漫", "animation", "anime"]),
             (.documentary, ["纪录", "documentary"]),
-            (.variety, ["综艺", "真人秀", "脱口秀", "reality", "talk", "variety"])
+            (.variety, ["综艺", "真人秀", "脱口秀", "reality", "talk", "variety"]),
+            (.homeVideo, ["家庭录像", "家庭视频", "home video", "homevideo", "home movie"])
         ]
         return rules.first { _, keywords in keywords.contains { normalized.contains($0) } }?.0
     }
@@ -4056,6 +4065,8 @@ final class AppState: ObservableObject {
             scanLocalSources(mediaTypes: [.documentary], emptyMessage: "当前纪录片分类没有可扫描的媒体源。")
         case .variety:
             scanLocalSources(mediaTypes: [.variety], emptyMessage: "当前综艺分类没有可扫描的媒体源。")
+        case .homeVideos:
+            scanLocalSources(mediaTypes: [.homeVideo], emptyMessage: "当前家庭录像分类没有可扫描的媒体源。")
         case .other:
             scanLocalSources(mediaTypes: [.other], emptyMessage: "当前其他分类没有可扫描的媒体源。")
         case .privacy:
@@ -4075,7 +4086,7 @@ final class AppState: ObservableObject {
         startScanQueue([source])
     }
 
-    private static let videoScanTypes: Set<MediaType> = [.movie, .tvShow, .anime, .documentary, .variety, .other]
+    private static let videoScanTypes: Set<MediaType> = [.movie, .tvShow, .anime, .documentary, .variety, .homeVideo, .other]
 
     private func mediaTypes(for section: VideoLibrarySection) -> Set<MediaType> {
         switch section {
@@ -4089,6 +4100,8 @@ final class AppState: ObservableObject {
             return [.documentary]
         case .variety:
             return [.variety]
+        case .homeVideos:
+            return [.homeVideo]
         case .other:
             return [.other]
         case .privacy:

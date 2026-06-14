@@ -488,7 +488,7 @@ public final class MediaScanner {
 
     private func resolvedMovieType(for source: MediaSource) -> MediaType {
         switch source.mediaType {
-        case .movie, .anime, .documentary, .variety, .music, .other, .privateCollection:
+        case .movie, .anime, .documentary, .variety, .homeVideo, .music, .other, .privateCollection:
             return source.mediaType
         case .auto, .tvShow, .episode:
             return .movie
@@ -497,7 +497,7 @@ public final class MediaScanner {
 
     private func resolvedSeriesType(for source: MediaSource) -> MediaType {
         switch source.mediaType {
-        case .anime, .documentary, .variety, .music, .other, .privateCollection:
+        case .anime, .documentary, .variety, .homeVideo, .music, .other, .privateCollection:
             return source.mediaType
         case .auto, .movie, .tvShow, .episode:
             return .tvShow

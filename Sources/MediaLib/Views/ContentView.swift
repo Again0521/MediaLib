@@ -8,6 +8,7 @@ enum VideoLibrarySection: String, CaseIterable, Identifiable, Sendable {
     case anime
     case documentaries
     case variety
+    case homeVideos
     case other
     case privacy
     case watching
@@ -25,6 +26,7 @@ enum VideoLibrarySection: String, CaseIterable, Identifiable, Sendable {
         case .anime: return "动漫"
         case .documentaries: return "纪录片"
         case .variety: return "综艺"
+        case .homeVideos: return "家庭录像"
         case .other: return "其他"
         case .privacy: return "保险库"
         case .watching: return "正在观看"
@@ -42,6 +44,7 @@ enum VideoLibrarySection: String, CaseIterable, Identifiable, Sendable {
         case .anime: return "sparkles.tv"
         case .documentaries: return "books.vertical"
         case .variety: return "music.mic"
+        case .homeVideos: return "video"
         case .other: return "tray"
         case .privacy: return "lock.rectangle.stack"
         case .watching: return "play.circle"
@@ -667,7 +670,7 @@ struct ContentView: View {
     private var navigationRoot: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             List(selection: $selection) {
-                Section("媒体库") {
+                Section(appState.localized("媒体库")) {
                     sidebarRow(.home)
 
                     sidebarGroupSpacer
@@ -679,7 +682,7 @@ struct ContentView: View {
                             $0 != .watching && $0 != .unwatched && $0 != .watched
                         }
                         if sections.isEmpty {
-                            Label("暂无视频", systemImage: "film")
+                            Label(appState.localized("暂无视频"), systemImage: "film")
                                 .foregroundStyle(.secondary)
                         } else {
                             ForEach(sections) { section in
@@ -700,7 +703,7 @@ struct ContentView: View {
                         } label: {
                             HStack(spacing: 10) {
                                 PlayfulSymbolIcon(systemImage: "plus", size: 22)
-                                Text("新建智能集合")
+                                Text(appState.localized("新建智能集合"))
                                     // 与其它目录行字体保持一致。
                                     .font(.body)
                             }
@@ -711,7 +714,7 @@ struct ContentView: View {
                         } label: {
                             HStack(spacing: 10) {
                                 PlayfulSymbolIcon(systemImage: "rectangle.stack.badge.plus", size: 22)
-                                Text("新建集合")
+                                Text(appState.localized("新建集合"))
                                     .font(.body)
                             }
                         }
@@ -724,7 +727,7 @@ struct ContentView: View {
                         } label: {
                             HStack(spacing: 10) {
                                 PlayfulSymbolIcon(systemImage: "film", size: 22)
-                                Text("视频")
+                                Text(appState.localized("视频"))
                                 Spacer(minLength: 0)
                             }
                             .font(.callout.weight(.semibold))
@@ -755,7 +758,7 @@ struct ContentView: View {
                         } label: {
                             HStack(spacing: 10) {
                                 PlayfulSymbolIcon(systemImage: "music.note", size: 22)
-                                Text("音乐")
+                                Text(appState.localized("音乐"))
                                 Spacer(minLength: 0)
                             }
                             .font(.callout.weight(.semibold))
@@ -771,7 +774,7 @@ struct ContentView: View {
                     }
                 }
 
-                Section("管理") {
+                Section(appState.localized("管理")) {
                     sidebarRow(.sources)
                     sidebarRow(.health)
                     sidebarRow(.tasks)
@@ -1115,7 +1118,7 @@ struct ContentView: View {
         return HStack(spacing: 10) {
             PlayfulSymbolIcon(systemImage: destination.systemImage, size: 22, selected: selected)
                 .id(appState.themeRevision)
-            Text(title(for: destination))
+            Text(appState.localized(title(for: destination)))
         }
             .tag(destination)
             .transaction { transaction in
@@ -1145,12 +1148,12 @@ struct ContentView: View {
             Button {
                 smartCollectionEditor = .edit(collection)
             } label: {
-                Label("编辑", systemImage: "pencil")
+                Label(appState.localized("编辑"), systemImage: "pencil")
             }
             Button {
                 appState.setVideoSmartCollectionHomeVisibility(collection, showOnHome: !collection.showOnHome)
             } label: {
-                Label(collection.showOnHome ? "从首页移除" : "发布到首页", systemImage: collection.showOnHome ? "house.slash" : "house")
+                Label(appState.localized(collection.showOnHome ? "从首页移除" : "发布到首页"), systemImage: collection.showOnHome ? "house.slash" : "house")
             }
             Button(role: .destructive) {
                 if selection == .smartCollection(collection.id) {
@@ -1158,7 +1161,7 @@ struct ContentView: View {
                 }
                 appState.deleteVideoSmartCollection(collection)
             } label: {
-                Label("删除", systemImage: "trash")
+                Label(appState.localized("删除"), systemImage: "trash")
             }
         }
     }
@@ -1181,12 +1184,12 @@ struct ContentView: View {
             Button {
                 manualCollectionEditor = .edit(collection)
             } label: {
-                Label("重命名", systemImage: "pencil")
+                Label(appState.localized("重命名"), systemImage: "pencil")
             }
             Button {
                 appState.setVideoManualCollectionHomeVisibility(collection, showOnHome: !collection.showOnHome)
             } label: {
-                Label(collection.showOnHome ? "从首页移除" : "发布到首页", systemImage: collection.showOnHome ? "house.slash" : "house")
+                Label(appState.localized(collection.showOnHome ? "从首页移除" : "发布到首页"), systemImage: collection.showOnHome ? "house.slash" : "house")
             }
             Button(role: .destructive) {
                 if selection == .manualCollection(collection.id) {
@@ -1194,7 +1197,7 @@ struct ContentView: View {
                 }
                 appState.deleteVideoManualCollection(collection)
             } label: {
-                Label("删除", systemImage: "trash")
+                Label(appState.localized("删除"), systemImage: "trash")
             }
         }
     }

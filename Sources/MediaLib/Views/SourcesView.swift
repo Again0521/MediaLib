@@ -115,7 +115,7 @@ private struct AddMediaSourceWizardSheet: View {
 
     private let columns = [GridItem(.adaptive(minimum: 188), spacing: 10)]
     private let mediaTypes: [MediaType] = [
-        .auto, .movie, .tvShow, .anime, .documentary, .variety, .music, .other, .privateCollection
+        .auto, .movie, .tvShow, .anime, .documentary, .variety, .homeVideo, .music, .other, .privateCollection
     ]
     private let contentInset: CGFloat = 2
 
@@ -745,7 +745,7 @@ private struct SourceSettingsSheet: View {
     @State private var errorMessage: String?
 
     private let mediaTypes: [MediaType] = [
-        .auto, .movie, .tvShow, .anime, .documentary, .variety, .music, .other, .privateCollection
+        .auto, .movie, .tvShow, .anime, .documentary, .variety, .homeVideo, .music, .other, .privateCollection
     ]
 
     init(source: MediaSource) {
@@ -1038,7 +1038,7 @@ private extension EmbyLibrarySummary {
         case "music": return "音乐"
         case "boxsets": return "合集"
         case "playlists": return "播放列表"
-        case "homevideos": return "家庭视频"
+        case "homevideos": return "家庭录像"
         case "photos": return "照片"
         case "livetv": return "电视直播"
         case .some(let value) where !value.isEmpty: return value
@@ -1089,8 +1089,6 @@ private struct SourceBehaviorSettingsPanel: View {
                                 Text(mode.title).tag(mode)
                             }
                         }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
                         .adaptiveMenuControl(selectedTitle: remoteTraceSyncMode.title, minWidth: 150, maxWidth: 240)
 
                         Spacer(minLength: 0)
@@ -1148,6 +1146,7 @@ private struct MediaTypeGridPicker: View {
         case .anime: return "sparkles.tv"
         case .documentary: return "books.vertical"
         case .variety: return "theatermasks"
+        case .homeVideo: return "video"
         case .music: return "music.note"
         case .other: return "tray"
         case .privateCollection: return "lock"

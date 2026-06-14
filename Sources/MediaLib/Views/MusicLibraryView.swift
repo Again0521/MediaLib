@@ -1793,7 +1793,7 @@ private struct MusicSongRow: View {
                 Label(row.track.favorite ? "取消收藏" : "收藏", systemImage: row.track.favorite ? "heart.slash" : "heart")
             }
             Menu {
-                ForEach([MediaType.movie, .tvShow, .anime, .documentary, .variety, .other, .privateCollection], id: \.self) { type in
+                ForEach([MediaType.movie, .tvShow, .anime, .documentary, .variety, .homeVideo, .other, .privateCollection], id: \.self) { type in
                     Button {
                         appState.reclassify(row.track, as: type)
                     } label: {
