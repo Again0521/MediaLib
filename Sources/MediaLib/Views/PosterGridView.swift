@@ -42,7 +42,9 @@ struct MarqueeText: View {
             }
             .frame(width: width, alignment: .leading)
             .clipped()
-            .mask(maskGradient)
+            // 仅当文字真的溢出时才套用渐变边缘遮罩；放得下时跳过 .mask 的离屏合成通道。
+            // 放得下时 measuredText 在 frame 内、原 maskGradient 是纯黑（等价无遮罩），像素零差异。
+            .modifier(MarqueeEdgeFadeMask(active: hasOverflow, hovering: hovering))
             .contentShape(Rectangle())
             .onAppear { containerWidth = width }
             .onChange(of: width) { newValue in
@@ -112,23 +114,34 @@ struct MarqueeText: View {
         }
     }
 
-    @ViewBuilder
-    private var maskGradient: some View {
-        if hasOverflow {
-            let edge: CGFloat = 0.06
-            LinearGradient(
-                stops: [
-                    .init(color: hovering ? .clear : .black, location: 0),
-                    .init(color: .black, location: edge),
-                    .init(color: .black, location: 1 - edge),
-                    .init(color: .clear, location: 1)
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
+}
+
+/// 跑马灯文字的边缘渐隐遮罩：只在文字溢出时才套用 `.mask`，放得下时直接放行，
+/// 省掉每个不溢出标题在密集网格里的一次离屏合成通道（像素零差异）。
+private struct MarqueeEdgeFadeMask: ViewModifier {
+    let active: Bool
+    let hovering: Bool
+
+    func body(content: Content) -> some View {
+        if active {
+            content.mask(gradient)
         } else {
-            Color.black
+            content
         }
+    }
+
+    private var gradient: some View {
+        let edge: CGFloat = 0.06
+        return LinearGradient(
+            stops: [
+                .init(color: hovering ? .clear : .black, location: 0),
+                .init(color: .black, location: edge),
+                .init(color: .black, location: 1 - edge),
+                .init(color: .clear, location: 1)
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
     }
 }
 struct PosterGridList<Leading: View>: View {
@@ -469,6 +482,11 @@ struct PosterCardView: View {
         .padding(10)
         .staticSurfaceBackground(cornerRadius: 18)
         .repeatedSurfaceHover(hoverActive, cornerRadius: 18, tint: AppColors.pointerLightTint, intensity: usesInspectHover ? 0.95 : 0.72)
+        // #1 只修 bug、不动悬停效果：封面 3D 检视(pointerInspectTilt)+放大保持原样。
+        // 原 bug＝悬停时封面 3D 投影/放大溢出本格，被相邻卡片（ForEach 中靠后者默认画在上层）裁切，
+        // 看着像“以右边为原点放大”且把相邻/底部卡片撑歪，窗口拉大海报变小时尤甚。
+        // 修＝悬停卡片 zIndex 抬到上层：封面放大干净地盖在邻格之上，不再相互裁切/挤压。
+        .zIndex(hoverActive ? 1 : 0)
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hoverActive)
         .onHover { hovering in
             guard !suppressHoverDuringScroll else {

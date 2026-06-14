@@ -99,6 +99,7 @@ struct HomeView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.mainLayoutTransitionActive) private var layoutTransitionActive
     let onOpenHealthCenter: () -> Void
+    let onOpenSources: () -> Void
     @State private var searchText = ""
     @State private var visibleHomeItems: [MediaItem] = []
     @State private var visibleHomeItemsKey = ""
@@ -110,8 +111,9 @@ struct HomeView: View {
     @State private var overviewBoardsKey = ""
     @AppStorage("MediaLib.home.selectedTab") private var selectedTabRaw = HomeTab.overview.rawValue
 
-    init(onOpenHealthCenter: @escaping () -> Void = {}) {
+    init(onOpenHealthCenter: @escaping () -> Void = {}, onOpenSources: @escaping () -> Void = {}) {
         self.onOpenHealthCenter = onOpenHealthCenter
+        self.onOpenSources = onOpenSources
     }
 
     private var selectedTab: HomeTab {
@@ -156,7 +158,7 @@ struct HomeView: View {
                             }
 
                             if appState.sources.isEmpty {
-                                EmptyLibraryView()
+                                EmptyLibraryView(onOpenSources: onOpenSources)
                             } else if isSearching {
                                 GlobalSearchView(query: searchText) { item in
                                     if item.type == .music {
@@ -1563,37 +1565,81 @@ struct LibraryHealthView: View {
 struct EmptyLibraryView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var breathe = false
+    let onOpenSources: () -> Void
+    @State private var iconShakeStep = 0
+    @State private var iconShakeTask: Task<Void, Never>?
+
+    private var iconShakeAngle: Double {
+        guard !reduceMotion else { return 0 }
+        let pattern: [Double] = [0, -5.0, 4.6, -3.4, 2.6, -1.4, 0.7, 0]
+        return pattern[iconShakeStep % pattern.count]
+    }
 
     var body: some View {
-        VStack(spacing: 18) {
+        ZStack {
             PlayfulSymbolIcon(systemImage: "externaldrive.badge.plus", size: 62)
-                .scaleEffect(breathe && !reduceMotion ? 1.04 : 1)
-                .opacity(breathe && !reduceMotion ? 1 : 0.88)
-                .animation(
-                    reduceMotion ? nil : .easeInOut(duration: 2.2).repeatForever(autoreverses: true),
-                    value: breathe
-                )
+                .rotationEffect(.degrees(iconShakeAngle), anchor: .center)
+                .scaleEffect(iconShakeStep == 0 || reduceMotion ? 1 : 1.012)
+                .opacity(0.94)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.085), value: iconShakeStep)
+
+            VStack(spacing: 18) {
 	            Text(appState.localized("媒体源待添加"))
 	                .font(.title2.weight(.semibold))
 	            Text(appState.localized("接入本地文件夹、移动硬盘、网络挂载或 Emby 媒体库后，MediaLIB 会整理索引。"))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 380)
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.right.circle.fill")
-                    .foregroundStyle(AppColors.selectedGlassTint.opacity(0.90))
-                Text((try? AttributedString(markdown: appState.localized("前往 **媒体源** 添加"))) ?? AttributedString(appState.localized("前往 **媒体源** 添加")))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+            Button(action: onOpenSources) {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .font(.callout.weight(.semibold))
+                    Text(appState.localized("前往媒体源添加"))
+                        .font(.callout.weight(.semibold))
+                }
+                .foregroundStyle(AppColors.selectedGlassTint)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule()
+                        .fill(AppColors.selectedGlassTint.opacity(0.10))
+                        .overlay(
+                            Capsule()
+                                .stroke(AppColors.selectedGlassTint.opacity(0.28), lineWidth: 1)
+                        )
+                )
+                .contentShape(Capsule())
             }
+            .buttonStyle(.plain)
+            .help(appState.localized("前往媒体源添加"))
             .padding(.top, 4)
+            }
+            .offset(y: 116)
         }
-        // 内容在更高的卡片内水平+垂直居中，让磁盘动画位于空状态视觉中心。
+        // 内容在更高的卡片内水平+垂直居中，让磁盘固定在空状态视觉中心。
         .frame(maxWidth: .infinity, minHeight: 480, alignment: .center)
         .padding(32)
         .staticSurfaceBackground(cornerRadius: 22)
-        .onAppear { breathe = true }
+        .onAppear { startIconShakeIfNeeded() }
+        .onDisappear {
+            iconShakeTask?.cancel()
+            iconShakeTask = nil
+        }
+    }
+
+    private func startIconShakeIfNeeded() {
+        guard iconShakeTask == nil, !reduceMotion else { return }
+        iconShakeTask = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_150_000_000)
+                for step in 1...7 {
+                    guard !Task.isCancelled else { return }
+                    iconShakeStep = step
+                    try? await Task.sleep(nanoseconds: 85_000_000)
+                }
+                iconShakeStep = 0
+            }
+        }
     }
 }
 

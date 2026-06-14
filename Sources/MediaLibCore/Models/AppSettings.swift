@@ -1210,8 +1210,8 @@ public enum MetadataMatchTolerance: String, Codable, CaseIterable, Identifiable 
 
     public var summary: String {
         switch self {
-        case .loose: return "更易匹配，命名混乱的库也能尽量覆盖，可能偶有误配"
-        case .standard: return "在准确度与覆盖率之间平衡（推荐）"
+        case .loose: return "更易匹配，命名混乱的库也能尽量覆盖（默认），可能偶有误配"
+        case .standard: return "在准确度与覆盖率之间平衡"
         case .strict: return "仅高置信度才自动套用，最大限度避免误配"
         }
     }
@@ -1575,7 +1575,7 @@ public struct AppSettings: Codable, Hashable {
         keepLocalAudioWithAirPlay: Bool = false,
         tmdbAPIKey: String? = nil,
         tmdbLanguage: String = "zh-CN",
-        metadataMatchTolerance: MetadataMatchTolerance = .standard,
+        metadataMatchTolerance: MetadataMatchTolerance = .loose,
         musicMetadataProvider: MusicMetadataProvider = .musicBrainz,
         musicMetadataMatchTolerance: MetadataMatchTolerance = .standard,
         lyricSyncAlgorithm: LyricSyncAlgorithm = .audioEnergy,

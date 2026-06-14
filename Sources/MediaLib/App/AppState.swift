@@ -26,6 +26,21 @@ enum AppFloatingNoticeKind: Equatable, Sendable {
         case .tip: return "sparkles"
         }
     }
+
+    /// 由 AppAlert 的标题/正文推断浮窗语气：失败/无法/错误→error，成功/已完成→success，
+    /// 否则 info。用于把原本"纯告知模态弹窗"统一收敛到浮窗时仍保留正确的图标与配色。
+    static func inferred(fromTitle title: String, message: String? = nil) -> AppFloatingNoticeKind {
+        let text = (title + " " + (message ?? "")).lowercased()
+        let negativeKeywords = ["失败", "无法", "错误", "出错", "异常", "拒绝", "不支持", "未能", "error", "failed", "cannot", "unable"]
+        if negativeKeywords.contains(where: text.contains) {
+            return .error
+        }
+        let positiveKeywords = ["成功", "已完成", "已保存", "完成", "已更新", "已添加", "succeeded", "completed", "saved"]
+        if positiveKeywords.contains(where: text.contains) {
+            return .success
+        }
+        return .info
+    }
 }
 
 struct AppFloatingNotice: Identifiable, Equatable, Sendable {
@@ -45,6 +60,13 @@ struct AppFloatingNotice: Identifiable, Equatable, Sendable {
 private struct PendingFloatingNotice: Sendable {
     var notice: AppFloatingNotice
     var duration: TimeInterval
+}
+
+private struct ArtworkWarmupProgressRecord: Codable, Sendable {
+    var sourceID: String
+    var completedURLs: [String]
+    var totalCount: Int
+    var updatedAt: Date
 }
 
 struct VideoManualCollectionCreationRequest: Identifiable, Equatable {
@@ -367,8 +389,14 @@ final class AppState: ObservableObject {
     @Published var isMatchingTMDB = false
     @Published var alert: AppAlert? {
         didSet {
+            // AppAlert 是"纯告知"载体（仅标题/正文 + 一个"好"键），统一只走浮窗通知，
+            // 不再叠加模态弹窗（ContentView 已移除 .alert(item:)），避免同一事件双重打扰。
             if let alert {
-                showFloatingNotice(title: alert.title, message: alert.message.isEmpty ? nil : alert.message)
+                showFloatingNotice(
+                    title: alert.title,
+                    message: alert.message.isEmpty ? nil : alert.message,
+                    kind: AppFloatingNoticeKind.inferred(fromTitle: alert.title, message: alert.message)
+                )
             }
         }
     }
@@ -509,6 +537,7 @@ final class AppState: ObservableObject {
     private var musicQueuePersistenceTask: Task<Void, Never>?
     private var didRestoreMusicQueue = false
     private var embyPlaybackSyncTasks: [String: Task<Void, Never>] = [:]
+    private var restoredArtworkWarmupTasks: [BackgroundTaskSnapshot] = []
     private var embyPlaySessionIDs: [String: String] = [:]
     private var playbackClearRevisionByItemID: [String: Date] = [:]
     /// B2 Scrobbling：当前待结算的听歌候选（开始播放即记录，达到时长门槛后 track.scrobble）。
@@ -2539,6 +2568,7 @@ final class AppState: ObservableObject {
             pruneExpiredVideoOfflineSubscriptions(reason: "library reload", notify: false)
             scheduleVideoOfflineSubscriptionExpirationCheck(reason: "library reload")
             scheduleVideoOfflineSubscriptionMaintenance(reason: "library reload")
+            resumeRestoredArtworkWarmupTasksIfNeeded()
             logPerformance("reload.total: \(Self.milliseconds(since: reloadStart))ms revision=\(libraryRevision) posterRevision=\(posterRevision)")
         } catch {
             showError("加载媒体库失败", error)
@@ -3146,6 +3176,7 @@ final class AppState: ObservableObject {
             try sourceRepository.save(source)
             reload()
             scan(source)
+            showInitialIndexingTipIfNeeded()
         } catch {
             showError("添加媒体源失败", error)
         }
@@ -3183,6 +3214,7 @@ final class AppState: ObservableObject {
             }
             reload()
             startScanQueue(savedSources)
+            showInitialIndexingTipIfNeeded()
         } catch {
             showError("添加媒体源失败", error)
         }
@@ -3513,6 +3545,7 @@ final class AppState: ObservableObject {
             )
             reload()
             scan(source)
+            showInitialIndexingTipIfNeeded()
         } catch {
             showError("添加网络媒体源失败", error)
         }
@@ -3677,43 +3710,115 @@ final class AppState: ObservableObject {
         return copy
     }
 
-    private func scheduleEmbyArtworkWarmup(source: MediaSource, items: [MediaItem]) {
-        let urls = Array(Set(items.compactMap { item -> URL? in
-            guard let posterPath = item.posterPath,
-                  let url = URL(string: posterPath),
-                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
-            return url
-        }))
+    private func scheduleEmbyArtworkWarmup(
+        source: MediaSource,
+        items: [MediaItem],
+        resumingTaskID: UUID? = nil
+    ) {
+        let urls = artworkWarmupURLs(for: items)
         guard !urls.isEmpty else { return }
 
         embyArtworkWarmupTasks[source.id]?.cancel()
-        let taskID = beginBackgroundTask(
-            kind: .artworkWarmup,
-            title: "封面预热 · \(source.name)",
-            detail: "准备缓存 \(urls.count) 张封面",
-            progress: 0,
-            isCancellable: false,
-            retrySourceID: source.id
+        let currentURLStrings = Set(urls.map(\.absoluteString))
+        let savedProgress = artworkWarmupProgressRecord(for: source.id)
+        var completedURLStrings = Set(savedProgress?.completedURLs ?? [])
+        completedURLStrings.formIntersection(currentURLStrings)
+
+        let totalCount = urls.count
+        let remainingURLs = urls.filter { !completedURLStrings.contains($0.absoluteString) }
+        let initialProgress = Double(completedURLStrings.count) / Double(max(totalCount, 1))
+        let taskID = ensureArtworkWarmupBackgroundTask(
+            source: source,
+            taskID: resumingTaskID,
+            totalCount: totalCount,
+            completedCount: completedURLStrings.count,
+            progress: initialProgress
         )
+
+        guard !remainingURLs.isEmpty else {
+            clearArtworkWarmupProgress(sourceID: source.id)
+            updateBackgroundTask(
+                id: taskID,
+                progress: 1,
+                detail: "已缓存 \(totalCount)/\(totalCount) 张封面"
+            )
+            finishBackgroundTask(id: taskID, errors: [])
+            return
+        }
+
+        persistArtworkWarmupProgress(
+            sourceID: source.id,
+            completedURLs: completedURLStrings,
+            totalCount: totalCount
+        )
+
         let task = Task { [weak self] in
             guard let self else { return }
-            var processed = 0
-            for url in urls {
+            var completed = completedURLStrings
+            for url in remainingURLs {
                 guard !Task.isCancelled else { return }
                 _ = await ArtworkImageCache.prewarmRemoteImage(url: url, targetSize: CGSize(width: 260, height: 390))
-                processed += 1
-                if processed == urls.count || processed % 6 == 0 {
+                completed.insert(url.absoluteString)
+                self.persistArtworkWarmupProgress(
+                    sourceID: source.id,
+                    completedURLs: completed,
+                    totalCount: totalCount
+                )
+                if completed.count == totalCount || completed.count % 6 == 0 {
                     self.updateBackgroundTask(
                         id: taskID,
-                        progress: Double(processed) / Double(max(urls.count, 1)),
-                        detail: "已缓存 \(processed)/\(urls.count) 张封面"
+                        progress: Double(completed.count) / Double(max(totalCount, 1)),
+                        detail: "已缓存 \(completed.count)/\(totalCount) 张封面"
                     )
                 }
             }
             self.embyArtworkWarmupTasks[source.id] = nil
+            self.clearArtworkWarmupProgress(sourceID: source.id)
             self.finishBackgroundTask(id: taskID, errors: [])
         }
         embyArtworkWarmupTasks[source.id] = task
+    }
+
+    private func artworkWarmupURLs(for items: [MediaItem]) -> [URL] {
+        let urlStrings = Set(items.compactMap { item -> String? in
+            guard let posterPath = item.posterPath,
+                  let url = URL(string: posterPath),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+            return url.absoluteString
+        })
+        return urlStrings.sorted().compactMap(URL.init(string:))
+    }
+
+    private func ensureArtworkWarmupBackgroundTask(
+        source: MediaSource,
+        taskID: UUID?,
+        totalCount: Int,
+        completedCount: Int,
+        progress: Double
+    ) -> UUID {
+        if let taskID, let index = backgroundTasks.firstIndex(where: { $0.id == taskID }) {
+            backgroundTasks[index].state = .running
+            backgroundTasks[index].title = "封面预热 · \(source.name)"
+            backgroundTasks[index].detail = completedCount > 0
+                ? "继续缓存 \(completedCount)/\(totalCount) 张封面"
+                : "准备缓存 \(totalCount) 张封面"
+            backgroundTasks[index].progress = progress
+            backgroundTasks[index].finishedAt = nil
+            backgroundTasks[index].isCancellable = false
+            backgroundTasks[index].retrySourceID = source.id
+            return taskID
+        }
+
+        return beginBackgroundTask(
+            kind: .artworkWarmup,
+            title: "封面预热 · \(source.name)",
+            detail: completedCount > 0
+                ? "继续缓存 \(completedCount)/\(totalCount) 张封面"
+                : "准备缓存 \(totalCount) 张封面",
+            progress: progress,
+            isCancellable: false,
+            retrySourceID: source.id
+        )
     }
 
     private func withValidEmbySession<T>(
@@ -4556,6 +4661,13 @@ final class AppState: ObservableObject {
     }
 
     private func enqueueFloatingNotice(_ pending: PendingFloatingNotice) {
+        guard settings.hasCompletedOnboarding else {
+            floatingNoticeQueue.append(pending)
+            if floatingNoticeQueue.count > 12 {
+                floatingNoticeQueue.removeFirst(floatingNoticeQueue.count - 12)
+            }
+            return
+        }
         if floatingNotices.isEmpty {
             presentFloatingNotice(pending)
             return
@@ -4594,6 +4706,11 @@ final class AppState: ObservableObject {
         guard floatingNotices.isEmpty, !floatingNoticeQueue.isEmpty else { return }
         let next = floatingNoticeQueue.removeFirst()
         presentFloatingNotice(next)
+    }
+
+    func releaseDeferredFloatingNoticesIfNeeded() {
+        guard settings.hasCompletedOnboarding else { return }
+        presentNextFloatingNoticeIfNeeded()
     }
 
     private func deliverTaskNotice(
@@ -4645,9 +4762,28 @@ final class AppState: ObservableObject {
 
     func showInterfaceTipOnce(key: String, title: String = "提示", message: String) {
         loadShownInterfaceTipKeysIfNeeded()
+        let isFirstPresentation = shownInterfaceTipKeys.insert(key).inserted
+        if isFirstPresentation {
+            UserDefaults.standard.set(Array(shownInterfaceTipKeys).sorted(), forKey: Self.shownInterfaceTipDefaultsKey)
+        } else {
+            guard Double.random(in: 0..<1) < 0.05 else { return }
+        }
+        showFloatingNotice(title: title, message: message, kind: .tip, duration: 5.8)
+    }
+
+    private func showOneShotInterfaceTip(key: String, title: String = "提示", message: String) {
+        loadShownInterfaceTipKeysIfNeeded()
         guard shownInterfaceTipKeys.insert(key).inserted else { return }
         UserDefaults.standard.set(Array(shownInterfaceTipKeys).sorted(), forKey: Self.shownInterfaceTipDefaultsKey)
-        showFloatingNotice(title: title, message: message, kind: .tip, duration: 5.8)
+        showFloatingNotice(title: title, message: message, kind: .tip, duration: 6.2)
+    }
+
+    private func showInitialIndexingTipIfNeeded() {
+        showOneShotInterfaceTip(
+            key: "sources.initialIndexing.performance",
+            title: "正在建立媒体索引",
+            message: "首次加入媒体源时，MediaLIB 会整理文件、封面和基础信息，短时间内可能不够轻快；索引完成后，浏览和搜索会顺畅许多。"
+        )
     }
 
     private func loadShownInterfaceTipKeysIfNeeded() {
@@ -4685,10 +4821,15 @@ final class AppState: ObservableObject {
         directories?.applicationSupport.appendingPathComponent("BackgroundTasks.json", isDirectory: false)
     }
 
+    private var artworkWarmupProgressURL: URL? {
+        directories?.applicationSupport.appendingPathComponent("ArtworkWarmupProgress.json", isDirectory: false)
+    }
+
     private func restoreBackgroundTasksIfPossible() {
         guard let url = backgroundTasksURL,
               let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode([BackgroundTaskSnapshot].self, from: data) else { return }
+        var resumableArtworkWarmupTasks: [BackgroundTaskSnapshot] = []
         isRestoringBackgroundTasks = true
         backgroundTasks = decoded.prefix(60).map { task in
             var restored = task
@@ -4697,6 +4838,16 @@ final class AppState: ObservableObject {
                 restored.detail = nil
             }
             guard task.state.isActive else { return restored }
+            if task.kind == .artworkWarmup, task.retrySourceID != nil {
+                restored.state = .running
+                restored.finishedAt = nil
+                restored.isCancellable = false
+                if !restored.hidesDetail {
+                    restored.detail = "继续封面预热…"
+                }
+                resumableArtworkWarmupTasks.append(restored)
+                return restored
+            }
             restored.state = .failed
             restored.finishedAt = restored.finishedAt ?? Date()
             restored.isCancellable = false
@@ -4706,7 +4857,30 @@ final class AppState: ObservableObject {
             return restored
         }
         isRestoringBackgroundTasks = false
+        restoredArtworkWarmupTasks = resumableArtworkWarmupTasks
         persistBackgroundTasksIfPossible()
+    }
+
+    private func resumeRestoredArtworkWarmupTasksIfNeeded() {
+        guard !restoredArtworkWarmupTasks.isEmpty else { return }
+        let tasks = restoredArtworkWarmupTasks
+        restoredArtworkWarmupTasks.removeAll()
+
+        for task in tasks {
+            guard let source = backgroundTaskRetrySource(for: task) else {
+                finishBackgroundTask(id: task.id, errors: ["找不到原来的媒体源，封面预热无法继续。"])
+                continue
+            }
+            let sourceItems = items.filter { item in
+                guard let sourcePath = item.sourcePath else { return false }
+                return Self.isSourcePath(sourcePath, inside: source.path)
+            }
+            guard !sourceItems.isEmpty else {
+                finishBackgroundTask(id: task.id, errors: ["这个媒体源暂时没有可预热的封面。"])
+                continue
+            }
+            scheduleEmbyArtworkWarmup(source: source, items: sourceItems, resumingTaskID: task.id)
+        }
     }
 
     private func persistBackgroundTasksIfPossible() {
@@ -4719,6 +4893,56 @@ final class AppState: ObservableObject {
             try data.write(to: url, options: [.atomic])
         } catch {
             logger?.log("任务中心历史保存失败：\(error.localizedDescription)", level: .warning)
+        }
+    }
+
+    private func artworkWarmupProgressRecord(for sourceID: String) -> ArtworkWarmupProgressRecord? {
+        loadArtworkWarmupProgressRecords()[sourceID]
+    }
+
+    private func persistArtworkWarmupProgress(
+        sourceID: String,
+        completedURLs: Set<String>,
+        totalCount: Int
+    ) {
+        var records = loadArtworkWarmupProgressRecords()
+        records[sourceID] = ArtworkWarmupProgressRecord(
+            sourceID: sourceID,
+            completedURLs: completedURLs.sorted(),
+            totalCount: totalCount,
+            updatedAt: Date()
+        )
+        saveArtworkWarmupProgressRecords(records)
+    }
+
+    private func clearArtworkWarmupProgress(sourceID: String) {
+        var records = loadArtworkWarmupProgressRecords()
+        guard records.removeValue(forKey: sourceID) != nil else { return }
+        saveArtworkWarmupProgressRecords(records)
+    }
+
+    private func loadArtworkWarmupProgressRecords() -> [String: ArtworkWarmupProgressRecord] {
+        guard let url = artworkWarmupProgressURL,
+              let data = try? Data(contentsOf: url),
+              let decoded = try? JSONDecoder().decode([String: ArtworkWarmupProgressRecord].self, from: data) else {
+            return [:]
+        }
+        return decoded
+    }
+
+    private func saveArtworkWarmupProgressRecords(_ records: [String: ArtworkWarmupProgressRecord]) {
+        guard let url = artworkWarmupProgressURL else { return }
+        do {
+            if records.isEmpty {
+                try? FileManager.default.removeItem(at: url)
+                return
+            }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(records)
+            try data.write(to: url, options: [.atomic])
+        } catch {
+            logger?.log("封面预热进度保存失败：\(error.localizedDescription)", level: .warning)
         }
     }
 
@@ -7514,8 +7738,19 @@ final class AppState: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             let service = MetadataSearchService()
+            let resolvedResult: MetadataSearchResult
+            if result.id.hasPrefix("tmdb:") {
+                let language = self.settings.tmdbLanguage.isEmpty ? "zh-CN" : self.settings.tmdbLanguage
+                resolvedResult = await service.fetchTMDBDetailResult(
+                    for: result,
+                    apiKey: self.settings.tmdbAPIKey,
+                    language: language
+                ) ?? result
+            } else {
+                resolvedResult = result
+            }
             let update = await service.materializedMetadataUpdate(
-                for: result,
+                for: resolvedResult,
                 itemID: item.id,
                 artworkDirectory: self.directories?.thumbnails,
                 preserveEmbeddedPoster: item.type == .music && item.hasEmbeddedArtwork
@@ -8167,26 +8402,30 @@ final class AppState: ObservableObject {
         let threshold = settings.metadataMatchTolerance.videoThreshold
         guard let best = await bestTMDBVideoMatch(for: item, service: service, apiKey: apiKey, language: language),
               best.confidence >= threshold else { return nil }
-        return await supplementalVideoUpdate(from: best.result, item: item, service: service)
+        let result = await service.fetchTMDBDetailResult(for: best.result, apiKey: apiKey, language: language) ?? best.result
+        return await supplementalVideoUpdate(from: result, item: item, service: service)
     }
 
     private func supplementalVideoUpdate(from result: MetadataSearchResult, item: MediaItem, service: MetadataSearchService) async -> MediaMetadataUpdate {
         let needsPoster = item.posterPath?.isEmpty ?? true
+        let alreadyMatchedToSameLocalizedResult = item.externalID == result.id && item.metadataProvider == result.provider
         var update = await service.materializedMetadataUpdate(
             for: result,
             itemID: item.id,
             artworkDirectory: needsPoster ? directories?.thumbnails : nil
         )
-        update.title = nil
-        update.originalTitle = nil
+        if alreadyMatchedToSameLocalizedResult {
+            update.title = nil
+            update.originalTitle = nil
+        }
         if item.year != nil { update.year = nil }
         if item.overview?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { update.overview = nil }
         if !needsPoster { update.posterPath = nil }
         if item.backdropPath?.isEmpty == false { update.backdropPath = nil }
         if item.rating != nil { update.rating = nil }
         if item.runtime != nil { update.runtime = nil }
-        if item.externalID?.isEmpty == false { update.externalID = nil }
-        if item.metadataProvider?.isEmpty == false { update.metadataProvider = nil }
+        if item.externalID?.hasPrefix("tmdb:") == true, item.externalID == result.id { update.externalID = nil }
+        if item.metadataProvider == result.provider { update.metadataProvider = nil }
         if item.genre?.isEmpty == false { update.genre = nil }
         return update
     }
@@ -8704,13 +8943,14 @@ final class AppState: ObservableObject {
                 logger?.log("TMDB 低置信跳过（\(item.title) → \(best.result.title) · \(String(format: "%.2f", best.confidence))）")
                 continue
             }
+            let result = await service.fetchTMDBDetailResult(for: best.result, apiKey: apiKey, language: language) ?? best.result
             let update = await service.materializedMetadataUpdate(
-                for: best.result,
+                for: result,
                 itemID: item.id,
                 artworkDirectory: artworkDirectory
             )
             guard !Task.isCancelled else { break }
-            applyMetadata(update, to: item)
+            applyMetadata(update, to: item, source: "tmdb-match")
             matched += 1
         }
 
@@ -8737,8 +8977,19 @@ final class AppState: ObservableObject {
         var allResults: [MetadataSearchResult] = []
         var seenIDs: Set<String> = []
         var matchedQueries: [String: [String]] = [:]
+        var singletonResultIDs: Set<String> = []
 
-        for query in queries.prefix(settings.metadataMatchTolerance == .loose ? 8 : 5) {
+        let searchLimit: Int
+        switch settings.metadataMatchTolerance {
+        case .loose:
+            searchLimit = 16
+        case .standard:
+            searchLimit = 10
+        case .strict:
+            searchLimit = 6
+        }
+
+        for query in queries.prefix(searchLimit) {
             if Task.isCancelled { break }
             do {
                 let results = try await service.searchTMDB(
@@ -8747,6 +8998,9 @@ final class AppState: ObservableObject {
                     apiKey: apiKey,
                     language: language
                 )
+                if results.count == 1, Self.isSpecificTMDBQuery(query) {
+                    singletonResultIDs.insert(results[0].id)
+                }
                 for result in results {
                     matchedQueries[result.id, default: []].append(query)
                     if !seenIDs.contains(result.id) {
@@ -8759,7 +9013,49 @@ final class AppState: ObservableObject {
             }
         }
 
-        return MetadataMatchScorer.bestVideoMatch(for: item, in: allResults, matchedQueries: matchedQueries)
+        let best = MetadataMatchScorer.bestVideoMatch(for: item, in: allResults, matchedQueries: matchedQueries)
+        // 「唯一解」优先：某个具体（非泛词）查询在 TMDB 上只召回一条结果，本身就是强证据——
+        // TMDB 已用清洗后的剧名把候选收敛到唯一一部。跨语言库（文件名是罗马音/英文、而 TMDB 在
+        // zh-CN 下返回中文/日文标题）里标题字符串相似度≈0，绝不能再拿相似度阈值把这种唯一命中挡掉，
+        // 否则就出现用户反馈的「手动一搜是唯一解、自动却匹配不上」。
+        if !singletonResultIDs.isEmpty {
+            // 全局唯一＝所有具体查询都只指向同一部；此时相似度多低都接受（宽松档）。
+            // 出现多个不同的唯一命中（罕见，多为同名作品）才退回到要一定相似度来消歧。
+            let isGloballyUnique = Set(singletonResultIDs).count == 1
+            let singletonMatches = allResults
+                .filter { singletonResultIDs.contains($0.id) }
+                .compactMap { result in
+                    MetadataMatchScorer.bestVideoMatch(for: item, in: [result], matchedQueries: matchedQueries)
+                }
+            let singletonFloor = isGloballyUnique ? 0.0 : 0.30
+            if let singletonBest = singletonMatches.max(by: { $0.confidence < $1.confidence }),
+               singletonBest.confidence >= singletonFloor {
+                // 仅当另有「分数明显更高、且确实是另一部」的多候选最佳解时才让路，
+                // 避免唯一命中抢走本应胜出的高置信标题匹配。
+                let betterDistinctCandidateWins = best != nil
+                    && best!.result.id != singletonBest.result.id
+                    && best!.confidence >= settings.metadataMatchTolerance.videoThreshold
+                    && singletonBest.confidence < best!.confidence * 0.82
+                if !betterDistinctCandidateWins {
+                    // 唯一命中给到「刚好越过当前宽容度阈值」的置信度，确保上层 guard 放行；
+                    // 宽松档(0.42)→0.52 放行，标准/严格档仍按各自更高阈值自然保持谨慎。
+                    return (singletonBest.result, max(singletonBest.confidence, 0.52))
+                }
+            }
+        }
+
+        return best
+    }
+
+    private static func isSpecificTMDBQuery(_ query: String) -> Bool {
+        let normalized = MetadataMatchScorer.normalized(query)
+        guard normalized.count >= 3 else { return false }
+        if normalized.range(of: #"^\d+$"#, options: .regularExpression) != nil { return false }
+        let weakQueries: Set<String> = [
+            "season", "series", "show", "tv", "anime", "movie", "episode",
+            "第 季", "第 集", "全集", "完结", "完結"
+        ]
+        return !weakQueries.contains(normalized)
     }
 
     private func videoSearchQueriesIncludingFolderNames(for item: MediaItem) -> [String] {

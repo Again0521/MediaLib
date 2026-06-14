@@ -115,8 +115,6 @@ struct MediaLibApp: App {
                         appDelegate.pendingOpenFileURLs = []
                         appState.playExternalFiles(pending)
                     }
-                    appState.checkForUpdatesDailyIfNeeded()
-                    appState.registerLaunchAndMaybeInvite()
                 }
                 .onChange(of: appState.settings.theme) { _ in
                     appState.applyAppearance()
@@ -124,6 +122,7 @@ struct MediaLibApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)
+        .defaultSize(width: 1088, height: 840)
         .commands {
             SidebarCommands()
             CommandMenu("播放") {

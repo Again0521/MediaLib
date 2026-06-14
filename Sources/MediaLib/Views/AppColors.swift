@@ -199,15 +199,18 @@ enum AppColors {
 
 enum AppMotion {
     // 弹簧曲线由系统按当前显示器刷新率插值，避免线性匀速感；hover 也保持短弹簧而不是 ease-out。
-    static let hover = Animation.spring(response: 0.20, dampingFraction: 0.82, blendDuration: 0.02)
-    static let listHover = Animation.spring(response: 0.18, dampingFraction: 0.84, blendDuration: 0.01)
+    // #3 “Q 弹”：通用过渡弹簧统一下调阻尼（更明显的回弹/微过冲）并略放长 response，让切换/出现/
+    // 悬停带一点弹性而不是生硬的 ease-out。音乐/歌词弹簧（musicPlayer/lyric/lyricFlow/lyricScroll）
+    // 已单独精调过、降阻尼会过冲，保持不动。
+    static let hover = Animation.spring(response: 0.22, dampingFraction: 0.80, blendDuration: 0.02)
+    static let listHover = Animation.spring(response: 0.20, dampingFraction: 0.81, blendDuration: 0.01)
     static let immediate = Animation.spring(response: 0.26, dampingFraction: 0.86)
-    static let fast = Animation.spring(response: 0.28, dampingFraction: 0.86)
-    static let standard = Animation.spring(response: 0.38, dampingFraction: 0.88)
-    static let page = Animation.spring(response: 0.48, dampingFraction: 0.89)
-    static let panel = Animation.spring(response: 0.46, dampingFraction: 0.88, blendDuration: 0.06)
-    static let notice = Animation.spring(response: 0.42, dampingFraction: 0.84, blendDuration: 0.04)
-    static let sidebar = Animation.spring(response: 0.46, dampingFraction: 0.90)
+    static let fast = Animation.spring(response: 0.30, dampingFraction: 0.79)
+    static let standard = Animation.spring(response: 0.40, dampingFraction: 0.80)
+    static let page = Animation.spring(response: 0.50, dampingFraction: 0.82)
+    static let panel = Animation.spring(response: 0.48, dampingFraction: 0.80, blendDuration: 0.06)
+    static let notice = Animation.spring(response: 0.42, dampingFraction: 0.78, blendDuration: 0.04)
+    static let sidebar = Animation.spring(response: 0.46, dampingFraction: 0.82)
     static let sidebarSelection = Animation.easeOut(duration: 0.001)
     // #4 音乐展开/收起是重点：把弹簧调得更紧凑（response 0.56→0.46），缩短重合成阶段的时长，
     // 在不改变“弹性展开”观感的前提下，让动画期间需要绘制的总帧数更少、掉帧更不明显。

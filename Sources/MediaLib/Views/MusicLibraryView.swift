@@ -1875,6 +1875,9 @@ private struct MusicAlbumCard: View {
         .staticSurfaceBackground(cornerRadius: 18)
         .repeatedSurfaceHover(hoverActive, cornerRadius: 18, tint: AppColors.pointerLightTint, intensity: 0.82)
         .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        // #1 同 PosterCardView：保留封面 3D 检视效果，只把悬停卡片 zIndex 抬到上层，
+        // 让放大干净地盖在邻格之上，修掉相互裁切/把相邻卡片撑歪的 bug。
+        .zIndex(hoverActive ? 1 : 0)
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hoverActive)
         .onHover { hovering in
             guard !suppressHoverDuringScroll else {

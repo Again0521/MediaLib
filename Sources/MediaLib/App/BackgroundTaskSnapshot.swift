@@ -28,13 +28,13 @@ enum BackgroundTaskKind: String, Codable, Sendable {
     var systemImage: String {
         switch self {
         case .fullScan: return "arrow.triangle.2.circlepath"
-        case .incrementalScan: return "bolt.horizontal.circle"
+        case .incrementalScan: return "bolt.circle"
         case .embySync: return "server.rack"
-        case .artworkWarmup: return "photo.stack"
+        case .artworkWarmup: return "photo.on.rectangle"
         case .cleanup: return "sparkles"
         case .videoCache: return "arrow.down.circle"
-        case .metadataSupplement: return "tag.badge.plus"
-        case .keyframeStoryboard: return "film.stack"
+        case .metadataSupplement: return "tag"
+        case .keyframeStoryboard: return "film"
         case .markerAnalysis: return "wand.and.stars"
         }
     }

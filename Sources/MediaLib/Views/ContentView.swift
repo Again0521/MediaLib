@@ -293,6 +293,8 @@ struct ContentView: View {
     @State private var manualCollectionEditor: VideoManualCollectionEditorRequest?
     @State private var musicSmartPlaylistEditor: MusicSmartPlaylistEditorRequest?
     @State private var showOnboarding = false
+    @State private var didRunPostOnboardingStartupTasks = false
+    @State private var postOnboardingStartupTask: Task<Void, Never>?
     @State private var themeSwitching = false
     @State private var themeSwitchTask: Task<Void, Never>?
     @Namespace private var musicPlayerNamespace
@@ -537,9 +539,9 @@ struct ContentView: View {
                 }
             )
         }
-        .alert(item: $appState.alert) { alert in
-            Alert(title: Text(alert.title), message: Text(alert.message), dismissButton: .default(Text("好")))
-        }
+        // 已移除纯告知模态弹窗：所有 appState.alert 经其 didSet 统一只走浮窗通知，
+        // 避免"检查更新已是最新版本"等场景同时弹窗 + 浮窗的双重打扰。需要用户操作的提示
+        // 走各自专用 sheet（如 embyRestrictionNotice），不在此通用 alert 通道内。
         .sheet(item: $appState.embyRestrictionNotice) { notice in
             EmbyRestrictionSheet(notice: notice) {
                 appState.embyRestrictionNotice = nil
@@ -549,6 +551,7 @@ struct ContentView: View {
             OnboardingView { goToSources in
                 appState.completeOnboarding()
                 showOnboarding = false
+                runPostOnboardingStartupTasksIfNeeded()
                 if goToSources {
                     selection = .sources
                 }
@@ -558,6 +561,8 @@ struct ContentView: View {
         .onAppear {
             if !appState.settings.hasCompletedOnboarding {
                 showOnboarding = true
+            } else {
+                runPostOnboardingStartupTasksIfNeeded()
             }
         }
         .onChange(of: appState.onboardingReplayRequested) { requested in
@@ -572,9 +577,10 @@ struct ContentView: View {
                 // 不再等到 musicImmersive 延迟置位——否则展开后到沉浸前的这段时间，
                 // 顶部 AppKit 标题栏会露出一条白色横条。
                 hiddenForMusicOverlay: musicChromeShouldBeHidden,
-                hideSidebarToggleForMusicOverlay: musicChromeShouldBeHidden
+                hideSidebarToggleForMusicOverlay: musicChromeShouldBeHidden,
+                shouldApplyInitialPlacement: !appState.settings.hasCompletedOnboarding
             )
-                .frame(width: 0, height: 0)
+            .frame(width: 0, height: 0)
         }
         .background {
             MusicExpansionWindowBackdropGuard(
@@ -883,6 +889,26 @@ struct ContentView: View {
         guard musicMiniPlayerCollapsed else { return }
         withAnimation(AppMotion.musicPlayer) {
             musicMiniPlayerCollapsed = false
+        }
+    }
+
+    private func runPostOnboardingStartupTasksIfNeeded() {
+        guard appState.settings.hasCompletedOnboarding,
+              !didRunPostOnboardingStartupTasks else { return }
+        didRunPostOnboardingStartupTasks = true
+        postOnboardingStartupTask?.cancel()
+        postOnboardingStartupTask = Task { @MainActor in
+            // 刚退出引导时先让首页落位，避免浮窗/弹窗抢在用户看清主界面前出现。
+            do { try await Task.sleep(nanoseconds: 1_200_000_000) } catch { return }
+            appState.releaseDeferredFloatingNoticesIfNeeded()
+
+            // 更新检查可能弹出更新日志，放在普通浮窗之后，减少首次进入首页的打扰。
+            do { try await Task.sleep(nanoseconds: 2_800_000_000) } catch { return }
+            appState.checkForUpdatesDailyIfNeeded()
+
+            // 赞助邀请是更低优先级的提示，继续后移，避免和更新提示同一时间段出现。
+            do { try await Task.sleep(nanoseconds: 7_000_000_000) } catch { return }
+            appState.registerLaunchAndMaybeInvite()
         }
     }
 
@@ -1317,9 +1343,14 @@ struct ContentView: View {
     private func detailView(for destination: SidebarDestination) -> some View {
         switch destination {
         case .home:
-            HomeView {
-                selection = .health
-            }
+            HomeView(
+                onOpenHealthCenter: {
+                    selection = .health
+                },
+                onOpenSources: {
+                    selection = .sources
+                }
+            )
         case .video(.privacy):
             if appState.canDisplayPrivateItems {
                 LibraryView(destination: destination)
@@ -1687,7 +1718,9 @@ private struct MusicExpansionWindowBackdropGuard: NSViewRepresentable {
 private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
     let hiddenForMusicOverlay: Bool
     let hideSidebarToggleForMusicOverlay: Bool
+    let shouldApplyInitialPlacement: Bool
     private static let minimumContentSize = NSSize(width: 1088, height: 720)
+    private static let initialContentSize = NSSize(width: 1088, height: 840)
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -1697,6 +1730,7 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
         let view = NSView(frame: .zero)
         context.coordinator.hiddenForMusicOverlay = hiddenForMusicOverlay
         context.coordinator.hideSidebarToggleForMusicOverlay = hideSidebarToggleForMusicOverlay
+        context.coordinator.shouldApplyInitialPlacement = shouldApplyInitialPlacement
         context.coordinator.attach(to: view)
         return view
     }
@@ -1704,6 +1738,7 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.hiddenForMusicOverlay = hiddenForMusicOverlay
         context.coordinator.hideSidebarToggleForMusicOverlay = hideSidebarToggleForMusicOverlay
+        context.coordinator.shouldApplyInitialPlacement = shouldApplyInitialPlacement
         context.coordinator.attach(to: nsView)
         context.coordinator.refreshTransientChrome()
     }
@@ -1715,6 +1750,7 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
     final class Coordinator {
         var hiddenForMusicOverlay = false
         var hideSidebarToggleForMusicOverlay = false
+        var shouldApplyInitialPlacement = false
         private weak var window: NSWindow?
         private var originalTitleVisibility: NSWindow.TitleVisibility?
         private var originalTitlebarAppearsTransparent: Bool?
@@ -1734,6 +1770,7 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
         private var storedTitlebarSeparatorStyle: Any?
         private var lastAppliedHiddenState: Bool?
         private var lastAppliedSidebarToggleState: Bool?
+        private var didApplyInitialPlacement = false
         private var titlebarChromeOriginalAlpha: [ObjectIdentifier: (view: NSView, alpha: CGFloat)] = [:]
         private var titlebarBackgroundOriginalState: [ObjectIdentifier: TitlebarBackgroundState] = [:]
 
@@ -1773,9 +1810,11 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
                 // 会发生错位或挤压，因此设为硬下限。fullSizeContentView 已常驻、styleMask 不再切换，
                 // 设固定下限不会再触发以往"反复展开收起撑大窗口"的问题。
                 applyMinimumWindowSize(to: nextWindow)
+                applyInitialWindowPlacementIfNeeded(to: nextWindow)
                 lastAppliedHiddenState = nil
                 lastAppliedSidebarToggleState = nil
             }
+            applyInitialWindowPlacementIfNeeded(to: nextWindow)
             applyIfNeeded()
         }
 
@@ -1822,6 +1861,7 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
             }
             lastAppliedHiddenState = nil
             lastAppliedSidebarToggleState = nil
+            didApplyInitialPlacement = false
             titlebarChromeOriginalAlpha.removeAll()
             titlebarBackgroundOriginalState.removeAll()
         }
@@ -1861,6 +1901,35 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
             frameRect.origin.x = window.frame.origin.x
             frameRect.origin.y = window.frame.maxY - frameRect.height
             window.setFrame(frameRect, display: true)
+        }
+
+        private func applyInitialWindowPlacementIfNeeded(to window: NSWindow) {
+            guard shouldApplyInitialPlacement,
+                  !didApplyInitialPlacement,
+                  !window.styleMask.contains(.fullScreen) else { return }
+            didApplyInitialPlacement = true
+
+            let screen = window.screen ?? NSScreen.main
+            guard let visibleFrame = screen?.visibleFrame else {
+                window.center()
+                return
+            }
+
+            let currentContent = window.contentRect(forFrameRect: window.frame).size
+            let maxContent = NSSize(
+                width: max(360, visibleFrame.width - 56),
+                height: max(320, visibleFrame.height - 72)
+            )
+            let targetContent = NSSize(
+                width: min(max(currentContent.width, MainWindowToolbarVisibilityGuard.initialContentSize.width), maxContent.width),
+                height: min(max(currentContent.height, MainWindowToolbarVisibilityGuard.initialContentSize.height), maxContent.height)
+            )
+            var frameRect = window.frameRect(forContentRect: NSRect(origin: .zero, size: targetContent))
+            frameRect.origin = NSPoint(
+                x: visibleFrame.midX - frameRect.width / 2,
+                y: visibleFrame.midY - frameRect.height / 2
+            )
+            window.setFrame(frameRect, display: true, animate: false)
         }
 
         private func applyIfNeeded() {

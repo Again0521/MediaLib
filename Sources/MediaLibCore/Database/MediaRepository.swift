@@ -19,7 +19,15 @@ public final class MediaRepository {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               type = excluded.type,
-              title = excluded.title,
+              title = CASE
+                WHEN EXISTS (
+                  SELECT 1 FROM metadata_correction_history
+                  WHERE media_id = media_items.id
+                    AND field_name = 'title'
+                    AND undone_at IS NULL
+                ) THEN media_items.title
+                ELSE excluded.title
+              END,
               original_title = COALESCE(excluded.original_title, media_items.original_title),
               artist = COALESCE(excluded.artist, media_items.artist),
               album = COALESCE(excluded.album, media_items.album),

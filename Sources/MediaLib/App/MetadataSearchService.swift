@@ -46,9 +46,19 @@ enum MetadataMatchScorer {
         in results: [MetadataSearchResult],
         matchedQueries: [String: [String]] = [:]
     ) -> (result: MetadataSearchResult, confidence: Double)? {
-        scoredBest(in: results) { result in
+        guard let best = scoredBest(in: results, score: { result in
             videoConfidence(item: item, result: result, matchedQueries: matchedQueries[result.id] ?? [])
+        }) else {
+            return nil
         }
+
+        if results.count == 1,
+           matchedQueries[best.result.id]?.isEmpty == false,
+           best.confidence >= 0.28 {
+            return (best.result, max(best.confidence, 0.50))
+        }
+
+        return best
     }
 
     static func bestMusicMatch(for item: MediaItem, in results: [MetadataSearchResult]) -> (result: MetadataSearchResult, confidence: Double)? {
@@ -406,6 +416,69 @@ struct MetadataSearchService {
         }
     }
 
+    func fetchTMDBDetailResult(
+        for result: MetadataSearchResult,
+        apiKey: String?,
+        language: String
+    ) async -> MetadataSearchResult? {
+        let token = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !token.isEmpty else { return nil }
+        let parts = result.id.split(separator: ":").map(String.init)
+        guard parts.count == 3,
+              parts[0] == "tmdb",
+              (parts[1] == "tv" || parts[1] == "movie"),
+              let tmdbID = Int(parts[2]) else {
+            return nil
+        }
+
+        var components = URLComponents(string: "https://api.themoviedb.org/3/\(parts[1])/\(tmdbID)")
+        components?.queryItems = [
+            URLQueryItem(name: "language", value: language.isEmpty ? "zh-CN" : language)
+        ]
+        guard let baseURL = components?.url else { return nil }
+        var request = URLRequest(url: baseURL)
+        request.timeoutInterval = 12
+        if token.contains(".") || token.count > 80 {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        } else {
+            var keyedComponents = components
+            keyedComponents?.queryItems?.append(URLQueryItem(name: "api_key", value: token))
+            guard let keyedURL = keyedComponents?.url else { return nil }
+            request.url = keyedURL
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+            let detail = try JSONDecoder().decode(TMDBDetailResponse.self, from: data)
+            let title = detail.title ?? detail.name ?? result.title
+            let originalTitle = [detail.originalTitle, detail.originalName, result.originalTitle]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .first { !$0.isEmpty && $0 != title }
+            let date = detail.releaseDate ?? detail.firstAirDate ?? result.subtitle
+            let genre = detail.genres?
+                .compactMap { $0.name?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: ", ")
+            return MetadataSearchResult(
+                id: result.id,
+                provider: Self.tmdbProviderName(language: language),
+                title: title,
+                originalTitle: originalTitle,
+                subtitle: date,
+                year: year(from: date) ?? result.year,
+                overview: detail.overview?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? detail.overview : result.overview,
+                posterPath: detail.posterPath.map { "https://image.tmdb.org/t/p/w500\($0)" } ?? result.posterPath,
+                backdropPath: detail.backdropPath.map { "https://image.tmdb.org/t/p/w780\($0)" } ?? result.backdropPath,
+                rating: detail.voteAverage ?? result.rating,
+                runtime: detail.runtime ?? detail.episodeRunTime?.first ?? result.runtime,
+                genre: genre?.isEmpty == false ? genre : result.genre
+            )
+        } catch {
+            return nil
+        }
+    }
+
     func searchMusic(query: String, provider: MusicMetadataProvider, lastfmAPIKey: String? = nil) async throws -> [MetadataSearchResult] {
         switch provider {
         case .musicBrainz:
@@ -702,6 +775,40 @@ private struct TMDBSearchResult: Decodable {
         case voteAverage = "vote_average"
         case genreIDs = "genre_ids"
     }
+}
+
+private struct TMDBDetailResponse: Decodable {
+    var id: Int
+    var title: String?
+    var name: String?
+    var originalTitle: String?
+    var originalName: String?
+    var overview: String?
+    var posterPath: String?
+    var backdropPath: String?
+    var releaseDate: String?
+    var firstAirDate: String?
+    var voteAverage: Double?
+    var runtime: Int?
+    var episodeRunTime: [Int]?
+    var genres: [TMDBDetailGenre]?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, name, overview, runtime, genres
+        case originalTitle = "original_title"
+        case originalName = "original_name"
+        case posterPath = "poster_path"
+        case backdropPath = "backdrop_path"
+        case releaseDate = "release_date"
+        case firstAirDate = "first_air_date"
+        case voteAverage = "vote_average"
+        case episodeRunTime = "episode_run_time"
+    }
+}
+
+private struct TMDBDetailGenre: Decodable {
+    var id: Int?
+    var name: String?
 }
 
 /// TMDB 固定 genre id→中文名映射（电影 + 电视，官方稳定列表）。搜索结果即带 genre_ids，无需额外请求。

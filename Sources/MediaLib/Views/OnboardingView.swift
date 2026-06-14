@@ -58,6 +58,16 @@ struct OnboardingView: View {
             ]
         ),
         Page(
+            systemImage: "music.note.list",
+            title: "音乐也能认真收藏",
+            subtitle: "封面、歌词、队列和歌单，会跟着你的音乐一起整理好。",
+            bullets: [
+                "歌曲会按专辑、艺人和歌单归档，查找起来更顺手",
+                "本地 LRC 和在线歌词都能同步显示，播放时自动对齐",
+                "随机播放、循环模式和下一首队列都能在底栏快速控制"
+            ]
+        ),
+        Page(
             systemImage: "checkmark.seal",
             title: "可以开始了",
             subtitle: "先把媒体源加上，其它的慢慢来。",
@@ -97,18 +107,18 @@ struct OnboardingView: View {
             }
             .padding(.horizontal, 32)
 
-            // 要点块：文字左对齐（首字竖向对齐）、对勾统一靠右竖向对齐；
+            // 要点块：对勾位于每行开头，文字左对齐（首字竖向对齐）；
             // 块宽收缩到最长一行（fixedSize），整块居中后左右留白自然相等，
-            // 同时避免短句的文字和对勾被拉得太开。
+            // 同时避免短句被拉得太开。
             VStack(alignment: .leading, spacing: 12) {
                 ForEach(page.bullets, id: \.self) { bullet in
                     HStack(alignment: .firstTextBaseline, spacing: 14) {
-                        Text(bullet)
-                            .font(.callout)
-                            .frame(maxWidth: .infinity, alignment: .leading)
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(AppColors.selectedGlassTint)
                             .font(.callout)
+                        Text(bullet)
+                            .font(.callout)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }
