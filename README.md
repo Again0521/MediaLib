@@ -162,7 +162,7 @@ MediaLIB 仍在持续打磨中。当前重点是让媒体库、播放器、远�
 
 使用过程中遇到问题，欢迎通过 Issue 反馈。最好附上页面、操作步骤、截图和日志信息，这样更容易定位问题。
 
-## 友链
+## 相关链接
 
 <div>
 <a href="https://gitee.com/xzy1102/home-emby-tv/releases">HomeEmby For Andorid TV</a><br>
