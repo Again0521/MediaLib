@@ -745,6 +745,17 @@ struct PlayerView: View {
         miniModeRestoreFrame != nil
     }
 
+    private var shouldHidePlayerCursor: Bool {
+        !controlsVisible &&
+        !controlsLocked &&
+        !isMiniMode &&
+        controller.isPlaying &&
+        controller.errorMessage == nil &&
+        contextMenuState == nil &&
+        !showingAdvancedSettings &&
+        !showingPlaybackInfo
+    }
+
     var body: some View {
         ZStack {
             playerBackdrop
@@ -995,6 +1006,11 @@ struct PlayerView: View {
         }
         .overlay {
             PlayerVideoAspectRatioReporter(controller: controller, onChange: onVideoAspectRatioChange)
+                .frame(width: 0, height: 0)
+                .allowsHitTesting(false)
+        }
+        .overlay {
+            PlayerCursorVisibilityLayer(hidden: shouldHidePlayerCursor)
                 .frame(width: 0, height: 0)
                 .allowsHitTesting(false)
         }
@@ -1930,6 +1946,87 @@ private final class PlayerControlsAutoHideCoordinator: ObservableObject {
     }
 }
 
+private struct PlayerCursorVisibilityLayer: NSViewRepresentable {
+    let hidden: Bool
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        context.coordinator.update(hidden: hidden, hostView: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.update(hidden: hidden, hostView: nsView)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.invalidate()
+    }
+
+    final class Coordinator: NSObject {
+        private weak var window: NSWindow?
+        private var wantsHidden = false
+        private var isHidden = false
+        private var observers: [NSObjectProtocol] = []
+
+        func update(hidden: Bool, hostView: NSView) {
+            wantsHidden = hidden
+            attach(to: hostView.window)
+            applyCursorVisibility()
+        }
+
+        func invalidate() {
+            wantsHidden = false
+            applyCursorVisibility()
+            detach()
+        }
+
+        deinit {
+            invalidate()
+        }
+
+        private func attach(to nextWindow: NSWindow?) {
+            guard window !== nextWindow else { return }
+            detach()
+            window = nextWindow
+            guard let nextWindow else { return }
+            let center = NotificationCenter.default
+            for name in [
+                NSWindow.didBecomeKeyNotification,
+                NSWindow.didResignKeyNotification,
+                NSWindow.willCloseNotification,
+                NSWindow.didMiniaturizeNotification
+            ] {
+                observers.append(center.addObserver(forName: name, object: nextWindow, queue: .main) { [weak self] _ in
+                    self?.applyCursorVisibility()
+                })
+            }
+        }
+
+        private func detach() {
+            let center = NotificationCenter.default
+            observers.forEach(center.removeObserver)
+            observers.removeAll()
+            window = nil
+        }
+
+        private func applyCursorVisibility() {
+            let shouldHide = wantsHidden && window?.isKeyWindow == true && window?.isVisible == true
+            guard shouldHide != isHidden else { return }
+            if shouldHide {
+                NSCursor.hide()
+            } else {
+                NSCursor.unhide()
+            }
+            isHidden = shouldHide
+        }
+    }
+}
+
 @MainActor
 private final class PlayerControllerProjection<Value: Equatable>: ObservableObject {
     @Published private(set) var value: Value
@@ -2805,6 +2902,7 @@ struct PlayerInteractionOverlay: NSViewRepresentable {
         }
 
         override func mouseDown(with event: NSEvent) {
+            activateWindowIfNeeded()
             onActivity?()
             didDragWindow = false
             dragStartEvent = event
@@ -2842,6 +2940,7 @@ struct PlayerInteractionOverlay: NSViewRepresentable {
         }
 
         override func rightMouseDown(with event: NSEvent) {
+            activateWindowIfNeeded()
             pendingPrimaryClick?.cancel()
             pendingPrimaryClick = nil
             onActivity?()
@@ -2849,6 +2948,7 @@ struct PlayerInteractionOverlay: NSViewRepresentable {
         }
 
         override func otherMouseDown(with event: NSEvent) {
+            activateWindowIfNeeded()
             pendingPrimaryClick?.cancel()
             pendingPrimaryClick = nil
             onActivity?()
@@ -2860,6 +2960,7 @@ struct PlayerInteractionOverlay: NSViewRepresentable {
         }
 
         override func scrollWheel(with event: NSEvent) {
+            activateWindowIfNeeded()
             onActivity?()
             guard event.hasPreciseScrollingDeltas else {
                 let deltaY = Double(event.scrollingDeltaY)
@@ -2881,8 +2982,14 @@ struct PlayerInteractionOverlay: NSViewRepresentable {
         }
 
         override func magnify(with event: NSEvent) {
+            activateWindowIfNeeded()
             onActivity?()
             onMagnify?(event.magnification)
+        }
+
+        private func activateWindowIfNeeded() {
+            guard let window, !window.isKeyWindow else { return }
+            window.makeKeyAndOrderFront(nil)
         }
 
         private func swiftUILocation(for event: NSEvent) -> CGPoint {
@@ -7426,6 +7533,19 @@ final class MpvPlayerController: ObservableObject {
     private var audioTransitionVolumeScale: Float = 1
     private var musicOutputRecoveryTask: Task<Void, Never>?
     private(set) var spectrumSuppressedDuringWindowDrag = false
+    /// 拖动/seek 进行中临时挂起频谱解码（与拖窗抑制独立，松手即恢复）。
+    private var spectrumSuppressedDuringSeek = false
+    /// 网络源（http 流 / 网络挂载盘）的卡顿恢复观察者：缓冲见底自动续播，避免「播着播着没声」。
+    private var audioTimeControlObservation: NSKeyValueObservation?
+    private var audioBufferEmptyObservation: NSKeyValueObservation?
+    private var audioLikelyToKeepUpObservation: NSKeyValueObservation?
+    /// 当前音频源是否为网络源（决定缓冲策略与卡顿恢复是否启用）。
+    private var currentAudioSourceIsNetwork = false
+
+    /// 频谱是否应当因任何交互（拖窗或拖动进度条）而暂停解码。
+    private var spectrumSuppressedDuringInteraction: Bool {
+        spectrumSuppressedDuringWindowDrag || spectrumSuppressedDuringSeek
+    }
 
     /// 窗口拖动/缩放期间临时挂起频谱解码（拖动结束立即恢复）。
     func setSpectrumSuppressedDuringWindowDrag(_ suppressed: Bool) {
@@ -7561,11 +7681,15 @@ final class MpvPlayerController: ObservableObject {
         clearPreloadedMusicItem()
         let generation = playbackGeneration
         let nextURL = URL(fileURLWithPath: nextPath)
+        let nextIsNetwork = isNetworkMountedFileURL(nextURL)
         musicPreloadTask = Task { @MainActor [weak self, weak player] in
             guard let self, let player else { return }
             do {
                 let prepared = try await self.prepareMusicPlayerItem(url: nextURL, preloaded: true)
-                prepared.playerItem.preferredForwardBufferDuration = self.preferredMusicPreloadBufferDuration(for: nextItem)
+                // 本地内存源可大幅前向缓冲；网络挂载盘只预读受控提前量，避免预缓冲整首歌占满网络。
+                prepared.playerItem.preferredForwardBufferDuration = nextIsNetwork
+                    ? self.preferredForwardBuffer(isNetwork: true, preloaded: true)
+                    : self.preferredMusicPreloadBufferDuration(for: nextItem)
                 guard !Task.isCancelled,
                       self.playbackGeneration == generation,
                       self.audioPlayer === player,
@@ -7656,7 +7780,8 @@ final class MpvPlayerController: ObservableObject {
 
         let generation = playbackGeneration
         if url.isFileURL {
-            statusMessage = "正在将歌曲载入内存。"
+            let isNetwork = isNetworkMountedFileURL(url)
+            statusMessage = isNetwork ? "正在从网络载入歌曲。" : "正在将歌曲载入内存。"
             musicMemoryLoadTask?.cancel()
             musicMemoryLoadTask = Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -7670,35 +7795,38 @@ final class MpvPlayerController: ObservableObject {
                     self.installInitialNativeAudioPlayer(
                         playerItem: prepared.playerItem,
                         generation: generation,
-                        memoryAsset: prepared.memoryAsset
+                        memoryAsset: prepared.memoryAsset,
+                        isNetwork: isNetwork
                     )
                 } catch {
                     guard self.playbackGeneration == generation else { return }
-                    self.fail("音频内存缓存失败：\(error.localizedDescription)")
+                    self.fail("音频载入失败：\(error.localizedDescription)")
                 }
             }
             return
         }
 
         let playerItem = makeAudioPlayerItem(url: url)
-        installInitialNativeAudioPlayer(playerItem: playerItem, generation: generation, memoryAsset: nil)
+        installInitialNativeAudioPlayer(playerItem: playerItem, generation: generation, memoryAsset: nil, isNetwork: true)
     }
 
     private func installInitialNativeAudioPlayer(
         playerItem: AVPlayerItem,
         generation: Int,
-        memoryAsset: MemoryAudioAsset?
+        memoryAsset: MemoryAudioAsset?,
+        isNetwork: Bool
     ) {
         currentMemoryAudioAsset = memoryAsset
         let player = AVQueuePlayer(items: [playerItem])
         player.allowsExternalPlayback = true
-        player.automaticallyWaitsToMinimizeStalling = false
+        applyAudioStallPolicy(to: player, isNetwork: isNetwork)
         player.actionAtItemEnd = .advance
         player.volume = effectiveMusicVolume
         player.isMuted = false
 
         observeAudioEnd(for: playerItem, generation: generation)
         observeAudioExternalPlayback(for: player)
+        installAudioStallRecovery(for: player, isNetwork: isNetwork)
 
         didReachAudioEnd = false
         audioPlayer = player
@@ -7776,7 +7904,8 @@ final class MpvPlayerController: ObservableObject {
             audioRouteProxyPlayer?.pause()
             isPlaying = false
             isPreparing = true
-            statusMessage = "正在将歌曲载入内存。"
+            // 网络挂载盘走流式（prepareMusicPlayerItem 内部不再整文件进内存），文案据此区分。
+            statusMessage = isNetworkMountedFileURL(url) ? "正在从网络载入歌曲。" : "正在将歌曲载入内存。"
             updateSystemNowPlaying()
             musicMemoryLoadTask = Task { @MainActor [weak self, weak player] in
                 guard let self, let player else { return }
@@ -7789,7 +7918,7 @@ final class MpvPlayerController: ObservableObject {
                     self.switchNativeAudio(to: nextItem, settings: settings, preparedOverride: prepared)
                 } catch {
                     guard self.playbackGeneration == loadGeneration else { return }
-                    self.fail("音频内存缓存失败：\(error.localizedDescription)")
+                    self.fail("音频载入失败：\(error.localizedDescription)")
                 }
             }
             return
@@ -7854,11 +7983,13 @@ final class MpvPlayerController: ObservableObject {
             }
         }
 
-        let playerItem = queuedPreload?.playerItem ?? preparedOverride?.playerItem ?? makeAudioPlayerItem(url: url)
+        let isNetwork = audioSourceIsNetwork(item: nextItem, url: url)
+        let playerItem = queuedPreload?.playerItem ?? preparedOverride?.playerItem ?? makeAudioPlayerItem(url: url, isNetwork: isNetwork)
         currentMemoryAudioAsset = queuedPreload?.memoryAsset ?? preparedOverride?.memoryAsset
         observeAudioEnd(for: playerItem, generation: generation)
         player.allowsExternalPlayback = true
-        player.automaticallyWaitsToMinimizeStalling = false
+        applyAudioStallPolicy(to: player, isNetwork: isNetwork)
+        installAudioStallRecovery(for: player, isNetwork: isNetwork)
         player.actionAtItemEnd = .advance
         if !alreadyAdvancedToPreload {
             observeAudioExternalPlayback(for: player)
@@ -7941,9 +8072,28 @@ final class MpvPlayerController: ObservableObject {
     ) async throws -> PreparedMusicPlayerItem {
         guard url.isFileURL else {
             return PreparedMusicPlayerItem(
-                playerItem: makeAudioPlayerItem(url: url, applyEqualizer: applyEqualizer),
+                playerItem: makeAudioPlayerItem(url: url, applyEqualizer: applyEqualizer, isNetwork: true),
                 memoryAsset: nil
             )
+        }
+
+        // 网络挂载盘（NAS/SMB/AFP）：不整文件进内存，直接渐进式流式起播。
+        // 用非精确时序避免起播前扫描整个远端文件；前向缓冲交给流式策略。
+        if isNetworkMountedFileURL(url) {
+            let asset = makeAudioAsset(url: url, preferPreciseTiming: false)
+            let playable = try await asset.load(.isPlayable)
+            try Task.checkCancellation()
+            guard playable else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            let playerItem = makeAudioPlayerItem(
+                asset: asset,
+                isLocal: true,
+                preloaded: preloaded,
+                applyEqualizer: applyEqualizer,
+                isNetwork: true
+            )
+            return PreparedMusicPlayerItem(playerItem: playerItem, memoryAsset: nil)
         }
 
         let data = try await Self.loadMusicFileData(fileURL: url)
@@ -7976,27 +8126,33 @@ final class MpvPlayerController: ObservableObject {
     private func makeAudioPlayerItem(
         url: URL,
         applyEqualizer: Bool = true,
-        preferPreciseTiming: Bool? = nil
+        preferPreciseTiming: Bool? = nil,
+        isNetwork: Bool = false
     ) -> AVPlayerItem {
-        let usePreciseTiming = preferPreciseTiming ?? (item?.type == .music)
+        // 网络源不做精确时序（会在起播前扫描整段），用容差时序换即时起播。
+        let usePreciseTiming = preferPreciseTiming ?? (!isNetwork && item?.type == .music)
         return makeAudioPlayerItem(
             asset: makeAudioAsset(url: url, preferPreciseTiming: usePreciseTiming),
             isLocal: url.isFileURL,
-            applyEqualizer: applyEqualizer
+            applyEqualizer: applyEqualizer,
+            isNetwork: isNetwork
         )
     }
 
-    private func makeAudioPlayerItem(asset: AVAsset, isLocal: Bool, preloaded: Bool = false, applyEqualizer: Bool = true) -> AVPlayerItem {
+    private func makeAudioPlayerItem(asset: AVAsset, isLocal: Bool, preloaded: Bool = false, applyEqualizer: Bool = true, isNetwork: Bool = false) -> AVPlayerItem {
         let playerItem = AVPlayerItem(asset: asset)
-        if isLocal {
+        if isNetwork {
+            // 网络挂载盘的流式 file 项：给足前向缓冲，配合 waitToMinimizeStalling 自动重缓冲。
+            playerItem.preferredForwardBufferDuration = preferredForwardBuffer(isNetwork: true, preloaded: preloaded)
+        } else if isLocal {
             playerItem.preferredForwardBufferDuration = preloaded ? 120 : 0
         } else {
             playerItem.preferredForwardBufferDuration = 2
         }
         // 仅在启用且非纯平时挂 EQ；失败则保持原样（透传），不影响播放。
         // 仅对本地文件挂 EQ：makeAudioMix 内部会同步访问 asset.tracks，远端资源在主线程同步取轨会阻塞 UI；
-        // EQ 主要面向本地高保真，远端流跳过以规避主线程卡顿。
-        if applyEqualizer, musicEqualizerEnabled, isLocal {
+        // EQ 主要面向本地高保真，远端/网络流跳过以规避主线程卡顿。
+        if applyEqualizer, musicEqualizerEnabled, isLocal, !isNetwork {
             let processor = AudioEQProcessor(gainsDB: musicEqualizerGains)
             if let mix = processor.makeAudioMix(for: asset) {
                 playerItem.audioMix = mix
@@ -8010,6 +8166,93 @@ final class MpvPlayerController: ObservableObject {
             return 120
         }
         return min(max(duration, 60), 240)
+    }
+
+    /// file:// 是否落在网络挂载盘（SMB/AFP/NFS 的 /Volumes/...）。
+    /// 网络挂载盘不走「整文件读进内存」——那会在切歌路径上同步下载整首歌，
+    /// 大体积 hi-res 文件在 NAS 上要等几十 MB 的网络往返；改为渐进式流式起播。
+    private func isNetworkMountedFileURL(_ url: URL) -> Bool {
+        guard url.isFileURL else { return false }
+        if let values = try? url.resourceValues(forKeys: [.volumeIsLocalKey]),
+           let isLocal = values.volumeIsLocal {
+            return !isLocal
+        }
+        // 取不到卷信息时按本地处理，保持旧行为。
+        return false
+    }
+
+    /// 该音频源是否为网络源（http 流，或网络挂载盘文件）。决定缓冲与卡顿恢复策略。
+    private func audioSourceIsNetwork(item: MediaItem?, url: URL) -> Bool {
+        if item?.isRemoteResource == true { return true }
+        return isNetworkMountedFileURL(url)
+    }
+
+    /// 按音频源类型设置 AVQueuePlayer 的停顿策略：
+    /// 本地内存源关闭 waitToMinimizeStalling 以求即时起播；网络源开启，
+    /// 让缓冲见底时自动停顿重缓冲并恢复，而不是「时钟继续走但没声音」。
+    private func applyAudioStallPolicy(to player: AVPlayer, isNetwork: Bool) {
+        player.automaticallyWaitsToMinimizeStalling = isNetwork
+    }
+
+    /// 网络源前向缓冲：本地内存源用各自原有值；网络源给足读取提前量。
+    private func preferredForwardBuffer(isNetwork: Bool, preloaded: Bool) -> TimeInterval {
+        if isNetwork {
+            return preloaded ? 30 : 12
+        }
+        return preloaded ? 120 : 0
+    }
+
+    /// 安装网络源卡顿恢复：监听 timeControlStatus / 缓冲空 / 可续播，
+    /// 缓冲见底时显示缓冲态，备好后自动续播——根治「下一首播着播着没声」。
+    private func installAudioStallRecovery(for player: AVQueuePlayer, isNetwork: Bool) {
+        removeAudioStallRecovery()
+        currentAudioSourceIsNetwork = isNetwork
+        guard isNetwork else { return }
+
+        audioTimeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] observed, _ in
+            Task { @MainActor in
+                guard let self, self.audioPlayer === observed else { return }
+                switch observed.timeControlStatus {
+                case .waitingToPlayAtSpecifiedRate:
+                    if self.isPlaying {
+                        self.updateBuffering(active: true, progress: nil)
+                    }
+                case .playing:
+                    self.updateBuffering(active: false, progress: nil)
+                case .paused:
+                    break
+                @unknown default:
+                    break
+                }
+            }
+        }
+
+        audioBufferEmptyObservation = player.observe(\.currentItem?.isPlaybackBufferEmpty, options: [.new]) { [weak self] observed, _ in
+            Task { @MainActor in
+                guard let self, self.audioPlayer === observed else { return }
+                if observed.currentItem?.isPlaybackBufferEmpty == true, self.isPlaying {
+                    self.updateBuffering(active: true, progress: nil)
+                }
+            }
+        }
+
+        audioLikelyToKeepUpObservation = player.observe(\.currentItem?.isPlaybackLikelyToKeepUp, options: [.new]) { [weak self] observed, _ in
+            Task { @MainActor in
+                guard let self, self.audioPlayer === observed else { return }
+                guard observed.currentItem?.isPlaybackLikelyToKeepUp == true else { return }
+                self.updateBuffering(active: false, progress: nil)
+                // 标记为播放中但实际停在缓冲：缓冲恢复后主动续播，覆盖 paused 残留。
+                if self.isPlaying, observed.timeControlStatus != .playing {
+                    observed.playImmediately(atRate: self.playbackRate)
+                }
+            }
+        }
+    }
+
+    private func removeAudioStallRecovery() {
+        audioTimeControlObservation = nil
+        audioBufferEmptyObservation = nil
+        audioLikelyToKeepUpObservation = nil
     }
 
     private func clearPreloadedMusicItem() {
@@ -8447,6 +8690,7 @@ final class MpvPlayerController: ObservableObject {
     func cancelScrubbing() {
         guard seekState?.phase == .scrubbing else { return }
         seekState = nil
+        spectrumSuppressedDuringSeek = false
         currentTime = lyricTime
         seekSyncRevision &+= 1
     }
@@ -8469,6 +8713,7 @@ final class MpvPlayerController: ObservableObject {
         seekSyncCorrectionTask?.cancel()
         seekSyncCorrectionTask = nil
         pendingTimelineSeek = nil
+        spectrumSuppressedDuringSeek = true
         seekState = PlaybackSeekState(
             revision: revision,
             phase: .scrubbing,
@@ -8480,6 +8725,7 @@ final class MpvPlayerController: ObservableObject {
 
     private func commitTimelineSeek(to target: Double) {
         let generation = playbackGeneration
+        spectrumSuppressedDuringSeek = true
         let seekRevision = beginTimelineSeek(to: target, generation: generation)
         if let audioPlayer {
             scheduleSeekSyncCorrection(for: generation)
@@ -9194,6 +9440,7 @@ final class MpvPlayerController: ObservableObject {
                 resolvedTime: time
             )
             scheduleSeekStateClear(revision: pending.revision)
+            spectrumSuppressedDuringSeek = false
             changed = true
         }
         return changed
@@ -9201,6 +9448,7 @@ final class MpvPlayerController: ObservableObject {
 
     private func scheduleSeekStateClear(revision: Int) {
         clearSeekStateTask?.cancel()
+        spectrumSuppressedDuringSeek = false
         clearSeekStateTask = Task { @MainActor [weak self] in
             do { try await Task.sleep(nanoseconds: 900_000_000) } catch { return }
             guard let self,
@@ -9669,6 +9917,9 @@ final class MpvPlayerController: ObservableObject {
         seekState = nil
         removeAudioEndObserver()
         removeAudioExternalPlaybackObserver()
+        removeAudioStallRecovery()
+        currentAudioSourceIsNetwork = false
+        spectrumSuppressedDuringSeek = false
         audioRouteRefreshTask?.cancel()
         audioRouteRefreshTask = nil
         stopAudioLocalMirror()
@@ -9719,6 +9970,9 @@ final class MpvPlayerController: ObservableObject {
         seekState = nil
         removeAudioEndObserver()
         removeAudioExternalPlaybackObserver()
+        removeAudioStallRecovery()
+        currentAudioSourceIsNetwork = false
+        spectrumSuppressedDuringSeek = false
         audioRouteRefreshTask?.cancel()
         audioRouteRefreshTask = nil
         stopAudioLocalMirror()
@@ -9883,10 +10137,13 @@ final class MpvPlayerController: ObservableObject {
               audioSpectrumTask == nil,
               // 性能：窗口正被拖动/缩放时跳过频谱的 AVAssetReader 解码（每 0.34s 一次的 PCM 解码+FFT 是
               // 播放期间持续的 CPU 开销，在无风扇机型上与拖窗合成抢资源）。跳过时频谱柱定格，拖动结束即恢复，
-              // 拖动中肉眼不可见，零观感牺牲。
-              !spectrumSuppressedDuringWindowDrag,
+              // 拖动中肉眼不可见，零观感牺牲。拖动进度条/seek 期间同样跳过，避免与 seek 解码抢 NAS I/O 造成转圈。
+              !spectrumSuppressedDuringInteraction,
               item?.type == .music,
               item?.isRemoteResource != true,
+              // 网络挂载盘：频谱每 0.34s 重开远端文件解码会持续占用 NAS I/O，
+              // 与播放/切歌抢带宽。网络源直接跳过频谱（装饰性，柱状定格无感）。
+              !currentAudioSourceIsNetwork,
               let filePath,
               Date().timeIntervalSince(lastAudioSpectrumSampleDate) > 0.34 else { return }
         lastAudioSpectrumSampleDate = Date()
@@ -10239,7 +10496,9 @@ enum PlayerWindowActions {
     }
 
     static func setAlwaysOnTop(_ enabled: Bool) {
-        guard let window = NSApp.keyWindow else { return }
+        guard let window = NSApp.windows
+            .compactMap({ $0 as? ImmersivePlayerWindow })
+            .first(where: \.isVisible) else { return }
         window.level = enabled ? .floating : .normal
     }
 
@@ -10413,7 +10672,6 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
                 // 走到这里，按「偏好宽度+屏高 94% 上限」重算会把用户刚拖大的窗口缩回去
                 // （拖宽→保存设置→触发本方法→等比收缩，即“拖动后自动缩放回去”的根因）。
                 window?.level = settings.videoPlayerAlwaysOnTop ? .floating : .normal
-                window?.makeKeyAndOrderFront(nil)
                 return
             }
 

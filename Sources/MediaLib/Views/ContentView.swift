@@ -2476,7 +2476,7 @@ struct AppUpdatePromptSheet: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.sheetContent) {
+        VStack(alignment: .leading, spacing: 16) {
             AppSheetHeader(
                 title: "\(appState.localized("发现新版本")) \(update.version)",
                 subtitle: "\(appState.localized("当前版本")) \(AppVersion.current)。\(releaseMetaText)",
@@ -2484,27 +2484,54 @@ struct AppUpdatePromptSheet: View {
                 subtitleLineLimit: 2
             )
 
-            AppInfoNote(
-                text: appState.localized("后台更新检查只读取 GitHub Releases 元数据；跳过当前版本后，静默检查不会再提示这一版，手动检查仍可看到结果。"),
-                systemImage: "arrow.triangle.2.circlepath"
-            )
+            HStack(alignment: .top, spacing: 9) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AppColors.selectedGlassTint.opacity(0.82))
+                    .frame(width: 18, height: 18)
+                Text(appState.localized("后台更新检查只读取 GitHub Releases 元数据；跳过当前版本后，静默检查不会再提示这一版，手动检查仍可看到结果。"))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 2)
 
             releaseNotesView
 
-            AppSheetActionFooter {
+            updateActionFooter
+        }
+        .appSheetChrome(width: 560, maxHeight: 640)
+    }
+
+    private var updateActionFooter: some View {
+        VStack(spacing: 0) {
+            Divider()
+                .opacity(0.45)
+                .padding(.bottom, 12)
+            HStack(spacing: 10) {
                 Button(appState.localized("跳过此版")) {
                     appState.settings.updateSkippedVersion = update.tagName
                     appState.saveSettings()
                     appState.availableUpdate = nil
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 34))
+                .buttonStyle(.plain)
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .frame(height: 32)
 
                 Button(appState.localized("不再自动提醒")) {
                     appState.settings.updateRemindersDisabled = true
                     appState.saveSettings()
                     appState.availableUpdate = nil
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 34))
+                .buttonStyle(.plain)
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .frame(height: 32)
+
+                Spacer(minLength: 12)
 
                 Button(appState.localized(update.downloadURL == nil ? "打开 Release" : "下载更新")) {
                     NSWorkspace.shared.open(update.downloadURL ?? update.releaseURL)
@@ -2513,8 +2540,8 @@ struct AppUpdatePromptSheet: View {
                 .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 18, minHeight: 34, prominent: true))
                 .keyboardShortcut(.defaultAction)
             }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .appSheetChrome(width: 560, maxHeight: 640)
     }
 
     private var releaseMetaText: String {
@@ -2531,33 +2558,49 @@ struct AppUpdatePromptSheet: View {
         if sections.isEmpty {
             AppInfoNote(text: appState.localized("此版本未提供更新日志，可前往 Release 页面查看详情。"), systemImage: "doc.text")
         } else {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(sections) { section in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(appState.localized(section.title))
-                                .font(.callout.weight(.semibold))
-                            ForEach(section.items, id: \.self) { item in
-                                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                    Circle()
-                                        .fill(AppColors.selectedGlassTint.opacity(0.72))
-                                        .frame(width: 4.5, height: 4.5)
-                                    Text(item)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                        .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 10) {
+                Text(appState.localized("更新内容"))
+                    .font(.headline)
+                    .foregroundStyle(.primary.opacity(0.88))
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(sections) { section in
+                            VStack(alignment: .leading, spacing: 7) {
+                                Text(appState.localized(section.title))
+                                    .font(.callout.weight(.semibold))
+                                    .foregroundStyle(.primary.opacity(0.86))
+                                ForEach(section.items, id: \.self) { item in
+                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                        Circle()
+                                            .fill(AppColors.selectedGlassTint.opacity(0.66))
+                                            .frame(width: 4, height: 4)
+                                            .padding(.top, 1)
+                                        Text(item)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                            .lineSpacing(2)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .textSelection(.enabled)
+                                    }
                                 }
                             }
+                            .padding(.vertical, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .staticSurfaceBackground(cornerRadius: 14, thickness: 0.92)
                     }
+                    .padding(14)
                 }
-                .padding(2)
+                .frame(maxHeight: 292)
+                .background {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(.white.opacity(0.34))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(.white.opacity(0.58), lineWidth: 1)
+                        }
+                        .shadow(color: .black.opacity(0.045), radius: 14, y: 7)
+                }
             }
-            .frame(maxHeight: 292)
         }
     }
 }

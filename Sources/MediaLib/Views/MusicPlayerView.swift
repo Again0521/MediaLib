@@ -3091,7 +3091,7 @@ private struct MusicExpandedLyricsPanel: View {
             GeometryReader { geometry in
                 ScrollView(.vertical, showsIndicators: false) {
                     Text(MusicPlayerView.cleanedLyrics(lyrics))
-                        .font(.system(size: 18, weight: .medium))
+                        .font(.system(size: 18, weight: .semibold))
                         .foregroundStyle(.primary.opacity(0.86))
                         .lineSpacing(9)
                         .multilineTextAlignment(.center)
@@ -5164,7 +5164,7 @@ private struct ActiveLyricMotionModifier: ViewModifier {
         if active && !isBrowsing {
             content
                 .brightness(0.010)
-                .scaleEffect(1.010)
+                .scaleEffect(1.006)
         } else {
             content
         }
@@ -7845,7 +7845,7 @@ private struct KaraokeLyricLine: View, Equatable {
 
     // 所有行（含被播放行）共用完全相同的字号与字重，杜绝"激活时整行放大、播放完突然缩小"的跳变。
     // 被播放行的突出感只来自字级 scaleEffect（见 LyricProgressWrappingText / SegmentedLyricFlowText）。
-    private static let baseFont = Font.system(size: 23, weight: .semibold, design: .rounded)
+    private static let baseFont = Font.system(size: 23, weight: .bold, design: .rounded)
 
     var body: some View {
         if isActive {
@@ -8063,11 +8063,11 @@ private struct SegmentedLyricFlowText: View {
     }
 
     private func segmentScale(for index: Int) -> CGFloat {
-        // 正在唱的词放大(~1.10)，其余为原字号。
+        // 正在唱的词轻微放大(~1.08)，其余为原字号。
         guard index == activeSegmentIndex else { return 1.0 }
         let p = localProgress(for: index)
         let bump = sin(min(max(p, 0), 1) * .pi)  // 0→1→0
-        return 1.0 + 0.10 * (0.55 + 0.45 * bump)
+        return 1.0 + 0.075 * (0.55 + 0.45 * bump)
     }
 
     private func verticalOffset(for index: Int) -> CGFloat {
@@ -8162,13 +8162,13 @@ private struct LyricProgressWrappingText: View {
     }
 
     private func glyphScale(for offset: Int) -> CGFloat {
-        // 仅正在唱的字附近放大（倍率略缩小到 ~1.10），唱过/未唱均为 1.0。
+        // 仅正在唱的字附近放大（倍率收敛到 ~1.08），唱过/未唱均为 1.0。
         let distance = Double(offset) - timing.headOriginalPosition
         if distance > 0.6 { return 1.0 }
         if distance < -1.6 { return 1.0 }
         let proximity = 1 - min(max(abs(distance) / 1.6, 0), 1)
         let eased = proximity * proximity * (3 - 2 * proximity)
-        return 1.0 + 0.10 * eased
+        return 1.0 + 0.075 * eased
     }
 
     private func verticalOffset(for offset: Int) -> CGFloat {

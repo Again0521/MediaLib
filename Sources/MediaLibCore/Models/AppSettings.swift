@@ -1862,7 +1862,7 @@ public struct AppSettings: Codable, Hashable {
             autoPlayNextEpisode: try container.decodeIfPresent(Bool.self, forKey: .autoPlayNextEpisode) ?? defaults.autoPlayNextEpisode,
             // 旧配置迁移：没存过结束行为时，沿用旧「自动下一集」开关的语义。
             videoPlaybackEndAction: try container.decodeIfPresent(VideoPlaybackEndAction.self, forKey: .videoPlaybackEndAction)
-                ?? (((try? container.decodeIfPresent(Bool.self, forKey: .autoPlayNextEpisode)) ?? true) ?? true ? .nextEpisode : .holdLastFrame),
+                ?? (((try? container.decodeIfPresent(Bool.self, forKey: .autoPlayNextEpisode)) ?? true) ? .nextEpisode : .holdLastFrame),
             videoRememberPlaybackRate: try container.decodeIfPresent(Bool.self, forKey: .videoRememberPlaybackRate) ?? defaults.videoRememberPlaybackRate,
             videoMiddleClickAction: try container.decodeIfPresent(VideoMiddleClickAction.self, forKey: .videoMiddleClickAction) ?? defaults.videoMiddleClickAction,
             videoMouseBackForwardAction: try container.decodeIfPresent(VideoSideButtonAction.self, forKey: .videoMouseBackForwardAction) ?? defaults.videoMouseBackForwardAction,

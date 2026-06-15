@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="MediaLib"
 DISPLAY_NAME="MediaLIB"
 BUNDLE_ID="com.local.MediaLib"
-VERSION="1.1.6"
-BUILD="6"
+VERSION="1.1.7"
+BUILD="8"
 DIST_DIR="$ROOT_DIR/dist"
 BUILD_ROOT="/private/tmp/MediaLib-package"
 APP_BUNDLE="$BUILD_ROOT/$DISPLAY_NAME.app"
@@ -14,6 +14,10 @@ APP_COPY="$DIST_DIR/$DISPLAY_NAME.app"
 LEGACY_APP_COPY="$DIST_DIR/$APP_NAME.app"
 DMG_ROOT="$BUILD_ROOT/dmg-root"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
+DMG_RW_PATH="$BUILD_ROOT/$APP_NAME-rw.dmg"
+DMG_MOUNT="$BUILD_ROOT/dmg-mount"
+DMG_BACKGROUND="$DMG_ROOT/.background/dmg-background.png"
+SWIFT_MODULE_CACHE="/private/tmp/MediaLib-package-module-cache"
 
 strip_bundle_metadata() {
   local target="$1"
@@ -31,6 +35,9 @@ strip_bundle_metadata() {
 if [[ -d "/Applications/Xcode.app/Contents/Developer" ]]; then
   export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 fi
+rm -rf "$SWIFT_MODULE_CACHE"
+mkdir -p "$SWIFT_MODULE_CACHE"
+export CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE"
 
 cd "$ROOT_DIR"
 
@@ -285,7 +292,25 @@ codesign --verify --deep --strict "$APP_BUNDLE"
 cp -R "$APP_BUNDLE" "$DMG_ROOT/$DISPLAY_NAME.app"
 strip_bundle_metadata "$DMG_ROOT/$DISPLAY_NAME.app"
 ln -s /Applications "$DMG_ROOT/Applications"
-hdiutil create -volname "$DISPLAY_NAME" -srcfolder "$DMG_ROOT" -ov -format UDZO "$DMG_PATH"
+swift scripts/generate_dmg_background.swift "$DMG_BACKGROUND"
+strip_bundle_metadata "$DMG_ROOT"
+DMG_SIZE_MB=$(du -sm "$DMG_ROOT" | awk '{print $1}')
+DMG_SIZE_MB=$((DMG_SIZE_MB + 96))
+hdiutil create "$DMG_RW_PATH" -volname "$DISPLAY_NAME" -size "${DMG_SIZE_MB}m" -fs HFS+ -ov
+mkdir -p "$DMG_MOUNT"
+hdiutil attach "$DMG_RW_PATH" -mountpoint "$DMG_MOUNT" -nobrowse -quiet
+cleanup_dmg_mount() {
+  hdiutil detach "$DMG_MOUNT" -quiet 2>/dev/null || true
+}
+trap cleanup_dmg_mount EXIT
+ditto --noextattr --noqtn "$DMG_ROOT/" "$DMG_MOUNT/"
+python3 scripts/write_dmg_ds_store.py "$DMG_MOUNT"
+SetFile -a V "$DMG_MOUNT/.background" 2>/dev/null || true
+bless --folder "$DMG_MOUNT" --openfolder "$DMG_MOUNT" 2>/dev/null || true
+sync
+hdiutil detach "$DMG_MOUNT" -quiet
+trap - EXIT
+hdiutil convert "$DMG_RW_PATH" -format UDZO -imagekey zlib-level=9 -ov -o "$DMG_PATH"
 hdiutil verify "$DMG_PATH"
 if ditto --noextattr --noqtn "$APP_BUNDLE" "$APP_COPY"; then
   strip_bundle_metadata "$APP_COPY"

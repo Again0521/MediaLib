@@ -227,7 +227,13 @@ private func eqTapProcess(
 ) {
     var sourceFlags = MTAudioProcessingTapFlags()
     let status = MTAudioProcessingTapGetSourceAudio(tap, numberFrames, bufferListInOut, &sourceFlags, nil, numberFramesOut)
-    guard status == noErr else { return }
+    guard status == noErr else {
+        // 取源失败时输出 0 帧并透传 flags，保持调用方状态定义良好，
+        // 避免 numberFramesOut 残留旧值导致后续缓冲读到越界/静音卡死。
+        numberFramesOut.pointee = 0
+        flagsOut.pointee = sourceFlags
+        return
+    }
     let processor = Unmanaged<AudioEQProcessor>.fromOpaque(MTAudioProcessingTapGetStorage(tap)).takeUnretainedValue()
     processor.process(frames: numberFramesOut.pointee, bufferList: bufferListInOut)
     flagsOut.pointee = sourceFlags
