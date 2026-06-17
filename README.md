@@ -168,7 +168,7 @@ MediaLIB 仍在持续打磨中。当前重点是让媒体库、播放器、远�
 <a href="https://github.com/mpv-player/mpv">mpv-player</a><br>
 <a href="https://gitee.com/xzy1102/home-emby-tv/releases">HomeEmby For Andorid TV</a><br>
 <a href="https://github.com/MediaBrowser/Emby">emby</a><br>
-<a href="https://github.com/jellyfin/jellyfin">jellfin</a><br>
+<a href="https://github.com/jellyfin/jellyfin">jellyfin</a><br>
 <a href="https://linux.do">Linux.do</a>
 </div>
 
