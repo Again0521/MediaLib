@@ -83,9 +83,9 @@ MediaLIB 会递归扫描目录，识别常见视频文件，并尽量从文件�
 
 音乐播放器有底部迷你播放器和展开页两种状态。双击歌曲后会先出现底部迷你播放器，点击曲目信息后可以展开完整播放界面。展开页会从专辑封面取色，展示封面、控制栏、队列和歌词卡片。
 
-<p align="center">
+<div align="center">
   <img src="./assets/music-player.png" alt="音乐播放页" width="86%" />
-</p>
+</div>
 歌词会优先使用音频内嵌歌词或同名 `.lrc` / `.txt` 文件。带时间戳的 LRC 可以自动滚动；增强 LRC 支持逐字或分词高亮。没有逐字时间戳时，MediaLIB 会根据歌词节奏估算行内进度，让歌词跟随播放更自然。
 <p align="center">
   <img src="./assets/music-player2.png" alt="音乐播放页" width="86%" />
