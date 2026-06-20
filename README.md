@@ -162,6 +162,16 @@ MediaLIB 仍在持续打磨中。当前重点是让媒体库、播放器、远�
 
 使用过程中遇到问题，欢迎通过 Issue 反馈。最好附上页面、操作步骤、截图和日志信息，这样更容易定位问题。
 
+## 相关链接
+
+<div>
+<a href="https://github.com/mpv-player/mpv">mpv-player</a><br>
+<a href="https://gitee.com/xzy1102/home-emby-tv/releases">HomeEmby For Andorid TV</a><br>
+<a href="https://github.com/MediaBrowser/Emby">emby</a><br>
+<a href="https://github.com/jellyfin/jellyfin">jellyfin</a><br>
+<a href="https://linux.do">Linux.do</a>
+</div>
+
 ## 许可
 
 当前仓库供个人学习与使用。随 App 使用或打包的 libmpv、ffmpeg 等第三方组件遵循各自的开源许可；如果你计划再分发或商用，请先确认相关许可要求。
