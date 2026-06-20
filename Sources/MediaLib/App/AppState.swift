@@ -6211,6 +6211,30 @@ final class AppState: ObservableObject {
         scheduleMusicQueuePersistence()
     }
 
+    /// 直接设置循环模式（书架方案「下拉唱片开启单曲循环」用；现有 cycleMusicRepeatMode 行为不变）。
+    func setMusicRepeatMode(_ mode: MusicRepeatMode) {
+        guard musicRepeatMode != mode else { return }
+        musicRepeatMode = mode
+        scheduleMusicQueuePersistence()
+    }
+
+    /// 随机重排播放队列，但保持当前正在播放的曲目位置不变（书架方案「长按聚拢后晃动洗牌」用）。
+    /// 仅打乱顺序、不切歌、不改其它行为；当前曲留在原下标，其余曲目随机填充剩余位置。
+    func shuffleMusicQueueKeepingCurrent() {
+        guard musicQueue.count > 2 else { return }
+        if let current = activePlayerItem,
+           let currentIndex = musicQueue.firstIndex(where: { $0.id == current.id }) {
+            var others = musicQueue
+            let pinned = others.remove(at: currentIndex)
+            others.shuffle()
+            others.insert(pinned, at: currentIndex)
+            musicQueue = others
+        } else {
+            musicQueue.shuffle()
+        }
+        scheduleMusicQueuePersistence()
+    }
+
     func presentBuiltInPlayer(_ item: MediaItem, preserveSelection: Bool = false) {
         if !preserveSelection {
             selectedItem = nil

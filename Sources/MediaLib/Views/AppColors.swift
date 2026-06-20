@@ -1513,7 +1513,7 @@ private struct LiquidGlassButtonStyleBody: View {
         configuration.label
             .font(.callout.weight(.semibold))
             .lineLimit(1)
-            .foregroundStyle(prominent ? Color.white.opacity(isEnabled ? 0.96 : 0.52) : Color.primary.opacity(isEnabled ? (active ? 0.88 : 0.78) : 0.50))
+            .foregroundStyle(prominent ? Color.white.opacity(0.96) : Color.primary.opacity(active ? 0.88 : 0.78))
             .padding(.horizontal, horizontalPadding)
             .frame(minHeight: minHeight)
             .background {
@@ -1521,7 +1521,7 @@ private struct LiquidGlassButtonStyleBody: View {
                     if prominent {
                         shape.fill(
                             LinearGradient(
-                                colors: AppColors.accentButtonColors.map { $0.opacity(isEnabled ? 1.0 : 0.48) },
+                                colors: AppColors.accentButtonColors,
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
@@ -1622,7 +1622,7 @@ private struct LiquidGlassButtonStyleBody: View {
                 y: prominent ? 0.5 : 0
             )
             .pointerLiquidEdge(cornerRadius: cornerRadius, tint: prominent ? AppColors.selectedGlassTint : AppColors.pointerLightTint, intensity: (prominent ? (active ? 0.24 : 0.14) : (active ? 1.06 : 0.72)) * depth)
-            .opacity(pressed ? 0.86 : 1)
+            .opacity(isEnabled ? (pressed ? 0.86 : 1) : AppControlMetrics.disabledControlOpacity)
             .brightness(isHovering && isEnabled && !pressed ? (prominent ? 0.018 : 0.010) : 0)
             .onHover { hovering in
                 isHovering = hovering
@@ -1672,7 +1672,7 @@ private struct RepeatedGlassButtonStyleBody: View {
         configuration.label
             .font(.callout.weight(.medium))
             .lineLimit(1)
-            .foregroundStyle(Color.primary.opacity(isEnabled ? (active ? 0.88 : 0.76) : 0.48))
+            .foregroundStyle(Color.primary.opacity(active ? 0.88 : 0.76))
             .padding(.horizontal, horizontalPadding)
             .frame(minHeight: minHeight)
             .background {
@@ -1717,7 +1717,7 @@ private struct RepeatedGlassButtonStyleBody: View {
                 }
             }
             .pointerLiquidEdge(cornerRadius: cornerRadius, intensity: (active ? 1.08 : 0.82) * depth)
-            .opacity(pressed ? 0.84 : 1)
+            .opacity(isEnabled ? (pressed ? 0.84 : 1) : AppControlMetrics.disabledControlOpacity)
             .brightness(isHovering && isEnabled && !pressed ? 0.010 : 0)
             .onHover { hovering in
                 isHovering = hovering
@@ -1752,7 +1752,7 @@ private struct SubtleIconButtonStyleBody: View {
         configuration.label
             .frame(minWidth: minSize, minHeight: minSize)
             .contentShape(Rectangle())
-            .opacity(configuration.isPressed ? 0.72 : (isEnabled ? 1 : 0.45))
+            .opacity(configuration.isPressed ? 0.72 : (isEnabled ? 1 : AppControlMetrics.disabledControlOpacity))
             .brightness(active ? (configuration.isPressed ? -0.018 : 0.018) : 0)
             .saturation(active ? 1.08 : 1.0)
             .onHover { hovering in
@@ -1773,7 +1773,7 @@ private struct HeaderControlGlassBackground: ViewModifier {
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        let enabledOpacity = enabled ? 1.0 : 0.58
+        let enabledOpacity = enabled ? 1.0 : AppControlMetrics.disabledControlOpacity
 
         content
             .background {

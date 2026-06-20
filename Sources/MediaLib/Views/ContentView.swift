@@ -2478,29 +2478,45 @@ struct AppUpdatePromptSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             AppSheetHeader(
-                title: "\(appState.localized("发现新版本")) \(update.version)",
-                subtitle: "\(appState.localized("当前版本")) \(AppVersion.current)。\(releaseMetaText)",
+                title: appState.localized("发现新版本"),
+                subtitle: releaseTitleText,
                 systemImage: "sparkles",
                 subtitleLineLimit: 2
             )
 
-            HStack(alignment: .top, spacing: 9) {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(AppColors.selectedGlassTint.opacity(0.82))
-                    .frame(width: 18, height: 18)
-                Text(appState.localized("后台更新检查只读取 GitHub Releases 元数据；跳过当前版本后，静默检查不会再提示这一版，手动检查仍可看到结果。"))
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                updateMetaPill(
+                    title: appState.localized("当前版本"),
+                    value: AppVersion.current,
+                    systemImage: "macwindow"
+                )
+                updateMetaPill(
+                    title: appState.localized("最新版本"),
+                    value: update.version,
+                    systemImage: "sparkle.magnifyingglass"
+                )
+                if let publishedAt = update.publishedAt {
+                    updateMetaPill(
+                        title: appState.localized("发布日期"),
+                        value: dateFormatter.string(from: publishedAt),
+                        systemImage: "calendar"
+                    )
+                }
+                if let assetName = update.assetName {
+                    updateMetaPill(
+                        title: appState.localized("安装包"),
+                        value: [assetName, assetSizeText].compactMap { $0 }.joined(separator: " · "),
+                        systemImage: "shippingbox"
+                    )
+                }
             }
-            .padding(.horizontal, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             releaseNotesView
 
             updateActionFooter
         }
-        .appSheetChrome(width: 560, maxHeight: 640)
+        .appSheetChrome(width: 600, maxHeight: 660)
     }
 
     private var updateActionFooter: some View {
@@ -2545,11 +2561,51 @@ struct AppUpdatePromptSheet: View {
     }
 
     private var releaseMetaText: String {
-        var parts = [update.title]
-        if let publishedAt = update.publishedAt {
-            parts.append(dateFormatter.string(from: publishedAt))
+        var parts: [String] = []
+        if update.prerelease {
+            parts.append(appState.localized("预发布版本"))
         }
+        parts.append(update.title)
         return parts.joined(separator: " · ")
+    }
+
+    private var releaseTitleText: String {
+        "MediaLIB \(update.version) · \(releaseMetaText)"
+    }
+
+    private var assetSizeText: String? {
+        guard let assetSize = update.assetSize, assetSize > 0 else { return nil }
+        return ByteCountFormatter.string(fromByteCount: Int64(assetSize), countStyle: .file)
+    }
+
+    private func updateMetaPill(title: String, value: String, systemImage: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(AppColors.selectedGlassTint.opacity(0.84))
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.primary.opacity(0.82))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.white.opacity(0.38))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(.white.opacity(0.58), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.035), radius: 10, y: 5)
+        }
     }
 
     @ViewBuilder
@@ -2593,12 +2649,23 @@ struct AppUpdatePromptSheet: View {
                 .frame(maxHeight: 292)
                 .background {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(.white.opacity(0.34))
+                        .fill(.white.opacity(0.40))
                         .overlay {
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(.white.opacity(0.58), lineWidth: 1)
+                                .stroke(
+                                    LinearGradient(
+                                        colors: [
+                                            .white.opacity(0.76),
+                                            AppColors.selectedGlassTint.opacity(0.18),
+                                            .black.opacity(0.04)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 1
+                                )
                         }
-                        .shadow(color: .black.opacity(0.045), radius: 14, y: 7)
+                        .shadow(color: .black.opacity(0.055), radius: 18, y: 8)
                 }
             }
         }

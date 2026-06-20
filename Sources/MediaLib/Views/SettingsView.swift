@@ -265,6 +265,18 @@ struct SettingsView: View {
             SettingsDescription(text: appState.settings.lyricSyncAlgorithm.description)
 
             if appState.settings.musicDefaultPlayer == .builtIn {
+                SettingsRow(title: "播放器外观", systemImage: "square.stack.3d.up") {
+                    Picker("播放器外观", selection: binding(\.musicPlayerVisualScheme)) {
+                        // 临时隐藏「无界」入口（仅去设置选项，枚举与实现代码保留）。
+                        ForEach(MusicPlayerVisualScheme.allCases.filter { $0 != .wujie }) { scheme in
+                            Text(appState.localized(scheme.displayName)).tag(scheme)
+                        }
+                    }
+                    .labelsHidden()
+                    .settingsMenuControl(selectedTitle: appState.localized(appState.settings.musicPlayerVisualScheme.displayName))
+                }
+                SettingsDescription(text: appState.settings.musicPlayerVisualScheme.description)
+
                 SettingsToggleRow(title: "封面发光", systemImage: "sparkles", isOn: binding(\.musicAlbumCoverGlowEnabled))
                 SettingsDescription(text: "开启时展开播放器使用封面原图的多层柔光；关闭后只保留主色的浅柔阴影，暂停时同样收起光效。")
 
@@ -675,16 +687,14 @@ struct SettingsView: View {
             }
 
             SettingsRow(title: "配色", systemImage: "paintpalette") {
-                Picker("配色", selection: Binding(get: {
-                    appState.settings.themePreset
-                }, set: { appState.setThemePreset($0) })) {
-                    ForEach(AppThemePreset.allCases) { preset in
-                        Text(appState.localized(preset.displayName)).tag(preset)
-                    }
-                }
-                .labelsHidden()
-                .settingsMenuControl(selectedTitle: appState.localized(appState.settings.themePreset.displayName))
+                Text(appState.localized(appState.settings.themePreset.displayName))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
+
+            ThemePaletteSwatchGrid()
 
             if appState.settings.themePreset.isCustom {
                 SettingsRow(title: "底色 / 卡片", systemImage: "rectangle.fill") {
@@ -701,7 +711,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsDescription(text: "挑一套喜欢的配色，界面的底色、卡片和高亮会一起换上新衣。五套预设都经过细心调配；想要更个性，选「自定义」可以分别调整三种颜色。")
+            SettingsDescription(text: "挑一套喜欢的配色，界面的底色、卡片和高亮会一起换上新衣。七套预设都经过细心调配，点选即时预览；想要更个性，选「自定义」可以分别调整三种颜色。")
 
             SettingsRow(title: "海报最小宽度", systemImage: "rectangle.compress.vertical") {
                 Slider(value: binding(\.posterMinWidth), in: 130...220, step: 10)
@@ -1318,6 +1328,97 @@ private struct ArtworkFallbackModeCapsules: View {
         }
         .padding(5)
         .staticSurfaceBackground(cornerRadius: 16, thickness: 0.92)
+    }
+}
+
+/// 「配色」选择器：把纯文字下拉升级为带色板小样的网格，每项展示该预设的底色·光线·高亮三段锚点，
+/// 点选即时换肤（沿用 setThemePreset 的发布 + 防抖落盘），所见即所得。
+private struct ThemePaletteSwatchGrid: View {
+    @EnvironmentObject private var appState: AppState
+    private let columns = [GridItem(.adaptive(minimum: 138), spacing: 10)]
+
+    var body: some View {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+            ForEach(AppThemePreset.allCases) { preset in
+                ThemePaletteSwatchTile(
+                    preset: preset,
+                    isSelected: appState.settings.themePreset == preset,
+                    action: {
+                        guard appState.settings.themePreset != preset else { return }
+                        appState.setThemePreset(preset)
+                    }
+                )
+            }
+        }
+    }
+}
+
+private struct ThemePaletteSwatchTile: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let preset: AppThemePreset
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        let active = isSelected || isHovering
+        let anchors = paletteAnchors
+        Button(action: action) {
+            HStack(spacing: 10) {
+                HStack(spacing: 0) {
+                    anchors.base
+                    anchors.light
+                    anchors.highlight
+                }
+                .frame(width: 42, height: 26)
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(AppColors.subtleBorder, lineWidth: 0.8)
+                )
+
+                Text(appState.localized(preset.displayName))
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+
+                Spacer(minLength: 4)
+
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 14))
+                    .foregroundStyle(isSelected ? AppColors.selectedGlassTint.opacity(0.95) : Color.secondary.opacity(0.45))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity)
+            .staticSurfaceBackground(selected: isSelected, cornerRadius: 12, thickness: 0.94)
+            .repeatedSurfaceHover(isHovering, cornerRadius: 12, intensity: active ? 0.74 : 0.62)
+            .brightness(isHovering ? 0.006 : 0)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .animation(reduceMotion ? nil : AppMotion.listHover, value: isHovering)
+        .animation(reduceMotion ? nil : AppMotion.standard, value: isSelected)
+        .help(appState.localized(preset.displayName))
+    }
+
+    private var paletteAnchors: (base: Color, light: Color, highlight: Color) {
+        let isDark = colorScheme == .dark
+        let seed = isDark ? preset.darkSeedHex : preset.seedHex
+        if preset.isCustom {
+            return (
+                themeColor(appState.settings.themeBaseHex ?? seed.base),
+                themeColor(appState.settings.themeLightHex ?? seed.light),
+                themeColor(appState.settings.themeHighlightHex ?? seed.highlight)
+            )
+        }
+        return (themeColor(seed.base), themeColor(seed.light), themeColor(seed.highlight))
+    }
+
+    private func themeColor(_ hex: String) -> Color {
+        Color(nsColor: NSColor(appThemeHex: hex) ?? NSColor.gray)
     }
 }
 

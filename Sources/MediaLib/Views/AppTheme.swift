@@ -141,9 +141,9 @@ enum AppThemeResolver {
             return AppThemeTokens(
                 name: "OLED Night",
                 usage: "夜间媒体播放、暗室观影和深色模式优先用户；浅色外观下也保持更冷静的蓝黑调性，避免与清蓝混同。",
-                primary: AppThemeColorToken(lightHex: "596FD8", darkHex: "7D92EE"),
+                primary: AppThemeColorToken(lightHex: "566FDE", darkHex: "7F94F2"),
                 secondary: AppThemeColorToken(lightHex: "637088", darkHex: "8FA0BE"),
-                accent: AppThemeColorToken(lightHex: "647AE0", darkHex: "879DFA"),
+                accent: AppThemeColorToken(lightHex: "627AE6", darkHex: "899FFC"),
                 background: AppThemeColorToken(lightHex: "F3F5F9", darkHex: "0C0E12"),
                 surface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "101216"),
                 elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "171B21"),
@@ -158,9 +158,9 @@ enum AppThemeResolver {
             return AppThemeTokens(
                 name: "Soft Coral",
                 usage: "年轻、轻快的媒体库和音乐场景；珊瑚红偏温暖但不过饱和，不做霓虹或游戏化表达。",
-                primary: AppThemeColorToken(lightHex: "D95F54", darkHex: "EA766A"),
+                primary: AppThemeColorToken(lightHex: "DC5B4F", darkHex: "EE766A"),
                 secondary: AppThemeColorToken(lightHex: "D99086", darkHex: "D99A90"),
-                accent: AppThemeColorToken(lightHex: "CB564C", darkHex: "F18476"),
+                accent: AppThemeColorToken(lightHex: "CE5347", darkHex: "F28575"),
                 background: AppThemeColorToken(lightHex: "FAF5F3", darkHex: "1A1112"),
                 surface: AppThemeColorToken(lightHex: "FFFDFC", darkHex: "241819"),
                 elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "30201E"),
@@ -175,9 +175,9 @@ enum AppThemeResolver {
             return AppThemeTokens(
                 name: "Clean Lime",
                 usage: "更年轻的清新主题，适合音乐、歌单和日常浏览；绿色压低饱和度，避免荧光感。",
-                primary: AppThemeColorToken(lightHex: "6F9A48", darkHex: "93C75F"),
+                primary: AppThemeColorToken(lightHex: "6C9C3F", darkHex: "97CB5E"),
                 secondary: AppThemeColorToken(lightHex: "91B16A", darkHex: "A6C37A"),
-                accent: AppThemeColorToken(lightHex: "628B40", darkHex: "A1D16D"),
+                accent: AppThemeColorToken(lightHex: "5F8B38", darkHex: "A4D56C"),
                 background: AppThemeColorToken(lightHex: "F6F8F2", darkHex: "10170F"),
                 surface: AppThemeColorToken(lightHex: "FEFFFB", darkHex: "182116"),
                 elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "22301B"),
@@ -192,9 +192,9 @@ enum AppThemeResolver {
             return AppThemeTokens(
                 name: "Fresh Apricot",
                 usage: "替代旧暖黄的干净暖色主题；更接近浅杏和蜂蜜橙，适合音乐和个人收藏。",
-                primary: AppThemeColorToken(lightHex: "D17D42", darkHex: "E79B58"),
+                primary: AppThemeColorToken(lightHex: "D47938", darkHex: "EB9C55"),
                 secondary: AppThemeColorToken(lightHex: "C49A69", darkHex: "D7AF83"),
-                accent: AppThemeColorToken(lightHex: "C17137", darkHex: "EFA764"),
+                accent: AppThemeColorToken(lightHex: "C46E2F", darkHex: "F2A861"),
                 background: AppThemeColorToken(lightHex: "FAF5EC", darkHex: "19130E"),
                 surface: AppThemeColorToken(lightHex: "FFFDF9", darkHex: "231910"),
                 elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "302214"),
@@ -205,13 +205,47 @@ enum AppThemeResolver {
                 warning: AppThemeColorToken(lightHex: "D97928", darkHex: "F0B468"),
                 error: AppThemeColorToken(lightHex: "D74E45", darkHex: "FF6B62")
             )
+        case .grape:
+            return AppThemeTokens(
+                name: "Muted Grape",
+                usage: "静谧、有格调的紫色主题；适合夜间音乐与个人收藏。紫调压低饱和，不做霓虹或浮夸表达。",
+                primary: AppThemeColorToken(lightHex: "7A57CC", darkHex: "AB8FF0"),
+                secondary: AppThemeColorToken(lightHex: "9C86C8", darkHex: "BCAAE0"),
+                accent: AppThemeColorToken(lightHex: "6F4CC6", darkHex: "B89BF4"),
+                background: AppThemeColorToken(lightHex: "F7F5FC", darkHex: "100E18"),
+                surface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "1A1622"),
+                elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "241F30"),
+                border: AppThemeColorToken(lightHex: "E4DCEE", darkHex: "352E44"),
+                textPrimary: AppThemeColorToken(lightHex: "1D1D1F", darkHex: "F4F1FA"),
+                textSecondary: AppThemeColorToken(lightHex: "6E6878", darkHex: "A99FB8"),
+                success: AppThemeColorToken(lightHex: "2FA463", darkHex: "5AD184"),
+                warning: AppThemeColorToken(lightHex: "C98732", darkHex: "E6B866"),
+                error: AppThemeColorToken(lightHex: "D74E45", darkHex: "FF6B62")
+            )
+        case .mistTeal:
+            return AppThemeTokens(
+                name: "Misty Teal",
+                usage: "雾感蓝绿 / 莫兰迪青，安静耐看；适合长时间浏览与古典、器乐场景。低饱和不刺眼。",
+                primary: AppThemeColorToken(lightHex: "3E8D82", darkHex: "5BB5A7"),
+                secondary: AppThemeColorToken(lightHex: "6FA59C", darkHex: "92C5BB"),
+                accent: AppThemeColorToken(lightHex: "357F76", darkHex: "63C2B2"),
+                background: AppThemeColorToken(lightHex: "F1F6F4", darkHex: "0C1413"),
+                surface: AppThemeColorToken(lightHex: "FBFEFD", darkHex: "141D1B"),
+                elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "1D2825"),
+                border: AppThemeColorToken(lightHex: "D8E6E1", darkHex: "2B3A36"),
+                textPrimary: AppThemeColorToken(lightHex: "1D1D1F", darkHex: "F1F6F4"),
+                textSecondary: AppThemeColorToken(lightHex: "63716C", darkHex: "9DB0A9"),
+                success: AppThemeColorToken(lightHex: "2FA463", darkHex: "5AD184"),
+                warning: AppThemeColorToken(lightHex: "C98732", darkHex: "E6B866"),
+                error: AppThemeColorToken(lightHex: "D74E45", darkHex: "FF6B62")
+            )
         case .classic, .ocean, .indigo, .purple, .rose, .mint, .green, .frosted, .custom:
             return AppThemeTokens(
                 name: "Apple Clean Blue",
                 usage: "默认主题、全局媒体库、初次使用和需要最强原生感的页面；接近 Apple Music、TV、Finder 的综合气质。",
-                primary: AppThemeColorToken(lightHex: "327FDB", darkHex: "5B9FEA"),
+                primary: AppThemeColorToken(lightHex: "2C7CE0", darkHex: "5FA2EE"),
                 secondary: AppThemeColorToken(lightHex: "72B6E8", darkHex: "7BC0EE"),
-                accent: AppThemeColorToken(lightHex: "3E84E0", darkHex: "70B0F2"),
+                accent: AppThemeColorToken(lightHex: "3A82E6", darkHex: "74B2F4"),
                 background: AppThemeColorToken(lightHex: "F6F8FC", darkHex: "121820"),
                 surface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "1A222C"),
                 elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "232C36"),

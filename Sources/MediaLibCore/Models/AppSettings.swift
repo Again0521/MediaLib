@@ -1093,10 +1093,12 @@ public enum AppThemePreset: String, Codable, CaseIterable, Identifiable, Sendabl
     case coral
     case lime
     case apricot
+    case grape
+    case mistTeal
     case custom
 
     public static var allCases: [AppThemePreset] {
-        [.classic, .coral, .lime, .apricot, .oled, .custom]
+        [.classic, .coral, .lime, .apricot, .grape, .mistTeal, .oled, .custom]
     }
 
     public var id: String { rawValue }
@@ -1107,6 +1109,8 @@ public enum AppThemePreset: String, Codable, CaseIterable, Identifiable, Sendabl
         case .coral: return "珊瑚"
         case .lime: return "青柠"
         case .orange, .warm, .apricot: return "暖杏"
+        case .grape: return "葡萄"
+        case .mistTeal: return "雾松"
         case .graphite, .oled: return "夜幕"
         case .custom: return "自定义"
         }
@@ -1119,15 +1123,19 @@ public enum AppThemePreset: String, Codable, CaseIterable, Identifiable, Sendabl
     public var seedHex: (base: String, highlight: String, light: String) {
         switch self {
         case .classic, .ocean, .indigo, .purple, .rose, .mint, .green, .frosted, .custom:
-            return ("F6F8FC", "327FDB", "F3F8FF")
+            return ("F6F8FC", "2C7CE0", "E8F2FF")
         case .coral:
-            return ("FAF5F3", "D95F54", "FFF1EC")
+            return ("FAF5F3", "DC5B4F", "FFE7DD")
         case .lime:
-            return ("F6F8F2", "6F9A48", "F1F7E9")
+            return ("F6F8F2", "6C9C3F", "E9F4DA")
         case .orange, .warm, .apricot:
-            return ("FAF5EC", "D17D42", "FFF1DF")
+            return ("FAF5EC", "D47938", "FFE9CF")
+        case .grape:
+            return ("F7F5FC", "7A57CC", "EFE7FF")
+        case .mistTeal:
+            return ("F1F6F4", "3E8D82", "E2F1ED")
         case .graphite, .oled:
-            return ("F3F5F9", "596FD8", "E9EEFF")
+            return ("F3F5F9", "566FDE", "E1E9FF")
         }
     }
 
@@ -1136,15 +1144,19 @@ public enum AppThemePreset: String, Codable, CaseIterable, Identifiable, Sendabl
     public var darkSeedHex: (base: String, highlight: String, light: String) {
         switch self {
         case .classic, .ocean, .indigo, .purple, .rose, .mint, .green, .frosted, .custom:
-            return ("121820", "5B9FEA", "1A2936")
+            return ("121820", "5FA2EE", "1C2E40")
         case .coral:
-            return ("1A1112", "EA766A", "3A211E")
+            return ("1A1112", "EE766A", "412320")
         case .lime:
-            return ("10170F", "93C75F", "243416")
+            return ("10170F", "97CB5E", "293E18")
         case .orange, .warm, .apricot:
-            return ("19130E", "E79B58", "342213")
+            return ("19130E", "EB9C55", "3C2814")
+        case .grape:
+            return ("100E18", "AB8FF0", "241C40")
+        case .mistTeal:
+            return ("0C1413", "5BB5A7", "16322D")
         case .graphite, .oled:
-            return ("0C0E12", "7D92EE", "182039")
+            return ("0C0E12", "7F94F2", "1C2549")
         }
     }
 }
@@ -1303,6 +1315,39 @@ public enum AutomaticScanInterval: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// 内置音乐播放器的视觉方案。各方案共用底板取色与封面发光，差异只在前景排版与材质：
+/// - 琉璃：玻璃卡片层叠（封面 / 歌词 / 控制栏各自悬浮在专辑取色玻璃上）。
+/// - 无界：去掉卡片边框，内容直接融入专辑光色；歌词右侧右对齐居中流动，圆形高斯大播放键。
+/// - 书架：去掉一切播放控制按钮；上部一排「厚玻璃唱片」书架（已播放在左·当前居中·待播在右），
+///   操作全长在唱片实体上（点击暂停 / 下拉单曲循环 / 长按聚拢 / 晃动洗牌 / 滚动翻看历史）；
+///   从上到下为 唱片架 → 歌词 → 进度条。完全隔离于琉璃/无界。
+public enum MusicPlayerVisualScheme: String, Codable, CaseIterable, Identifiable, Sendable {
+    case liuli   // 琉璃
+    case wujie   // 无界
+    case shelf   // 书架
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .liuli: return "琉璃"
+        case .wujie: return "无界"
+        case .shelf: return "湖光"
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .liuli:
+            return "玻璃卡片层叠：封面、歌词与控制栏各自悬浮在专辑取色玻璃上。"
+        case .wujie:
+            return "去除卡片边框：内容直接融入专辑光色，歌词靠右居中流动，圆形高斯大播放键。"
+        case .shelf:
+            return "湖光沉浸：无任何播放按钮，唱片如临湖面般居中陈列、倒影粼粼；点击唱片暂停、下拉单曲循环、长按聚拢、晃动洗牌、滚动翻看历史。"
+        }
+    }
+}
+
 public struct AppSettings: Codable, Hashable {
     private static let legacyDefaultHomeTabs: [HomeTab] = [
         .overview,
@@ -1456,6 +1501,8 @@ public struct AppSettings: Codable, Hashable {
     public var musicTransitionMode: MusicTransitionMode
     public var musicSoftFadeDuration: Double
     public var musicAlbumCoverGlowEnabled: Bool
+    /// 内置音乐播放器视觉方案（琉璃 / 无界）。
+    public var musicPlayerVisualScheme: MusicPlayerVisualScheme
     /// 用户选择的视频缓存根目录；nil 时使用系统 Caches/MediaLib。
     public var videoCacheDirectoryPath: String?
     /// 离线视频缓存容量上限，0 表示不限制。
@@ -1583,6 +1630,7 @@ public struct AppSettings: Codable, Hashable {
         musicTransitionMode: MusicTransitionMode = .immediate,
         musicSoftFadeDuration: Double = 0.8,
         musicAlbumCoverGlowEnabled: Bool = true,
+        musicPlayerVisualScheme: MusicPlayerVisualScheme = .liuli,
         videoCacheDirectoryPath: String? = nil,
         videoCacheSizeLimitGB: Double = 0,
         musicEqualizerEnabled: Bool = false,
@@ -1697,6 +1745,7 @@ public struct AppSettings: Codable, Hashable {
         self.musicTransitionMode = musicTransitionMode
         self.musicSoftFadeDuration = min(max(musicSoftFadeDuration, 0.3), 2)
         self.musicAlbumCoverGlowEnabled = musicAlbumCoverGlowEnabled
+        self.musicPlayerVisualScheme = musicPlayerVisualScheme
         self.videoCacheDirectoryPath = videoCacheDirectoryPath
         self.videoCacheSizeLimitGB = Self.clampedCacheSizeLimit(videoCacheSizeLimitGB)
         self.musicEqualizerEnabled = musicEqualizerEnabled
@@ -1813,6 +1862,7 @@ public struct AppSettings: Codable, Hashable {
         case musicTransitionMode
         case musicSoftFadeDuration
         case musicAlbumCoverGlowEnabled
+        case musicPlayerVisualScheme
         case videoCacheDirectoryPath
         case videoCacheSizeLimitGB
         case musicEqualizerEnabled
@@ -1943,6 +1993,7 @@ public struct AppSettings: Codable, Hashable {
             musicTransitionMode: try container.decodeIfPresent(MusicTransitionMode.self, forKey: .musicTransitionMode) ?? defaults.musicTransitionMode,
             musicSoftFadeDuration: try container.decodeIfPresent(Double.self, forKey: .musicSoftFadeDuration) ?? defaults.musicSoftFadeDuration,
             musicAlbumCoverGlowEnabled: try container.decodeIfPresent(Bool.self, forKey: .musicAlbumCoverGlowEnabled) ?? defaults.musicAlbumCoverGlowEnabled,
+            musicPlayerVisualScheme: try container.decodeIfPresent(MusicPlayerVisualScheme.self, forKey: .musicPlayerVisualScheme) ?? defaults.musicPlayerVisualScheme,
             videoCacheDirectoryPath: try container.decodeIfPresent(String.self, forKey: .videoCacheDirectoryPath) ?? defaults.videoCacheDirectoryPath,
             videoCacheSizeLimitGB: try container.decodeIfPresent(Double.self, forKey: .videoCacheSizeLimitGB) ?? defaults.videoCacheSizeLimitGB,
             musicEqualizerEnabled: try container.decodeIfPresent(Bool.self, forKey: .musicEqualizerEnabled) ?? defaults.musicEqualizerEnabled,

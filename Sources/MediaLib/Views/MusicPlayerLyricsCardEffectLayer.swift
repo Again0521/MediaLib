@@ -18,18 +18,18 @@ enum MusicGlassSurfaceRole: Hashable {
     }
 
     func materialOpacity(dark: Bool, centerClarity: Bool) -> Double {
-        // 平衡点：material 是"高斯玻璃"的主体；白霜只提亮，专辑色只染边。
-        // 提高 material 参与度、压低实色色层，避免看起来像一块半透明亚克力色板。
+        // material 负责真实模糊，白霜和专辑色负责受光与透色。
+        // 适度降低浅色 material 占比，避免玻璃面被系统灰白雾感压住。
         if centerClarity {
-            return dark ? 0.60 : 0.64
+            return dark ? 0.58 : 0.58
         }
         switch self {
         case .lyrics:
-            return dark ? 0.60 : 0.64
+            return dark ? 0.58 : 0.58
         case .controls:
-            return dark ? 0.58 : 0.61
+            return dark ? 0.56 : 0.55
         case .chrome:
-            return dark ? 0.58 : 0.61
+            return dark ? 0.56 : 0.54
         case .popover:
             return dark ? 0.70 : 0.62
         case .mini:
@@ -57,11 +57,11 @@ enum MusicGlassSurfaceRole: Hashable {
         // 看起来是闷灰板而不是"透亮的、透出底板颜色的玻璃"。
         switch self {
         case .lyrics:
-            return dark ? 0.108 : 0.064
+            return dark ? 0.124 : 0.080
         case .controls:
-            return dark ? 0.100 : 0.058
+            return dark ? 0.118 : 0.074
         case .chrome:
-            return dark ? 0.092 : 0.052
+            return dark ? 0.106 : 0.064
         case .popover:
             return dark ? 0.205 : 0.125
         case .mini:
@@ -87,9 +87,9 @@ enum MusicGlassSurfaceRole: Hashable {
 
     var effectIntensity: Double {
         switch self {
-        case .lyrics: return 1.02
-        case .controls: return 0.96
-        case .chrome: return 0.92
+        case .lyrics: return 1.10
+        case .controls: return 1.04
+        case .chrome: return 1.00
         case .popover: return 0.76
         case .mini: return 0.72
         }
@@ -97,9 +97,9 @@ enum MusicGlassSurfaceRole: Hashable {
 
     var edgeDepth: Double {
         switch self {
-        case .lyrics: return 1.20
-        case .controls: return 1.00
-        case .chrome: return 0.92
+        case .lyrics: return 1.28
+        case .controls: return 1.10
+        case .chrome: return 1.02
         case .popover: return 0.70
         case .mini: return 0.42
         }
@@ -107,9 +107,9 @@ enum MusicGlassSurfaceRole: Hashable {
 
     var shadowColorRadius: CGFloat {
         switch self {
-        case .lyrics: return 20
-        case .controls: return 17
-        case .chrome: return 15
+        case .lyrics: return 23
+        case .controls: return 20
+        case .chrome: return 17
         case .popover: return 14
         case .mini: return 12
         }
@@ -117,9 +117,9 @@ enum MusicGlassSurfaceRole: Hashable {
 
     var shadowDepthRadius: CGFloat {
         switch self {
-        case .lyrics: return 13
-        case .controls: return 11
-        case .chrome: return 10
+        case .lyrics: return 15
+        case .controls: return 13
+        case .chrome: return 11
         case .popover: return 9
         case .mini: return 8
         }
@@ -128,11 +128,11 @@ enum MusicGlassSurfaceRole: Hashable {
     func shadowColorOpacity(dark: Bool) -> Double {
         switch self {
         case .lyrics:
-            return dark ? 0.24 : 0.18
+            return dark ? 0.27 : 0.20
         case .controls:
-            return dark ? 0.21 : 0.15
+            return dark ? 0.24 : 0.17
         case .chrome:
-            return dark ? 0.19 : 0.13
+            return dark ? 0.21 : 0.15
         case .popover:
             return dark ? 0.16 : 0.10
         case .mini:
@@ -143,11 +143,11 @@ enum MusicGlassSurfaceRole: Hashable {
     func shadowDepthOpacity(dark: Bool) -> Double {
         switch self {
         case .lyrics:
-            return dark ? 0.18 : 0.078
+            return dark ? 0.20 : 0.090
         case .controls:
-            return dark ? 0.16 : 0.066
+            return dark ? 0.18 : 0.078
         case .chrome:
-            return dark ? 0.14 : 0.056
+            return dark ? 0.16 : 0.066
         case .popover:
             return dark ? 0.12 : 0.046
         case .mini:

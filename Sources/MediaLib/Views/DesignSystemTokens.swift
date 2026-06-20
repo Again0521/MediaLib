@@ -46,6 +46,9 @@ enum AppControlMetrics {
     static let minTouchHeight: CGFloat = 30
     static let defaultButtonHeight: CGFloat = 32
     static let headerButtonHeight: CGFloat = 34
+    /// 统一的禁用态不透明度：所有自定义控件在 isEnabled == false 时整控件降到此值，
+    /// 让禁用态在按钮 / 图标 / 页头 / 输入外壳之间观感一致（启用态不受影响）。
+    static let disabledControlOpacity: Double = 0.5
 }
 
 enum AppDesignStandard {
