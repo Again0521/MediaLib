@@ -22,14 +22,17 @@ enum MusicPlayerVisualTokens {
     enum Glass {
         /// 白霜 = 玻璃的"提亮体"：比底板亮一档才有玻璃质感；但过高会变灰雾，
         /// 灰/透的平衡靠 material 模糊 + 专辑染色一起承担。
-        static func frostWhite(dark: Bool) -> Double { dark ? 0.046 : 0.122 }
+        // R2：浅色白霜上抬，给玻璃面更明确的"提亮体"，配合降低的 material 占比读作通透玻璃而非灰板。
+        static func frostWhite(dark: Bool) -> Double { dark ? 0.052 : 0.150 }
         static func frostTexture(dark: Bool) -> Double { dark ? 0.012 : 0.010 }
-        static func topHighlight(dark: Bool) -> Double { dark ? 0.185 : 0.315 }
+        // R2：上沿镜面受光增强，让玻璃顶边有清晰的高光线（玻璃质感的关键反射）。
+        static func topHighlight(dark: Bool) -> Double { dark ? 0.205 : 0.360 }
         /// §1.3 底沿内侧极淡暗线（仅最底 ~2pt 的 .black），与顶部高光形成"上受光、下背光"的厚度感。
         static func bottomShade(dark: Bool) -> Double { dark ? 0.028 : 0.0008 }
         /// 发丝描边渐变三色（白 → 专辑色 → 暗），方向 topLeading→bottomTrailing。
         static func strokeTopWhite(dark: Bool) -> Double { dark ? 0.66 : 1.0 }
-        static func strokeMidAlbum(dark: Bool) -> Double { dark ? 0.18 : 0.14 }
+        // R4：发丝描边中段的专辑色加重，让玻璃边缘明显带"歌曲的颜色"（描边氛围）。
+        static func strokeMidAlbum(dark: Bool) -> Double { dark ? 0.26 : 0.23 }
         static func strokeBottomBlack(dark: Bool) -> Double { dark ? 0.056 : 0.0015 }
     }
 
@@ -56,14 +59,16 @@ enum MusicPlayerVisualTokens {
     enum Spill {
         // 组件染色不再固定铺满整条边，而是再乘以布局计算出的真实入射强度。
         // 这些值只定义“玻璃吃到光后的材质反应”，光能不能到由 AlbumComponentLight 决定。
+        // R4 氛围增强：让"歌曲发光"对控制栏/收起按钮的浸染更明显。
         static let lyricsIntensity: Double = 0.0
-        static let controlsIntensity: Double = 0.58
-        static let chromeIntensity: Double = 0.23
+        static let controlsIntensity: Double = 0.74
+        static let chromeIntensity: Double = 0.34
         static let lyricsReach: Double = 0.245
-        static let controlsReach: Double = 0.27
-        static let chromeReach: Double = 0.17
-        static let chromaTravelBase: Double = 0.30
-        static let chromaTravelVibrancy: Double = 0.16
+        static let controlsReach: Double = 0.31
+        static let chromeReach: Double = 0.21
+        // 主增益：同时放大三块玻璃的浸染漫入强度（含歌词卡右侧平衡光），让光"软软漫进卡片"更明显。
+        static let chromaTravelBase: Double = 0.37
+        static let chromaTravelVibrancy: Double = 0.18
         static let innerPeak: Double = 0.02
         static let innerPrimary: Double = 0.064
         static let innerSecondary: Double = 0.13
@@ -2017,13 +2022,14 @@ private enum AlbumGlowBlurCoverBaker {
             .cropped(to: canvas)
         debugWrite(directionalLight, name: "03-light-field", sourcePath: path, rect: canvas)
 
+        // R3：发光大封面副本提饱和 + 略增对比，让封面发光更绚丽不发灰（保色相，仍是封面本色）。
         let glowColor = directionalLight
             .applyingFilter("CIColorControls", parameters: [
-                kCIInputSaturationKey: 0.96,
-                kCIInputBrightnessKey: -0.006,
-                kCIInputContrastKey: 0.94
+                kCIInputSaturationKey: 1.14,
+                kCIInputBrightnessKey: 0.004,
+                kCIInputContrastKey: 0.98
             ])
-            .applyingFilter("CIGammaAdjust", parameters: ["inputPower": 1.02])
+            .applyingFilter("CIGammaAdjust", parameters: ["inputPower": 1.0])
             .cropped(to: canvas)
 
         // 此时的图像就是一张柔化后的封面副本；运行期只负责贴图和播放/暂停淡入淡出。
@@ -8133,17 +8139,19 @@ private struct FloatingLyricsGlass: ViewModifier {
         let albumTint = palette.albumGlassBaseColor(for: colorScheme)
             .opacity(role.albumTintOpacity(dark: isDark) * tintStrength)
         let material: NSVisualEffectView.Material = usesNeutralMaterial ? .popover : .hudWindow
+        // R2：玻璃高光/镜面带的专辑色更饱和、更亮——让玻璃反射出"有颜色的光"，去灰。
         let albumEffectTint = palette.glowPrimary.adjustedPreservingHue(
-            saturationMultiplier: 0.76,
-            brightnessMultiplier: 1.04,
-            minSaturation: 0.06,
-            maxSaturation: isDark ? 0.44 : 0.38,
-            minBrightness: isDark ? 0.50 : 0.66,
-            maxBrightness: isDark ? 0.82 : 0.90
+            saturationMultiplier: 0.84,
+            brightnessMultiplier: 1.06,
+            minSaturation: 0.08,
+            maxSaturation: isDark ? 0.48 : 0.44,
+            minBrightness: isDark ? 0.52 : 0.68,
+            maxBrightness: isDark ? 0.84 : 0.92
         )
         let effectTint = usesNeutralMaterial ? albumEffectTint.nsColor : palette.glowPrimary.nsColor
+        // R4：三块琉璃玻璃（中性 material）的描边中段专辑色加重，让边缘明显"染上歌曲的颜色"。
         let strokeMidColor = usesNeutralMaterial
-            ? albumEffectTint.color.opacity(isDark ? 0.18 : 0.22)
+            ? albumEffectTint.color.opacity(isDark ? 0.27 : 0.31)
             : palette.glowPrimary.color.opacity(MusicPlayerVisualTokens.Glass.strokeMidAlbum(dark: isDark))
         // §需求3 玻璃受光彩色化：高光/描边的"白"统一替换为带封面主色的镜面色——
         // 光照在玻璃上呈现的是光本身的颜色，而不是无色相的白边。
@@ -9374,12 +9382,14 @@ struct AlbumColorPalette: Equatable {
                 : min(max(saturation * 0.82, 0.14), 0.32)
             cleanedBrightness = min(max(brightness, 0.16), 0.34)
         } else {
+            // R1 清亮化：浅色底色整体上抬亮度并放宽饱和上限，去掉"发灰暗沉"的第一印象。
+            // 仅动 S/V、不旋色相，仍落在封面高斯模糊色系内。
             cleanedSaturation = lowVibrancy
-                ? min(max(saturation * 0.78, saturation < 0.028 ? saturation : 0.045), 0.18)
-                : min(max(saturation * 0.78, saturation < 0.035 ? saturation : 0.13), 0.28)
+                ? min(max(saturation * 0.80, saturation < 0.028 ? saturation : 0.048), 0.20)
+                : min(max(saturation * 0.82, saturation < 0.035 ? saturation : 0.14), 0.30)
             cleanedBrightness = lowVibrancy
-                ? min(max(brightness * 1.02, 0.76), 0.91)
-                : min(max(brightness * 1.01, 0.70), 0.86)
+                ? min(max(brightness * 1.04, 0.80), 0.93)
+                : min(max(brightness * 1.03, 0.75), 0.90)
         }
         let cleaned = NSColor(calibratedHue: hue, saturation: cleanedSaturation, brightness: cleanedBrightness, alpha: 1)
         guard let rgb = cleaned.usingColorSpace(.sRGB) else {
@@ -9474,16 +9484,18 @@ struct AlbumPaletteColor: Equatable {
         var brightness: CGFloat = 0
         var alpha: CGFloat = 0
         nsColor.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
+        // R3 绚丽化：彩色封面的发光色更饱和（地板 0.22→0.30、乘子 1.08→1.18、上限 0.78→0.82），
+        // 保色相去灰，让"歌曲发光"读作有颜色的光而非灰光；低饱和(白/灰)封面仍克制，不凭空上色。
         let glowSaturation: CGFloat
         if saturation < 0.16 {
-            glowSaturation = min(saturation * 1.08, 0.16)
+            glowSaturation = min(saturation * 1.10, 0.17)
         } else {
-            glowSaturation = min(max(saturation * 1.08, 0.22), 0.78)
+            glowSaturation = min(max(saturation * 1.18, 0.30), 0.82)
         }
         return Self.hsb(
             hue: hue,
             saturation: glowSaturation,
-            brightness: min(max(brightness * 1.08, 0.68), 0.92)
+            brightness: min(max(brightness * 1.09, 0.70), 0.93)
         )
     }
 

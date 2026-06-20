@@ -632,10 +632,12 @@ vertex VertexOut musicAlbumBackdropVertex(uint vertexID [[vertex_id]]) {
 
 // ───────────────── 底板观感总调参 ─────────────────
 // 浅色舒适带：底板"亮而不灰、彩而不扎眼"的硬边界。
-constant float kLightValueMin   = 0.675; // 浅色亮度下限：稍微提亮，避免底板发沉
-constant float kLightValueMax   = 0.855; // 浅色亮度上限：保留通透感但不把封面色洗白
-constant float kLightSatScale   = 0.94;  // 浅色饱和缩放：避免底板比封面本体更艳
-constant float kLightSatMax     = 0.355; // 浅色饱和上限（防"比封面还艳"刺眼）
+// R1 清亮化：抬高亮度下限（根治"暗沉发灰"）+ 放宽上限保留通透；饱和度只在原色相上轻补，
+// 不旋转色相，仍严格落在封面高斯模糊色系内。
+constant float kLightValueMin   = 0.722; // 浅色亮度下限：明显提亮，根治底板发沉发灰
+constant float kLightValueMax   = 0.902; // 浅色亮度上限：放宽，让明亮封面读得更清亮
+constant float kLightSatScale   = 0.99;  // 浅色饱和缩放：几乎保留原饱和，去灰
+constant float kLightSatMax     = 0.392; // 浅色饱和上限（仍防"比封面还艳"刺眼）
 constant float kDarkValueMin    = 0.130;
 constant float kDarkValueMax    = 0.310;
 constant float kDarkSatScale    = 0.88;
@@ -816,11 +818,13 @@ fragment float4 musicAlbumBackdropFragment(
     float satMax = mix(kLightSatMax, kDarkSatMax, isDark) * (0.82 + 0.18 * vibrancy);
     float satScale = mix(kLightSatScale, kDarkSatScale, isDark);
     // 彩色区域饱和地板：封面有明确颜色时底板不许退成灰白（低彩封面不受影响）。
-    float satFloor = smoothstep(0.08, 0.32, hsv.y) * mix(0.110, 0.080, isDark);
+    // R1：浅色地板上抬，让有色封面的底板"清亮带彩"而非灰白雾。
+    float satFloor = smoothstep(0.08, 0.32, hsv.y) * mix(0.138, 0.080, isDark);
     hsv.y = clamp(hsv.y * satScale, satFloor, satMax);
     float vMin = mix(kLightValueMin, kDarkValueMin, isDark);
     float vMax = mix(kLightValueMax, kDarkValueMax, isDark);
-    hsv.z = clamp(hsv.z * mix(0.400, 0.30, isDark) + mix(0.455, 0.105, isDark), vMin, vMax);
+    // R1：浅色提高映射斜率（0.40→0.46）让明暗封面拉开层次，截距略升，整体上移到"清亮带"。
+    hsv.z = clamp(hsv.z * mix(0.460, 0.30, isDark) + mix(0.452, 0.105, isDark), vMin, vMax);
     field = hsv2rgb(hsv);
 
     // 无封面 / 纹理未就绪：退到 palette 清洁基色。
@@ -851,7 +855,7 @@ fragment float4 musicAlbumBackdropFragment(
     float topLift = (1.0 - smoothstep(0.0, 0.46, uv.y)) * (isDark * 0.030 + isLight * 0.026) * strength;
     color = controlledScreen(color, glassLight, topLift);
     // 下沿入影：极轻压暗，形成玻璃厚度。
-    float bottomShade = smoothstep(0.58, 1.0, uv.y) * (isDark * 0.060 + isLight * 0.022) * strength;
+    float bottomShade = smoothstep(0.58, 1.0, uv.y) * (isDark * 0.060 + isLight * 0.015) * strength;
     color *= (1.0 - bottomShade);
     // 极薄空气纱（浅色限定）：让浅色底板带"隔着玻璃"的空气感，幅度小到不会发灰。
     float airT = 1.0 - smoothstep(0.0, 0.85, uv.y);
@@ -860,7 +864,8 @@ fragment float4 musicAlbumBackdropFragment(
     // ── 7) 出图：抖动去断层 + 防纯白 clamp ──
     float dither = fract(sin(dot(point, float2(12.9898, 78.233))) * 43758.5453);
     color += (dither - 0.5) * (1.15 / 255.0);
-    color = clamp(color, float3(0.0), float3(0.920));
+    // R1：抬高防纯白上限（0.920→0.945），给清亮底板的高光留呼吸空间，仍不到纯白。
+    color = clamp(color, float3(0.0), float3(0.945));
     return float4(color, 1.0);
 }
 """#

@@ -19,21 +19,23 @@ enum MusicGlassSurfaceRole: Hashable {
 
     func materialOpacity(dark: Bool, centerClarity: Bool) -> Double {
         // material 负责真实模糊，白霜和专辑色负责受光与透色。
-        // 适度降低浅色 material 占比，避免玻璃面被系统灰白雾感压住。
+        // R2 透亮化：进一步降低浅色 material 占比——系统 NSVisualEffectView 的灰白雾是
+        // "玻璃发暗发闷"的主因；降占比让 R1 已清亮的底板更多透上来，灰雾退位，
+        // 通透感由白霜提亮 + 专辑染色透出补回（见 frostWhite / albumTintOpacity）。
         if centerClarity {
-            return dark ? 0.58 : 0.58
+            return dark ? 0.57 : 0.52
         }
         switch self {
         case .lyrics:
-            return dark ? 0.58 : 0.58
+            return dark ? 0.57 : 0.52
         case .controls:
-            return dark ? 0.56 : 0.55
+            return dark ? 0.55 : 0.49
         case .chrome:
-            return dark ? 0.56 : 0.54
+            return dark ? 0.55 : 0.48
         case .popover:
-            return dark ? 0.70 : 0.62
+            return dark ? 0.70 : 0.60
         case .mini:
-            return dark ? 0.72 : 0.64
+            return dark ? 0.72 : 0.62
         }
     }
 
@@ -55,13 +57,15 @@ enum MusicGlassSurfaceRole: Hashable {
     func albumTintOpacity(dark: Bool) -> Double {
         // 中性玻璃也要带一层很轻的专辑染色：完全归零会让 material 的灰白主导整块卡片，
         // 看起来是闷灰板而不是"透亮的、透出底板颜色的玻璃"。
+        // R2：提高浅色专辑染色——降了 material 占比后，由这层把绚丽底色透到玻璃面上，
+        // 模拟玻璃规范里的 saturate(180%)（AppKit material 不增彩，靠这层补色）。
         switch self {
         case .lyrics:
-            return dark ? 0.124 : 0.080
+            return dark ? 0.130 : 0.106
         case .controls:
-            return dark ? 0.118 : 0.074
+            return dark ? 0.124 : 0.099
         case .chrome:
-            return dark ? 0.106 : 0.064
+            return dark ? 0.112 : 0.088
         case .popover:
             return dark ? 0.205 : 0.125
         case .mini:
