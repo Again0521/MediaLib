@@ -117,6 +117,9 @@ enum ShelfDesignSystem {
         static let heroPausedScale: CGFloat = 1.18 // 暂停时略小
         static let heroDrop: CGFloat = 4       // hero 底边基本贴合架面，只略微压前
         static let shelfRaise: CGFloat = 0     // 两侧封面与中心共享同一架面
+        /// 两侧封面中心相对中心唱片的**轻微上扬**量（×plateSize×(1−scale)）：
+        /// 0 = 所有中心严格水平；>0 = 越远的封面中心越往上抬一点点，连线读作"轻轻上扬的翼线"而非下坠。
+        static let edgeCenterRise: CGFloat = 0.08
         static let farDimPerStep: Double = 0.018 // 每远离一张压暗多少（R1 减弱：靠 opacity 表达"远=淡"，不靠压黑）
         static let dimFloor: Double = 0.82      // 压暗下限（抬高：远卡淡而不脏，避免两侧发黑）
     }
@@ -164,6 +167,20 @@ enum ShelfDesignSystem {
         static let reflectionCacheSide: CGFloat = 220 // 倒影独立低清晰度，保持水面柔化观感
     }
 
+    /// 前景悬浮 chrome 的统一高程刻度（skill §4 elevation-consistent / effects-match-style）：
+    /// 中性黑投影分两级，让"浮在湖面上的玻璃"共享同一套景深语言，而非各自随手取阴影值。
+    /// 仅用于中性界面 chrome（Dock / 顶部提示胶囊）；唱片接触阴影、专辑色辉光、文字描边等"艺术光影"不归此管。
+    enum Elevation {
+        /// surface：主控制面（Dock）—— 更高更沉。
+        static let surfaceColor = Color.black.opacity(0.26)
+        static let surfaceRadius: CGFloat = 20
+        static let surfaceY: CGFloat = 10
+        /// floating：轻浮元素（顶部提示胶囊）—— 浅浅托起、与背景拉开层次即可。
+        static let floatingColor = Color.black.opacity(0.18)
+        static let floatingRadius: CGFloat = 9
+        static let floatingY: CGFloat = 3
+    }
+
     enum Motion {
         /// 布局重排（hover / 切歌）弹簧。
         static let layout = Animation.interactiveSpring(response: 0.48, dampingFraction: 0.82, blendDuration: 0.12)
@@ -176,6 +193,17 @@ enum ShelfDesignSystem {
         static let playingPop = Animation.spring(response: 0.40, dampingFraction: 0.74)
         /// 播放/暂停瞬间的状态切换：很快很利落（response 0.15 + 几乎不回弹），点下即响应。
         static let playPause = Animation.spring(response: 0.15, dampingFraction: 0.9)
+
+        // —— 微交互统一节奏（skill §7 motion-consistency）：把散落的 hover/press/淡入收敛到统一命名刻度，
+        //    让全部控件共享同一手感；各值与原值几乎一致（±20ms / 弹簧 0.28↔0.3），仅消除相邻控件的不一致。
+        /// 控件 hover 浮起/落下（统一原 0.16 与 0.18）。
+        static let controlHover = Animation.easeOut(duration: 0.18)
+        /// 控件按压回弹（统一原 0.28 / 0.3，dampingFraction 0.6）。
+        static let controlPress = Animation.spring(response: 0.3, dampingFraction: 0.6)
+        /// 状态/提示文字交叉淡入（统一原 0.25 / 0.28 / 0.3）。
+        static let contentFade = Animation.easeInOut(duration: 0.28)
+        /// 正在播放大标题切歌交叉淡入：保留更舒缓的层级节奏（比 contentFade 略慢）。
+        static let titleFade = Animation.easeInOut(duration: 0.38)
     }
 
     /// 「向下拉当前唱片 → 单曲循环」手势。
@@ -536,8 +564,8 @@ struct MusicShelfPlayerStage: View {
                         },
                         onPullDownLoop: { toggleRepeatOne() },
                         onShuffle: { shuffleQueue() },
-                        onGatherChange: { gathered in withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.28)) { isGathered = gathered } },
-                        onBrowseChange: { browsing in withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.28)) { isBrowsing = browsing } }
+                        onGatherChange: { gathered in withAnimation(reduceMotion ? nil : ShelfDesignSystem.Motion.contentFade) { isGathered = gathered } },
+                        onBrowseChange: { browsing in withAnimation(reduceMotion ? nil : ShelfDesignSystem.Motion.contentFade) { isBrowsing = browsing } }
                     )
                     .frame(width: geometry.size.width, height: geometry.size.height)
 
@@ -551,8 +579,8 @@ struct MusicShelfPlayerStage: View {
                     )
                     .frame(width: layout.hintFrame.width, height: layout.hintFrame.height)
                     .position(x: layout.hintFrame.midX, y: layout.hintFrame.midY)
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: isPlaying)
-                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: appState.musicRepeatMode)
+                    .animation(reduceMotion ? nil : ShelfDesignSystem.Motion.contentFade, value: isPlaying)
+                    .animation(reduceMotion ? nil : ShelfDesignSystem.Motion.contentFade, value: appState.musicRepeatMode)
 
                     // 歌曲标题 + 艺术家：跟随中心唱片底边，而不是跟随唱片架容器底边。
                     ShelfNowPlayingTitle(
@@ -632,12 +660,12 @@ struct MusicShelfPlayerStage: View {
     }
 
     private func showTransient(_ text: String) {
-        withAnimation(.easeInOut(duration: 0.25)) { transientMessage = text }
+        withAnimation(ShelfDesignSystem.Motion.contentFade) { transientMessage = text }
         transientTask?.cancel()
         transientTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 1_900_000_000)
             guard !Task.isCancelled else { return }
-            withAnimation(.easeInOut(duration: 0.3)) { transientMessage = nil }
+            withAnimation(ShelfDesignSystem.Motion.contentFade) { transientMessage = nil }
         }
     }
 
@@ -1251,14 +1279,17 @@ private struct ShelfRackView: View {
             : (isPrimed ? heroScale * 1.04
             : (isHero ? heroScale
             : (isHovered ? 1.15 : 1.0)))
-        // 竖直落点：放大后的 hero 以**视觉中心**对齐两侧封面中心，而非底边贴湖面。
-        // 缩放锚点在底边(.bottom)、hero 比邻卡大 → 其中心会被顶得比邻卡更高、显得"浮起来"；
-        // 这里按邻卡 scale 反推落点，令 hero 缩放后中心 Y 与邻卡中心 Y 严格相等
-        // （与窗口尺寸、播放/暂停放大系数无关）。primed(拾起待命)在此基础上再明显抬起，保留"已拿起"提示。
-        let heroCenteredY = baselineY + plateSize * 0.5 * (extraScale - ShelfDesignSystem.Plate.neighborScale)
+        // 竖直落点：让**所有封面的视觉中心连成一条水平线**（默认）、两侧再轻微上扬，而不是随近大远小往下坠。
+        // 缩放锚点在底边(.bottom) → 越小的远卡缩放后中心被压得越低（连起来一条下坠弧）。这里按各卡**总缩放系数**
+        // factor 反推落点抵消下坠，把视觉中心拉回 baselineY；再按距离(1−slot.scale)给两侧一点上扬(edgeCenterRise)，
+        // 读作"轻轻上扬的翼线"。hero(slot.scale=1)上扬量=0、恒落在中线；primed(拾起)仍在此基础上抬起。
+        let plateFactor = slot.scale * extraScale
+        let flatCenterY = baselineY
+            + plateSize * 0.5 * (plateFactor - 1)
+            - ShelfDesignSystem.Angle.edgeCenterRise * plateSize * (1 - slot.scale)
         let restY: CGFloat = isPrimed
-            ? heroCenteredY - (ShelfDesignSystem.Angle.heroDrop + 34)
-            : (isHero ? heroCenteredY : baselineY - ShelfDesignSystem.Angle.shelfRaise)
+            ? flatCenterY - (ShelfDesignSystem.Angle.heroDrop + 34)
+            : flatCenterY
         let showsReflection = !floating && (isHero || isHovered || abs(diffF) <= ShelfDesignSystem.Perf.reflectionBand)
         // 电影景深 DoF：聚焦中心，越远越模糊；达到最大后保持，不再归零。
         // 前一轮为了省合成把 cutoff 后的 blur 归零，会造成“中间糊、最远清”的反常景深。
@@ -1336,7 +1367,7 @@ private struct ShelfRackView: View {
         if anchorCenter {
             styled
                 .scaleEffect(pressedCenter && !reduceMotion ? 0.965 : 1.0, anchor: .bottom)
-                .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.6), value: pressedCenter)
+                .animation(reduceMotion ? nil : ShelfDesignSystem.Motion.controlPress, value: pressedCenter)
                 .offset(y: (floating ? 0 : centerDragY) + heroFloat)
                 // 播放/暂停时浮动幅度变化利落过渡（snappy，消除迟钝感）。
                 .animation(reduceMotion ? nil : ShelfDesignSystem.Motion.playPause, value: isPlaying)
@@ -1493,10 +1524,9 @@ private struct ShelfRackView: View {
             // 斜放卡投影宽度按 cos 收窄，使命中区贴合真实可见封面。
             let w = h * CGFloat(abs(cos(slot.rotationY * .pi / 180)))
             let cx = centerX + slot.xOffset
-            // hero 命中区跟随其新的居中落点（与渲染一致）：中心已与邻卡齐平，故按行中线建矩形。
-            let cy = isHeroCard
-                ? baselineY + plateSize * 0.5 * (1 - ShelfDesignSystem.Plate.neighborScale)
-                : baselineY
+            // 命中区跟随渲染的「水平中心线 + 两侧轻微上扬」：每卡视觉中心 = baselineY − rise×(1−scale)
+            // （与 plate() 的 flatCenterY 同源，factor 项在底边锚点缩放后正好抵消，故与 hover/播放放大无关）。
+            let cy = baselineY - ShelfDesignSystem.Angle.edgeCenterRise * plateSize * (1 - slot.scale)
             let rect = CGRect(x: cx - w / 2, y: cy - h / 2, width: w, height: h)
             if rect.contains(loc) {
                 return isHeroCard ? nil : index
@@ -2482,8 +2512,21 @@ private struct ShelfProgressRail: View {
             Text(shelfFormatTime(duration))
                 .frame(width: 44, alignment: .trailing)
         }
-        .font(.system(size: ShelfDesignSystem.FontSize.time, weight: .regular).monospacedDigit())
-        .foregroundStyle(.white.opacity(0.55))
+        // 时间数字：中等字重 + 提高不透明度 + 极淡暗影 → 在高亮专辑封面底板上也稳过 4.5:1 可读（skill §6 对比度）。
+        .font(.system(size: ShelfDesignSystem.FontSize.time, weight: .medium).monospacedDigit())
+        .foregroundStyle(.white.opacity(0.78))
+        .shadow(color: .black.opacity(0.28), radius: 2, y: 0.5)
+        // 进度条 VoiceOver 语义：作为「可调」滑杆朗读当前/总时长，上下箭头 ±5s 快进/退（skill §1 无障碍）。
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("播放进度")
+        .accessibilityValue("\(shelfFormatTime(displayTime)) / \(shelfFormatTime(duration))")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: controller.seek(to: min(duration, displayTime + 5))
+            case .decrement: controller.seek(to: max(0, displayTime - 5))
+            @unknown default: break
+            }
+        }
     }
 
     private func railTrack(fraction: Double, duration: Double) -> some View {
@@ -2533,7 +2576,7 @@ private struct ShelfProgressRail: View {
             .frame(height: 18)
             .contentShape(Rectangle())
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: active)
-            .animation(.easeOut(duration: 0.18), value: railHover)
+            .animation(ShelfDesignSystem.Motion.controlHover, value: railHover)
             // 已播放段流光：仅播放中循环，暂停时停转（窗口可空闲）。
             .shelfAmbientLoop($sheenPhase, active: timeline.value.isPlaying && !reduceMotion, activeValue: 1, restValue: 0,
                               loop: .linear(duration: 3.8).repeatForever(autoreverses: false),
@@ -2615,8 +2658,8 @@ private struct ShelfNowPlayingTitle: View {
         }
         .frame(maxWidth: 640)
         .padding(.horizontal, 24)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.38), value: title)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.38), value: subtitle)
+        .animation(reduceMotion ? nil : ShelfDesignSystem.Motion.titleFade, value: title)
+        .animation(reduceMotion ? nil : ShelfDesignSystem.Motion.titleFade, value: subtitle)
         .shelfAmbientLoop($sheenX, active: isPlaying && !reduceMotion, activeValue: 1.0, restValue: -0.4,
                           loop: .easeInOut(duration: 4.6).repeatForever(autoreverses: false).delay(0.6),
                           settle: .linear(duration: 0.01))
@@ -2659,7 +2702,7 @@ private struct ShelfDock: View {
                     action: { appState.toggleFavorite(currentItem) }
                 )
                 ShelfDockQueueButton(currentItem: currentItem, palette: palette, reduceMotion: reduceMotion)
-                ShelfDockAirPlay(controller: controller)
+                ShelfDockAirPlay(controller: controller, reduceMotion: reduceMotion)
                 ShelfDockVolumeButton(controller: controller, reduceMotion: reduceMotion)
                 Capsule().fill(.white.opacity(0.16)).frame(width: 1, height: 20).padding(.horizontal, 4)
                 ShelfDockButton(
@@ -2689,7 +2732,12 @@ private struct ShelfDock: View {
                 )
             }
         )
-        .shadow(color: .black.opacity(0.26), radius: 20, y: 10)
+        .shadow(color: ShelfDesignSystem.Elevation.surfaceColor,
+                radius: ShelfDesignSystem.Elevation.surfaceRadius,
+                y: ShelfDesignSystem.Elevation.surfaceY)
+        // 湖光识别延展：Dock 下方一汪专辑色柔光，控制面读作"浮在被点亮的湖面上"，把全屏的湖光叙事收束到底部 chrome。
+        // 纯叠加的彩色投影、静态无动画（零额外帧开销）；与上面的中性高程阴影叠合成"实托起 + 暖光晕"。
+        .shadow(color: palette.glowPrimary.color.opacity(0.22), radius: 26, y: 9)
     }
 
     private var transportStrip: some View {
@@ -2697,13 +2745,13 @@ private struct ShelfDock: View {
         let hasNext = appState.hasAdjacentItem(to: currentItem, direction: 1)
         // 固定等宽三段（避免 GeometryReader 返回提案全宽导致段条溢出 Dock）。
         return HStack(spacing: segGap) {
-            ShelfThinSegment(width: segWidth, thickness: segThickness, tint: .white, prominent: false, enabled: hasPrev, reduceMotion: reduceMotion) {
+            ShelfThinSegment(width: segWidth, thickness: segThickness, tint: .white, prominent: false, enabled: hasPrev, reduceMotion: reduceMotion, accessibilityLabel: "上一首") {
                 appState.playAdjacent(to: currentItem, direction: -1)
             }
-            ShelfThinSegment(width: segWidth, thickness: segThickness, tint: Color(nsColor: palette.primary.nsColor), prominent: true, enabled: true, reduceMotion: reduceMotion) {
+            ShelfThinSegment(width: segWidth, thickness: segThickness, tint: Color(nsColor: palette.primary.nsColor), prominent: true, enabled: true, reduceMotion: reduceMotion, accessibilityLabel: isPlaying ? "暂停" : "播放") {
                 controller.togglePlay()
             }
-            ShelfThinSegment(width: segWidth, thickness: segThickness, tint: .white, prominent: false, enabled: hasNext, reduceMotion: reduceMotion) {
+            ShelfThinSegment(width: segWidth, thickness: segThickness, tint: .white, prominent: false, enabled: hasNext, reduceMotion: reduceMotion, accessibilityLabel: "下一首") {
                 appState.playAdjacent(to: currentItem, direction: 1)
             }
         }
@@ -2718,6 +2766,7 @@ private struct ShelfThinSegment: View {
     let prominent: Bool
     let enabled: Bool
     let reduceMotion: Bool
+    var accessibilityLabel: String = ""
     let action: () -> Void
 
     @State private var hover = false
@@ -2730,17 +2779,28 @@ private struct ShelfThinSegment: View {
             .fill(tint.opacity(op))
             .overlay(Capsule().fill(.white.opacity(prominent ? 0.3 : 0.2)).frame(height: 1).offset(y: -thickness * 0.28))
             .frame(width: width, height: thickness)
+            // 主操作（中段播放/暂停）专辑色柔光：把"唯一主 CTA"从一排同形细条里轻轻托出（skill §4 primary-action）；
+            // 上一/下一首不发光，层级清晰。纯叠加、暂停态仍在（不删任何效果）。
+            .shadow(color: prominent && enabled ? tint.opacity(0.55) : .clear, radius: prominent ? 5 : 0)
             .scaleEffect(y: pressed ? 0.65 : 1.0, anchor: .center)
             .contentShape(Rectangle().inset(by: -9))   // 加大可点区（段条本身很细）
-            .onHover { h in withAnimation(reduceMotion ? nil : .easeOut(duration: 0.16)) { hover = h } }
+            .onHover { h in withAnimation(reduceMotion ? nil : ShelfDesignSystem.Motion.controlHover) { hover = h } }
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { _ in if enabled, !pressed { withAnimation(reduceMotion ? nil : .easeOut(duration: 0.1)) { pressed = true } } }
                     .onEnded { v in
-                        withAnimation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.6)) { pressed = false }
+                        withAnimation(reduceMotion ? nil : ShelfDesignSystem.Motion.controlPress) { pressed = false }
                         if enabled, abs(v.translation.width) < 16, abs(v.translation.height) < 16 { action() }
                     }
             )
+            // 无图标细条靠位置区分，对 VoiceOver/指针悬停不可读 → 补按钮语义 + 标签 + 激活动作 + tooltip
+            // （skill §1 aria-labels / §9 nav-label-icon：上一首 / 播放·暂停 / 下一首）。
+            .help(accessibilityLabel)
+            .accessibilityElement()
+            .accessibilityLabel(accessibilityLabel)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint(enabled ? "" : "当前没有可切换的曲目")
+            .accessibilityAction { if enabled { action() } }
     }
 }
 
@@ -2767,7 +2827,7 @@ private struct ShelfDockButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(ShelfDockPressStyle(reduceMotion: reduceMotion))
-        .onHover { h in withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { hover = h } }
+        .onHover { h in withAnimation(reduceMotion ? nil : ShelfDesignSystem.Motion.controlHover) { hover = h } }
         .onChange(of: isActive) { active in
             guard active, !reduceMotion else { return }
             withAnimation(.spring(response: 0.2, dampingFraction: 0.42)) { activeBounce = 1.34 }
@@ -2787,13 +2847,14 @@ private struct ShelfDockPressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.86 : 1.0)
-            .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.6), value: configuration.isPressed)
+            .animation(reduceMotion ? nil : ShelfDesignSystem.Motion.controlPress, value: configuration.isPressed)
     }
 }
 
 /// Dock 内的隔空播放：复用系统 AVRoutePicker，去掉它自带的玻璃底，套到 Dock 统一的 hover 圆圈里。
 private struct ShelfDockAirPlay: View {
     let controller: MpvPlayerController
+    var reduceMotion: Bool = false
     @State private var hover = false
 
     var body: some View {
@@ -2812,7 +2873,7 @@ private struct ShelfDockAirPlay: View {
         .frame(width: 40, height: 40)
         .background(Circle().fill(.white.opacity(hover ? 0.14 : 0)))
         .contentShape(Circle())
-        .onHover { h in withAnimation(.easeOut(duration: 0.18)) { hover = h } }
+        .onHover { h in withAnimation(reduceMotion ? nil : ShelfDesignSystem.Motion.controlHover) { hover = h } }
         .help("隔空播放")
         .accessibilityLabel("隔空播放")
     }
@@ -2850,7 +2911,7 @@ private struct ShelfDockVolumeButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(ShelfDockPressStyle(reduceMotion: reduceMotion))
-        .onHover { h in withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { hover = h } }
+        .onHover { h in withAnimation(reduceMotion ? nil : ShelfDesignSystem.Motion.controlHover) { hover = h } }
         .help("音量")
         .accessibilityLabel("音量")
         .popover(isPresented: $showPopover, arrowEdge: .top) {
@@ -2893,7 +2954,7 @@ private struct ShelfDockQueueButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(ShelfDockPressStyle(reduceMotion: reduceMotion))
-        .onHover { h in withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { hover = h } }
+        .onHover { h in withAnimation(reduceMotion ? nil : ShelfDesignSystem.Motion.controlHover) { hover = h } }
         .help("播放列表")
         .accessibilityLabel("播放列表")
         .popover(isPresented: $showQueue, arrowEdge: .top) {
@@ -3080,9 +3141,20 @@ private struct ShelfHintPill: View {
             .foregroundStyle(.white.opacity(0.7))
             .padding(.horizontal, 16)
             .padding(.vertical, 6)
+            // 提示胶囊原本是一层扁平白纱、无景深 → 与 Dock 不同语言。统一到 Dock 的「磨砂玻璃 +
+            // 顶亮渐变描边 + 悬浮高程」（skill §4 effects-match-style / elevation-consistent）：读作同一套浮于湖面的玻璃。
             .background(
-                Capsule().fill(.white.opacity(override != nil ? 0.14 : 0.08))
-                    .overlay(Capsule().strokeBorder(.white.opacity(0.06)))
+                ZStack {
+                    Capsule().fill(.ultraThinMaterial)
+                    Capsule().fill(.white.opacity(override != nil ? 0.16 : 0.08))
+                    Capsule().strokeBorder(
+                        LinearGradient(colors: [.white.opacity(0.22), .white.opacity(0.06)],
+                                       startPoint: .top, endPoint: .bottom),
+                        lineWidth: 1)
+                }
+                .shadow(color: ShelfDesignSystem.Elevation.floatingColor,
+                        radius: ShelfDesignSystem.Elevation.floatingRadius,
+                        y: ShelfDesignSystem.Elevation.floatingY)
             )
             .id(text)
             .transition(.opacity)
