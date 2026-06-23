@@ -35,6 +35,8 @@ struct VideoSmartCollectionSheet: View {
     @State private var genreKeyword: String
     @State private var sourceRule: VideoSmartCollectionSourceRule
     @State private var showOnHome: Bool
+    // 规则区实际内容高度：用于在内容较矮时让弹窗贴合内容，较高时落到滚动上限。
+    @State private var sectionsContentHeight: CGFloat = .greatestFiniteMagnitude
 
     init(
         request: VideoSmartCollectionEditorRequest,
@@ -68,98 +70,30 @@ struct VideoSmartCollectionSheet: View {
                 systemImage: "sparkles.rectangle.stack"
             )
 
-            VStack(spacing: 14) {
-                SettingsRow(title: "名称", systemImage: "pencil.line") {
-                    TextField("智能集合", text: $name)
-                        .textFieldStyle(.plain)
-                        .multilineTextAlignment(.center)
-                        .glassFormField()
-                        .frame(width: adaptiveFieldWidth(text: name, placeholder: "智能集合"), alignment: .trailing)
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 18) {
+                    sectionsContent
                 }
-                SettingsRow(title: "媒体类型", systemImage: "film.stack") {
-                    picker(selection: $mediaScope, selectedTitle: mediaScope.displayName) {
-                        ForEach(VideoSmartCollectionMediaScope.allCases) { scope in
-                            Text(scope.displayName).tag(scope)
-                        }
+                .padding(.bottom, 2)
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: SmartCollectionSectionsHeightKey.self,
+                            value: proxy.size.height
+                        )
                     }
-                }
-                SettingsRow(title: "状态条件", systemImage: "line.3.horizontal.decrease.circle") {
-                    picker(selection: $stateFilter, selectedTitle: stateFilter.displayName) {
-                        ForEach(VideoSmartCollectionStateFilter.allCases) { filter in
-                            Text(filter.displayName).tag(filter)
-                        }
-                    }
-                }
-                SettingsRow(title: "加入时间", systemImage: "calendar.badge.clock") {
-                    picker(selection: $recency, selectedTitle: recency.displayName) {
-                        ForEach(VideoSmartCollectionRecency.allCases) { option in
-                            Text(option.displayName).tag(option)
-                        }
-                    }
-                }
-                SettingsRow(title: "首页展示", systemImage: "house") {
-                    Toggle("", isOn: $showOnHome)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                }
+                )
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .staticSurfaceBackground(cornerRadius: 18)
-
-            VStack(spacing: 14) {
-                SettingsRow(title: "条件关系", systemImage: "checklist") {
-                    picker(selection: $matchMode, selectedTitle: matchMode.displayName) {
-                        ForEach(VideoSmartCollectionRuleMatchMode.allCases) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                }
-                SettingsRow(title: "年份", systemImage: "calendar") {
-                    picker(selection: $yearRule, selectedTitle: yearRule.displayName) {
-                        ForEach(VideoSmartCollectionYearRule.allCases) { rule in
-                            Text(rule.displayName).tag(rule)
-                        }
-                    }
-                }
-                SettingsRow(title: "资料评分", systemImage: "chart.bar") {
-                    picker(selection: $providerRatingRule, selectedTitle: providerRatingRule.displayName) {
-                        ForEach(VideoSmartCollectionProviderRatingRule.allCases) { rule in
-                            Text(rule.displayName).tag(rule)
-                        }
-                    }
-                }
-                SettingsRow(title: "我的评级", systemImage: "star") {
-                    picker(selection: $userRatingRule, selectedTitle: userRatingRule.displayName) {
-                        ForEach(VideoSmartCollectionUserRatingRule.allCases) { rule in
-                            Text(rule.displayName).tag(rule)
-                        }
-                    }
-                }
-                SettingsRow(title: "题材", systemImage: "tag") {
-                    TextField("动作 / 科幻", text: $genreKeyword)
-                        .textFieldStyle(.plain)
-                        .multilineTextAlignment(.center)
-                        .glassFormField()
-                        .frame(width: adaptiveFieldWidth(text: genreKeyword, placeholder: "动作 / 科幻", minWidth: 132), alignment: .trailing)
-                }
-                SettingsRow(title: "来源", systemImage: "tray.full") {
-                    picker(selection: $sourceRule, selectedTitle: sourceRule.displayName) {
-                        ForEach(VideoSmartCollectionSourceRule.allCases) { rule in
-                            Text(rule.displayName).tag(rule)
-                        }
-                    }
-                }
+            // 内容矮时贴合内容，超出可用高度时锁到滚动上限并出现滚动条。
+            .frame(height: min(sectionsContentHeight, scrollHeightCap))
+            .onPreferenceChange(SmartCollectionSectionsHeightKey.self) { height in
+                if height > 0 { sectionsContentHeight = height }
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .staticSurfaceBackground(cornerRadius: 18)
 
             AppSheetActionFooter {
                 Button("取消", action: onCancel)
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                    .keyboardShortcut(.cancelAction)
                 Button {
                     var collection = request.collection
                     collection.name = trimmedName
@@ -179,20 +113,128 @@ struct VideoSmartCollectionSheet: View {
                 } label: {
                     Label("保存", systemImage: "checkmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                 .disabled(trimmedName.isEmpty)
+                .keyboardShortcut(.defaultAction)
             }
         }
         .appSheetChrome(width: 620)
     }
 
+    // 可用滚动高度上限：随主屏可见高度收缩，保证整窗弹窗不超过软件高度。
+    private var scrollHeightCap: CGFloat {
+        let screenHeight = NSScreen.main?.visibleFrame.height ?? 820
+        // 预留头部、底部按钮与外层留白后的可滚动区域上限。
+        let reserved: CGFloat = 250
+        return max(220, screenHeight - 120 - reserved)
+    }
+
+    @ViewBuilder
+    private var sectionsContent: some View {
+            AppSheetSection(
+                title: "基础设置",
+                systemImage: "slider.horizontal.3",
+                subtitle: "定义集合名称、媒体范围和基础状态。"
+            ) {
+                VStack(spacing: 14) {
+                SettingsRow(title: "名称", systemImage: "pencil.line") {
+                    TextField("智能集合", text: $name)
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.center)
+                        .glassFormField()
+                        .frame(width: adaptiveFieldWidth(text: name, placeholder: "智能集合"), alignment: .trailing)
+                }
+                SettingsRow(title: "媒体类型", systemImage: "film.stack") {
+                    picker(selection: $mediaScope, selectedTitle: mediaScope.displayName, accessibilityLabel: "媒体类型") {
+                        ForEach(VideoSmartCollectionMediaScope.allCases) { scope in
+                            Text(scope.displayName).tag(scope)
+                        }
+                    }
+                }
+                SettingsRow(title: "状态条件", systemImage: "line.3.horizontal.decrease.circle") {
+                    picker(selection: $stateFilter, selectedTitle: stateFilter.displayName, accessibilityLabel: "状态条件") {
+                        ForEach(VideoSmartCollectionStateFilter.allCases) { filter in
+                            Text(filter.displayName).tag(filter)
+                        }
+                    }
+                }
+                SettingsRow(title: "加入时间", systemImage: "calendar.badge.clock") {
+                    picker(selection: $recency, selectedTitle: recency.displayName, accessibilityLabel: "加入时间") {
+                        ForEach(VideoSmartCollectionRecency.allCases) { option in
+                            Text(option.displayName).tag(option)
+                        }
+                    }
+                }
+                SettingsRow(title: "首页展示", systemImage: "house") {
+                    Toggle("", isOn: $showOnHome)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .accessibilityLabel("首页展示")
+                }
+                }
+            }
+
+            AppSheetSection(
+                title: "匹配规则",
+                systemImage: "checklist",
+                subtitle: "多个规则按条件关系组合，结果会随媒体库自动更新。"
+            ) {
+                VStack(spacing: 14) {
+                SettingsRow(title: "条件关系", systemImage: "checklist") {
+                    picker(selection: $matchMode, selectedTitle: matchMode.displayName, accessibilityLabel: "条件关系") {
+                        ForEach(VideoSmartCollectionRuleMatchMode.allCases) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                }
+                SettingsRow(title: "年份", systemImage: "calendar") {
+                    picker(selection: $yearRule, selectedTitle: yearRule.displayName, accessibilityLabel: "年份") {
+                        ForEach(VideoSmartCollectionYearRule.allCases) { rule in
+                            Text(rule.displayName).tag(rule)
+                        }
+                    }
+                }
+                SettingsRow(title: "资料评分", systemImage: "chart.bar") {
+                    picker(selection: $providerRatingRule, selectedTitle: providerRatingRule.displayName, accessibilityLabel: "资料评分") {
+                        ForEach(VideoSmartCollectionProviderRatingRule.allCases) { rule in
+                            Text(rule.displayName).tag(rule)
+                        }
+                    }
+                }
+                SettingsRow(title: "我的评级", systemImage: "star") {
+                    picker(selection: $userRatingRule, selectedTitle: userRatingRule.displayName, accessibilityLabel: "我的评级") {
+                        ForEach(VideoSmartCollectionUserRatingRule.allCases) { rule in
+                            Text(rule.displayName).tag(rule)
+                        }
+                    }
+                }
+                SettingsRow(title: "题材", systemImage: "tag") {
+                    TextField("动作 / 科幻", text: $genreKeyword)
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.center)
+                        .glassFormField()
+                        .frame(width: adaptiveFieldWidth(text: genreKeyword, placeholder: "动作 / 科幻", minWidth: 132), alignment: .trailing)
+                }
+                SettingsRow(title: "来源", systemImage: "tray.full") {
+                    picker(selection: $sourceRule, selectedTitle: sourceRule.displayName, accessibilityLabel: "来源") {
+                        ForEach(VideoSmartCollectionSourceRule.allCases) { rule in
+                            Text(rule.displayName).tag(rule)
+                        }
+                    }
+                }
+                }
+            }
+    }
+
     private func picker<SelectionValue: Hashable, Content: View>(
         selection: Binding<SelectionValue>,
         selectedTitle: String,
+        accessibilityLabel: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
         Picker("", selection: selection, content: content)
             .adaptiveMenuControl(selectedTitle: selectedTitle, minWidth: Self.optionMenuMinWidth, maxWidth: Self.optionMenuMaxWidth)
+            .accessibilityLabel(accessibilityLabel)
     }
 
     private static let optionMenuMinWidth: CGFloat = 76
@@ -215,5 +257,13 @@ struct VideoSmartCollectionSheet: View {
         text.reduce(CGFloat(0)) { partial, character in
             partial + (character.unicodeScalars.contains { $0.value > 0x2E80 } ? 1.55 : 1.0)
         }
+    }
+}
+
+/// 测量规则区自然高度，用于判定是否需要进入滚动模式。
+private struct SmartCollectionSectionsHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }

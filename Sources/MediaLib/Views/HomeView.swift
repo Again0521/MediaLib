@@ -100,7 +100,7 @@ struct HomeView: View {
     @Environment(\.mainLayoutTransitionActive) private var layoutTransitionActive
     let onOpenHealthCenter: () -> Void
     let onOpenSources: () -> Void
-    @State private var searchText = ""
+    @State private var searchText: String
     @State private var visibleHomeItems: [MediaItem] = []
     @State private var visibleHomeItemsKey = ""
     @State private var isPreparingHomeItems = false
@@ -109,9 +109,21 @@ struct HomeView: View {
     @State private var restoredOverviewAnchorID: String?
     @State private var overviewBoardsSnapshot: [HomeOverviewBoardModel] = []
     @State private var overviewBoardsKey = ""
+    @State private var inlineReturnContentReady: Bool
+    @State private var overviewVerticalReturnReady: Bool
+    @State private var overviewHorizontalReturnReady: Bool
     @AppStorage("MediaLib.home.selectedTab") private var selectedTabRaw = HomeTab.overview.rawValue
 
-    init(onOpenHealthCenter: @escaping () -> Void = {}, onOpenSources: @escaping () -> Void = {}) {
+    init(
+        initialSearchText: String = "",
+        initialReturnAnchorID: String? = nil,
+        onOpenHealthCenter: @escaping () -> Void = {},
+        onOpenSources: @escaping () -> Void = {}
+    ) {
+        _searchText = State(initialValue: initialSearchText)
+        _inlineReturnContentReady = State(initialValue: initialReturnAnchorID == nil)
+        _overviewVerticalReturnReady = State(initialValue: initialReturnAnchorID == nil)
+        _overviewHorizontalReturnReady = State(initialValue: initialReturnAnchorID == nil)
         self.onOpenHealthCenter = onOpenHealthCenter
         self.onOpenSources = onOpenSources
     }
@@ -134,8 +146,9 @@ struct HomeView: View {
                     items: gridItems,
                     bottomInset: gridBottomInset,
                     showsDeletePlaybackHistory: tab == .continueWatching || tab == .nextUp,
-                    restoreAnchorID: appState.selectedItemReturnAnchorID,
-                    onDidRestoreAnchor: { appState.selectedItemReturnAnchorID = nil }
+                    restoreAnchorID: activeReturnContext?.anchorID,
+                    detailSourceDestinationID: SidebarDestination.home.id,
+                    onDidRestoreAnchor: completeHomeReturnRestoration
                 ) {
                     VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
                         header
@@ -147,6 +160,7 @@ struct HomeView: View {
                             .font(.title2.weight(.semibold))
                     }
                 }
+                .opacity(inlineReturnContentReady ? 1 : 0)
             } else {
                 ScrollViewReader { scrollProxy in
                     ScrollView {
@@ -164,8 +178,12 @@ struct HomeView: View {
                                     if item.type == .music {
                                         appState.play(item)
                                     } else {
-                                        appState.selectedItemReturnAnchorID = item.id
-                                        appState.selectedItem = item
+                                        appState.presentDetail(
+                                            item,
+                                            from: SidebarDestination.home.id,
+                                            anchorID: item.id,
+                                            searchText: searchText
+                                        )
                                     }
                                 }
                                 .environmentObject(appState)
@@ -176,15 +194,16 @@ struct HomeView: View {
                         }
                         .pageContainer()
                     }
+                    .opacity(inlineReturnContentReady ? 1 : 0)
                     .suppressHoverEffectsDuringScroll()
                     .onAppear {
                         restoreHomeInlineAnchorIfNeeded(
-                            appState.selectedItemReturnAnchorID,
+                            activeReturnContext?.anchorID,
                             isSearching: isSearching,
                             scrollProxy: scrollProxy
                         )
                     }
-                    .onChange(of: appState.selectedItemReturnAnchorID) { anchorID in
+                    .onChange(of: activeReturnContext?.anchorID) { anchorID in
                         restoreHomeInlineAnchorIfNeeded(anchorID, isSearching: isSearching, scrollProxy: scrollProxy)
                     }
                 }
@@ -202,6 +221,11 @@ struct HomeView: View {
             normalizeSelectedTab()
             refreshOverviewBoardsIfNeeded(force: true)
             refreshHomeItems(for: currentTab)
+            if activeReturnContext == nil {
+                inlineReturnContentReady = true
+                overviewVerticalReturnReady = true
+                overviewHorizontalReturnReady = true
+            }
             appState.showInterfaceTipOnce(
                 key: "home.overview.boards",
                 message: "总览会把继续观看、下一集、推荐和已发布片单放在一起，适合先找今天要看的内容。"
@@ -318,6 +342,10 @@ struct HomeView: View {
     private func homeContent(for tab: HomeTab) -> some View {
         switch tab {
         case .overview:
+            AppSectionHeading(
+                title: displayName(for: .overview),
+                systemImage: "chart.bar.xaxis"
+            )
             HomeStatsView()
             ForEach(overviewBoards) { board in
                 HomeOverviewBoard(
@@ -329,11 +357,14 @@ struct HomeView: View {
                     metadata: overviewMetadata(for:),
                     showsDeletePlaybackHistory: board.id == "continue" || board.id == "nextUp",
                     onSelect: { item in
-                        appState.selectedItemReturnAnchorID = item.id
-                        appState.selectedItem = item
+                        appState.presentDetail(
+                            item,
+                            from: SidebarDestination.home.id,
+                            anchorID: item.id
+                        )
                     },
-                    restoreAnchorID: appState.selectedItemReturnAnchorID,
-                    onDidRestoreAnchor: { appState.selectedItemReturnAnchorID = nil }
+                    restoreAnchorID: activeReturnContext?.anchorID,
+                    onDidRestoreAnchor: completeOverviewHorizontalRestoration
                 )
                 .id("overview-board-\(board.id)")
             }
@@ -1073,6 +1104,38 @@ struct HomeView: View {
         }
     }
 
+    private var activeReturnContext: DetailReturnContext? {
+        guard appState.selectedItem == nil,
+              appState.detailReturnContext?.destinationID == SidebarDestination.home.id else { return nil }
+        return appState.detailReturnContext
+    }
+
+    private func completeHomeReturnRestoration() {
+        overviewVerticalReturnReady = true
+        overviewHorizontalReturnReady = true
+        finishHomeReturnRestorationIfReady()
+    }
+
+    private func completeOverviewHorizontalRestoration() {
+        overviewHorizontalReturnReady = true
+        finishHomeReturnRestorationIfReady()
+    }
+
+    private func finishHomeReturnRestorationIfReady() {
+        guard overviewVerticalReturnReady, overviewHorizontalReturnReady else { return }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        transaction.animation = nil
+        withTransaction(transaction) {
+            inlineReturnContentReady = true
+        }
+        guard let context = activeReturnContext else { return }
+        appState.consumeDetailReturnContext(
+            destinationID: SidebarDestination.home.id,
+            anchorID: context.anchorID
+        )
+    }
+
     private func restoreOverviewAnchorIfNeeded(_ anchorID: String?, scrollProxy: ScrollViewProxy) {
         guard currentTab == .overview,
               let anchorID,
@@ -1080,18 +1143,17 @@ struct HomeView: View {
               let board = overviewBoards.first(where: { $0.items.contains(where: { $0.id == anchorID }) }) else { return }
         restoredOverviewAnchorID = anchorID
         let boardAnchorID = "overview-board-\(board.id)"
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            scrollProxy.scrollTo(boardAnchorID, anchor: .center)
-        }
         Task { @MainActor in
             await Task.yield()
-            var retryTransaction = Transaction()
-            retryTransaction.disablesAnimations = true
-            withTransaction(retryTransaction) {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            transaction.animation = nil
+            withTransaction(transaction) {
                 scrollProxy.scrollTo(boardAnchorID, anchor: .center)
             }
+            await Task.yield()
+            overviewVerticalReturnReady = true
+            finishHomeReturnRestorationIfReady()
         }
     }
 
@@ -1103,19 +1165,16 @@ struct HomeView: View {
         if isSearching {
             guard let anchorID, restoredOverviewAnchorID != anchorID else { return }
             restoredOverviewAnchorID = anchorID
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                scrollProxy.scrollTo(anchorID, anchor: .center)
-            }
             Task { @MainActor in
                 await Task.yield()
-                var retryTransaction = Transaction()
-                retryTransaction.disablesAnimations = true
-                withTransaction(retryTransaction) {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                transaction.animation = nil
+                withTransaction(transaction) {
                     scrollProxy.scrollTo(anchorID, anchor: .center)
                 }
-                appState.selectedItemReturnAnchorID = nil
+                await Task.yield()
+                completeHomeReturnRestoration()
             }
         } else {
             restoreOverviewAnchorIfNeeded(anchorID, scrollProxy: scrollProxy)
@@ -1160,6 +1219,7 @@ struct HomeTabBar: View {
             }
             .padding(4)
         }
+        .verticalScrollPassthroughFromNestedHorizontal()
         .frame(height: 46)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1233,6 +1293,34 @@ struct HomeOverviewBoard: View {
     @State private var isHoveringStrip = false
     @State private var isDraggingStrip = false
     @State private var restoredAnchorID: String?
+    @State private var returnContentReady: Bool
+
+    init(
+        title: String,
+        subtitle: String,
+        systemImage: String,
+        items: [MediaItem],
+        emptyMessage: String,
+        metadata: @escaping (MediaItem) -> String,
+        showsDeletePlaybackHistory: Bool = false,
+        onSelect: @escaping (MediaItem) -> Void,
+        restoreAnchorID: String? = nil,
+        onDidRestoreAnchor: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.systemImage = systemImage
+        self.items = items
+        self.emptyMessage = emptyMessage
+        self.metadata = metadata
+        self.showsDeletePlaybackHistory = showsDeletePlaybackHistory
+        self.onSelect = onSelect
+        self.restoreAnchorID = restoreAnchorID
+        self.onDidRestoreAnchor = onDidRestoreAnchor
+        _returnContentReady = State(
+            initialValue: restoreAnchorID == nil || !items.contains(where: { $0.id == restoreAnchorID })
+        )
+    }
 
     private var autoScrollKey: String {
         items.map(\.id).joined(separator: "|")
@@ -1240,17 +1328,11 @@ struct HomeOverviewBoard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                PlayfulSymbolIcon(systemImage: systemImage, size: 34)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.headline)
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
+            AppSectionHeading(
+                title: title,
+                subtitle: subtitle,
+                systemImage: systemImage
+            )
 
             if items.isEmpty {
                 Text(emptyMessage)
@@ -1273,6 +1355,8 @@ struct HomeOverviewBoard: View {
                         }
                         .padding(.vertical, 2)
                     }
+                    // 横向海报条吞掉落在卡片上的纵向滚动，放行给外层首页竖向滚动。
+                    .verticalScrollPassthroughFromNestedHorizontal()
                     .horizontalMouseDragScroll(enabled: !layoutTransitionActive) { dragging in
                         isDraggingStrip = dragging
                     }
@@ -1309,10 +1393,12 @@ struct HomeOverviewBoard: View {
                         }
                     }
                 }
+                .opacity(returnContentReady ? 1 : 0)
             }
         }
         .padding(16)
         .staticSurfaceBackground(cornerRadius: 20, thickness: 1.02)
+        .repeatedCardChrome(false, cornerRadius: 20)
     }
 
     private func restoreAnchorIfNeeded(_ anchorID: String?, scrollProxy: ScrollViewProxy) {
@@ -1321,18 +1407,16 @@ struct HomeOverviewBoard: View {
               let index = items.firstIndex(where: { $0.id == anchorID }) else { return }
         restoredAnchorID = anchorID
         autoScrollIndex = index
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            scrollProxy.scrollTo(anchorID, anchor: .center)
-        }
         Task { @MainActor in
             await Task.yield()
-            var retryTransaction = Transaction()
-            retryTransaction.disablesAnimations = true
-            withTransaction(retryTransaction) {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            transaction.animation = nil
+            withTransaction(transaction) {
                 scrollProxy.scrollTo(anchorID, anchor: .center)
+                returnContentReady = true
             }
+            await Task.yield()
             onDidRestoreAnchor?()
         }
     }
@@ -1393,6 +1477,7 @@ private struct HomeOverviewPosterCard: View {
             .padding(8)
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .staticSurfaceBackground(cornerRadius: 16, thickness: active ? 1.08 : 0.92)
+            .repeatedCardChrome(active, cornerRadius: 16)
             .repeatedSurfaceHover(active, cornerRadius: 16, intensity: 0.62)
             .scaleEffect(active && !reduceMotion ? 1.018 : 1)
         }
@@ -1430,6 +1515,7 @@ struct StatTile: View {
     @State private var isHovering = false
 
     var body: some View {
+        let active = isHovering && !suppressHoverDuringScroll && !layoutTransitionActive
         HStack(spacing: 12) {
             PlayfulSymbolIcon(systemImage: systemImage, size: 38)
             VStack(alignment: .leading, spacing: 2) {
@@ -1448,9 +1534,11 @@ struct StatTile: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
-        .staticSurfaceBackground()
-        .scaleEffect(!reduceMotion && isHovering && !suppressHoverDuringScroll && !layoutTransitionActive ? 1.022 : 1)
-        .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering && !suppressHoverDuringScroll && !layoutTransitionActive)
+        .staticSurfaceBackground(cornerRadius: AppCardMetrics.repeatedCornerRadius)
+        .repeatedCardChrome(active)
+        .repeatedSurfaceHover(active, cornerRadius: AppCardMetrics.repeatedCornerRadius, intensity: 0.54)
+        .scaleEffect(!reduceMotion && active ? 1.022 : 1)
+        .animation(reduceMotion ? nil : AppMotion.fast, value: active)
         .onHover { hovering in
             guard !suppressHoverDuringScroll, !layoutTransitionActive else {
                 isHovering = false

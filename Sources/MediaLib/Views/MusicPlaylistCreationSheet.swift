@@ -39,30 +39,31 @@ struct MusicPlaylistCreationSheet: View {
                 systemImage: "music.note.list"
             )
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("歌单名称")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+            AppSheetSection(
+                title: "歌单名称",
+                systemImage: "text.cursor",
+                subtitle: "使用简洁、易识别的名称，之后仍可重命名。"
+            ) {
                 TextField("新歌单", text: $name)
                     .textFieldStyle(.plain)
                     .glassFormField()
             }
-            .padding(16)
-            .staticSurfaceBackground(cornerRadius: 18)
 
             AppSheetActionFooter {
                 Button("取消") {
                     onCancel()
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                .keyboardShortcut(.cancelAction)
 
                 Button {
                     onCreate(trimmedName)
                 } label: {
                     Label("创建", systemImage: "plus")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                 .disabled(trimmedName.isEmpty)
+                .keyboardShortcut(.defaultAction)
             }
         }
         .appSheetChrome(width: AppSheetMetrics.compactWidth)
@@ -106,30 +107,31 @@ struct MusicPlaylistRenameSheet: View {
                 systemImage: "pencil.line"
             )
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("歌单名称")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+            AppSheetSection(
+                title: "歌单名称",
+                systemImage: "text.cursor",
+                subtitle: "只更新 MediaLIB 内部歌单名称，不修改歌曲文件。"
+            ) {
                 TextField("歌单名称", text: $name)
                     .textFieldStyle(.plain)
                     .glassFormField()
             }
-            .padding(16)
-            .staticSurfaceBackground(cornerRadius: 18)
 
             AppSheetActionFooter {
                 Button("取消") {
                     onCancel()
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                .keyboardShortcut(.cancelAction)
 
                 Button {
                     onRename(trimmedName)
                 } label: {
                     Label("保存", systemImage: "checkmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                 .disabled(trimmedName.isEmpty)
+                .keyboardShortcut(.defaultAction)
             }
         }
         .appSheetChrome(width: AppSheetMetrics.compactWidth)

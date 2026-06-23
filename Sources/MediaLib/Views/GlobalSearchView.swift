@@ -25,8 +25,8 @@ struct GlobalSearchView: View {
         let privacyVisible = appState.privacyPINConfigured && appState.privacyUnlocked
         let matched = appState.items.filter { item in
             guard item.type != .episode else { return false }
-            if item.type == .privateCollection && !privacyVisible { return false }
-            return PinyinSearchMatcher.matches(query: q, in: [item.title, item.originalTitle, item.artist, item.album])
+            if appState.isPrivateItem(item) && !privacyVisible { return false }
+            return appState.matchesMediaSearch(query: q, item: item)
         }
 
         let order: [(MediaType, String, String)] = [
@@ -52,21 +52,23 @@ struct GlobalSearchView: View {
         let groups = groups
         let total = groups.reduce(0) { $0 + $1.items.count }
         VStack(alignment: .leading, spacing: 16) {
-            Label(
-                total == 0
-                    ? "未找到“\(trimmedQuery)”"
-                    : "搜索“\(trimmedQuery)” · 共 \(total) 个结果",
-                systemImage: "magnifyingglass"
+            AppSectionHeading(
+                title: total == 0 ? "未找到“\(trimmedQuery)”" : "搜索“\(trimmedQuery)”",
+                subtitle: total == 0
+                    ? "可尝试标题、演员、角色、题材、简介、制作方、年份或剧集名称。"
+                    : "已穿透匹配作品资料、演职人员和子集标题，并按媒体类型分组。",
+                systemImage: "magnifyingglass",
+                badgeText: total == 0 ? nil : "\(total) 个结果"
             )
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .staticSurfaceBackground(cornerRadius: 16, thickness: 0.94)
+            .repeatedCardChrome(false, cornerRadius: 16)
 
             if total == 0 {
                 EmptyStateView(
                     title: "无匹配结果",
                     systemImage: "magnifyingglass",
-                    message: "支持标题、拼音全拼、首字母和艺术家关键词。"
+                    message: "支持标题与拼音、演员和角色、题材、简介、电视网、制作公司、年份及具体剧集名称。"
                 )
                 .staticSurfaceBackground(cornerRadius: 22)
             } else {
@@ -79,9 +81,13 @@ struct GlobalSearchView: View {
     }
 
     private func groupSection(_ group: Group) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("\(group.title) · \(group.items.count)", systemImage: group.systemImage)
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 12) {
+            AppSectionHeading(
+                title: group.title,
+                subtitle: group.id == MediaType.music.rawValue ? "点击条目立即播放" : "点击条目查看详情",
+                systemImage: group.systemImage,
+                badgeText: "\(group.items.count) 项"
+            )
             LazyVStack(spacing: 8) {
                 ForEach(group.items) { item in
                     resultRow(item)
@@ -101,6 +107,9 @@ struct GlobalSearchView: View {
         }
         var parts: [String] = [item.type.displayName]
         if item.year != nil { parts.append(item.displayYear) }
+        if let genre = item.genre?.trimmingCharacters(in: .whitespacesAndNewlines), !genre.isEmpty {
+            parts.append(genre)
+        }
         if let rating = item.rating, rating > 0 { parts.append("★ \(String(format: "%.1f", rating))") }
         return parts.joined(separator: " · ")
     }
@@ -125,6 +134,10 @@ private struct GlobalSearchResultRow: View {
                     .aspectRatio(item.type == .music ? 1 : 2.0 / 3.0, contentMode: .fill)
                     .frame(width: item.type == .music ? 46 : 40, height: 60)
                     .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(.white.opacity(active ? 0.46 : 0.22), lineWidth: 0.75)
+                    }
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(item.title)
@@ -144,10 +157,13 @@ private struct GlobalSearchResultRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .staticSurfaceBackground(cornerRadius: 12, thickness: 0.9)
+            .repeatedCardChrome(active, cornerRadius: 12)
             .repeatedSurfaceHover(active, cornerRadius: 12, intensity: 0.82)
             .brightness(active ? 0.006 : 0)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(item.title)，\(subtitle)")
+        .accessibilityHint(item.type == .music ? "播放此音乐" : "打开媒体详情")
         .onHover { hovering in
             isHovering = suppressHoverDuringScroll ? false : hovering
         }

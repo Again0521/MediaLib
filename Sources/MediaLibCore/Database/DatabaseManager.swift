@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public final class DatabaseManager {
-    public static let currentSchemaVersion = 18
+    public static let currentSchemaVersion = 19
 
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
@@ -321,6 +321,13 @@ public final class DatabaseManager {
                 try execute("PRAGMA user_version = 18")
             }
             version = 18
+        }
+        if version < 19 {
+            try transaction {
+                try migrateToVersion19()
+                try execute("PRAGMA user_version = 19")
+            }
+            version = 19
         }
         guard version == Self.currentSchemaVersion else {
             throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
@@ -769,6 +776,147 @@ public final class DatabaseManager {
         try execute("CREATE INDEX IF NOT EXISTS index_sync_conflicts_status ON sync_conflicts(status, updated_at)")
         try execute("CREATE INDEX IF NOT EXISTS index_sync_conflicts_media ON sync_conflicts(media_id, provider, field_name)")
         try execute("CREATE INDEX IF NOT EXISTS index_sync_conflicts_account ON sync_conflicts(account_id)")
+    }
+
+    private func migrateToVersion19() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_detail_metadata (
+          media_id TEXT PRIMARY KEY,
+          status TEXT,
+          first_air_date TEXT,
+          end_date TEXT,
+          season_count INTEGER,
+          episode_count INTEGER,
+          content_rating TEXT,
+          original_language TEXT,
+          countries_json TEXT NOT NULL DEFAULT '[]',
+          production_companies_json TEXT NOT NULL DEFAULT '[]',
+          networks_json TEXT NOT NULL DEFAULT '[]',
+          trailer_url TEXT,
+          provider TEXT NOT NULL,
+          language TEXT NOT NULL,
+          fetched_at TEXT NOT NULL,
+          fetch_version INTEGER NOT NULL DEFAULT 1,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_detail_fetched_at ON media_detail_metadata(fetched_at)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_external_ids (
+          media_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          external_value TEXT NOT NULL,
+          PRIMARY KEY(media_id, provider),
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_external_lookup ON media_external_ids(provider, external_value)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_people (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          profile_url TEXT,
+          biography TEXT,
+          birthday TEXT,
+          deathday TEXT,
+          place_of_birth TEXT,
+          known_for_department TEXT,
+          known_for_json TEXT NOT NULL DEFAULT '[]',
+          filmography_json TEXT NOT NULL DEFAULT '[]',
+          updated_at TEXT NOT NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_people_name ON media_people(name COLLATE NOCASE)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_person_external_ids (
+          person_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          external_value TEXT NOT NULL,
+          PRIMARY KEY(person_id, provider),
+          FOREIGN KEY(person_id) REFERENCES media_people(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_person_external_lookup ON media_person_external_ids(provider, external_value)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_credits (
+          id TEXT PRIMARY KEY,
+          media_id TEXT NOT NULL,
+          person_id TEXT NOT NULL,
+          category TEXT NOT NULL,
+          role TEXT NOT NULL,
+          department TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE,
+          FOREIGN KEY(person_id) REFERENCES media_people(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_credits_media ON media_credits(media_id, category, sort_order)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_credits_person ON media_credits(person_id, sort_order)")
+        try execute("""
+        CREATE TRIGGER IF NOT EXISTS delete_orphaned_media_person_after_credit
+        AFTER DELETE ON media_credits
+        BEGIN
+          DELETE FROM media_people
+          WHERE id = OLD.person_id
+            AND NOT EXISTS (
+              SELECT 1 FROM media_credits WHERE person_id = OLD.person_id
+            );
+        END
+        """)
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_artwork (
+          id TEXT PRIMARY KEY,
+          media_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          thumb_url TEXT NOT NULL,
+          full_url TEXT NOT NULL,
+          language TEXT,
+          aspect_ratio REAL NOT NULL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          local_path TEXT,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_artwork_media ON media_artwork(media_id, kind, sort_order)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_related_titles (
+          id TEXT PRIMARY KEY,
+          media_id TEXT NOT NULL,
+          relation TEXT NOT NULL,
+          external_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          year INTEGER,
+          poster_url TEXT,
+          overview TEXT,
+          rating REAL,
+          popularity REAL,
+          local_media_id TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE,
+          FOREIGN KEY(local_media_id) REFERENCES media_items(id) ON DELETE SET NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_related_media ON media_related_titles(media_id, relation, sort_order)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_related_external ON media_related_titles(external_id)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_detail_backfill_jobs (
+          media_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL DEFAULT 'pending',
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          next_retry_at TEXT,
+          last_error TEXT,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_detail_backfill_status ON media_detail_backfill_jobs(status, next_retry_at)")
     }
 
     private func validateBackup(at backupURL: URL) throws {

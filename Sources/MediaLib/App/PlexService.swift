@@ -27,7 +27,7 @@ enum PlexServiceError: LocalizedError {
 
 struct PlexService {
     private let clientName = "MediaLIB"
-    private let version = "1.0.0"
+    private let version = AppVersion.current
     private let pageSize = 300
 
     func isAuthenticationFailure(_ error: Error) -> Bool {
@@ -165,6 +165,86 @@ struct PlexService {
         )
     }
 
+    /// Plex 详情扩展与 Emby/Jellyfin 使用同一展示模型：演员、主创、艺术照与外部 ID。
+    func fetchExtras(session: PlexSession, itemID: String) async throws -> EmbyDetailExtras {
+        let root = try await fetchXML(
+            session: session,
+            pathComponents: ["library", "metadata", itemID],
+            queryItems: [URLQueryItem(name: "includeExtras", value: "1")]
+        )
+        let node = root.children.first(where: { ["Video", "Directory", "Track"].contains($0.name) }) ?? root
+
+        let cast = node.children(named: "Role").prefix(20).enumerated().compactMap { index, role -> TMDBPerson? in
+            guard let name = role.attributes["tag"], !name.isEmpty else { return nil }
+            return TMDBPerson(
+                id: role.attributes["id"].flatMap(Int.init) ?? name.hashValue ^ index,
+                stableID: "plex-person-\(role.attributes["id"] ?? String(name.hashValue))",
+                name: name,
+                role: role.attributes["role"]?.nilIfEmpty ?? "演员",
+                profileURL: role.attributes["thumb"].flatMap { mediaURL(relativeOrAbsolutePath: $0, session: session) },
+                category: "cast",
+                department: "Acting"
+            )
+        }
+        let crewNodes: [(String, String)] = [
+            ("Director", "导演"),
+            ("Writer", "编剧"),
+            ("Producer", "制片")
+        ]
+        var crew: [TMDBPerson] = []
+        var seenCrew = Set<String>()
+        for (nodeName, roleName) in crewNodes {
+            for person in node.children(named: nodeName) {
+                guard let name = person.attributes["tag"], !name.isEmpty, seenCrew.insert(name).inserted else { continue }
+                crew.append(TMDBPerson(
+                    id: name.hashValue,
+                    stableID: "plex-person-\(name.hashValue)",
+                    name: name,
+                    role: roleName,
+                    profileURL: nil,
+                    category: "crew",
+                    department: nodeName
+                ))
+            }
+        }
+
+        var images: [TMDBImage] = []
+        if let art = node.attributes["art"],
+           let full = mediaURL(relativeOrAbsolutePath: art, session: session) {
+            images.append(TMDBImage(
+                id: "plex-art-\(itemID)",
+                thumbURL: full,
+                fullURL: full,
+                aspectRatio: 1.78,
+                kind: "backdrop"
+            ))
+        }
+        if let thumb = node.attributes["thumb"],
+           let full = mediaURL(relativeOrAbsolutePath: thumb, session: session) {
+            images.append(TMDBImage(
+                id: "plex-thumb-\(itemID)",
+                thumbURL: full,
+                fullURL: full,
+                aspectRatio: 0.67,
+                kind: "poster"
+            ))
+        }
+
+        let guidValues = node.children(named: "Guid").compactMap { $0.attributes["id"] }
+        let tmdbID = providerID(prefix: "tmdb://", in: guidValues)
+        let imdbID = providerID(prefix: "imdb://", in: guidValues)
+            ?? node.attributes["guid"].flatMap { $0.hasPrefix("imdb://") ? providerID(prefix: "imdb://", in: [$0]) : nil }
+        let kind = node.plexType == "movie" ? "movie" : "tv"
+        return EmbyDetailExtras(
+            cast: Array(cast),
+            crew: crew,
+            images: images,
+            tmdbID: tmdbID,
+            tmdbKind: tmdbID == nil ? nil : kind,
+            imdbID: imdbID
+        )
+    }
+
     private func fetchMetadataNodes(session: PlexSession, library: EmbyLibrarySummary) async throws -> [PlexXMLNode] {
         switch library.collectionType?.lowercased() {
         case "movies":
@@ -240,12 +320,14 @@ struct PlexService {
             id: id,
             type: type,
             title: node.attributes["title"] ?? node.attributes["grandparentTitle"] ?? "Plex 媒体",
-            artist: node.attributes["grandparentTitle"] ?? node.attributes["originalTitle"],
-            album: node.attributes["parentTitle"],
+            originalTitle: node.attributes["originalTitle"],
+            artist: type == .music ? (node.attributes["grandparentTitle"] ?? node.attributes["originalTitle"]) : nil,
+            album: type == .music ? node.attributes["parentTitle"] : nil,
             trackNumber: Self.int(node.attributes["index"]),
             year: Self.int(node.attributes["year"]) ?? Self.year(from: node.attributes["originallyAvailableAt"]),
             overview: node.attributes["summary"],
             posterPath: posterURLString(for: node, session: session),
+            backdropPath: node.attributes["art"].flatMap { mediaURL(relativeOrAbsolutePath: $0, session: session) },
             rating: rating,
             userRating: userRating,
             runtime: duration.map { Int($0 / 60.0) },
@@ -266,6 +348,7 @@ struct PlexService {
             favorite: false,
             externalID: ratingKey,
             metadataProvider: "Plex",
+            collectionTitle: node.children(named: "Collection").first?.attributes["tag"],
             lastPlayedAt: Self.date(fromUnixSeconds: node.attributes["lastViewedAt"]),
             genre: node.children(named: "Genre").compactMap { $0.attributes["tag"] }.joined(separator: ", ").nilIfEmpty
         )
@@ -459,6 +542,14 @@ struct PlexService {
     private static func seedUserRating(from rating: Double?) -> Double? {
         guard let rating, rating > 0 else { return nil }
         return min(max((rating / 10.0) * 5.0, 0), 5)
+    }
+
+    private func providerID(prefix: String, in values: [String]) -> String? {
+        values.first(where: { $0.lowercased().hasPrefix(prefix) })
+            .map { value in
+                let suffix = String(value.dropFirst(prefix.count))
+                return suffix.split(separator: "?").first.map(String.init) ?? suffix
+            }
     }
 }
 

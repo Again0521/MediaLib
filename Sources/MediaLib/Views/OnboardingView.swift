@@ -122,8 +122,10 @@ struct OnboardingView: View {
                     }
                 }
             }
-            .fixedSize(horizontal: true, vertical: false)
-            .frame(maxWidth: 440)
+            .padding(16)
+            .staticSurfaceBackground(cornerRadius: 18, thickness: 0.96)
+            .repeatedCardChrome(false, cornerRadius: 18)
+            .frame(maxWidth: 440, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.top, 4)
 
@@ -173,5 +175,24 @@ struct OnboardingView: View {
             }
         }
         .padding(20)
+        .background {
+            LinearGradient(
+                colors: [
+                    AppColors.cleanPanelFill.opacity(colorScheme == .dark ? 0.54 : 0.74),
+                    AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.34 : 0.52)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+        .overlay(alignment: .top) {
+            LinearGradient(
+                colors: [.clear, AppColors.cleanPanelBorder.opacity(0.72), .clear],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(height: 0.8)
+            .padding(.horizontal, 20)
+        }
     }
 }

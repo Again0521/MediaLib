@@ -12,6 +12,7 @@ public enum MediaType: String, Codable, CaseIterable, Identifiable, Sendable {
     case other
     case privateCollection = "private"
     case episode
+    case photo
 
     public var id: String { rawValue }
 
@@ -28,6 +29,7 @@ public enum MediaType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .other: return "其他"
         case .privateCollection: return "保险库"
         case .episode: return "剧集"
+        case .photo: return "照片"
         }
     }
 
@@ -44,6 +46,7 @@ public enum MediaType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .other: return "tray"
         case .privateCollection: return "lock.rectangle.stack"
         case .episode: return "play.rectangle"
+        case .photo: return "photo"
         }
     }
 }

@@ -151,6 +151,8 @@ struct PosterGridList<Leading: View>: View {
     var showsDeletePlaybackHistory: Bool = false
     var selectionEnabled: Bool = false
     var restoreAnchorID: String? = nil
+    var detailSourceDestinationID: String
+    var detailSourceSearchText: String? = nil
     var currentManualCollectionID: String? = nil
     var onDidRestoreAnchor: (() -> Void)? = nil
     @ViewBuilder var leading: () -> Leading
@@ -190,6 +192,8 @@ struct PosterGridList<Leading: View>: View {
                                     cacheTargetSize: cacheSize,
                                     showsDeletePlaybackHistory: showsDeletePlaybackHistory,
                                     selectionEnabled: selectionEnabled,
+                                    detailSourceDestinationID: detailSourceDestinationID,
+                                    detailSourceSearchText: detailSourceSearchText,
                                     currentManualCollectionID: currentManualCollectionID
                                 )
                                     .id(item.id)
@@ -228,6 +232,11 @@ struct PosterGridList<Leading: View>: View {
                     .help("返回顶部")
                 }
             }
+            .overlay(alignment: .top) {
+                PosterGridTopFade()
+                    .offset(y: -proxy.safeAreaInsets.top)
+                    .ignoresSafeArea(edges: .top)
+            }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
         }
         .suppressHoverEffectsDuringScroll()
@@ -255,18 +264,15 @@ struct PosterGridList<Leading: View>: View {
               restoredAnchorID != anchorID,
               items.contains(where: { $0.id == anchorID }) else { return }
         restoredAnchorID = anchorID
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            scrollProxy.scrollTo(anchorID, anchor: .center)
-        }
         Task { @MainActor in
             await Task.yield()
-            var retryTransaction = Transaction()
-            retryTransaction.disablesAnimations = true
-            withTransaction(retryTransaction) {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            transaction.animation = nil
+            withTransaction(transaction) {
                 scrollProxy.scrollTo(anchorID, anchor: .center)
             }
+            await Task.yield()
             onDidRestoreAnchor?()
         }
     }
@@ -379,6 +385,8 @@ struct PosterCardView: View {
     var cacheTargetSize: CGSize? = nil
     var showsDeletePlaybackHistory: Bool = false
     var selectionEnabled: Bool = false
+    var detailSourceDestinationID: String
+    var detailSourceSearchText: String? = nil
     var currentManualCollectionID: String? = nil
     @State private var isHovering = false
 
@@ -390,6 +398,7 @@ struct PosterCardView: View {
         // 使同一网格内所有海报高度一致，消除上下间距不齐的问题。
         let cropRatio: CGFloat = item.type == .music ? 1 : (2.0 / 3.0)
         let hoverActive = isHovering && !suppressHoverDuringScroll
+        let coverRadius = AppCardMetrics.posterCoverCornerRadius
 
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .bottomLeading) {
@@ -398,25 +407,23 @@ struct PosterCardView: View {
                     .overlay {
                         PosterImage(path: item.posterPath, title: item.cardTitle, mediaType: item.type, cacheTargetSize: cacheTargetSize)
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: coverRadius, style: .continuous))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        RoundedRectangle(cornerRadius: coverRadius, style: .continuous)
                             .strokeBorder(.white.opacity(hoverActive ? 0.54 : 0.24), lineWidth: hoverActive ? 1.1 : 0.7)
                     }
                     .overlay {
-                        if hoverActive {
-                            LinearGradient(
-                                colors: [
-                                    .white.opacity(0.18),
-                                    .clear,
-                                    AppColors.pointerLightTint.opacity(0.10)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                            .transition(.opacity)
-                        }
+                        LinearGradient(
+                            colors: [
+                                .white.opacity(hoverActive ? 0.18 : 0.075),
+                                .clear,
+                                AppColors.pointerLightTint.opacity(hoverActive ? 0.10 : 0.028)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: coverRadius, style: .continuous))
+                        .transition(.opacity)
                     }
 
                 if !badgeTexts.isEmpty {
@@ -461,12 +468,17 @@ struct PosterCardView: View {
             }
             .overlay {
                 if isSelectionActive && isSelected {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: coverRadius, style: .continuous)
                         .strokeBorder(AppColors.selectedGlassTint, lineWidth: 2.5)
                 }
             }
-            .pointerInspectTilt(enabled: usesInspectHover && !isSelectionActive, cornerRadius: 10)
+            .pointerInspectTilt(enabled: usesInspectHover && !isSelectionActive, cornerRadius: coverRadius)
             .scaleEffect(hoverActive && !reduceMotion ? 1.018 : 1)
+            .shadow(
+                color: hoverActive ? AppColors.pointerLightTint.opacity(0.16) : .clear,
+                radius: hoverActive ? 11 : 0,
+                y: hoverActive ? 4 : 0
+            )
             .contentShape(Rectangle())
             .onTapGesture {
                 handlePrimaryTap()
@@ -480,8 +492,9 @@ struct PosterCardView: View {
                 }
         }
         .padding(10)
-        .staticSurfaceBackground(cornerRadius: 18)
-        .repeatedSurfaceHover(hoverActive, cornerRadius: 18, tint: AppColors.pointerLightTint, intensity: usesInspectHover ? 0.95 : 0.72)
+        .staticSurfaceBackground(cornerRadius: AppCardMetrics.repeatedCornerRadius)
+        .repeatedCardChrome(hoverActive)
+        .repeatedSurfaceHover(hoverActive, cornerRadius: AppCardMetrics.repeatedCornerRadius, tint: AppColors.pointerLightTint, intensity: usesInspectHover ? 0.95 : 0.72)
         // #1 只修 bug、不动悬停效果：封面 3D 检视(pointerInspectTilt)+放大保持原样。
         // 原 bug＝悬停时封面 3D 投影/放大溢出本格，被相邻卡片（ForEach 中靠后者默认画在上层）裁切，
         // 看着像“以右边为原点放大”且把相邻/底部卡片撑歪，窗口拉大海报变小时尤甚。
@@ -516,8 +529,12 @@ struct PosterCardView: View {
                 appState.toggleItemSelection(item.id)
             }
         } else {
-            appState.selectedItemReturnAnchorID = item.id
-            appState.selectedItem = item
+            appState.presentDetail(
+                item,
+                from: detailSourceDestinationID,
+                anchorID: item.id,
+                searchText: detailSourceSearchText
+            )
         }
     }
 
@@ -578,6 +595,31 @@ struct PosterCardView: View {
                             .strokeBorder(.white.opacity(0.24), lineWidth: 0.5)
                     }
             }
+    }
+}
+
+private struct PosterGridTopFade: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        Group {
+            if reduceTransparency {
+                Color(nsColor: .windowBackgroundColor)
+            } else {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+            }
+        }
+        .mask {
+            LinearGradient(
+                colors: [.black.opacity(0.72), .black.opacity(0.22), .clear],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+        .frame(height: 28)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 

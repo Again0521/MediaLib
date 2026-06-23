@@ -8,6 +8,11 @@ struct LibraryHealthCenterView: View {
     // 健康中心的“补充”复用详情页/音乐库的 MetadataSearchView，保持匹配和写入策略一致。
     @State private var metadataItem: MediaItem?
     @State private var restoredReturnAnchorID: String?
+    @State private var returnContentReady: Bool
+
+    init(initialReturnAnchorID: String? = nil) {
+        _returnContentReady = State(initialValue: initialReturnAnchorID == nil)
+    }
 
     var body: some View {
         ScrollViewReader { scrollProxy in
@@ -21,6 +26,7 @@ struct LibraryHealthCenterView: View {
                         missingFilesSection
                         duplicateGroupsSection
                         missingMetadataSection
+                        missingDetailMetadataSection
                     } else {
                         EmptyStateView(
                             title: "片库状态良好",
@@ -32,10 +38,14 @@ struct LibraryHealthCenterView: View {
                 }
                 .pageContainer()
             }
+            .opacity(returnContentReady ? 1 : 0)
             .onAppear {
-                restoreReturnAnchorIfNeeded(appState.selectedItemReturnAnchorID, scrollProxy: scrollProxy)
+                restoreReturnAnchorIfNeeded(activeReturnContext?.anchorID, scrollProxy: scrollProxy)
+                if activeReturnContext == nil {
+                    returnContentReady = true
+                }
             }
-            .onChange(of: appState.selectedItemReturnAnchorID) { anchorID in
+            .onChange(of: activeReturnContext?.anchorID) { anchorID in
                 restoreReturnAnchorIfNeeded(anchorID, scrollProxy: scrollProxy)
             }
         }
@@ -131,29 +141,58 @@ struct LibraryHealthCenterView: View {
     }
 
     private var summary: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 150), spacing: 12), count: 4), spacing: 12) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 168), spacing: 12), count: 4), spacing: 12) {
             healthMetric(title: "离线媒体源", value: appState.offlineSources.count, systemImage: "externaldrive.badge.exclamationmark")
             healthMetric(title: "失效路径", value: appState.missingFileItems.count, systemImage: "doc.badge.ellipsis")
             healthMetric(title: "疑似重复组", value: appState.duplicateTitleGroups.count, systemImage: "square.on.square")
-            healthMetric(title: "元数据缺口", value: appState.missingMetadataItems.count, systemImage: "tag.slash")
+            healthMetric(
+                title: "资料缺口",
+                value: appState.missingMetadataItems.count + appState.detailMetadataGapItems.count,
+                systemImage: "tag.slash"
+            )
         }
     }
 
     private func healthMetric(title: String, value: Int, systemImage: String) -> some View {
-        HStack(spacing: 12) {
-            PlayfulSymbolIcon(systemImage: systemImage, size: 34)
-            VStack(alignment: .leading, spacing: 2) {
+        let needsAttention = value > 0
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                PlayfulSymbolIcon(systemImage: systemImage, size: 34)
+                Spacer(minLength: 8)
+                Label(needsAttention ? "需处理" : "正常", systemImage: needsAttention ? "exclamationmark.circle" : "checkmark.circle")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption2.weight(.semibold))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .foregroundStyle(needsAttention ? Color.orange : AppColors.selectedGlassTint.opacity(0.88))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        (needsAttention ? Color.orange : AppColors.selectedGlassTint)
+                            .opacity(0.09),
+                        in: Capsule()
+                    )
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text("\(value)")
                     .font(.title2.weight(.semibold))
                     .monospacedDigit()
+                    .lineLimit(1)
                 Text(title)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // 图标字形在 34pt 方框内居中，可见左缘较方框内缩约 6pt；
+            // 文字行同步内缩，使其左边界与上方图标字形左缘对齐。
+            .padding(.leading, 6)
         }
         .padding(14)
         .staticSurfaceBackground(cornerRadius: 16)
+        .repeatedCardChrome(needsAttention, cornerRadius: 16, tint: needsAttention ? .orange : AppColors.pointerLightTint)
+        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
@@ -276,6 +315,31 @@ struct LibraryHealthCenterView: View {
         }
     }
 
+    @ViewBuilder
+    private var missingDetailMetadataSection: some View {
+        if !appState.detailMetadataGapItems.isEmpty {
+            healthSection(
+                title: "影视详情资料不完整",
+                subtitle: "区分缺少人物、艺术照、外部 ID 或推荐；打开详情或等待后台升级任务即可继续补齐。",
+                systemImage: "person.crop.rectangle.stack"
+            ) {
+                ForEach(appState.detailMetadataGapItems) { item in
+                    healthItemRow(
+                        item,
+                        detail: "缺少\(appState.detailMetadataGapDescription(for: item))"
+                    ) {
+                        Button {
+                            openDetail(item)
+                        } label: {
+                            Label("查看详情", systemImage: "info.circle")
+                        }
+                    }
+                    .id("detail-metadata-\(item.id)")
+                }
+            }
+        }
+    }
+
     private func healthSection<Content: View>(
         title: String,
         subtitle: String,
@@ -312,7 +376,8 @@ struct LibraryHealthCenterView: View {
         !appState.offlineSources.isEmpty ||
             !appState.missingFileItems.isEmpty ||
             !appState.duplicateTitleGroups.isEmpty ||
-            !appState.missingMetadataItems.isEmpty
+            !appState.missingMetadataItems.isEmpty ||
+            !appState.detailMetadataGapItems.isEmpty
     }
 
     private var safeMissingItems: [MediaItem] {
@@ -366,26 +431,33 @@ struct LibraryHealthCenterView: View {
     }
 
     private func openDetail(_ item: MediaItem) {
-        appState.selectedItemReturnAnchorID = item.id
-        appState.selectedItem = item
+        appState.presentDetail(item, from: SidebarDestination.health.id, anchorID: item.id)
+    }
+
+    private var activeReturnContext: DetailReturnContext? {
+        guard appState.selectedItem == nil,
+              appState.detailReturnContext?.destinationID == SidebarDestination.health.id else { return nil }
+        return appState.detailReturnContext
     }
 
     private func restoreReturnAnchorIfNeeded(_ anchorID: String?, scrollProxy: ScrollViewProxy) {
         guard let anchorID, restoredReturnAnchorID != anchorID else { return }
         restoredReturnAnchorID = anchorID
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            scrollProxy.scrollTo(anchorID, anchor: .center)
-        }
         Task { @MainActor in
             await Task.yield()
-            var retryTransaction = Transaction()
-            retryTransaction.disablesAnimations = true
-            withTransaction(retryTransaction) {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            transaction.animation = nil
+            withTransaction(transaction) {
                 scrollProxy.scrollTo(anchorID, anchor: .center)
+                returnContentReady = true
             }
-            appState.selectedItemReturnAnchorID = nil
+            await Task.yield()
+            guard appState.selectedItem == nil else { return }
+            appState.consumeDetailReturnContext(
+                destinationID: SidebarDestination.health.id,
+                anchorID: anchorID
+            )
         }
     }
 }
@@ -433,16 +505,12 @@ private struct CollapsibleHealthSection<Content: View>: View {
                     expanded.toggle()
                 }
             } label: {
-                HStack(alignment: .top, spacing: 10) {
-                    PlayfulSymbolIcon(systemImage: systemImage, size: 30)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(title)
-                            .font(.title3.weight(.semibold))
-                        Text(subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+                HStack(alignment: .center, spacing: 10) {
+                    AppSectionHeading(
+                        title: title,
+                        subtitle: subtitle,
+                        systemImage: systemImage
+                    )
                     Spacer(minLength: 8)
                     Image(systemName: "chevron.down")
                         .font(.callout.weight(.semibold))
@@ -459,6 +527,8 @@ private struct CollapsibleHealthSection<Content: View>: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("\(title)，\(expanded ? "已展开" : "已折叠")")
+            .accessibilityHint("切换此健康检查分组")
             .onHover { headerHovering = $0 }
             .animation(reduceMotion ? nil : AppMotion.fast, value: headerHovering)
 
@@ -487,6 +557,7 @@ private struct HealthRowSurface<Content: View>: View {
             .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 9, minHeight: 30, thickness: 0.92))
             .padding(12)
             .staticSurfaceBackground(selected: active, cornerRadius: 14, thickness: 0.92)
+            .repeatedCardChrome(active, cornerRadius: 14)
             .scaleEffect(!reduceMotion && active ? 1.005 : 1)
             .animation(reduceMotion ? nil : AppMotion.fast, value: active)
             .onHover { hovering in

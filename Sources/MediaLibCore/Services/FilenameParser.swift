@@ -15,6 +15,12 @@ public final class FilenameParser {
         "jpg", "jpeg", "png", "webp", "heic", "tif", "tiff", "gif", "bmp", "avif"
     ]
 
+    /// 相册（.photo 源）扫描时识别为照片的扩展名；普通视频/音乐源里这些仍按 sidecar 处理，不当媒体。
+    public static let supportedImageExtensions: Set<String> = [
+        "jpg", "jpeg", "png", "webp", "heic", "heif", "tif", "tiff",
+        "gif", "bmp", "avif", "jfif", "raw", "dng", "cr2", "nef", "arw", "rw2", "orf"
+    ]
+
     private let noiseTokens: Set<String> = [
         "1080p", "2160p", "720p", "480p", "4k", "8k", "bluray", "blu-ray", "bdrip",
         "web-dl", "webdl", "webrip", "hdr", "hdr10", "dv", "dolby", "vision",
@@ -52,11 +58,19 @@ public final class FilenameParser {
         Self.supportedAudioExtensions.contains(url.pathExtension.lowercased())
     }
 
+    public func isImageFile(_ url: URL) -> Bool {
+        Self.supportedImageExtensions.contains(url.pathExtension.lowercased())
+    }
+
     public func isSidecarMetadataFile(_ url: URL) -> Bool {
         Self.sidecarMetadataExtensions.contains(url.pathExtension.lowercased())
     }
 
     public func isMediaFile(_ url: URL, preferredType: MediaType) -> Bool {
+        // 相册源把图片与视频都当作媒体，且图片不再被当作 sidecar 跳过。
+        if preferredType == .photo {
+            return isImageFile(url) || isVideoFile(url)
+        }
         guard !isSidecarMetadataFile(url) else { return false }
         switch preferredType {
         case .music:

@@ -36,6 +36,13 @@ struct BackgroundTaskCenterView: View {
                     )
                     .frame(minHeight: 360)
                 } else {
+                    AppSectionHeading(
+                        title: "任务记录",
+                        subtitle: "运行中任务优先显示，完成与失败记录保留在下方。",
+                        systemImage: "clock.arrow.circlepath",
+                        badgeText: "\(appState.backgroundTasks.count) 项"
+                    )
+
                     LazyVStack(spacing: 10) {
                         ForEach(appState.backgroundTasks) { task in
                             taskRow(task)
@@ -63,9 +70,11 @@ struct BackgroundTaskCenterView: View {
                 HStack(spacing: 8) {
                     Text(task.title)
                         .font(.callout.weight(.semibold))
-                    Text(task.state.title)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(task.state == .failed ? .red : .secondary)
+                    AppStatusBadge(
+                        title: task.state.title,
+                        systemImage: taskStateSystemImage(task.state),
+                        tint: taskStateTint(task.state)
+                    )
                 }
                 if task.state.isActive, let progress = task.progress {
                     ProgressView(value: progress)
@@ -92,6 +101,27 @@ struct BackgroundTaskCenterView: View {
         .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 9, minHeight: 30, thickness: 0.92))
         .padding(13)
         .staticSurfaceBackground(cornerRadius: 15, thickness: 0.94)
+    }
+
+    private func taskStateSystemImage(_ state: BackgroundTaskState) -> String {
+        switch state {
+        case .queued: return "clock"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .pausing: return "pause.circle"
+        case .paused: return "pause.circle.fill"
+        case .completed: return "checkmark.circle"
+        case .failed: return "exclamationmark.circle"
+        case .cancelled: return "xmark.circle"
+        }
+    }
+
+    private func taskStateTint(_ state: BackgroundTaskState) -> Color {
+        switch state {
+        case .failed: return .red
+        case .cancelled, .paused, .pausing: return .orange
+        case .completed: return AppColors.selectedGlassTint
+        case .queued, .running: return AppColors.selectedGlassTint
+        }
     }
 
     @ViewBuilder

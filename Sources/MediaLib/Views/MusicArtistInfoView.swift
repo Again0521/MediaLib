@@ -16,17 +16,20 @@ struct MusicArtistInfoView: View {
         Group {
             if let info {
                 VStack(alignment: .leading, spacing: 14) {
-                    HStack {
-                        Label("艺术家", systemImage: "person.crop.square")
-                            .font(.headline)
-                        Spacer()
+                    HStack(spacing: 12) {
+                        AppSectionHeading(
+                            title: "艺术家",
+                            subtitle: "简介、风格与相似艺人",
+                            systemImage: "person.crop.square"
+                        )
+
                         if appState.hasPlayableTracks(forArtist: info.name) {
                             Button {
                                 appState.startArtistRadio(artistName: info.name)
                             } label: {
                                 Label("艺人电台", systemImage: "dot.radiowaves.left.and.right")
                             }
-                            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32, prominent: true))
+                            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                             .help("从本地曲库生成该艺人的连续电台")
                         }
                     }
@@ -77,7 +80,9 @@ struct MusicArtistInfoView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .staticSurfaceBackground(cornerRadius: 16)
             }
         }
         .task(id: artistName) { await loadIfNeeded() }

@@ -57,7 +57,7 @@ struct EmbyRestrictionSheet: View {
                         Label(copiedAll ? "已复制" : "复制全部", systemImage: copiedAll ? "checkmark" : "doc.on.doc")
                             .font(.caption.weight(.medium))
                     }
-                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 9, horizontalPadding: 8, minHeight: 28, thickness: 0.92))
+                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 9, horizontalPadding: 8, minHeight: AppControlMetrics.minTouchHeight, thickness: 0.92))
                 }
 
                 VStack(spacing: 0) {
@@ -74,7 +74,7 @@ struct EmbyRestrictionSheet: View {
 
             AppSheetActionFooter {
                 Button("关闭", action: onDismiss)
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                     .keyboardShortcut(.defaultAction)
             }
         }
@@ -97,7 +97,8 @@ struct EmbyRestrictionSheet: View {
                 Image(systemName: "doc.on.doc")
                     .font(.caption2)
             }
-            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 8, horizontalPadding: 6, minHeight: 24, thickness: 0.88))
+            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 8, horizontalPadding: 6, minHeight: AppControlMetrics.minTouchHeight, thickness: 0.88))
+            .accessibilityLabel("复制\(label)")
             .help("复制\(label)")
         }
         .padding(.vertical, 6)

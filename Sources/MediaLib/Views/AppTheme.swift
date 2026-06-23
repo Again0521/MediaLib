@@ -49,8 +49,9 @@ struct ResolvedAppTheme: Equatable {
 
 enum AppThemeResolver {
     static func resolve(for settings: AppSettings) -> ResolvedAppTheme {
-        let seed = settings.themePreset.seedHex
-        if settings.themePreset.isCustom {
+        let preset = settings.themePreset.canonicalPreset
+        let seed = preset.seedHex
+        if preset.isCustom {
             return resolve(
                 baseHex: settings.themeBaseHex ?? seed.base,
                 highlightHex: settings.themeHighlightHex ?? seed.highlight,
@@ -62,7 +63,7 @@ enum AppThemeResolver {
                 )
             )
         }
-        return resolve(preset: settings.themePreset)
+        return resolve(preset: preset)
     }
 
     static func resolve(preset: AppThemePreset) -> ResolvedAppTheme {
@@ -137,22 +138,22 @@ enum AppThemeResolver {
 
     private static func tokens(for preset: AppThemePreset) -> AppThemeTokens {
         switch preset {
-        case .graphite, .oled:
+        case .graphite, .oled, .seaSalt, .duskViolet:
             return AppThemeTokens(
-                name: "OLED Night",
-                usage: "夜间媒体播放、暗室观影和深色模式优先用户；浅色外观下也保持更冷静的蓝黑调性，避免与清蓝混同。",
-                primary: AppThemeColorToken(lightHex: "566FDE", darkHex: "7F94F2"),
-                secondary: AppThemeColorToken(lightHex: "637088", darkHex: "8FA0BE"),
-                accent: AppThemeColorToken(lightHex: "627AE6", darkHex: "899FFC"),
-                background: AppThemeColorToken(lightHex: "F3F5F9", darkHex: "0C0E12"),
-                surface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "101216"),
-                elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "171B21"),
-                border: AppThemeColorToken(lightHex: "D5DAE6", darkHex: "2B313A"),
-                textPrimary: AppThemeColorToken(lightHex: "1D1D1F", darkHex: "F5F5F7"),
-                textSecondary: AppThemeColorToken(lightHex: "636C7A", darkHex: "9AA3AE"),
-                success: AppThemeColorToken(lightHex: "34C759", darkHex: "30D158"),
-                warning: AppThemeColorToken(lightHex: "FF9F0A", darkHex: "FFD60A"),
-                error: AppThemeColorToken(lightHex: "FF3B30", darkHex: "FF453A")
+                name: "Dusk Violet",
+                usage: "雅致紫罗兰与暮色冷灰的平衡方案，低饱和不刺眼，适合长时间浏览、海报墙与安静的夜间场景。",
+                primary: AppThemeColorToken(lightHex: "6E5C9E", darkHex: "A491D8"),
+                secondary: AppThemeColorToken(lightHex: "8B7FB0", darkHex: "B7A9DC"),
+                accent: AppThemeColorToken(lightHex: "6553A0", darkHex: "B19EE0"),
+                background: AppThemeColorToken(lightHex: "F5F3F9", darkHex: "15121C"),
+                surface: AppThemeColorToken(lightHex: "FCFBFE", darkHex: "1D1825"),
+                elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "271F33"),
+                border: AppThemeColorToken(lightHex: "E2DCEE", darkHex: "38304A"),
+                textPrimary: AppThemeColorToken(lightHex: "1D1D1F", darkHex: "F4F1FA"),
+                textSecondary: AppThemeColorToken(lightHex: "6A6577", darkHex: "A89FBD"),
+                success: AppThemeColorToken(lightHex: "2FA463", darkHex: "5AD184"),
+                warning: AppThemeColorToken(lightHex: "C98732", darkHex: "E6B866"),
+                error: AppThemeColorToken(lightHex: "D74E45", darkHex: "FF6B62")
             )
         case .coral:
             return AppThemeTokens(
@@ -188,36 +189,36 @@ enum AppThemeResolver {
                 warning: AppThemeColorToken(lightHex: "C98732", darkHex: "E6B866"),
                 error: AppThemeColorToken(lightHex: "D74E45", darkHex: "FF6B62")
             )
-        case .orange, .warm, .apricot:
+        case .orange, .warm, .apricot, .sandGold:
             return AppThemeTokens(
-                name: "Fresh Apricot",
-                usage: "替代旧暖黄的干净暖色主题；更接近浅杏和蜂蜜橙，适合音乐和个人收藏。",
-                primary: AppThemeColorToken(lightHex: "D47938", darkHex: "EB9C55"),
-                secondary: AppThemeColorToken(lightHex: "C49A69", darkHex: "D7AF83"),
-                accent: AppThemeColorToken(lightHex: "C46E2F", darkHex: "F2A861"),
-                background: AppThemeColorToken(lightHex: "FAF5EC", darkHex: "19130E"),
-                surface: AppThemeColorToken(lightHex: "FFFDF9", darkHex: "231910"),
-                elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "302214"),
-                border: AppThemeColorToken(lightHex: "EADCC8", darkHex: "493421"),
-                textPrimary: AppThemeColorToken(lightHex: "1D1D1F", darkHex: "F7F1EA"),
-                textSecondary: AppThemeColorToken(lightHex: "74685A", darkHex: "BDAA94"),
+                name: "Sand Gold",
+                usage: "以香槟金和浅砂岩替代旧橙杏调，保留温度但压低甜腻感，适合收藏、音乐与家庭媒体场景。",
+                primary: AppThemeColorToken(lightHex: "886127", darkHex: "D4AF6A"),
+                secondary: AppThemeColorToken(lightHex: "A88956", darkHex: "C8B083"),
+                accent: AppThemeColorToken(lightHex: "7C571F", darkHex: "E2BA71"),
+                background: AppThemeColorToken(lightHex: "FAF7F0", darkHex: "18150F"),
+                surface: AppThemeColorToken(lightHex: "FFFDF9", darkHex: "221D15"),
+                elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "2C261B"),
+                border: AppThemeColorToken(lightHex: "E7DDCA", darkHex: "453B2A"),
+                textPrimary: AppThemeColorToken(lightHex: "1D1D1F", darkHex: "F7F2E9"),
+                textSecondary: AppThemeColorToken(lightHex: "70685B", darkHex: "B8AA91"),
                 success: AppThemeColorToken(lightHex: "2FA463", darkHex: "5AD184"),
-                warning: AppThemeColorToken(lightHex: "D97928", darkHex: "F0B468"),
+                warning: AppThemeColorToken(lightHex: "B87722", darkHex: "E7B563"),
                 error: AppThemeColorToken(lightHex: "D74E45", darkHex: "FF6B62")
             )
-        case .grape:
+        case .grape, .mica:
             return AppThemeTokens(
-                name: "Muted Grape",
-                usage: "静谧、有格调的紫色主题；适合夜间音乐与个人收藏。紫调压低饱和，不做霓虹或浮夸表达。",
-                primary: AppThemeColorToken(lightHex: "7A57CC", darkHex: "AB8FF0"),
-                secondary: AppThemeColorToken(lightHex: "9C86C8", darkHex: "BCAAE0"),
-                accent: AppThemeColorToken(lightHex: "6F4CC6", darkHex: "B89BF4"),
-                background: AppThemeColorToken(lightHex: "F7F5FC", darkHex: "100E18"),
-                surface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "1A1622"),
-                elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "241F30"),
-                border: AppThemeColorToken(lightHex: "E4DCEE", darkHex: "352E44"),
-                textPrimary: AppThemeColorToken(lightHex: "1D1D1F", darkHex: "F4F1FA"),
-                textSecondary: AppThemeColorToken(lightHex: "6E6878", darkHex: "A99FB8"),
+                name: "Moon Mica",
+                usage: "中性月白、云母灰与钢蓝高亮组成的珍珠主题，适合设置、资料整理和需要低干扰的长时间浏览。",
+                primary: AppThemeColorToken(lightHex: "5B7087", darkHex: "91A6BC"),
+                secondary: AppThemeColorToken(lightHex: "8793A0", darkHex: "A7B1BB"),
+                accent: AppThemeColorToken(lightHex: "52677D", darkHex: "A3B7C9"),
+                background: AppThemeColorToken(lightHex: "F4F5F3", darkHex: "111416"),
+                surface: AppThemeColorToken(lightHex: "FDFDFC", darkHex: "191D20"),
+                elevatedSurface: AppThemeColorToken(lightHex: "FFFFFF", darkHex: "22272B"),
+                border: AppThemeColorToken(lightHex: "DDE1E2", darkHex: "343B40"),
+                textPrimary: AppThemeColorToken(lightHex: "1D1D1F", darkHex: "F4F5F3"),
+                textSecondary: AppThemeColorToken(lightHex: "666D73", darkHex: "A5AFB7"),
                 success: AppThemeColorToken(lightHex: "2FA463", darkHex: "5AD184"),
                 warning: AppThemeColorToken(lightHex: "C98732", darkHex: "E6B866"),
                 error: AppThemeColorToken(lightHex: "D74E45", darkHex: "FF6B62")

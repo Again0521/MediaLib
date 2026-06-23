@@ -71,7 +71,7 @@ struct PrivacyLockView: View {
                 Button("解锁") {
                     unlockWithPIN()
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                 .frame(width: 74)
                 .disabled(!PrivacyLockService.isValidPIN(pin))
 
@@ -81,7 +81,7 @@ struct PrivacyLockView: View {
                     } label: {
                         Label("Touch ID", systemImage: "touchid")
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
                     .frame(width: 118)
                 }
             }
@@ -115,7 +115,7 @@ struct PrivacyLockView: View {
                 Button("设置并解锁") {
                     createPIN()
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                 .disabled(!canCreatePIN)
             }
 

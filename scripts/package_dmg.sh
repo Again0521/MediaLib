@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="MediaLib"
 DISPLAY_NAME="MediaLIB"
 BUNDLE_ID="com.local.MediaLib"
-VERSION="1.2.0"
-BUILD="14"
+VERSION="1.2.1"
+BUILD="15"
 DIST_DIR="$ROOT_DIR/dist"
 BUILD_ROOT="/private/tmp/MediaLib-package"
 APP_BUNDLE="$BUILD_ROOT/$DISPLAY_NAME.app"
@@ -234,6 +234,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <!-- 相册「系统照片」来源：读取 macOS 系统「照片」App 图库需要的用途说明。 -->
+  <key>NSPhotoLibraryUsageDescription</key>
+  <string>MediaLIB 需要访问你的照片图库，以在「相册」中浏览系统照片与录像。</string>
   <!-- 声明可打开的媒体文档类型：作为「系统默认视频/音乐播放器」的前提，
        设置页的「设为默认」按钮按这些声明向 LaunchServices 注册。 -->
   <key>CFBundleDocumentTypes</key>
@@ -286,7 +289,18 @@ PLIST
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 plutil -lint "$APP_BUNDLE/Contents/Info.plist"
 strip_bundle_metadata "$APP_BUNDLE"
-codesign --force --deep --sign - "$APP_BUNDLE" >/dev/null
+
+# 用稳定的本地自签名身份签名（让系统照片/通知等权限只需授权一次，跨重装保留）；
+# 取不到稳定身份时回退到临时(ad-hoc)签名，仍可运行但权限会每次重新弹窗。
+CODESIGN_IDENTITY="-"
+if STABLE_IDENTITY="$("$ROOT_DIR/scripts/ensure_local_signing_identity.sh" 2>/dev/null)" \
+   && [ -n "$STABLE_IDENTITY" ]; then
+  CODESIGN_IDENTITY="$STABLE_IDENTITY"
+  echo "codesign: 使用稳定本地身份「$CODESIGN_IDENTITY」签名。"
+else
+  echo "warning: 未能创建/获取稳定签名身份，回退到 ad-hoc 签名；系统照片与通知权限将每次启动重新弹窗。" >&2
+fi
+codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE" >/dev/null
 codesign --verify --deep --strict "$APP_BUNDLE"
 
 cp -R "$APP_BUNDLE" "$DMG_ROOT/$DISPLAY_NAME.app"

@@ -2726,10 +2726,32 @@ private struct ShelfDock: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 24, style: .continuous).fill(.ultraThinMaterial)
                 RoundedRectangle(cornerRadius: 24, style: .continuous).fill(.white.opacity(colorScheme == .dark ? 0.05 : 0.09))
+                RoundedRectangle(cornerRadius: 24, style: .continuous).fill(
+                    LinearGradient(
+                        colors: [
+                            palette.glowSecondary.color.opacity(colorScheme == .dark ? 0.075 : 0.055),
+                            .clear,
+                            palette.glowPrimary.color.opacity(colorScheme == .dark ? 0.045 : 0.032)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
                 RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(
-                    LinearGradient(colors: [.white.opacity(0.28), .white.opacity(0.07)], startPoint: .top, endPoint: .bottom),
+                    LinearGradient(
+                        colors: [
+                            .white.opacity(colorScheme == .dark ? 0.38 : 0.50),
+                            palette.glowPrimary.color.opacity(0.16),
+                            .white.opacity(0.07)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
                     lineWidth: 1
                 )
+                RoundedRectangle(cornerRadius: 23, style: .continuous)
+                    .strokeBorder(.black.opacity(colorScheme == .dark ? 0.10 : 0.035), lineWidth: 0.7)
+                    .padding(1)
             }
         )
         .shadow(color: ShelfDesignSystem.Elevation.surfaceColor,

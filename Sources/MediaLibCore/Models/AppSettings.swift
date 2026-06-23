@@ -264,7 +264,7 @@ public enum VideoRotationMode: String, Codable, CaseIterable, Identifiable {
 
     public var displayName: String {
         switch self {
-        case .source: return "不旋转"
+        case .source: return "跟随源文件"
         case .clockwise90: return "顺时针 90"
         case .rotate180: return "180"
         case .counterclockwise90: return "逆时针 90"
@@ -273,7 +273,8 @@ public enum VideoRotationMode: String, Codable, CaseIterable, Identifiable {
 
     public var mpvValue: String {
         switch self {
-        case .source: return "no"
+        // mpv 的 `no` 会明确忽略文件旋转元数据；`0` 才是保留源旋转并不追加额外角度。
+        case .source: return "0"
         case .clockwise90: return "90"
         case .rotate180: return "180"
         case .counterclockwise90: return "270"
@@ -1095,10 +1096,14 @@ public enum AppThemePreset: String, Codable, CaseIterable, Identifiable, Sendabl
     case apricot
     case grape
     case mistTeal
+    case mica
+    case sandGold
+    case seaSalt
+    case duskViolet
     case custom
 
     public static var allCases: [AppThemePreset] {
-        [.classic, .coral, .lime, .apricot, .grape, .mistTeal, .oled, .custom]
+        [.classic, .coral, .lime, .mistTeal, .mica, .sandGold, .duskViolet, .custom]
     }
 
     public var id: String { rawValue }
@@ -1108,15 +1113,51 @@ public enum AppThemePreset: String, Codable, CaseIterable, Identifiable, Sendabl
         case .classic, .ocean, .indigo, .purple, .rose, .mint, .green, .frosted: return "清蓝"
         case .coral: return "珊瑚"
         case .lime: return "青柠"
-        case .orange, .warm, .apricot: return "暖杏"
-        case .grape: return "葡萄"
         case .mistTeal: return "雾松"
-        case .graphite, .oled: return "夜幕"
+        case .grape, .mica: return "月白"
+        case .orange, .warm, .apricot, .sandGold: return "砂金"
+        case .graphite, .oled, .seaSalt, .duskViolet: return "暮山紫"
         case .custom: return "自定义"
         }
     }
 
     public var isCustom: Bool { self == .custom }
+
+    /// 旧主题 raw value 继续可解码，但统一映射到当前可选主题，避免升级后出现无选中项。
+    public var canonicalPreset: AppThemePreset {
+        switch self {
+        case .classic, .ocean, .indigo, .purple, .rose, .mint, .green, .frosted:
+            return .classic
+        case .coral:
+            return .coral
+        case .lime:
+            return .lime
+        case .mistTeal:
+            return .mistTeal
+        case .grape, .mica:
+            return .mica
+        case .orange, .warm, .apricot, .sandGold:
+            return .sandGold
+        case .graphite, .oled, .seaSalt, .duskViolet:
+            return .duskViolet
+        case .custom:
+            return .custom
+        }
+    }
+
+    public var paletteDescription: String {
+        switch canonicalPreset {
+        case .classic: return "原生清透"
+        case .coral: return "柔和活力"
+        case .lime: return "清新明快"
+        case .mistTeal: return "安静耐看"
+        case .mica: return "中性珍珠"
+        case .sandGold: return "克制香槟"
+        case .duskViolet: return "雅致紫罗兰"
+        case .custom: return "自由调色"
+        default: return "原生清透"
+        }
+    }
 
     /// 各预设的种子颜色（浅色方案的 底色 / 高亮 / 左上光线，十六进制）。
     /// custom 由用户设置覆盖；深色方案在渲染层按规则派生。
@@ -1128,18 +1169,18 @@ public enum AppThemePreset: String, Codable, CaseIterable, Identifiable, Sendabl
             return ("FAF5F3", "DC5B4F", "FFE7DD")
         case .lime:
             return ("F6F8F2", "6C9C3F", "E9F4DA")
-        case .orange, .warm, .apricot:
-            return ("FAF5EC", "D47938", "FFE9CF")
-        case .grape:
-            return ("F7F5FC", "7A57CC", "EFE7FF")
         case .mistTeal:
             return ("F1F6F4", "3E8D82", "E2F1ED")
-        case .graphite, .oled:
-            return ("F3F5F9", "566FDE", "E1E9FF")
+        case .grape, .mica:
+            return ("F4F5F3", "5B7087", "F4EFE6")
+        case .orange, .warm, .apricot, .sandGold:
+            return ("FAF7F0", "886127", "F7EBD2")
+        case .graphite, .oled, .seaSalt, .duskViolet:
+            return ("F5F3F9", "6E5C9E", "EAE4F4")
         }
     }
 
-    /// 深色外观专用种子。显式给出可以让 OLED Dark 保持非纯黑的夜间基底，
+    /// 深色外观专用种子。显式给出非纯黑基底，避免深色外观失去玻璃层级，
     /// 同时避免浅色外观被误染成深色主题。
     public var darkSeedHex: (base: String, highlight: String, light: String) {
         switch self {
@@ -1149,14 +1190,14 @@ public enum AppThemePreset: String, Codable, CaseIterable, Identifiable, Sendabl
             return ("1A1112", "EE766A", "412320")
         case .lime:
             return ("10170F", "97CB5E", "293E18")
-        case .orange, .warm, .apricot:
-            return ("19130E", "EB9C55", "3C2814")
-        case .grape:
-            return ("100E18", "AB8FF0", "241C40")
         case .mistTeal:
             return ("0C1413", "5BB5A7", "16322D")
-        case .graphite, .oled:
-            return ("0C0E12", "7F94F2", "1C2549")
+        case .grape, .mica:
+            return ("111416", "91A6BC", "2A2D2B")
+        case .orange, .warm, .apricot, .sandGold:
+            return ("18150F", "D4AF6A", "3A2C17")
+        case .graphite, .oled, .seaSalt, .duskViolet:
+            return ("15121C", "A491D8", "2B2440")
         }
     }
 }
@@ -1433,6 +1474,8 @@ public struct AppSettings: Codable, Hashable {
     public var lastMusicVolume: Double
     public var defaultPlaybackRate: Double
     public var enableQuickPreview: Bool
+    /// 是否在「相册」一级目录里接入系统「照片」App 图库（需用户授权照片访问）。
+    public var enableSystemPhotoLibrary: Bool
     public var quickPreviewStartRatio: Double
     public var quickPreviewMuted: Bool
     public var enableThumbnailFallback: Bool
@@ -1571,6 +1614,7 @@ public struct AppSettings: Codable, Hashable {
         lastMusicVolume: Double? = nil,
         defaultPlaybackRate: Double = 1.0,
         enableQuickPreview: Bool = true,
+        enableSystemPhotoLibrary: Bool = false,
         quickPreviewStartRatio: Double = 0.1,
         quickPreviewMuted: Bool = true,
         enableThumbnailFallback: Bool = true,
@@ -1686,6 +1730,7 @@ public struct AppSettings: Codable, Hashable {
         self.lastMusicVolume = Self.clampedVolume(lastMusicVolume ?? defaultVolume)
         self.defaultPlaybackRate = defaultPlaybackRate
         self.enableQuickPreview = enableQuickPreview
+        self.enableSystemPhotoLibrary = enableSystemPhotoLibrary
         self.quickPreviewStartRatio = quickPreviewStartRatio
         self.quickPreviewMuted = quickPreviewMuted
         self.enableThumbnailFallback = enableThumbnailFallback
@@ -1803,6 +1848,7 @@ public struct AppSettings: Codable, Hashable {
         case lastMusicVolume
         case defaultPlaybackRate
         case enableQuickPreview
+        case enableSystemPhotoLibrary
         case quickPreviewStartRatio
         case quickPreviewMuted
         case enableThumbnailFallback
@@ -1904,7 +1950,7 @@ public struct AppSettings: Codable, Hashable {
             defaultPlayer: legacyDefaultPlayer ?? defaults.defaultPlayer,
             appLanguage: try container.decodeIfPresent(AppLanguage.self, forKey: .appLanguage) ?? defaults.appLanguage,
             theme: try container.decodeIfPresent(AppTheme.self, forKey: .theme) ?? defaults.theme,
-            themePreset: try container.decodeIfPresent(AppThemePreset.self, forKey: .themePreset) ?? defaults.themePreset,
+            themePreset: (try container.decodeIfPresent(AppThemePreset.self, forKey: .themePreset) ?? defaults.themePreset).canonicalPreset,
             themeBaseHex: try container.decodeIfPresent(String.self, forKey: .themeBaseHex) ?? defaults.themeBaseHex,
             themeHighlightHex: try container.decodeIfPresent(String.self, forKey: .themeHighlightHex) ?? defaults.themeHighlightHex,
             themeLightHex: try container.decodeIfPresent(String.self, forKey: .themeLightHex) ?? defaults.themeLightHex,
@@ -1933,6 +1979,7 @@ public struct AppSettings: Codable, Hashable {
             lastMusicVolume: try container.decodeIfPresent(Double.self, forKey: .lastMusicVolume) ?? legacyDefaultVolume,
             defaultPlaybackRate: try container.decodeIfPresent(Double.self, forKey: .defaultPlaybackRate) ?? defaults.defaultPlaybackRate,
             enableQuickPreview: try container.decodeIfPresent(Bool.self, forKey: .enableQuickPreview) ?? defaults.enableQuickPreview,
+            enableSystemPhotoLibrary: try container.decodeIfPresent(Bool.self, forKey: .enableSystemPhotoLibrary) ?? defaults.enableSystemPhotoLibrary,
             quickPreviewStartRatio: try container.decodeIfPresent(Double.self, forKey: .quickPreviewStartRatio) ?? defaults.quickPreviewStartRatio,
             quickPreviewMuted: try container.decodeIfPresent(Bool.self, forKey: .quickPreviewMuted) ?? defaults.quickPreviewMuted,
             enableThumbnailFallback: legacyThumbnailFallback,

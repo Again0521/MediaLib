@@ -1,27 +1,73 @@
 import SwiftUI
 
 struct EmptyStateView: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
     let systemImage: String
     let message: String
 
     var body: some View {
-        VStack(spacing: 12) {
-            PlayfulSymbolIcon(systemImage: systemImage, size: 48)
+        VStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                .white.opacity(colorScheme == .dark ? 0.12 : 0.64),
+                                AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.08 : 0.16),
+                                .clear
+                            ],
+                            center: UnitPoint(x: 0.36, y: 0.28),
+                            startRadius: 2,
+                            endRadius: 50
+                        )
+                    )
+                    .frame(width: 104, height: 104)
+                    .blur(radius: 2)
+
+                RoundedRectangle(cornerRadius: 25, style: .continuous)
+                    .fill(AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.40 : 0.72))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 25, style: .continuous)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        .white.opacity(colorScheme == .dark ? 0.22 : 0.74),
+                                        AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.10 : 0.20),
+                                        AppColors.cleanPanelBorder.opacity(0.44)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 1
+                            )
+                    }
+                    .frame(width: 76, height: 76)
+
+                PlayfulSymbolIcon(systemImage: systemImage, size: 52)
+            }
+            .frame(width: 112, height: 104)
+
             Text(title)
                 .font(.title2.weight(.semibold))
+                .multilineTextAlignment(.center)
             Text(message)
+                .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .lineLimit(3)
+                .lineSpacing(3)
+                .frame(maxWidth: AppCardMetrics.emptyStateTextWidth)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, minHeight: AppCardMetrics.emptyStateMinimumHeight)
         .padding(32)
+        .accessibilityElement(children: .combine)
     }
 }
 
 struct AppLoadingView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     let title: String
     let systemImage: String
     var rowCount = 5
@@ -52,20 +98,13 @@ struct AppLoadingView: View {
         .frame(maxWidth: .infinity, minHeight: 320, alignment: .topLeading)
         .staticSurfaceBackground(cornerRadius: 22)
         .onAppear {
-            guard !reduceMotion else {
-                shimmerX = 0.28
-                return
-            }
-            withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
-                shimmerX = 1.4
-            }
+            updateShimmer()
         }
-        .onChange(of: reduceMotion) { reduced in
-            shimmerX = reduced ? 0.28 : -0.4
-            guard !reduced else { return }
-            withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
-                shimmerX = 1.4
-            }
+        .onChange(of: reduceMotion) { _ in
+            updateShimmer()
+        }
+        .onChange(of: scenePhase) { _ in
+            updateShimmer()
         }
     }
 
@@ -97,5 +136,20 @@ struct AppLoadingView: View {
                     )
             }
             .frame(width: width, height: height)
+    }
+
+    private func updateShimmer() {
+        guard !reduceMotion, scenePhase == .active else {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                shimmerX = 0.28
+            }
+            return
+        }
+        shimmerX = -0.4
+        withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
+            shimmerX = 1.4
+        }
     }
 }

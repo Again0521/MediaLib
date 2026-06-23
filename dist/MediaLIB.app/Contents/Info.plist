@@ -19,9 +19,9 @@
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.2.0</string>
+  <string>1.2.1</string>
   <key>CFBundleVersion</key>
-  <string>14</string>
+  <string>15</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSApplicationCategoryType</key>
@@ -30,6 +30,9 @@
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <!-- 相册「系统照片」来源：读取 macOS 系统「照片」App 图库需要的用途说明。 -->
+  <key>NSPhotoLibraryUsageDescription</key>
+  <string>MediaLIB 需要访问你的照片图库，以在「相册」中浏览系统照片与录像。</string>
   <!-- 声明可打开的媒体文档类型：作为「系统默认视频/音乐播放器」的前提，
        设置页的「设为默认」按钮按这些声明向 LaunchServices 注册。 -->
   <key>CFBundleDocumentTypes</key>

@@ -44,6 +44,13 @@ struct SourcesView: View {
                     )
                     .frame(minHeight: 320)
                 } else {
+                    AppSectionHeading(
+                        title: "已连接媒体源",
+                        subtitle: "状态、参与策略和扫描操作集中在每个来源行中。",
+                        systemImage: "externaldrive.connected.to.line.below",
+                        badgeText: "\(appState.sources.count) 个"
+                    )
+
                     LazyVStack(spacing: 12) {
                         ForEach(appState.sources) { source in
                             SourceRowView(source: source)
@@ -79,14 +86,14 @@ struct SourcesView: View {
             } label: {
                 Label("添加媒体源…", systemImage: "plus")
             }
-            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32, prominent: true))
+            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
 
             Button {
                 appState.scanAllSources()
             } label: {
                 Label("扫描全部", systemImage: "arrow.clockwise")
             }
-            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
+            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
             .disabled(appState.sources.isEmpty || appState.isScanning)
         }
     }
@@ -115,7 +122,7 @@ private struct AddMediaSourceWizardSheet: View {
 
     private let columns = [GridItem(.adaptive(minimum: 188), spacing: 10)]
     private let mediaTypes: [MediaType] = [
-        .auto, .movie, .tvShow, .anime, .documentary, .variety, .homeVideo, .music, .other, .privateCollection
+        .auto, .movie, .tvShow, .anime, .documentary, .variety, .homeVideo, .music, .photo, .other, .privateCollection
     ]
     private let contentInset: CGFloat = 2
 
@@ -136,7 +143,7 @@ private struct AddMediaSourceWizardSheet: View {
                     Button("取消", role: .cancel) {
                         dismiss()
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
 
                     if step != .source {
                         Button("上一步") {
@@ -144,7 +151,7 @@ private struct AddMediaSourceWizardSheet: View {
                                 step = previousStep
                             }
                         }
-                        .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                        .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
                     }
 
                     Button {
@@ -152,7 +159,7 @@ private struct AddMediaSourceWizardSheet: View {
                     } label: {
                         Label(primaryActionTitle, systemImage: primaryActionIcon)
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                     .disabled(submitDisabled)
                 }
             }
@@ -272,7 +279,7 @@ private struct AddMediaSourceWizardSheet: View {
                 } label: {
                     Label(selectedURLs.isEmpty ? "选择文件夹" : "重新选择文件夹", systemImage: "folder.badge.plus")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32, prominent: selectedURLs.isEmpty))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight, prominent: selectedURLs.isEmpty))
 
                 Text(localSelectionSummary)
                     .font(.caption)
@@ -745,7 +752,7 @@ private struct SourceSettingsSheet: View {
     @State private var errorMessage: String?
 
     private let mediaTypes: [MediaType] = [
-        .auto, .movie, .tvShow, .anime, .documentary, .variety, .homeVideo, .music, .other, .privateCollection
+        .auto, .movie, .tvShow, .anime, .documentary, .variety, .homeVideo, .music, .photo, .other, .privateCollection
     ]
 
     init(source: MediaSource) {
@@ -793,14 +800,14 @@ private struct SourceSettingsSheet: View {
                 Button("取消", role: .cancel) {
                     dismiss()
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
 
                 Button {
                     save()
                 } label: {
                     Label(isSaving ? "保存中" : saveTitle, systemImage: "checkmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                 .disabled(saveDisabled)
             }
         }
@@ -1151,6 +1158,7 @@ private struct MediaTypeGridPicker: View {
         case .other: return "tray"
         case .privateCollection: return "lock"
         case .episode: return "list.number"
+        case .photo: return "photo.on.rectangle.angled"
         }
     }
 }
@@ -1170,18 +1178,41 @@ struct SourceRowView: View {
 
         HStack(spacing: 14) {
             ZStack {
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: AppCardMetrics.compactArtworkCornerRadius, style: .continuous)
                     .fill(isReachable ? AppColors.selectedGlassTint.opacity(0.12) : Color.orange.opacity(0.14))
+                RoundedRectangle(cornerRadius: AppCardMetrics.compactArtworkCornerRadius, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0.24), .clear],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
                 Image(systemName: iconName)
                     .font(.title2)
                     .foregroundStyle(isReachable ? AppColors.selectedGlassTint.opacity(0.90) : Color.orange.opacity(0.88))
             }
             .frame(width: 52, height: 52)
+            .overlay {
+                RoundedRectangle(cornerRadius: AppCardMetrics.compactArtworkCornerRadius, style: .continuous)
+                    .strokeBorder(.white.opacity(isHovering && !suppressHoverDuringScroll ? 0.48 : 0.24), lineWidth: 0.8)
+            }
 
             VStack(alignment: .leading, spacing: 5) {
-                HStack {
+                HStack(spacing: 8) {
                     Text(sourceTitle(isLockedPrivateSource: isLockedPrivateSource))
                         .font(.headline)
+
+                    AppStatusBadge(
+                        title: isReachable ? "可访问" : "不可访问",
+                        systemImage: isReachable ? "checkmark.circle" : "exclamationmark.circle",
+                        tint: isReachable ? AppColors.selectedGlassTint : .orange
+                    )
+
+                    AppStatusBadge(
+                        title: source.sourceKind.displayName,
+                        systemImage: source.sourceKind.isRemoteMediaServer ? "server.rack" : (source.sourceKind == .local ? "internaldrive" : "network")
+                    )
                 }
                 if isLockedPrivateSource {
                     Text("路径已隐藏，解锁\(appState.settings.privacyVaultName)后可查看。")
@@ -1199,20 +1230,13 @@ struct SourceRowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 12) {
-                if !isReachable {
-                    Text("不可访问")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(Color.orange)
-                        .frame(width: 58, alignment: .trailing)
-                }
-
                 Button {
                     showingSettings = true
                 } label: {
                     Image(systemName: "slider.horizontal.3")
                         .frame(width: 18, height: 18)
                 }
-                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: 32, thickness: 0.96))
+                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
                 .help("设置")
 
                 if !isReachable, appState.canRemountNetworkSource(source) {
@@ -1222,7 +1246,7 @@ struct SourceRowView: View {
                         Image(systemName: "arrow.triangle.2.circlepath")
                             .frame(width: 18, height: 18)
                     }
-                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: 32, thickness: 0.96))
+                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
                     .help("重新挂载")
                 }
 
@@ -1232,7 +1256,7 @@ struct SourceRowView: View {
                     Image(systemName: "arrow.clockwise")
                         .frame(width: 18, height: 18)
                 }
-                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: 32, thickness: 0.96))
+                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
                 .disabled(appState.isScanning || !isReachable)
                 .help("扫描")
 
@@ -1243,7 +1267,7 @@ struct SourceRowView: View {
                         .frame(width: 18, height: 18)
                         .foregroundStyle(.red)
                 }
-                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: 32, thickness: 0.96))
+                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
                 .help("删除")
                 .confirmationDialog(
                     "删除媒体源「\(sourceTitle(isLockedPrivateSource: isLockedPrivateSource))」？",
@@ -1260,9 +1284,10 @@ struct SourceRowView: View {
             }
             .fixedSize(horizontal: true, vertical: false)
         }
-        .padding(14)
+        .padding(AppCardMetrics.repeatedContentPadding)
         .frame(maxWidth: .infinity, alignment: .trailing)
-        .staticSurfaceBackground(selected: isHovering && !suppressHoverDuringScroll, cornerRadius: 18)
+        .staticSurfaceBackground(selected: isHovering && !suppressHoverDuringScroll, cornerRadius: AppCardMetrics.repeatedCornerRadius)
+        .repeatedCardChrome(isHovering && !suppressHoverDuringScroll)
         .scaleEffect(!reduceMotion && isHovering && !suppressHoverDuringScroll ? 1.002 : 1)
         .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering && !suppressHoverDuringScroll)
         .onHover { hovering in

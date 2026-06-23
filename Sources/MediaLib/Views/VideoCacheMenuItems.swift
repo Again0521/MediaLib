@@ -310,13 +310,15 @@ struct VideoOfflineSubscriptionLimitSheet: View {
 
             AppSheetActionFooter {
                 Button("取消", action: onCancel)
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                    .keyboardShortcut(.cancelAction)
                 Button {
                     onSave(episodeLimit)
                 } label: {
                     Label("保存", systemImage: "checkmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+                .keyboardShortcut(.defaultAction)
             }
         }
         .appSheetChrome(width: 500)

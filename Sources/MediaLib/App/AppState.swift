@@ -359,13 +359,26 @@ private extension RemoteConnectorProvider {
     }
 }
 
+struct DetailReturnContext: Equatable, Sendable {
+    let destinationID: String
+    let anchorID: String
+    let searchText: String?
+}
+
+private enum DetailNavigationNode: Equatable, Sendable {
+    case media(String)
+    case person(String)
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var sources: [MediaSource] = []
     @Published var items: [MediaItem] = []
     @Published var settings: AppSettings
     @Published var selectedItem: MediaItem?
-    @Published var selectedItemReturnAnchorID: String?
+    @Published var selectedPersonID: String?
+    @Published private(set) var detailReturnContext: DetailReturnContext?
+    private var detailNavigationHistory: [DetailNavigationNode] = []
     @Published var activePlayerItem: MediaItem?
     /// 视频播放队列（播放器内剧集列表）：播放系列中的某一集时，
     /// 自动装入「当前集 + 之后的同系列剧集」；独立影片只含自身。
@@ -424,6 +437,9 @@ final class AppState: ObservableObject {
     @Published private(set) var pendingSyncConflictCount = 0
     @Published private(set) var pendingSyncConflicts: [SyncConflict] = []
     @Published private(set) var remoteConnectorAccounts: [RemoteConnectorAccount] = []
+    @Published private(set) var detailMetadataGapsByMediaID: [String: Set<String>] = [:]
+    @Published private(set) var detailSearchTermsByMediaID: [String: [String]] = [:]
+    @Published private(set) var mediaSearchRevision = 0
     @Published var videoManualCollectionCreationRequest: VideoManualCollectionCreationRequest?
     @Published var videoOfflineSubscriptionLimitRequest: VideoOfflineSubscriptionLimitRequest?
     @Published var musicSmartPlaylists: [MusicSmartPlaylist] = []
@@ -433,6 +449,7 @@ final class AppState: ObservableObject {
     @Published private(set) var isConnectingEmby = false
     @Published private(set) var isConnectingJellyfin = false
     @Published private(set) var isConnectingPlex = false
+    private var detailBackfillTask: Task<Void, Never>?
     @Published var musicMetadataFetchProgress = ""
     @Published private(set) var libraryRevision = 0
     /// 仅在 reload() 完成（元数据/封面路径真实变化）时递增；文件存在性检查不会触发它。
@@ -462,6 +479,7 @@ final class AppState: ObservableObject {
     private let musicSmartPlaylistRepository: MusicSmartPlaylistRepository?
     private let playbackMarkerRepository: PlaybackMarkerRepository?
     private let metadataCorrectionRepository: MetadataCorrectionRepository?
+    private let mediaDetailRepository: MediaDetailRepository?
     private let syncConflictRepository: SyncConflictRepository?
     private let remoteConnectorAccountRepository: RemoteConnectorAccountRepository?
     private let videoOfflineCacheStore: VideoOfflineCacheStore?
@@ -479,6 +497,7 @@ final class AppState: ObservableObject {
     private var automaticTMDBMatchTask: Task<Void, Never>?
     private var configuredAutomaticTMDBMatchInterval: AutomaticScanInterval?
     private var tmdbMatchTask: Task<Void, Never>?
+    private var detailEnrichmentTasks: [String: Task<TMDBEnrichment?, Never>] = [:]
     private var videoCacheJobs: [UUID: VideoCacheJob] = [:]
     private var videoOfflineSubscriptionMaintenanceTask: Task<Void, Never>?
     private var videoOfflineSubscriptionExpirationTask: Task<Void, Never>?
@@ -508,6 +527,7 @@ final class AppState: ObservableObject {
     private var cachedMusicTracks: [MediaItem] = []
     private var cachedMusicTracksByID: [String: MediaItem] = [:]
     private var cachedEmbyTopLevelItems: [MediaItem] = []
+    private var cachedAlbumItems: [MediaItem] = []
     private var cachedHomeVideoItems: [MediaItem] = []
     private var cachedHomeOfflineVideoItems: [MediaItem] = []
     private var cachedEmbyLibrarySummaries: [EmbyLibrarySummary] = []
@@ -527,6 +547,8 @@ final class AppState: ObservableObject {
     private var cachedOfflineSources: [MediaSource] = []
     private var cachedOfflineSourceIDs: Set<String> = []
     private var cachedHomeStats = HomeStatsSnapshot()
+    private var mediaExternalIDIndex: [String: String] = [:]
+    private var mediaIDsByPersonID: [String: Set<String>] = [:]
     private var fileHealthTask: Task<Void, Never>?
     private var fileHealthRefreshID = UUID()
     private lazy var localFileEventMonitor = LocalFileEventMonitor { [weak self] changes in
@@ -548,6 +570,74 @@ final class AppState: ObservableObject {
     private var settingsPersistTask: Task<Void, Never>?
     /// 正在进行 Last.fm 授权/连接操作。
     @Published var isLastfmAuthorizing = false
+
+    func presentDetail(
+        _ item: MediaItem,
+        from destinationID: String,
+        anchorID: String,
+        searchText: String? = nil
+    ) {
+        let normalizedSearchText = searchText?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        detailNavigationHistory.removeAll()
+        selectedPersonID = nil
+        // 先切入详情，再发布返回上下文，避免仍挂载的来源页把“打开详情”误判成“正在返回”并提前消费。
+        selectedItem = item
+        detailReturnContext = DetailReturnContext(
+            destinationID: destinationID,
+            anchorID: anchorID,
+            searchText: normalizedSearchText?.isEmpty == false ? normalizedSearchText : nil
+        )
+    }
+
+    func presentRelatedDetail(_ item: MediaItem) {
+        if let selectedItem, selectedItem.id != item.id {
+            detailNavigationHistory.append(.media(selectedItem.id))
+        } else if let selectedPersonID {
+            detailNavigationHistory.append(.person(selectedPersonID))
+        }
+        selectedPersonID = nil
+        self.selectedItem = item
+    }
+
+    func presentPersonDetail(_ personID: String) {
+        if let selectedItem {
+            detailNavigationHistory.append(.media(selectedItem.id))
+        } else if let selectedPersonID, selectedPersonID != personID {
+            detailNavigationHistory.append(.person(selectedPersonID))
+        }
+        selectedItem = nil
+        selectedPersonID = personID
+    }
+
+    func dismissDetail() {
+        guard let previous = detailNavigationHistory.popLast() else {
+            selectedItem = nil
+            selectedPersonID = nil
+            return
+        }
+        switch previous {
+        case .media(let id):
+            selectedPersonID = nil
+            selectedItem = items.first(where: { $0.id == id })
+        case .person(let id):
+            selectedItem = nil
+            selectedPersonID = id
+        }
+    }
+
+    func consumeDetailReturnContext(destinationID: String, anchorID: String) {
+        guard detailReturnContext?.destinationID == destinationID,
+              detailReturnContext?.anchorID == anchorID else { return }
+        detailReturnContext = nil
+    }
+
+    func clearDetailNavigation() {
+        detailNavigationHistory.removeAll()
+        detailReturnContext = nil
+        selectedItem = nil
+        selectedPersonID = nil
+    }
 
     init() {
         let loadedSettings = settingsStore.load()
@@ -575,6 +665,7 @@ final class AppState: ObservableObject {
             self.musicSmartPlaylistRepository = MusicSmartPlaylistRepository(database: database)
             self.playbackMarkerRepository = PlaybackMarkerRepository(database: database)
             self.metadataCorrectionRepository = MetadataCorrectionRepository(database: database)
+            self.mediaDetailRepository = MediaDetailRepository(database: database)
             self.syncConflictRepository = SyncConflictRepository(database: database)
             self.remoteConnectorAccountRepository = RemoteConnectorAccountRepository(database: database)
             do {
@@ -597,6 +688,7 @@ final class AppState: ObservableObject {
             configureAutomaticScan()
             configureLocalFileEventMonitoring()
             configureAutomaticTMDBMatch()
+            scheduleVersion19DetailBackfillIfNeeded()
         } catch {
             self.directories = nil
             self.logger = nil
@@ -611,6 +703,7 @@ final class AppState: ObservableObject {
             self.musicSmartPlaylistRepository = nil
             self.playbackMarkerRepository = nil
             self.metadataCorrectionRepository = nil
+            self.mediaDetailRepository = nil
             self.syncConflictRepository = nil
             self.remoteConnectorAccountRepository = nil
             self.videoOfflineCacheStore = nil
@@ -629,6 +722,8 @@ final class AppState: ObservableObject {
     }
 
     deinit {
+        detailBackfillTask?.cancel()
+        detailEnrichmentTasks.values.forEach { $0.cancel() }
         networkPathMonitor?.cancel()
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
@@ -651,6 +746,32 @@ final class AppState: ObservableObject {
 
     var embyTopLevelItems: [MediaItem] {
         cachedEmbyTopLevelItems
+    }
+
+    /// 相册条目（本地「相册」源里的照片与录像）。独立于视频库，仅在相册一级目录展示。
+    var albumItems: [MediaItem] {
+        cachedAlbumItems
+    }
+
+    /// 当前配置的「相册」源根路径集合（mediaType == .photo）。
+    var albumSourcePaths: Set<String> {
+        Set(sources.filter { $0.mediaType == .photo }.map(\.path))
+    }
+
+    /// 是否在侧边栏展示「相册」一级目录：有相册源/条目，或已接入系统照片图库。
+    var showsAlbumSection: Bool {
+        true
+    }
+
+    /// 判断条目是否属于相册（照片，或归属相册源的录像）。
+    func isAlbumItem(_ item: MediaItem) -> Bool {
+        guard !Self.isRemoteMediaServerItem(item),
+              source(for: item)?.sourceKind.isRemoteMediaServer != true else {
+            return false
+        }
+        if item.type == .photo { return true }
+        guard let sourcePath = item.sourcePath else { return false }
+        return albumSourcePaths.contains { Self.isSourcePath(sourcePath, inside: $0) }
     }
 
     var privateTopLevelItems: [MediaItem] {
@@ -687,6 +808,19 @@ final class AppState: ObservableObject {
 
     var missingMetadataItems: [MediaItem] {
         cachedMissingMetadataItems.filter(healthCheckEnabled(for:))
+    }
+
+    var detailMetadataGapItems: [MediaItem] {
+        topLevelItems.filter {
+            detailMetadataGapsByMediaID[$0.id] != nil &&
+                healthCheckEnabled(for: $0) &&
+                !(isPrivateItem($0) && !canDisplayPrivateItems)
+        }
+    }
+
+    func detailMetadataGapDescription(for item: MediaItem) -> String {
+        let values = detailMetadataGapsByMediaID[item.id] ?? []
+        return values.sorted().joined(separator: "、")
     }
 
     var offlineSources: [MediaSource] {
@@ -795,13 +929,54 @@ final class AppState: ObservableObject {
                 break
             }
             base = musicTracks(inSmart: playlist)
+        case .album(let section):
+            switch section {
+            case .all:
+                base = cachedAlbumItems
+            case .photos:
+                base = cachedAlbumItems.filter { $0.type == .photo }
+            case .videos:
+                base = cachedAlbumItems.filter { $0.type != .photo }
+            }
         }
 
         guard !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return base }
-        // 拼音/首字母/模糊搜索：支持"贝加尔"用 beijiaer / bje 命中。
-        return base.filter {
-            PinyinSearchMatcher.matches(query: searchText, in: [$0.title, $0.originalTitle, $0.artist, $0.album])
+        return base.filter { matchesMediaSearch(query: searchText, item: $0) }
+    }
+
+    func mediaSearchFields(for item: MediaItem) -> [String?] {
+        var fields: [String?] = [
+            item.title,
+            item.originalTitle,
+            item.artist,
+            item.album,
+            item.overview,
+            item.genre,
+            item.year.map(String.init),
+            item.externalID,
+            item.metadataProvider,
+            item.collectionTitle,
+            item.videoCodec,
+            item.audioCodec,
+            item.resolution
+        ]
+        fields.append(contentsOf: (detailSearchTermsByMediaID[item.id] ?? []).map(Optional.some))
+        for episode in cachedChildrenByParentID[item.id] ?? [] {
+            fields.append(contentsOf: [
+                episode.title,
+                episode.originalTitle,
+                episode.overview,
+                episode.genre,
+                episode.episodeLabel,
+                episode.seasonNumber.map { "第 \($0) 季" },
+                episode.episodeNumber.map { "第 \($0) 集" }
+            ])
         }
+        return fields
+    }
+
+    func matchesMediaSearch(query: String, item: MediaItem) -> Bool {
+        PinyinSearchMatcher.matches(query: query, in: mediaSearchFields(for: item))
     }
 
     func videoSmartCollection(id: String) -> VideoSmartCollection? {
@@ -2549,6 +2724,20 @@ final class AppState: ObservableObject {
             pendingSyncConflicts = try syncConflictRepository?.fetchPending(limit: 120) ?? []
             remoteConnectorAccounts = try remoteConnectorAccountRepository?.fetchAll() ?? []
             items = fetchedItems
+            let detailCandidateIDs = fetchedItems.compactMap { item -> String? in
+                guard item.parentID == nil,
+                      item.type != .music,
+                      item.type != .photo,
+                      item.type != .homeVideo,
+                      item.type != .privateCollection else { return nil }
+                return item.id
+            }
+            detailMetadataGapsByMediaID = try mediaDetailRepository?
+                .detailCompleteness(mediaIDs: detailCandidateIDs) ?? [:]
+            detailSearchTermsByMediaID = try mediaDetailRepository?.searchTermsByMediaID() ?? [:]
+            mediaExternalIDIndex = try mediaDetailRepository?.externalMediaIDIndex() ?? [:]
+            mediaIDsByPersonID = try mediaDetailRepository?.mediaIDsByPersonID() ?? [:]
+            mediaSearchRevision += 1
             logPerformance("reload.fetch repositories: \(Self.milliseconds(since: fetchStart))ms items=\(items.count) sources=\(sources.count) playlists=\(musicPlaylists.count)")
             let cacheStart = Date()
             rebuildDerivedItemCaches()
@@ -2604,6 +2793,7 @@ final class AppState: ObservableObject {
         var topLevelRaw: [MediaItem] = []
         var privateTopLevelRaw: [MediaItem] = []
         var musicTracksRaw: [MediaItem] = []
+        var albumRaw: [MediaItem] = []
         var embyTopLevelRaw: [MediaItem] = []
         var continueWatchingRaw: [MediaItem] = []
         var watchingRaw: [MediaItem] = []
@@ -2629,10 +2819,31 @@ final class AppState: ObservableObject {
         let watchedThreshold = settings.watchedThreshold
         // 不参与健康检查的来源路径：其条目不计入元数据缺口/重复等健康统计（重新检测时即生效）。
         let healthExcludedSourcePaths = sources.filter { !$0.includeInHealthCheck }.map(\.path)
+        // 相册源根路径：照片与其录像归属相册，绝不串入视频库/首页/健康统计。
+        let albumSourcePaths = sources.filter { $0.mediaType == .photo }.map(\.path)
+        let remoteSourcePaths = sources.filter { $0.sourceKind.isRemoteMediaServer }.map(\.path)
 
         for item in items {
-            let isEmby = Self.isEmbyItem(item)
+            let hasRemoteScheme = Self.isRemoteMediaServerItem(item)
+            let isEmby = item.sourcePath.map { sourcePath in
+                remoteSourcePaths.contains { Self.isSourcePath(sourcePath, inside: $0) }
+            } ?? false
             let isPrivate = privateItemIDs.contains(item.id)
+            // 已删除来源留下的远程孤儿不能回流到本地视频、相册或首页分类。
+            if hasRemoteScheme && !isEmby {
+                continue
+            }
+            let isRemoteMediaServerItem = hasRemoteScheme || isEmby
+            let isAlbum = !isRemoteMediaServerItem && (
+                item.type == .photo ||
+                (item.sourcePath.map { sourcePath in
+                    albumSourcePaths.contains { Self.isSourcePath(sourcePath, inside: $0) }
+                } ?? false)
+            )
+            if isAlbum {
+                if !isPrivate { albumRaw.append(item) }
+                continue
+            }
 
             if !isEmby,
                item.type != .music,
@@ -2763,6 +2974,8 @@ final class AppState: ObservableObject {
         }
         cachedMusicTracksByID = Dictionary(uniqueKeysWithValues: cachedMusicTracks.map { ($0.id, $0) })
         cachedEmbyTopLevelItems = embyTopLevelRaw.sorted { $0.updatedAt > $1.updatedAt }
+        // 相册按拍摄日期（扫描时写入 createdAt）倒序，最新在前，照片 App 习惯。
+        cachedAlbumItems = albumRaw.sorted { $0.createdAt > $1.createdAt }
         cachedHomeVideoItems = (cachedTopLevelItems + cachedEmbyTopLevelItems.filter { $0.type != .music })
             .sorted { $0.updatedAt > $1.updatedAt }
         cachedHomeOfflineVideoItems = cachedHomeVideoItems.filter { includesCachedVideo($0) }
@@ -3348,6 +3561,7 @@ final class AppState: ObservableObject {
             )
             try await importPlexItems(source: source, session: session)
             reload()
+            scheduleVersion19DetailBackfillIfNeeded()
             finishBackgroundTask(id: taskID, errors: [])
             alert = AppAlert(title: "Plex 已连接", message: "\(hostName) 的媒体库已同步到 Plex 目录。")
         } catch {
@@ -3454,6 +3668,7 @@ final class AppState: ObservableObject {
             )
             try await importEmbyItems(source: source, session: session)
             reload()
+            scheduleVersion19DetailBackfillIfNeeded()
             finishBackgroundTask(id: taskID, errors: [])
             alert = AppAlert(title: "\(provider.displayName) 已连接", message: "\(hostName) 的媒体库已同步到 \(provider.mediaSourceDisplayName) 目录。")
         } catch {
@@ -3586,6 +3801,7 @@ final class AppState: ObservableObject {
             }
             finishBackgroundTask(id: taskID, errors: [])
             reload()
+            scheduleVersion19DetailBackfillIfNeeded()
         } catch {
             finishBackgroundTask(id: taskID, errors: [error.localizedDescription])
             if !presentEmbyRestrictionIfNeeded(error, serverHost: Self.embyServerHost(for: source)) {
@@ -3609,6 +3825,7 @@ final class AppState: ObservableObject {
             }
             finishBackgroundTask(id: taskID, errors: [])
             reload()
+            scheduleVersion19DetailBackfillIfNeeded()
         } catch {
             finishBackgroundTask(id: taskID, errors: [error.localizedDescription])
             showError("Plex 同步失败", error)
@@ -3679,6 +3896,9 @@ final class AppState: ObservableObject {
             embyItems = embyItems.map(preservingLocalTraceForDisabledEmbySync)
         }
         try mediaRepository.replaceRemoteItems(sourcePathPrefix: source.path, with: embyItems)
+        try mediaDetailRepository?.prepareBackfill(
+            mediaIDs: embyItems.filter { $0.parentID == nil && $0.type != .music }.map(\.id)
+        )
         scheduleEmbyArtworkWarmup(source: source, items: embyItems)
     }
 
@@ -3694,6 +3914,9 @@ final class AppState: ObservableObject {
             plexItems = plexItems.map(preservingLocalTraceForDisabledEmbySync)
         }
         try mediaRepository.replaceRemoteItems(sourcePathPrefix: source.path, with: plexItems)
+        try mediaDetailRepository?.prepareBackfill(
+            mediaIDs: plexItems.filter { $0.parentID == nil && $0.type != .music }.map(\.id)
+        )
         scheduleEmbyArtworkWarmup(source: source, items: plexItems)
     }
 
@@ -3910,6 +4133,479 @@ final class AppState: ObservableObject {
         return sources.first { source in
             source.sourceKind.isRemoteMediaServer &&
             Self.isSourcePath(item.sourcePath, inside: source.path)
+        }
+    }
+
+    /// 该条目是否能展示详情页「详情」栏：已匹配 TMDB 的本地条目，或来自远程媒体服务器。
+    func supportsDetailExtras(_ item: MediaItem) -> Bool {
+        guard item.type != .music else { return false }
+        if item.externalID?.hasPrefix("tmdb:") == true { return true }
+        return embySource(for: item)?.sourceKind.isRemoteMediaServer == true
+    }
+
+    func cachedDetailSnapshot(for item: MediaItem) -> MediaDetailSnapshot? {
+        try? mediaDetailRepository?.fetch(mediaID: item.id)
+    }
+
+    func loadDetailSnapshot(for item: MediaItem, forceRefresh: Bool = false) async -> MediaDetailSnapshot? {
+        let cached = cachedDetailSnapshot(for: item)
+        let maxAge: TimeInterval = 30 * 24 * 60 * 60
+        if !forceRefresh, let cached,
+           Date().timeIntervalSince(cached.metadata.fetchedAt) < maxAge {
+            return snapshotWithLocalMatches(cached)
+        }
+        guard let enrichment = await detailEnrichment(for: item, forceRefresh: forceRefresh) else {
+            return cached.map(snapshotWithLocalMatches)
+        }
+        var snapshot = enrichment.snapshot(
+            mediaID: item.id,
+            provider: item.metadataProvider ?? "TMDB",
+            language: settings.tmdbLanguage.isEmpty ? "zh-CN" : settings.tmdbLanguage
+        )
+        if let source = embySource(for: item), let externalID = item.externalID {
+            snapshot.externalIDs.append(
+                MediaExternalID(provider: source.sourceKind.rawValue, value: externalID)
+            )
+        }
+        snapshot = snapshotWithLocalMatches(snapshot)
+        do {
+            try mediaDetailRepository?.save(snapshot)
+            detailMetadataGapsByMediaID[item.id] = (
+                try? mediaDetailRepository?.detailCompleteness(mediaIDs: [item.id])[item.id]
+            ) ?? nil
+            detailSearchTermsByMediaID = try mediaDetailRepository?.searchTermsByMediaID() ?? detailSearchTermsByMediaID
+            mediaExternalIDIndex = try mediaDetailRepository?.externalMediaIDIndex() ?? mediaExternalIDIndex
+            mediaIDsByPersonID = try mediaDetailRepository?.mediaIDsByPersonID() ?? mediaIDsByPersonID
+            mediaSearchRevision += 1
+        } catch {
+            logger?.log("详情资料保存失败（\(item.title)）：\(error.localizedDescription)", level: .warning)
+        }
+        return snapshot
+    }
+
+    func personDetail(personID: String) async -> MediaPerson? {
+        let cached = try? mediaDetailRepository?.fetchPerson(id: personID)
+        if let cached,
+           !cached.filmography.isEmpty,
+           Date().timeIntervalSince(cached.updatedAt) < 30 * 24 * 60 * 60 {
+            return cached
+        }
+        guard personID.hasPrefix("tmdb-person-"),
+              let numericID = Int(personID.dropFirst("tmdb-person-".count)),
+              let apiKey = settings.tmdbAPIKey,
+              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return cached
+        }
+        do {
+            let person = try await TMDBEnrichmentService().fetchPerson(
+                personID: numericID,
+                apiKey: apiKey,
+                language: settings.tmdbLanguage
+            )
+            try mediaDetailRepository?.savePerson(person)
+            return person
+        } catch {
+            logger?.log("人物资料加载失败：\(error.localizedDescription)", level: .warning)
+            return cached
+        }
+    }
+
+    func libraryCredits(personID: String) -> [MediaPersonLibraryCredit] {
+        let values = (try? mediaDetailRepository?.libraryCredits(personID: personID)) ?? []
+        return values.filter { credit in
+            !(isPrivateItem(credit.media) && !canDisplayPrivateItems)
+        }
+    }
+
+    func libraryItems(
+        person: MediaPerson,
+        directCredits: [MediaPersonLibraryCredit]
+    ) -> [MediaItem] {
+        var resultByID: [String: MediaItem] = [:]
+        for credit in directCredits {
+            resultByID[credit.media.id] = credit.media
+        }
+        for work in person.knownFor + person.filmography {
+            if let item = libraryItem(
+                matchingExternalID: work.id,
+                title: work.title,
+                year: work.year
+            ) {
+                resultByID[item.id] = item
+            }
+        }
+        return resultByID.values.sorted {
+            if ($0.year ?? 0) != ($1.year ?? 0) {
+                return ($0.year ?? 0) > ($1.year ?? 0)
+            }
+            return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+        }
+    }
+
+    func libraryItem(
+        matchingExternalID externalID: String?,
+        title: String,
+        year: Int?
+    ) -> MediaItem? {
+        let candidates = visibleLibraryVideoItems
+        if let externalID, !externalID.isEmpty {
+            let normalizedID = externalID.lowercased()
+            if let mediaID = mediaExternalIDIndex[normalizedID],
+               let item = candidates.first(where: { $0.id == mediaID }) {
+                return item
+            }
+            if let item = candidates.first(where: {
+                $0.id == externalID || $0.externalID?.caseInsensitiveCompare(externalID) == .orderedSame
+            }) {
+                return item
+            }
+        }
+
+        let normalizedTitle = Self.normalizedMediaLookupTitle(title)
+        guard !normalizedTitle.isEmpty else { return nil }
+        var titleMatches = candidates.filter {
+            Self.normalizedMediaLookupTitle($0.title) == normalizedTitle ||
+                Self.normalizedMediaLookupTitle($0.originalTitle ?? "") == normalizedTitle
+        }
+        if let year {
+            let closeYearMatches = titleMatches.filter {
+                guard let itemYear = $0.year else { return false }
+                return abs(itemYear - year) <= 1
+            }
+            if !closeYearMatches.isEmpty {
+                titleMatches = closeYearMatches
+            }
+        }
+        return titleMatches.count == 1 ? titleMatches[0] : nil
+    }
+
+    func libraryRecommendations(
+        for item: MediaItem,
+        snapshot: MediaDetailSnapshot,
+        limit: Int = 24
+    ) -> [MediaRelatedTitle] {
+        let currentGenres = Self.mediaGenreKeys(item.genre)
+        let currentPersonIDs = Set(snapshot.credits.map(\.personID))
+        var sharedCreditCounts: [String: Int] = [:]
+        for personID in currentPersonIDs {
+            for mediaID in mediaIDsByPersonID[personID] ?? [] where mediaID != item.id {
+                sharedCreditCounts[mediaID, default: 0] += 1
+            }
+        }
+
+        return visibleLibraryVideoItems
+            .filter { $0.id != item.id }
+            .compactMap { candidate -> (MediaItem, Double)? in
+                var score = 0.0
+                let genreOverlap = currentGenres.intersection(Self.mediaGenreKeys(candidate.genre)).count
+                score += Double(genreOverlap) * 2.0
+                score += Double(sharedCreditCounts[candidate.id] ?? 0) * 3.0
+                if candidate.type == item.type { score += 0.8 }
+                if let year = candidate.year, let currentYear = item.year {
+                    score += max(0, 1.0 - Double(abs(year - currentYear)) / 10.0)
+                }
+                if candidate.favorite { score += 0.5 }
+                if candidate.watchlist { score += 0.6 }
+                if candidate.watched || candidate.playProgress >= settings.watchedThreshold { score -= 1.2 }
+                guard score >= 1.2 else { return nil }
+                return (candidate, score)
+            }
+            .sorted {
+                if $0.1 != $1.1 { return $0.1 > $1.1 }
+                return ($0.0.rating ?? 0) > ($1.0.rating ?? 0)
+            }
+            .prefix(max(limit, 1))
+            .enumerated()
+            .map { index, value in
+                let candidate = value.0
+                return MediaRelatedTitle(
+                    id: "library:\(candidate.id)",
+                    mediaID: item.id,
+                    relation: "library",
+                    externalID: candidate.externalID ?? "local:\(candidate.id)",
+                    title: candidate.title,
+                    year: candidate.year,
+                    posterURL: candidate.posterPath,
+                    overview: candidate.overview,
+                    rating: candidate.rating,
+                    popularity: value.1,
+                    localMediaID: candidate.id,
+                    order: index
+                )
+            }
+    }
+
+    /// 统一加载详情页扩展数据：先由服务器给出角色与艺术图，再由 TMDB 补充人物身份和推荐。
+    private func detailEnrichment(for item: MediaItem, forceRefresh: Bool) async -> TMDBEnrichment? {
+        let language = settings.tmdbLanguage.isEmpty ? "zh-CN" : settings.tmdbLanguage
+        let apiKey = settings.tmdbAPIKey
+        let taskKey = "\(item.id)|\(language)"
+        if !forceRefresh, let task = detailEnrichmentTasks[taskKey] {
+            return await task.value
+        }
+
+        let task = Task<TMDBEnrichment?, Never> { [weak self] in
+            guard let self else { return nil }
+            if item.externalID?.hasPrefix("tmdb:") == true {
+                return try? await TMDBMetadataClient().fetch(
+                    externalID: item.externalID ?? "",
+                    apiKey: apiKey,
+                    language: language
+                )
+            }
+
+            guard let source = self.embySource(for: item),
+                  source.sourceKind.isRemoteMediaServer,
+                  let externalID = item.externalID else { return nil }
+
+            let extras: EmbyDetailExtras
+            do {
+                if source.sourceKind == .plex {
+                    extras = try await self.withValidPlexSession(for: source) { session in
+                        try await self.plexService.fetchExtras(session: session, itemID: externalID)
+                    }
+                } else {
+                    extras = try await self.withValidEmbySession(for: source) { session in
+                        try await self.embyService.fetchExtras(session: session, itemID: externalID)
+                    }
+                }
+            } catch {
+                self.logger?.log("\(source.sourceKind.displayName) 详情扩展加载失败：\(error.localizedDescription)", level: .warning)
+                return nil
+            }
+
+            var tmdbEnrichment: TMDBEnrichment?
+            if let tmdbID = extras.tmdbID, let kind = extras.tmdbKind,
+               let key = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
+                tmdbEnrichment = try? await TMDBMetadataClient().fetch(
+                    externalID: "tmdb:\(kind):\(tmdbID)",
+                    apiKey: apiKey,
+                    language: language
+                )
+            }
+
+            return Self.mergedDetailEnrichment(
+                server: extras,
+                tmdb: tmdbEnrichment,
+                provider: source.sourceKind.displayName
+            )
+        }
+        detailEnrichmentTasks[taskKey] = task
+        let value = await task.value
+        detailEnrichmentTasks[taskKey] = nil
+        return value
+    }
+
+    private static func mergedDetailEnrichment(
+        server: EmbyDetailExtras,
+        tmdb: TMDBEnrichment?,
+        provider: String
+    ) -> TMDBEnrichment? {
+        func mergedPeople(_ primary: [TMDBPerson], _ supplement: [TMDBPerson]) -> [TMDBPerson] {
+            func nameKey(_ value: String) -> String {
+                value.folding(
+                    options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                    locale: .current
+                )
+            }
+            let supplementalByName = Dictionary(
+                supplement.map { (nameKey($0.name), $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            var values = primary.map { serverPerson -> TMDBPerson in
+                guard let tmdbPerson = supplementalByName[nameKey(serverPerson.name)] else {
+                    return serverPerson
+                }
+                return TMDBPerson(
+                    id: tmdbPerson.id,
+                    stableID: tmdbPerson.stableID,
+                    name: serverPerson.name,
+                    role: serverPerson.role,
+                    profileURL: serverPerson.profileURL ?? tmdbPerson.profileURL,
+                    category: serverPerson.category,
+                    department: serverPerson.department ?? tmdbPerson.department
+                )
+            }
+            var seenIDs = Set(values.map(\.stableID))
+            let matchedNames = Set(primary.map { nameKey($0.name) })
+            for person in supplement where !matchedNames.contains(nameKey(person.name)) {
+                guard seenIDs.insert(person.stableID).inserted else { continue }
+                values.append(person)
+            }
+            return values
+        }
+        func mergedImages(_ primary: [TMDBImage], _ supplement: [TMDBImage]) -> [TMDBImage] {
+            var seen = Set<String>()
+            return (primary + supplement).filter {
+                seen.insert($0.fullURL).inserted
+            }
+        }
+        let merged = TMDBEnrichment(
+            title: tmdb?.title,
+            originalTitle: tmdb?.originalTitle,
+            overview: tmdb?.overview,
+            posterURL: tmdb?.posterURL,
+            backdropURL: tmdb?.backdropURL,
+            rating: tmdb?.rating,
+            runtime: tmdb?.runtime,
+            genres: tmdb?.genres ?? [],
+            cast: mergedPeople(server.cast, tmdb?.cast ?? []),
+            crew: mergedPeople(server.crew, tmdb?.crew ?? []),
+            similar: tmdb?.similar ?? [],
+            images: mergedImages(server.images, tmdb?.images ?? []),
+            trailerURL: tmdb?.trailerURL,
+            imdbID: server.imdbID ?? tmdb?.imdbID,
+            tmdbKind: server.tmdbKind ?? tmdb?.tmdbKind,
+            tmdbID: server.tmdbID ?? tmdb?.tmdbID,
+            status: tmdb?.status,
+            firstAirDate: tmdb?.firstAirDate,
+            endDate: tmdb?.endDate,
+            seasonCount: tmdb?.seasonCount,
+            episodeCount: tmdb?.episodeCount,
+            contentRating: tmdb?.contentRating,
+            originalLanguage: tmdb?.originalLanguage,
+            countries: tmdb?.countries ?? [],
+            productionCompanies: tmdb?.productionCompanies ?? [],
+            networks: tmdb?.networks ?? []
+        )
+        return merged.isEmpty ? nil : merged
+    }
+
+    private func snapshotWithLocalMatches(_ snapshot: MediaDetailSnapshot) -> MediaDetailSnapshot {
+        var copy = snapshot
+        copy.relatedTitles = copy.relatedTitles.map { value in
+            var updated = value
+            updated.localMediaID = libraryItem(
+                matchingExternalID: value.externalID,
+                title: value.title,
+                year: value.year
+            )?.id
+            return updated
+        }
+        return copy
+    }
+
+    private var visibleLibraryVideoItems: [MediaItem] {
+        var resultByID = Dictionary(uniqueKeysWithValues: homeVideoItems.map { ($0.id, $0) })
+        if canDisplayPrivateItems {
+            for item in privateTopLevelItems {
+                resultByID[item.id] = item
+            }
+        }
+        return Array(resultByID.values)
+    }
+
+    private static func normalizedMediaLookupTitle(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: .current
+        )
+        .lowercased()
+        .unicodeScalars
+        .filter { CharacterSet.alphanumerics.contains($0) }
+        .map(String.init)
+        .joined()
+    }
+
+    private static func mediaGenreKeys(_ value: String?) -> Set<String> {
+        guard let value else { return [] }
+        return Set(
+            value.components(separatedBy: CharacterSet(charactersIn: ",，、/|;；"))
+                .map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .folding(
+                            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                            locale: .current
+                        )
+                        .lowercased()
+                }
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    /// v19 将详情扩展改为结构化索引。任务状态持久化到 SQLite，退出后可继续，
+    /// 且只处理顶层影视条目，不再通过全量重同步远程来源间接补齐。
+    private func scheduleVersion19DetailBackfillIfNeeded() {
+        guard detailBackfillTask == nil, let mediaDetailRepository else { return }
+        let candidates = topLevelItems.filter {
+            $0.type != .music && $0.type != .photo && $0.type != .homeVideo && $0.type != .privateCollection
+        }
+        do {
+            try mediaDetailRepository.prepareBackfill(mediaIDs: candidates.map(\.id))
+        } catch {
+            logger?.log("详情升级任务准备失败：\(error.localizedDescription)", level: .warning)
+            return
+        }
+
+        detailBackfillTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 900_000_000)
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            let pending = (try? mediaDetailRepository.pendingBackfillMediaIDs()) ?? []
+            guard !pending.isEmpty else {
+                self.detailBackfillTask = nil
+                return
+            }
+            let taskID = self.beginBackgroundTask(
+                kind: .metadataSupplement,
+                title: "影视详情资料升级",
+                detail: "准备补齐 \(pending.count) 个影视项目",
+                progress: 0,
+                isCancellable: false
+            )
+            var completed = 0
+            var errors: [String] = []
+            let chunks = stride(from: 0, to: pending.count, by: 2).map {
+                Array(pending[$0..<min($0 + 2, pending.count)])
+            }
+            for chunk in chunks {
+                if Task.isCancelled { break }
+                await withTaskGroup(of: (String, String?).self) { group in
+                    for mediaID in chunk {
+                        group.addTask { @MainActor [weak self] in
+                            guard let self,
+                                  let item = self.items.first(where: { $0.id == mediaID }) else {
+                                return (mediaID, "条目已不存在")
+                            }
+                            try? mediaDetailRepository.markBackfillRunning(mediaID: mediaID)
+                            let needsTMDB = !Self.isRemoteMediaServerItem(item)
+                            let hasTMDBKey = !(self.settings.tmdbAPIKey?
+                                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                            if needsTMDB && !hasTMDBKey {
+                                try? mediaDetailRepository.markBackfillWaitingForConfiguration(mediaID: mediaID)
+                                return (mediaID, nil)
+                            }
+                            if await self.loadDetailSnapshot(for: item, forceRefresh: true) != nil {
+                                try? mediaDetailRepository.markBackfillCompleted(mediaID: mediaID)
+                                return (mediaID, nil)
+                            }
+                            let message = "未能获取详情资料"
+                            try? mediaDetailRepository.markBackfillFailed(mediaID: mediaID, error: message)
+                            return (mediaID, message)
+                        }
+                    }
+                    for await (_, error) in group {
+                        completed += 1
+                        if let error { errors.append(error) }
+                        self.updateBackgroundTask(
+                            id: taskID,
+                            progress: Double(completed) / Double(max(pending.count, 1)),
+                            detail: "已检查 \(completed)/\(pending.count) 个影视项目"
+                        )
+                    }
+                }
+            }
+            self.updateBackgroundTask(
+                id: taskID,
+                progress: 1,
+                detail: errors.isEmpty ? "影视详情资料已完成升级" : "部分条目将在稍后自动重试"
+            )
+            self.finishBackgroundTask(id: taskID, errors: Array(errors.prefix(8)))
+            self.detailBackfillTask = nil
+            self.scheduleVersion19DetailBackfillIfNeeded()
         }
     }
 
@@ -4149,6 +4845,8 @@ final class AppState: ObservableObject {
             scanLocalSources(mediaTypes: [.music], emptyMessage: "当前智能歌单没有可扫描的音乐媒体源。")
         case .video(let section):
             scanLocalSources(mediaTypes: mediaTypes(for: section), emptyMessage: "当前分类没有可扫描的媒体源。")
+        case .album:
+            scanLocalSources(mediaTypes: [.photo], emptyMessage: "当前没有可扫描的相册媒体源。")
         }
     }
 
@@ -5078,6 +5776,11 @@ final class AppState: ObservableObject {
     }
 
     /// 设置页开关：开启时立即向系统申请通知授权；被拒则回退关闭并提示。
+    func setSystemPhotoLibraryEnabled(_ enabled: Bool) {
+        settings.enableSystemPhotoLibrary = enabled
+        saveSettings()
+    }
+
     func setTaskCompletionNotifications(_ enabled: Bool) {
         settings.notifyOnTaskCompletion = enabled
         saveSettings()
@@ -7329,6 +8032,70 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// 相册批量收藏/取消收藏（选择模式下使用）。
+    func setAlbumItemsFavorite(_ targets: [MediaItem], favorite: Bool) {
+        let ids = Set(targets.map(\.id))
+        guard !ids.isEmpty else { return }
+        func updated(_ item: MediaItem) -> MediaItem {
+            guard ids.contains(item.id) else { return item }
+            var copy = item
+            copy.favorite = favorite
+            return copy
+        }
+        items = items.map(updated)
+        rebuildDerivedItemCaches()
+        libraryRevision += 1
+        showFloatingNotice(
+            title: favorite ? "已加入喜欢" : "已取消喜欢",
+            message: "\(ids.count) 张照片",
+            kind: favorite ? .success : .info
+        )
+        if let mediaRepository {
+            Task(priority: .utility) { [mediaRepository] in
+                for id in ids { try? mediaRepository.setFavorite(id: id, favorite: favorite) }
+            }
+        }
+    }
+
+    /// 相册删除：把照片/录像文件移到废纸篓（可在访达恢复），并从内部索引移除。
+    func deleteAlbumItems(_ targets: [MediaItem]) {
+        let albumTargets = targets.filter { isAlbumItem($0) }
+        guard !albumTargets.isEmpty else { return }
+
+        var trashedIDs: [String] = []
+        var failures = 0
+        for item in albumTargets {
+            guard let path = item.filePath else { continue }
+            let url = URL(fileURLWithPath: path)
+            do {
+                try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                trashedIDs.append(item.id)
+            } catch {
+                failures += 1
+            }
+        }
+
+        guard !trashedIDs.isEmpty else {
+            alert = AppAlert(title: "删除失败", message: "无法把所选项目移到废纸篓，请检查文件是否仍可访问。")
+            return
+        }
+
+        do {
+            try mediaRepository?.deleteItems(ids: trashedIDs)
+            reload()
+        } catch {
+            showError("删除后清理索引失败", error)
+            return
+        }
+
+        let suffix = failures > 0 ? "（\(failures) 项未能删除）" : ""
+        showFloatingNotice(
+            title: "已移到废纸篓",
+            message: "\(trashedIDs.count) 项\(suffix)",
+            kind: failures > 0 ? .warning : .success
+        )
+    }
+
     private func updateFavoriteInMemory(id: String, favorite: Bool) {
         func updated(_ item: MediaItem) -> MediaItem {
             guard item.id == id else { return item }
@@ -7354,6 +8121,7 @@ final class AppState: ObservableObject {
         cachedWatchingItems = cachedWatchingItems.map(updated)
         cachedPrivateWatchingItems = cachedPrivateWatchingItems.map(updated)
         cachedNextUpItems = cachedNextUpItems.map(updated)
+        cachedAlbumItems = cachedAlbumItems.map(updated)
         cachedDuplicateTitleGroups = cachedDuplicateTitleGroups.map { group in
             group.map(updated)
         }
@@ -7752,6 +8520,9 @@ final class AppState: ObservableObject {
         do {
             try updateMetadata(id: item.id, metadata: metadata, source: source)
             updateMetadataInMemory(id: item.id, metadata: metadata)
+            if metadata.externalID?.hasPrefix("tmdb:") == true || source.hasPrefix("tmdb") {
+                refreshDetailSnapshotAfterMetadataUpdate(itemID: item.id)
+            }
         } catch {
             showError("元数据更新失败", error)
         }
@@ -7783,6 +8554,9 @@ final class AppState: ObservableObject {
                 do {
                     try self.updateMetadata(id: item.id, metadata: update, source: "manual")
                     self.updateMetadataInMemory(id: item.id, metadata: update)
+                    if resolvedResult.id.hasPrefix("tmdb:") {
+                        self.refreshDetailSnapshotAfterMetadataUpdate(itemID: item.id)
+                    }
                     let displayTitle = update.title ?? item.title
                     self.deliverTaskNotice(
                         title: "元数据已应用",
@@ -7801,6 +8575,13 @@ final class AppState: ObservableObject {
                     )
                 }
             }
+        }
+    }
+
+    private func refreshDetailSnapshotAfterMetadataUpdate(itemID: String) {
+        guard let refreshed = items.first(where: { $0.id == itemID }) else { return }
+        Task { [weak self] in
+            _ = await self?.loadDetailSnapshot(for: refreshed, forceRefresh: true)
         }
     }
 
@@ -8757,7 +9538,7 @@ final class AppState: ObservableObject {
 
     func lockPrivacy() {
         privacyUnlocked = false
-        selectedItem = nil
+        clearDetailNavigation()
         stopPlaybackIfPrivate()
     }
 
@@ -8771,7 +9552,7 @@ final class AppState: ObservableObject {
         settingsStore.save(settings)
         privacyPINConfigured = false
         privacyUnlocked = false
-        selectedItem = nil
+        clearDetailNavigation()
         stopPlaybackIfPrivate()
     }
 

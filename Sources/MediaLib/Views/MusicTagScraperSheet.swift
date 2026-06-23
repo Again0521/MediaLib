@@ -246,7 +246,7 @@ struct MusicTagScraperSheet: View {
                 } label: {
                     Label(isMatching ? "匹配中" : "开始匹配", systemImage: "sparkles")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                 .disabled(isWorking || scopedTracks.isEmpty || appState.settings.musicMetadataProvider == .disabled)
             }
         }

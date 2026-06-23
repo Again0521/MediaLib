@@ -23,451 +23,451 @@
 		<dict>
 			<key>cdhash</key>
 			<data>
-			WP1matLgIF3WXLKyWJz1cn5hU9Y=
+			7c1PqlmteCn6ZCK8KlL3S/YXoSk=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"58fd666ad2e0205dd65cb2b2589cf5727e6153d6"</string>
+			<string>identifier "org.python.python" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libSvtAv1Enc.4.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			Cno/SiPkQaFCJH/XumDWnsChgYE=
+			6nzS4hSqrKCKfaCkOUCEisK7Vy4=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"0a7a3f4a23e441a142247fd7ba60d69ec0a18181"</string>
+			<string>identifier "libSvtAv1Enc.4" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libarchive.13.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			sFHlibI9WOpDoNlif2D/cwozD8o=
+			ylg8MgcEGBMPL7Wfxp2Q94OP+HU=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"b051e589b23d58ea43a0d9627f60ff730a330fca"</string>
+			<string>identifier "libarchive.13" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libass.9.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			3pkKv/ncLZHOYVMEdCvTLs//2qA=
+			V/63uhEB+3ZY4eXebiCQnUxrA4g=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"de990abff9dc2d91ce615304742bd32ecfffdaa0"</string>
+			<string>identifier "libass.9" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libavcodec.62.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			iR6lmLDnfW4ZuAalPC4m7neljPM=
+			+ZXX8mRmVPl+FyRqx7bY/PtAZdg=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"891ea598b0e77d6e19b806a53c2e26ee77a58cf3"</string>
+			<string>identifier "libavcodec.62" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libavdevice.62.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			o6sPNfZT66DNKI/rdDTBNYN84KE=
+			MEzoMHKQtlDcxpdhafZv9K51wFI=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"a3ab0f35f653eba0cd288feb7434c135837ce0a1"</string>
+			<string>identifier "libavdevice.62" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libavfilter.11.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			BEEqt5tn3tD6GVxjVMySxcR2SC0=
+			I8ukZblrK6z6lrxplKcQLrBMoPU=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"04412ab79b67ded0fa195c6354cc92c5c476482d"</string>
+			<string>identifier "libavfilter.11" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libavformat.62.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			mirg9i2hZdiDRx/wwU2BbQ5biME=
+			y50o6haI2BVL2qw2Tpb6AwfBulo=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"9a2ae0f62da165d883471ff0c14d816d0e5b88c1"</string>
+			<string>identifier "libavformat.62" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libavutil.60.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			Jcg99aKZJX/L8glbpIY7BfamVzE=
+			jPfzpofngg8wpzd5XFAMoqnJx30=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"25c83df5a299257fcbf2095ba4863b05f6a65731"</string>
+			<string>identifier "libavutil.60" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libb2.1.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			WjVF5PqX8yUkct1XfJ7fmTtrTWM=
+			pMG//2Fu9xuiHtNYcIHpcLRBrHU=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"5a3545e4fa97f3252472dd577c9edf993b6b4d63"</string>
+			<string>identifier libb2 and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libbluray.3.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			uK6F4iMJgk46LXKDColncWraIdo=
+			FONueUjTHKlMpKlPn/z01QbC5ew=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"b8ae85e22309824e3a2d72830a8967716ada21da"</string>
+			<string>identifier "libbluray.3" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libcrypto.3.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			2fi6ScbI1R8mUqn7MO41JS0Lh/0=
+			8KN5wm+YKKkv72Cs5tdFsOYPtEM=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"d9f8ba49c6c8d51f2652a9fb30ee35252d0b87fd"</string>
+			<string>identifier "libcrypto.3" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libdav1d.7.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			X9Z8jYar3cG7lVyhDndTyj94AJg=
+			3IcPzRy8G/l/C3rRUb4Rz7gcVAE=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"5fd67c8d86abddc1bb955ca10e7753ca3f780098"</string>
+			<string>identifier "libdav1d.7" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libfontconfig.1.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			dHEux3ho1FYFFQcc/V1Te8cuHvQ=
+			WlshZS2G6p7xz5mlhSeSxGRMt7M=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"74712ec77868d4560515071cfd5d537bc72e1ef4"</string>
+			<string>identifier "libfontconfig.1" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libfreetype.6.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			9q+chFsyTzpdb1AfMOZb8O8K/OE=
+			BpaKECnrZLGrcyzT7ycxI3goBZU=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"f6af9c845b324f3a5d6f501f30e65bf0ef0afce1"</string>
+			<string>identifier "libfreetype.6" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libfribidi.0.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			aPPW9g3d5YAbTY+Cn70s5/W5/Mo=
+			ScG1zoRnHAkkTYCq6PbhpJgGxBk=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"68f3d6f60ddde5801b4d8f829fbd2ce7f5b9fcca"</string>
+			<string>identifier "libfribidi.0" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libglib-2.0.0.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			MG8mDYoXdkYLz8/YUfHaEKh64lg=
+			XAKi1KfgKTQa23j7rQHW6KkXRHc=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"306f260d8a1776460bcfcfd851f1da10a87ae258"</string>
+			<string>identifier "libglib-2" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libgraphite2.3.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			x2r2XZYXTPhGTQ29WR6lkW86tVo=
+			fWe5vWE01G/lMPAzxnewjHSXUE0=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"c76af65d96174cf8464d0dbd591ea5916f3ab55a"</string>
+			<string>identifier libgraphite2 and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libharfbuzz.0.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			SsCkZ3X/wpaZzCWCjP3DEuQ8Wx8=
+			l4YInZHCyiLRTsAJB/8hy9L3RqY=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"4ac0a46775ffc29699cc25828cfdc312e43c5b1f"</string>
+			<string>identifier "libharfbuzz.0" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libintl.8.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			jxNTLQiU3IxixpWJxPNWxerIzYA=
+			fBOMDmwwttxWrXEoOwsr5nTPCfc=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"8f13532d0894dc8c62c69589c4f356c5eac8cd80"</string>
+			<string>identifier "libintl.8" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libjpeg.8.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			RvqPku2Dq9Pf0/4F6g18mivSYMI=
+			8xOM/Dz2jEj+mFtlMuAnqLX4MYM=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"46fa8f92ed83abd3dfd3fe05ea0d7c9a2bd260c2"</string>
+			<string>identifier "libjpeg.8" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/liblcms2.2.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			LoF/Kb3INmLNaw8VxakyKN2Xl2Q=
+			5yUA6JBkpR5Z7G1Pbkhm9DuMjgc=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"2e817f29bdc83662cd6b0f15c5a93228dd979764"</string>
+			<string>identifier liblcms2 and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libluajit-5.1.2.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			Bjj2PLAZoCFnyi4xDsGc4ZBvxaQ=
+			VD6ZCIZGzryd411pH58tcG7juOM=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"0638f63cb019a02167ca2e310ec19ce1906fc5a4"</string>
+			<string>identifier "libluajit-5" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/liblz4.1.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			Sox4QWCvJWxvlUaaV4CfwVcdfD8=
+			eWtjchH0rDrLJ1K1Vtn4wRA3yRE=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"4a8c784160af256c6f95469a57809fc1571d7c3f"</string>
+			<string>identifier liblz4 and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/liblzma.5.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			zCW7Bg9DVVIYnxLziMbEorYxG/Y=
+			5f7AIeWYCCmRGi6142SXSS4Kb+Q=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"cc25bb060f435552189f12f388c6c4a2b6311bf6"</string>
+			<string>identifier "liblzma.5" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libmp3lame.0.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			OmrAfTX2fAgxWMqdXdY1VSmx+BY=
+			WsBbTSLN2P/gqJgYLYgEuFbZIiQ=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"3a6ac07d35f67c083158ca9d5dd6355529b1f816"</string>
+			<string>identifier "libmp3lame.0" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libmpv.2.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			Up8HurciEt8hJt6WGD49oOtpTC4=
+			gNjLn2WWGxalEiyojsvN4MQdQAI=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"529f07bab72212df2126de96183e3da0eb694c2e"</string>
+			<string>identifier "libmpv.2" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libmujs.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			aEdTemwRw5Iv9L1QQ9yCKuCuE6s=
+			PBgqxvYPuB9HIDtMxDk7K0S1F98=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"6847537a6c11c3922ff4bd5043dc822ae0ae13ab"</string>
+			<string>identifier libmujs and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libopus.0.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			cRfhJHAjnNbZA3jLevWNfqx84ps=
+			g+1+fVce8O555mMOB+Nb+2j9nes=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"7117e12470239cd6d90378cb7af58d7eac7ce29b"</string>
+			<string>identifier "libopus.0" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libpcre2-8.0.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			w55kvSsvPM3XG5EBAp9/rMQVIko=
+			Us+Pp05WgSXlKGQJM5z+f5SSNOA=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"c39e64bd2b2f3ccdd71b9101029f7facc415224a"</string>
+			<string>identifier "libpcre2-8" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libplacebo.360.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			atTlpWl/R2u8voFVx7uEDMqUkqo=
+			zQ8fiqAJlBUhdNOfPbNKPCLzkd8=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"6ad4e5a5697f476bbcbe8155c7bb840cca9492aa"</string>
+			<string>identifier "libplacebo.360" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libpng16.16.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			ucciiAs/m1ll8KFHKcp10OXIjUM=
+			GQxnw5AeZvU+V3RvW8WPQMb5dxo=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"b9c722880b3f9b5965f0a14729ca75d0e5c88d43"</string>
+			<string>identifier libpng16 and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/librubberband.3.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			gmTrEfRnX4JURDyse1xqfPvzMnQ=
+			mo7XoIQS4IYLYGPquHcFoepScm8=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"8264eb11f4675f8254443cac7b5c6a7cfbf33274"</string>
+			<string>identifier "librubberband.3" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libsamplerate.0.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			0a79xAOntjBYGhqQBSGNy5LrDHY=
+			rtpvIMZj+EYuZXS/MrogHf6WbR0=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"d1aefdc403a7b630581a1a9005218dcb92eb0c76"</string>
+			<string>identifier "libsamplerate.0" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libshaderc_shared.1.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			tSXsGR8xUuWAxDw7EWH1vxhop0U=
+			Y/yJ+auB7qklbXbnBcB1xy6KOWk=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"b525ec191f3152e580c43c3b1161f5bf1868a745"</string>
+			<string>identifier "libshaderc_shared.1" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libssl.3.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			szYK09sG/QQXJFENMVs9Z8WrUrM=
+			c9N+vm2g8K0GARqHEfaPLIQ7Jgc=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"b3360ad3db06fd041724510d315b3d67c5ab52b3"</string>
+			<string>identifier "libssl.3" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libswresample.6.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			c1P9T7I821OL0ZWXLYc7tyRvmhs=
+			dXdxvCX216NKDT8MtuPu0AO3/5Q=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"7353fd4fb23cdb538bd195972d873bb7246f9a1b"</string>
+			<string>identifier "libswresample.6" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libswscale.9.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			LuD1mMdghK2CcfcPNQnyE/AHrIc=
+			i0RbUJxAlMFcFksbQte1NI6Mp9Q=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"2ee0f598c76084ad8271f70f3509f213f007ac87"</string>
+			<string>identifier "libswscale.9" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libuchardet.0.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			+MdLI9aDmtRWZN3zJBaoTRq1ZLE=
+			3eLXiQYD9YxiBVDAkq65C5Tgw7U=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"f8c74b23d6839ad45664ddf32416a84d1ab564b1"</string>
+			<string>identifier "libuchardet.0" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libudfread.3.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			5AnCAPdd/cNbBc2IDQoIud0Y4pc=
+			qKwQOxJyRe384AfCNeU6zTXW9RM=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"e409c200f75dfdc35b05cd880d0a08b9dd18e297"</string>
+			<string>identifier "libudfread.3" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libunibreak.7.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			i2sSPf6Kg+URHv5n6ZlPwM1reYU=
+			gckiLtRJdeMj2XTGDxCyc4c62x4=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"8b6b123dfe8a83e5111efe67e9994fc0cd6b7985"</string>
+			<string>identifier "libunibreak.7" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libvapoursynth-script.0.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			69RsW/J1Ti10sLMpWs7mxjCUgBo=
+			F24KYpZj30qLZ8c6uoGlOxLlQ7c=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"ebd46c5bf2754e2d74b0b3295acee6c63094801a"</string>
+			<string>identifier "libvapoursynth-script.0" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libvmaf.3.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			2+5tOa+0QbuJ0sB3a4iCeve9CVI=
+			Tx/+GCWye+HiexZVMZvjqz30z+s=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"dbee6d39afb441bb89d2c0776b88827af7bd0952"</string>
+			<string>identifier "libvmaf.3" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libvpx.12.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			MZFUrt1u0bcTh/Ndhphe3jVQhiA=
+			fbnYpfaUjFPk7CrRE4ewcyB0yNg=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"319154aedd6ed1b71387f35d86985ede35508620"</string>
+			<string>identifier "libvpx.12" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libvulkan.1.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			8GuXa6ROnsnc/G5gLN9CRvJKHcQ=
+			MvWFP+ByDT//3OM73/QTc5pbfSE=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"f06b976ba44e9ec9dcfc6e602cdf4246f24a1dc4"</string>
+			<string>identifier "libvulkan.1" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libx264.165.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			loO25ys1FbPGdoh8ybc9WzL/8+8=
+			jQgV11OSk5+cZwrtN3f3pNU5OlM=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"9683b6e72b3515b3c676887cc9b73d5b32fff3ef"</string>
+			<string>identifier libx264 and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libx265.216.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			OGg1Md647GLZXNkBcFJ/SM2Ix74=
+			hFMellxDbCSsUYx4nXDFjkLkR+U=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"38683531deb8ec62d95cd90170527f48cd88c7be"</string>
+			<string>identifier libx265 and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libzimg.2.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			CgK0kfbZkrKx/HdTSeXfqyOj7Cc=
+			O+8l53Jbtwfre7tQdNB5DreENME=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"0a02b491f6d992b2b1fc775349e5dfab23a3ec27"</string>
+			<string>identifier "libzimg.2" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Frameworks/libzstd.1.dylib</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			wi54kE0K+s+BW9jmrBVdeSVJ9dA=
+			ejKkCvW2nGaFTTTDJUH80+IedZw=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"c22e78904d0afacf815bd8e6ac155d792549f5d0"</string>
+			<string>identifier "libzstd.1" and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>MacOS/ffmpeg</key>
 		<dict>
 			<key>cdhash</key>
 			<data>
-			2qBjoLp08H8ipfor07jIj4WDmn8=
+			hCPq4iQWAzqAoNzmfpGWFSKGr+8=
 			</data>
 			<key>requirement</key>
-			<string>cdhash H"daa063a0ba74f07f22a5fa2bd3b8c88f85839a7f"</string>
+			<string>identifier ffmpeg and certificate leaf = H"dce7401355f02cc4e5f3e5f78d3bd52a8b620019"</string>
 		</dict>
 		<key>Resources/AppIcon.icns</key>
 		<dict>

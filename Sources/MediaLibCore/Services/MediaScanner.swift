@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 public struct ScanProgress: Equatable {
     public var sourceID: String
@@ -218,6 +219,11 @@ public final class MediaScanner {
     }
 
     private func importFile(_ fileURL: URL, fileSize: Int64, source: MediaSource, settings: AppSettings) async throws -> Set<String> {
+        // 相册源：图片→.photo，视频→.homeVideo（归属由源决定，独立于视频库），不做剧集/电影解析。
+        if source.mediaType == .photo {
+            return try await importAlbumFile(fileURL, fileSize: fileSize, source: source, settings: settings)
+        }
+
         let parsed = parser.parse(url: fileURL, preferredType: source.mediaType, sourcePath: source.path)
         let isMusicFile = source.mediaType == .music || (source.mediaType == .auto && parser.isAudioFile(fileURL))
         let localMetadata = isMusicFile
@@ -361,6 +367,96 @@ public final class MediaScanner {
         }
     }
 
+    /// 相册条目导入：单文件即一个顶层条目。图片用原图作缩略图来源，视频生成缩略图；
+    /// 拍摄日期取文件创建/修改日期（EXIF 留待后续轮），用于相册按时间排序。
+    private func importAlbumFile(_ fileURL: URL, fileSize: Int64, source: MediaSource, settings: AppSettings) async throws -> Set<String> {
+        let canonicalURL = canonicalMediaURL(fileURL)
+        let isImage = parser.isImageFile(canonicalURL)
+        let id = StableID.make(prefix: isImage ? "photo" : "albumvideo", value: canonicalURL.path)
+        let title = canonicalURL.deletingPathExtension().lastPathComponent
+        let capturedDate = fileCaptureDate(for: canonicalURL, isImage: isImage)
+
+        var poster: String?
+        var resolution: String?
+        var duration: Double?
+        if isImage {
+            poster = canonicalURL.path
+            // 记录像素尺寸（W×H），相册网格用它做保留宽高比的瀑布式排版。
+            resolution = Self.imagePixelSize(for: canonicalURL)
+        } else {
+            let mediaInfo = await thumbnailGenerator?.mediaInfo(for: canonicalURL)
+            resolution = mediaInfo?.resolution
+            duration = mediaInfo?.duration
+            poster = await fallbackPoster(
+                for: canonicalURL,
+                mediaID: id,
+                title: title,
+                mediaType: .homeVideo,
+                source: source,
+                settings: settings,
+                mediaInfo: mediaInfo
+            )
+        }
+
+        let item = MediaItem(
+            id: id,
+            type: isImage ? .photo : .homeVideo,
+            title: title,
+            posterPath: poster,
+            sourcePath: source.path,
+            filePath: canonicalURL.path,
+            fileSize: fileSize,
+            resolution: resolution,
+            duration: duration,
+            createdAt: capturedDate,
+            updatedAt: capturedDate
+        )
+        try mediaRepository.deleteItems(filePath: canonicalURL.path, excludingID: id)
+        try mediaRepository.upsert(item)
+        return [id]
+    }
+
+    private func fileCaptureDate(for fileURL: URL, isImage: Bool) -> Date {
+        // 照片优先用 EXIF 拍摄时间（更贴合「相册按拍摄日期分组」），回落到文件创建/修改日期。
+        if isImage, let exifDate = Self.exifCaptureDate(for: fileURL) {
+            return exifDate
+        }
+        let values = try? fileURL.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+        return values?.creationDate ?? values?.contentModificationDate ?? Date()
+    }
+
+    private static let exifDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
+
+    private static func imagePixelSize(for url: URL) -> String? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0 else {
+            return nil
+        }
+        return "\(width)x\(height)"
+    }
+
+    private static func exifCaptureDate(for url: URL) -> Date? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return nil
+        }
+        let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let dateString = (exif?[kCGImagePropertyExifDateTimeOriginal] as? String)
+            ?? (exif?[kCGImagePropertyExifDateTimeDigitized] as? String)
+            ?? (tiff?[kCGImagePropertyTIFFDateTime] as? String)
+        guard let dateString else { return nil }
+        return exifDateFormatter.date(from: dateString)
+    }
+
     private func fallbackPoster(
         for fileURL: URL,
         mediaID: String,
@@ -463,6 +559,10 @@ public final class MediaScanner {
     }
 
     private func minimumFileSize(for fileURL: URL, source: MediaSource) -> Int64 {
+        // 相册源不设体积下限：照片常常远小于视频的 50MB 默认阈值。
+        if source.mediaType == .photo {
+            return 0
+        }
         guard parser.isAudioFile(fileURL) else {
             return source.minimumFileSize
         }
@@ -490,7 +590,7 @@ public final class MediaScanner {
         switch source.mediaType {
         case .movie, .anime, .documentary, .variety, .homeVideo, .music, .other, .privateCollection:
             return source.mediaType
-        case .auto, .tvShow, .episode:
+        case .auto, .tvShow, .episode, .photo:
             return .movie
         }
     }
@@ -499,7 +599,7 @@ public final class MediaScanner {
         switch source.mediaType {
         case .anime, .documentary, .variety, .homeVideo, .music, .other, .privateCollection:
             return source.mediaType
-        case .auto, .movie, .tvShow, .episode:
+        case .auto, .movie, .tvShow, .episode, .photo:
             return .tvShow
         }
     }

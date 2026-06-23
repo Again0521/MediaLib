@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 struct DetailView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let item: MediaItem
     let sourceTitle: String
     let sourceSystemImage: String
@@ -21,6 +22,10 @@ struct DetailView: View {
     private enum ArtworkKind { case poster, backdrop }
 
     @State private var selectedEpisodeID: MediaItem.ID?
+    @State private var artworkEntries: [MediaImageViewerEntry] = []
+    @State private var artworkIndex: Int?
+    @State private var detailSnapshot: MediaDetailSnapshot?
+    @State private var isLoadingDetailSnapshot = false
     /// 已展开的季（多季时进入默认全部折叠）。
     @State private var expandedSeasonIDs: Set<String> = []
 
@@ -52,10 +57,25 @@ struct DetailView: View {
             detailRow(top: 28, bottom: 8) { topBar }
             detailRow(top: 8, bottom: 8) { hero }
 
-            if item.type != .music, item.externalID?.hasPrefix("tmdb:") == true {
+            if let detailSnapshot {
                 detailRow(top: 8, bottom: 8) {
-                    MediaTMDBExtrasView(item: item)
-                        .environmentObject(appState)
+                    MediaTMDBExtrasView(
+                        item: item,
+                        snapshot: detailSnapshot
+                    ) { entries, index in
+                            artworkEntries = entries
+                            artworkIndex = index
+                        }
+                    .environmentObject(appState)
+                }
+            } else if appState.supportsDetailExtras(item), isLoadingDetailSnapshot {
+                detailRow(top: 8, bottom: 8) {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("正在整理演职人员、艺术照和相关作品…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 
@@ -102,16 +122,44 @@ struct DetailView: View {
         .suppressHoverEffectsDuringScroll()
         .suppressListHighlight()
         .background(AppPageBackground())
+        .overlay {
+            if let index = artworkIndex, !artworkEntries.isEmpty {
+                MediaImageViewer(
+                    items: artworkEntries,
+                    index: Binding(
+                        get: { artworkIndex ?? index },
+                        set: { artworkIndex = $0 }
+                    ),
+                    allowsFavorite: false,
+                    onClose: { artworkIndex = nil }
+                )
+                .environmentObject(appState)
+                .transition(.opacity)
+                .zIndex(60)
+            }
+        }
         .frame(minWidth: 820, minHeight: 620)
         .sheet(isPresented: $showingMetadataSearch) {
             MetadataSearchView(item: item)
                 .environmentObject(appState)
         }
         .onAppear(perform: refreshFileStatus)
+        .task(id: item.id) {
+            guard appState.supportsDetailExtras(item) else {
+                detailSnapshot = nil
+                return
+            }
+            detailSnapshot = appState.cachedDetailSnapshot(for: item)
+            isLoadingDetailSnapshot = detailSnapshot == nil
+            detailSnapshot = await appState.loadDetailSnapshot(for: item) ?? detailSnapshot
+            isLoadingDetailSnapshot = false
+        }
         .onChange(of: item.id) { _ in
             refreshFileStatus()
             selectedEpisodeID = nil
             expandedSeasonIDs = []
+            detailSnapshot = nil
+            isLoadingDetailSnapshot = false
         }
         .background {
             RawKeyCaptureView { key in
@@ -122,7 +170,7 @@ struct DetailView: View {
                     if appState.quickPreviewItem != nil {
                         appState.quickPreviewItem = nil
                     } else {
-                        appState.selectedItem = nil
+                        appState.dismissDetail()
                     }
                 }
             }
@@ -144,6 +192,7 @@ struct DetailView: View {
                 .font(.title3.weight(.semibold))
             Spacer()
             Text("\(episodes.count) 集")
+                .monospacedDigit()
                 .foregroundStyle(.secondary)
             let watchedThreshold = appState.settings.watchedThreshold
             let allWatched = episodes.allSatisfy { $0.watched || $0.playProgress >= watchedThreshold }
@@ -163,7 +212,7 @@ struct DetailView: View {
         let watchedThreshold = appState.settings.watchedThreshold
         let watchedCount = group.episodes.filter { $0.watched || $0.playProgress >= watchedThreshold }.count
         return Button {
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(reduceMotion ? nil : AppMotion.standard) {
                 if expanded {
                     expandedSeasonIDs.remove(group.id)
                 } else {
@@ -180,10 +229,12 @@ struct DetailView: View {
                     .font(.headline.weight(.semibold))
                 Text("\(group.episodes.count) 集")
                     .font(.caption)
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
                 if watchedCount > 0 {
                     Text(watchedCount == group.episodes.count ? "已看完" : "已看 \(watchedCount) 集")
                         .font(.caption)
+                        .monospacedDigit()
                         .foregroundStyle(watchedCount == group.episodes.count ? AppColors.selectedGlassTint.opacity(0.92) : Color.secondary)
                 }
                 Spacer()
@@ -250,19 +301,11 @@ struct DetailView: View {
     private var topBar: some View {
         PageHeader(title: sourceTitle, subtitle: nil, systemImage: sourceSystemImage) {
             Button {
-                withAnimation(AppMotion.page) {
-                    appState.selectedItem = nil
-                }
+                appState.dismissDetail()
             } label: {
                 Label("返回", systemImage: "chevron.left")
             }
             .keyboardShortcut(.escape, modifiers: [])
-
-            let episodes = appState.children(for: item)
-            if !episodes.isEmpty {
-                Text("\(episodes.count) 集")
-                    .foregroundStyle(.secondary)
-            }
         }
     }
 
@@ -275,6 +318,18 @@ struct DetailView: View {
                 .aspectRatio(artworkAspectRatio, contentMode: .fit)
                 .frame(width: artworkWidth)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(.white.opacity(0.34), lineWidth: 0.85)
+                }
+                .overlay {
+                    LinearGradient(
+                        colors: [.white.opacity(0.10), .clear, AppColors.pointerLightTint.opacity(0.035)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
                 .pointerInspectTilt(enabled: item.type != .music, cornerRadius: 12)
                 .contextMenu {
                     if !appState.videoCacheQualityChoices(for: item).isEmpty {
@@ -313,6 +368,7 @@ struct DetailView: View {
                     }
                     .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 14, horizontalPadding: 10, minHeight: 30))
                     .help(item.watchlist ? "移出想看" : "加入想看")
+                    .accessibilityLabel(item.watchlist ? "移出想看" : "加入想看")
                     Button {
                         appState.toggleFavorite(item)
                     } label: {
@@ -321,21 +377,33 @@ struct DetailView: View {
                     }
                     .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 14, horizontalPadding: 10, minHeight: 30))
                     .help(item.favorite ? "取消喜欢" : "喜欢")
+                    .accessibilityLabel(item.favorite ? "取消喜欢" : "喜欢")
                 }
 
-                HStack(spacing: 12) {
-                    Label(item.displayYear, systemImage: "calendar")
+                DetailMetadataFlow {
+                    DetailMetadataChip(title: item.displayYear, systemImage: "calendar")
                     if let rating = item.rating {
-                        Label(String(format: "%.1f", rating), systemImage: "star.fill")
+                        DetailMetadataChip(title: String(format: "%.1f", rating), systemImage: "star.fill")
                     }
                     if let runtime = item.runtime {
-                        Label("\(runtime) 分钟", systemImage: "clock")
+                        DetailMetadataChip(title: "\(runtime) 分钟", systemImage: "clock")
                     }
                     if let resolution = item.resolution {
-                        Label(resolution, systemImage: "rectangle.expand.vertical")
+                        DetailMetadataChip(title: resolution, systemImage: "rectangle.expand.vertical")
+                    }
+                    if let status = detailSnapshot?.metadata.status, !status.isEmpty {
+                        DetailMetadataChip(title: status, systemImage: "dot.radiowaves.left.and.right")
+                    }
+                    if let rating = detailSnapshot?.metadata.contentRating, !rating.isEmpty {
+                        DetailMetadataChip(title: rating, systemImage: "person.crop.circle.badge.checkmark")
+                    }
+                    if let seasonCount = detailSnapshot?.metadata.seasonCount, seasonCount > 0 {
+                        DetailMetadataChip(title: "\(seasonCount) 季", systemImage: "rectangle.stack")
+                    }
+                    if let episodeCount = detailSnapshot?.metadata.episodeCount, episodeCount > 0 {
+                        DetailMetadataChip(title: "\(episodeCount) 集", systemImage: "list.number")
                     }
                 }
-                .foregroundStyle(.secondary)
 
                 ratingControl
 
@@ -358,6 +426,19 @@ struct DetailView: View {
 
                 if !genreTags.isEmpty {
                     DetailGenreTagFlow(genres: genreTags)
+                }
+
+                if let detailSnapshot {
+                    let organizations = detailSnapshot.metadata.networks + detailSnapshot.metadata.productionCompanies
+                    if !organizations.isEmpty {
+                        Label(
+                            Array(organizations.prefix(4)).joined(separator: " · "),
+                            systemImage: "building.2"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    }
                 }
 
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -410,10 +491,15 @@ struct DetailView: View {
                     .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 34))
                     .fixedSize(horizontal: true, vertical: false)
                 }
+                // 横向操作条会吞掉落在按钮上的纵向触控板滚动，放行给外层详情列表。
+                .verticalScrollPassthroughFromNestedHorizontal()
             }
         }
         .padding(18)
+        // 去掉原本盖在卡片上的灰色氛围层（模糊海报 + cleanPanelFill 灰渐变），
+        // 仅保留下面这张圆角玻璃卡片本体与描边。
         .surfaceBackground(cornerRadius: 24)
+        .repeatedCardChrome(false, cornerRadius: 24)
     }
 
     private var genreTags: [String] {
@@ -586,6 +672,39 @@ struct DetailView: View {
     }
 }
 
+private struct DetailMetadataFlow<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        PosterBadgeFlowLayout(horizontalSpacing: 8, verticalSpacing: 7) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct DetailMetadataChip: View {
+    let title: String
+    let systemImage: String
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(AppColors.cleanFieldFill.opacity(0.72), in: Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(AppColors.cleanPanelBorder.opacity(0.82), lineWidth: 0.75)
+            }
+    }
+}
+
 private struct DetailGenreTagFlow: View {
     let genres: [String]
 
@@ -701,7 +820,7 @@ struct MetadataSearchView: View {
                 } label: {
                     Image(systemName: "xmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 10, minHeight: 32))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 10, minHeight: AppControlMetrics.defaultButtonHeight))
                 .keyboardShortcut(.escape, modifiers: [])
             }
 
@@ -716,7 +835,7 @@ struct MetadataSearchView: View {
                 } label: {
                     Label("搜索", systemImage: "magnifyingglass")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                 .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isLoading)
             }
 

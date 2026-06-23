@@ -1,5 +1,6 @@
 import AppKit
 import MediaLibCore
+import Photos
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -11,6 +12,7 @@ private enum SettingsControlMetrics {
 
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var systemPhotoLibrary: SystemPhotoLibraryStore
     @State private var showingMusicTagSheet = false
     @State private var showingAboutSoftware = false
     @State private var showingSyncConflictQueue = false
@@ -366,6 +368,38 @@ struct SettingsView: View {
 
     private var thumbnailSettings: some View {
         SettingsSection(title: "封面与截图", subtitle: "设置缺失封面、视频帧截图和并发任务。", systemImage: "photo.on.rectangle") {
+            SettingsRow(title: "系统照片图库", systemImage: "photo.stack") {
+                HStack(spacing: 10) {
+                    AppStatusBadge(
+                        title: systemPhotoAuthorizationTitle,
+                        systemImage: systemPhotoAuthorizationIcon,
+                        tint: systemPhotoLibrary.isAuthorized ? .green : AppColors.selectedGlassTint
+                    )
+
+                    Button(systemPhotoLibrary.isAuthorized ? "刷新权限" : "授权访问") {
+                        Task {
+                            if systemPhotoLibrary.authorizationStatus == .notDetermined {
+                                await systemPhotoLibrary.requestAccessAndLoad(collectionID: "all")
+                            } else {
+                                await systemPhotoLibrary.refreshAuthorizationAndReload()
+                                if !systemPhotoLibrary.isAuthorized,
+                                   let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Photos") {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            }
+                        }
+                    }
+                    .buttonStyle(LiquidGlassButtonStyle(
+                        cornerRadius: 10,
+                        horizontalPadding: 12,
+                        minHeight: AppControlMetrics.defaultButtonHeight,
+                        prominent: !systemPhotoLibrary.isAuthorized
+                    ))
+                }
+            }
+
+            SettingsDescription(text: "系统照片现在固定显示在「相册」控制条中。MediaLIB 通过 PhotoKit 实时读取，不复制图库；喜欢与删除操作会同步修改系统「照片」App。")
+
             SettingsRow(title: "缺失封面处理", systemImage: "photo.badge.plus") {
                 ArtworkFallbackModeCapsules(
                     selection: Binding(get: {
@@ -408,6 +442,21 @@ struct SettingsView: View {
             }
             .disabled(appState.settings.artworkFallbackMode == .none)
         }
+    }
+
+    private var systemPhotoAuthorizationTitle: String {
+        switch systemPhotoLibrary.authorizationStatus {
+        case .authorized: return "已授权"
+        case .limited: return "有限访问"
+        case .denied: return "已拒绝"
+        case .restricted: return "受系统限制"
+        case .notDetermined: return "尚未授权"
+        @unknown default: return "未知状态"
+        }
+    }
+
+    private var systemPhotoAuthorizationIcon: String {
+        systemPhotoLibrary.isAuthorized ? "checkmark.circle.fill" : "exclamationmark.triangle"
     }
 
     private var metadataSettings: some View {
@@ -711,7 +760,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsDescription(text: "挑一套喜欢的配色，界面的底色、卡片和高亮会一起换上新衣。七套预设都经过细心调配，点选即时预览；想要更个性，选「自定义」可以分别调整三种颜色。")
+            SettingsDescription(text: "七套配色会同时调整页面底色、玻璃卡片、边缘光和高亮反馈。点选即可即时预览；选择「自定义」还能分别调整三种锚点颜色。")
 
             SettingsRow(title: "海报最小宽度", systemImage: "rectangle.compress.vertical") {
                 Slider(value: binding(\.posterMinWidth), in: 130...220, step: 10)
@@ -1189,7 +1238,7 @@ struct SettingsSection<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: AppSpacing.settingsSectionHeaderToCard) {
             HStack(spacing: 12) {
                 PlayfulSymbolIcon(systemImage: systemImage, size: 38)
 
@@ -1202,6 +1251,7 @@ struct SettingsSection<Content: View>: View {
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                        .lineSpacing(1)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -1214,9 +1264,24 @@ struct SettingsSection<Content: View>: View {
             .padding(.vertical, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .staticSurfaceBackground(cornerRadius: AppRadius.card)
-            .padding(.leading, 42)
+            .overlay(alignment: .topLeading) {
+                LinearGradient(
+                    colors: [
+                        .white.opacity(colorScheme == .dark ? 0.34 : 0.70),
+                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.12 : 0.22),
+                        .clear
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(height: 0.8)
+                .padding(.horizontal, AppRadius.card * 0.72)
+                .padding(.top, 1.5)
+                .allowsHitTesting(false)
+            }
+            .padding(.leading, AppSpacing.settingsSectionContentLeading)
         }
-        .padding(.leading, 28)
+        .padding(.leading, AppSpacing.settingsSectionOuterLeading)
     }
 }
 
@@ -1226,9 +1291,27 @@ struct SettingsSubsectionHeader: View {
     let systemImage: String
 
     var body: some View {
-        Label(appState.localized(title), systemImage: systemImage)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(AppColors.selectedGlassTint.opacity(0.78))
+                .frame(width: 14)
+
+            Text(appState.localized(title))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            LinearGradient(
+                colors: [
+                    AppColors.solarEdgeTint.opacity(0.22),
+                    Color.secondary.opacity(0.08),
+                    .clear
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(height: 0.8)
+        }
             .padding(.top, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1335,7 +1418,7 @@ private struct ArtworkFallbackModeCapsules: View {
 /// 点选即时换肤（沿用 setThemePreset 的发布 + 防抖落盘），所见即所得。
 private struct ThemePaletteSwatchGrid: View {
     @EnvironmentObject private var appState: AppState
-    private let columns = [GridItem(.adaptive(minimum: 138), spacing: 10)]
+    private let columns = [GridItem(.adaptive(minimum: 164), spacing: 10)]
 
     var body: some View {
         LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
@@ -1366,32 +1449,37 @@ private struct ThemePaletteSwatchTile: View {
         let active = isSelected || isHovering
         let anchors = paletteAnchors
         Button(action: action) {
-            HStack(spacing: 10) {
-                HStack(spacing: 0) {
-                    anchors.base
-                    anchors.light
-                    anchors.highlight
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(alignment: .top, spacing: 10) {
+                    palettePreview(anchors)
+
+                    Spacer(minLength: 4)
+
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(isSelected ? AppColors.selectedGlassTint.opacity(0.95) : Color.secondary.opacity(0.38))
+                        .padding(5)
+                        .background(
+                            Circle()
+                                .fill(isSelected ? AppColors.selectedGlassTint.opacity(0.10) : Color.primary.opacity(0.025))
+                        )
                 }
-                .frame(width: 42, height: 26)
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .strokeBorder(AppColors.subtleBorder, lineWidth: 0.8)
-                )
 
-                Text(appState.localized(preset.displayName))
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(appState.localized(preset.displayName))
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
 
-                Spacer(minLength: 4)
-
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 14))
-                    .foregroundStyle(isSelected ? AppColors.selectedGlassTint.opacity(0.95) : Color.secondary.opacity(0.45))
+                    Text(appState.localized(preset.paletteDescription))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
+                }
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 9)
+            .padding(.vertical, 11)
             .frame(maxWidth: .infinity)
             .staticSurfaceBackground(selected: isSelected, cornerRadius: 12, thickness: 0.94)
             .repeatedSurfaceHover(isHovering, cornerRadius: 12, intensity: active ? 0.74 : 0.62)
@@ -1401,7 +1489,37 @@ private struct ThemePaletteSwatchTile: View {
         .onHover { isHovering = $0 }
         .animation(reduceMotion ? nil : AppMotion.listHover, value: isHovering)
         .animation(reduceMotion ? nil : AppMotion.standard, value: isSelected)
-        .help(appState.localized(preset.displayName))
+        .help("\(appState.localized(preset.displayName)) · \(appState.localized(preset.paletteDescription))")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(appState.localized(preset.displayName))
+        .accessibilityValue(appState.localized(preset.paletteDescription))
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private func palettePreview(_ anchors: (base: Color, light: Color, highlight: Color)) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
+        return ZStack {
+            shape.fill(anchors.base)
+
+            Circle()
+                .fill(anchors.light.opacity(colorScheme == .dark ? 0.78 : 0.92))
+                .frame(width: 38, height: 38)
+                .blur(radius: 2.5)
+                .offset(x: -9, y: -8)
+
+            Capsule()
+                .fill(anchors.highlight)
+                .frame(width: 27, height: 9)
+                .overlay(
+                    Capsule()
+                        .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.28 : 0.62), lineWidth: 0.7)
+                )
+                .shadow(color: anchors.highlight.opacity(0.22), radius: 4, y: 2)
+                .offset(x: 11, y: 8)
+        }
+        .frame(width: 58, height: 34)
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(AppColors.subtleBorder, lineWidth: 0.8))
     }
 
     private var paletteAnchors: (base: Color, light: Color, highlight: Color) {
@@ -1587,6 +1705,30 @@ struct SettingsRow<Content: View>: View {
     }
 
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) {
+                rowLabel
+
+                HStack(spacing: contentSpacing) {
+                    content
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                rowLabel
+
+                HStack(spacing: contentSpacing) {
+                    Spacer(minLength: 0)
+                    content
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .frame(minHeight: AppControlMetrics.settingsRowHeight)
+    }
+
+    private var rowLabel: some View {
         HStack(spacing: 14) {
             PlayfulSymbolIcon(systemImage: systemImage, size: 26)
 
@@ -1595,13 +1737,8 @@ struct SettingsRow<Content: View>: View {
                 .lineLimit(2)
                 .minimumScaleFactor(0.86)
                 .frame(width: 148, alignment: .leading)
-
-            HStack(spacing: contentSpacing) {
-                content
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .frame(minHeight: 34)
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 

@@ -23,16 +23,16 @@ enum MusicPlayerVisualTokens {
         /// 白霜 = 玻璃的"提亮体"：比底板亮一档才有玻璃质感；但过高会变灰雾，
         /// 灰/透的平衡靠 material 模糊 + 专辑染色一起承担。
         // R2：浅色白霜上抬，给玻璃面更明确的"提亮体"，配合降低的 material 占比读作通透玻璃而非灰板。
-        static func frostWhite(dark: Bool) -> Double { dark ? 0.052 : 0.150 }
+        static func frostWhite(dark: Bool) -> Double { dark ? 0.058 : 0.165 }
         static func frostTexture(dark: Bool) -> Double { dark ? 0.012 : 0.010 }
         // R2：上沿镜面受光增强，让玻璃顶边有清晰的高光线（玻璃质感的关键反射）。
-        static func topHighlight(dark: Bool) -> Double { dark ? 0.205 : 0.360 }
+        static func topHighlight(dark: Bool) -> Double { dark ? 0.225 : 0.390 }
         /// §1.3 底沿内侧极淡暗线（仅最底 ~2pt 的 .black），与顶部高光形成"上受光、下背光"的厚度感。
         static func bottomShade(dark: Bool) -> Double { dark ? 0.028 : 0.0008 }
         /// 发丝描边渐变三色（白 → 专辑色 → 暗），方向 topLeading→bottomTrailing。
         static func strokeTopWhite(dark: Bool) -> Double { dark ? 0.66 : 1.0 }
         // R4：发丝描边中段的专辑色加重，让玻璃边缘明显带"歌曲的颜色"（描边氛围）。
-        static func strokeMidAlbum(dark: Bool) -> Double { dark ? 0.26 : 0.23 }
+        static func strokeMidAlbum(dark: Bool) -> Double { dark ? 0.29 : 0.26 }
         static func strokeBottomBlack(dark: Bool) -> Double { dark ? 0.056 : 0.0015 }
     }
 
@@ -973,6 +973,7 @@ struct MusicPlayerView: View {
                     .lineLimit(2)
                     .minimumScaleFactor(0.72)
                     .multilineTextAlignment(.center)
+                    .shadow(color: albumPalette.primary.color.opacity(colorScheme == .dark ? 0.18 : 0.10), radius: 10, y: 3)
                 HStack(spacing: 6) {
                     if let artist = currentItem.artist, !artist.isEmpty {
                         Text(artist)
@@ -991,6 +992,7 @@ struct MusicPlayerView: View {
                 .foregroundStyle(.primary.opacity(0.62))
                 .lineLimit(1)
                 .minimumScaleFactor(0.78)
+                .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.12 : 0.04), radius: 5, y: 2)
             }
             .frame(maxHeight: 82)
 
@@ -3457,7 +3459,7 @@ private struct MusicEmptyLyricsStage: View {
                     .scaleEffect(animating && breathe ? 1.06 : 1)
                     .opacity(animating && breathe ? 0.70 : 1)
                     .animation(
-                        animating ? .easeInOut(duration: 0.86).repeatForever(autoreverses: true) : .default,
+                        animating ? .easeInOut(duration: 0.86).repeatForever(autoreverses: true) : nil,
                         value: breathe
                     )
             }
@@ -3496,6 +3498,9 @@ private struct MusicEmptyLyricsStage: View {
         .accessibilityElement(children: .combine)
         .onAppear { breathe = isFetchingLyrics }
         .onChange(of: isFetchingLyrics) { breathe = $0 }
+        .onChange(of: reduceMotion) { reduced in
+            if reduced { breathe = false }
+        }
     }
 }
 
@@ -3627,11 +3632,14 @@ private struct LyricFetchIcon: View {
             .scaleEffect(animating && breathe ? 1.06 : 1)
             .opacity(animating && breathe ? 0.62 : 1)
             .animation(
-                animating ? .easeInOut(duration: 0.85).repeatForever(autoreverses: true) : .default,
+                animating ? .easeInOut(duration: 0.85).repeatForever(autoreverses: true) : nil,
                 value: breathe
             )
             .onAppear { breathe = isFetching }
             .onChange(of: isFetching) { breathe = $0 }
+            .onChange(of: reduceMotion) { reduced in
+                if reduced { breathe = false }
+            }
     }
 }
 
@@ -6305,6 +6313,22 @@ struct MusicMiniPlayerBar: View {
                     .frame(width: 46, height: 46)
                     .matchedGeometryEffect(id: "music-mini-cover", in: transitionNamespace)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        .white.opacity(0.72),
+                                        albumPalette.primary.color.opacity(0.22),
+                                        .white.opacity(0.20)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 0.9
+                            )
+                    }
+                    .shadow(color: albumPalette.primary.color.opacity(0.12), radius: 8, y: 3)
 
                 if showText {
                     VStack(alignment: .leading, spacing: 3) {
@@ -6317,6 +6341,20 @@ struct MusicMiniPlayerBar: View {
                             .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        LinearGradient(
+                            colors: [
+                                Color.white.opacity(0.20),
+                                albumPalette.primary.color.opacity(0.035),
+                                Color.clear
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    )
                 }
             }
         }
@@ -7350,10 +7388,14 @@ private struct MusicQueuePopover: View {
             uniquingKeysWith: { first, _ in first }
         )
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("播放队列")
-                    .font(.headline)
-                Spacer()
+            HStack(spacing: 10) {
+                AppSectionHeading(
+                    title: "播放队列",
+                    subtitle: queue.isEmpty ? "等待加入歌曲" : "拖动歌曲可调整播放顺序",
+                    systemImage: "text.line.first.and.arrowtriangle.forward",
+                    badgeText: queue.isEmpty ? nil : "\(queue.count) 首"
+                )
+
                 MusicPlaylistActionsMenu(
                     tracks: queue,
                     title: "存入歌单",
@@ -7393,6 +7435,7 @@ private struct MusicQueuePopover: View {
                             )
                             .equatable()
                             .id(row.id)
+                            .opacity(draggedItem?.id == row.id ? 0.48 : 1)
                             .onAppear {
                                 guard didRestoreScroll, draggedItem == nil else { return }
                                 // 只更新本地状态，不触碰 @Published（避免滚动时整树重算）。
@@ -7576,18 +7619,35 @@ private struct MusicQueueRow: View, Equatable {
                 .frame(width: 34, height: 34)
                 .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.titleText)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(row.titleText)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(1)
+
+                    if isCurrent {
+                        MusicCompactStatusBadge(
+                            title: "播放中",
+                            systemImage: "speaker.wave.2.fill"
+                        )
+                    }
+                }
                 Text(row.subtitleText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             Spacer()
-            if isCurrent {
-                Image(systemName: "speaker.wave.2.fill")
-                    .foregroundStyle(AppColors.selectedGlassTint)
+            if row.track.favorite {
+                Image(systemName: "heart.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.red.opacity(0.82))
+                    .accessibilityLabel("喜欢")
+            }
+            if row.track.isRemoteResource {
+                Image(systemName: "cloud")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("远程歌曲")
             }
             Button {
                 onRemove()
@@ -7603,10 +7663,24 @@ private struct MusicQueueRow: View, Equatable {
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .frame(height: 48)
-        .background(.white.opacity(isCurrent ? 0.14 : 0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .background(
+            AppColors.cleanFieldFill.opacity(isCurrent ? 0.92 : 0.62),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
         .overlay {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(.white.opacity(isCurrent ? 0.28 : 0.14), lineWidth: 1)
+                .stroke(
+                    isCurrent
+                        ? AppColors.selectedGlassTint.opacity(0.30)
+                        : AppColors.cleanPanelBorder.opacity(0.70),
+                    lineWidth: 0.85
+                )
+        }
+        .overlay(alignment: .leading) {
+            Capsule()
+                .fill(AppColors.selectedGlassTint.opacity(isCurrent ? 0.88 : 0))
+                .frame(width: 3, height: 26)
+                .padding(.leading, 2)
         }
     }
 }
@@ -9404,10 +9478,10 @@ struct AlbumColorPalette: Equatable {
     }
 
     static let fallback = AlbumColorPalette(
-        primary: AlbumPaletteColor(red: 0.12, green: 0.58, blue: 0.98),
-        secondary: AlbumPaletteColor(red: 0.10, green: 0.78, blue: 0.86),
-        accent: AlbumPaletteColor(red: 0.46, green: 0.36, blue: 0.98),
-        vibrancy: 0.7
+        primary: AlbumPaletteColor(red: 0.184, green: 0.490, blue: 0.882),
+        secondary: AlbumPaletteColor(red: 0.435, green: 0.722, blue: 0.929),
+        accent: AlbumPaletteColor(red: 0.231, green: 0.514, blue: 0.902),
+        vibrancy: 0.62
     )
 }
 
@@ -10953,9 +11027,20 @@ struct WujieEnvironmentWash: View {
                     startRadius: 0,
                     endRadius: d * 0.5
                 )
+
+                LinearGradient(
+                    colors: [
+                        palette.glowSecondary.color.opacity(isDark ? 0.055 : 0.038),
+                        .clear,
+                        palette.glowAccent.color.opacity(isDark ? 0.040 : 0.028)
+                    ],
+                    startPoint: UnitPoint(x: 0.12, y: 0.0),
+                    endPoint: UnitPoint(x: 0.88, y: 1.0)
+                )
+                .blendMode(.screen)
             }
             .frame(width: geo.size.width, height: geo.size.height)
-            .saturation(0.45)
+            .saturation(0.48)
             // 整体呼吸：scale 始终 ≥ 1.0（不会在边缘露出底板）+ 不透明度微动。CA 合成，廉价。
             .scaleEffect(reduceMotion ? 1 : (breathe ? 1.05 : 1.0), anchor: .center)
             .opacity(reduceMotion ? 1 : (breathe ? 1.0 : 0.9))

@@ -14,6 +14,7 @@ private enum LibrarySnapshotCache {
         let watchlistRevision: Int
         let ratingRevision: Int
         let videoCacheRevision: Int
+        let mediaSearchRevision: Int
         let cachedOnly: Bool
         let watchedThreshold: Double
     }
@@ -48,6 +49,7 @@ private enum LibrarySnapshotCache {
 
 private struct LibrarySnapshotBuildInput: Sendable {
     let items: [MediaItem]
+    let searchFieldsByItemID: [String: [String]]
     let searchText: String
     let sortMode: LibrarySortMode
     let sortOrder: LibrarySortOrder
@@ -66,10 +68,10 @@ private enum LibrarySnapshotBuilder {
             searched = input.items
         } else {
             searched = input.items.filter {
-                $0.title.localizedCaseInsensitiveContains(query) ||
-                ($0.originalTitle?.localizedCaseInsensitiveContains(query) ?? false) ||
-                ($0.artist?.localizedCaseInsensitiveContains(query) ?? false) ||
-                ($0.album?.localizedCaseInsensitiveContains(query) ?? false)
+                PinyinSearchMatcher.matches(
+                    query: query,
+                    in: (input.searchFieldsByItemID[$0.id] ?? []).map(Optional.some)
+                )
             }
         }
 
@@ -173,7 +175,7 @@ private enum LibrarySortOrder: String, Sendable {
 struct LibraryView: View {
     @EnvironmentObject private var appState: AppState
     let destination: SidebarDestination
-    @State private var searchText = ""
+    @State private var searchText: String
     @State private var sortMode: LibrarySortMode = .recentlyUpdated
     @State private var sortOrder: LibrarySortOrder = .primary
     @State private var watchFilter: LibraryWatchFilter = .all
@@ -188,6 +190,17 @@ struct LibraryView: View {
     @State private var smartCollectionEditor: VideoSmartCollectionEditorRequest?
     @State private var manualCollectionEditor: VideoManualCollectionEditorRequest?
     @State private var showBatchDeleteConfirm = false
+    @State private var returnContentReady: Bool
+
+    init(
+        destination: SidebarDestination,
+        initialSearchText: String = "",
+        initialReturnAnchorID: String? = nil
+    ) {
+        self.destination = destination
+        _searchText = State(initialValue: initialSearchText)
+        _returnContentReady = State(initialValue: initialReturnAnchorID == nil)
+    }
 
     var body: some View {
         let displayedItems = currentItems
@@ -213,15 +226,18 @@ struct LibraryView: View {
                     bottomInset: selectionBarBottomInset,
                     showsDeletePlaybackHistory: showsDeletePlaybackHistoryContextAction,
                     selectionEnabled: true,
-                    restoreAnchorID: appState.selectedItemReturnAnchorID,
+                    restoreAnchorID: activeReturnContext?.anchorID,
+                    detailSourceDestinationID: destination.id,
+                    detailSourceSearchText: searchText,
                     currentManualCollectionID: currentManualCollection?.id,
-                    onDidRestoreAnchor: { appState.selectedItemReturnAnchorID = nil }
+                    onDidRestoreAnchor: completeReturnRestoration
                 ) {
                     VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
                         libraryHeader
                         libraryControls
                     }
                 }
+                .opacity(returnContentReady ? 1 : 0)
                 .overlay(alignment: .bottom) {
                     if appState.isSelectionModeActive {
                         batchActionBar(for: displayedItems)
@@ -239,6 +255,9 @@ struct LibraryView: View {
             loadViewState()
             refreshVisibleItems(for: destination)
             presentContextTipsIfNeeded()
+            if activeReturnContext == nil {
+                returnContentReady = true
+            }
         }
         .onChange(of: searchText) { _ in
             scheduleSearchRefresh()
@@ -295,6 +314,10 @@ struct LibraryView: View {
             searchRefreshTask?.cancel()
             refreshVisibleItems(for: destination, deferred: true)
         }
+        .onChange(of: appState.mediaSearchRevision) { _ in
+            searchRefreshTask?.cancel()
+            refreshVisibleItems(for: destination, deferred: true)
+        }
         .onDisappear {
             contentRefreshTask?.cancel()
             searchRefreshTask?.cancel()
@@ -337,13 +360,17 @@ struct LibraryView: View {
         if let currentManualCollection {
             VideoManualCollectionPageHeader(
                 title: title,
-                subtitle: "按集合顺序整理专题片单。",
+                subtitle: "按集合顺序整理专题片单 · \(currentItems.count) 项",
                 previewItems: appState.videoManualCollectionPreviewItems(currentManualCollection, limit: 4)
             ) {
                 libraryHeaderActions
             }
         } else {
-            PageHeader(title: title, subtitle: "浏览、筛选和管理当前内容。", systemImage: destination.systemImage) {
+            PageHeader(
+                title: title,
+                subtitle: "浏览、筛选和管理当前内容 · \(currentItems.count) 项",
+                systemImage: destination.systemImage
+            ) {
                 libraryHeaderActions
             }
         }
@@ -543,6 +570,26 @@ struct LibraryView: View {
         }
     }
 
+    private var activeReturnContext: DetailReturnContext? {
+        guard appState.selectedItem == nil,
+              appState.detailReturnContext?.destinationID == destination.id else { return nil }
+        return appState.detailReturnContext
+    }
+
+    private func completeReturnRestoration() {
+        guard let context = activeReturnContext else {
+            returnContentReady = true
+            return
+        }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        transaction.animation = nil
+        withTransaction(transaction) {
+            returnContentReady = true
+        }
+        appState.consumeDetailReturnContext(destinationID: destination.id, anchorID: context.anchorID)
+    }
+
     private var scrollTopButtonBottomPadding: CGFloat {
         appState.activePlayerItem?.type == .music ? 122 : 22
     }
@@ -580,6 +627,7 @@ struct LibraryView: View {
             watchlistRevision: appState.watchlistRevision,
             ratingRevision: appState.ratingRevision,
             videoCacheRevision: appState.videoCacheRevision,
+            mediaSearchRevision: appState.mediaSearchRevision,
             cachedOnly: cachedOnly,
             watchedThreshold: appState.settings.watchedThreshold
         )
@@ -617,6 +665,11 @@ struct LibraryView: View {
         let cachedScopeIDs = key.cachedOnly ? appState.cachedVideoScopeIDs(in: baseItems) : []
         let input = LibrarySnapshotBuildInput(
             items: baseItems,
+            searchFieldsByItemID: Dictionary(
+                uniqueKeysWithValues: baseItems.map {
+                    ($0.id, appState.mediaSearchFields(for: $0).compactMap { $0 })
+                }
+            ),
             searchText: key.searchText,
             sortMode: key.sortMode,
             sortOrder: key.sortOrder,
@@ -677,11 +730,9 @@ struct LibraryView: View {
     private var libraryControls: some View {
         let genres = availableGenres
         let hasCachedVideos = appState.hasCachedVideos(in: appState.items(for: destination, searchText: ""))
-        return HStack(spacing: 12) {
+        return AppAdaptiveControlBar {
             LibraryWatchFilterCapsules(selection: $watchFilter)
-
-            Spacer(minLength: 18)
-
+        } trailing: {
             if hasCachedVideos {
                 Button {
                     withAnimation(AppMotion.fast) {
@@ -724,10 +775,6 @@ struct LibraryView: View {
                 }
             }
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 11)
-        .frame(maxWidth: .infinity)
-        .staticSurfaceBackground(cornerRadius: 16, thickness: 1.04)
     }
 
     private var stateKeyPrefix: String {

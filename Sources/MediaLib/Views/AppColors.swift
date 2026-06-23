@@ -113,7 +113,7 @@ enum AppColors {
                 dark:  theme.lightDark.appThemeAdjustingBrightness(by: 0.5).appThemeWithAlpha(0.16))
             // Hover / pointer light is part of the selected theme, not a fixed blue wash.
             // Start from the user-controlled top-left light, then gently fold in the
-            // highlight color so coral/lime/apricot/night presets keep their own hover tone.
+            // highlight color so coral/lime/mica/sand-gold/sea-salt presets keep their own hover tone.
             let pointerLight = theme.lightLight
                 .appThemeBlended(toward: theme.highlightLight.appThemeLightened(by: 0.42), fraction: 0.24)
                 .appThemeSaturated(by: 0.72)
@@ -332,7 +332,7 @@ struct SurfaceBackground: ViewModifier {
     @Environment(\.glassPerformanceMode) private var glassPerformanceMode
     var selected = false
     var cornerRadius: CGFloat = 12
-    var thickness: Double = 1.18
+    var thickness: Double = AppGlassMetrics.Thickness.surface
 
     @State private var pointerLocation: CGPoint?
     @State private var lastPointerLocation: CGPoint?
@@ -420,9 +420,10 @@ struct SurfaceBackground: ViewModifier {
 
 struct LiquidGlassSurfaceLayer: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     var selected = false
     var cornerRadius: CGFloat = 12
-    var thickness: Double = 1.18
+    var thickness: Double = AppGlassMetrics.Thickness.surface
     var respondsToPointer = true
     var renderMode: GlassSurfaceRenderMode = .material
 
@@ -440,7 +441,7 @@ struct LiquidGlassSurfaceLayer: View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let depth = min(max(thickness, 0.7), 2.1)
         return shape
-            .fill(AppColors.cleanPanelFill)
+            .fill(reduceTransparency ? AppColors.elevatedSurface : AppColors.cleanPanelFill)
             .overlay {
                 if selected {
                     shape.fill(
@@ -485,7 +486,7 @@ struct LiquidGlassSurfaceLayer: View {
                         startPoint: .topLeading,
                         endPoint: UnitPoint(x: 0.72, y: 0.80)
                     ),
-                    lineWidth: selected ? 1.05 : 0.85
+                    lineWidth: selected ? AppGlassMetrics.Stroke.selected : 0.85
                 )
                 .allowsHitTesting(false)
             }
@@ -493,12 +494,16 @@ struct LiquidGlassSurfaceLayer: View {
                 // 方向性玻璃染色描边：受光面在左上，右下只留暗边。
                 shape.strokeBorder(
                     AppColors.edgeLightStroke(colorScheme, depth: depth, intensity: 0.92),
-                    lineWidth: 1.0
+                    lineWidth: AppGlassMetrics.Stroke.surface
                 )
             }
             .clipShape(shape)
             .shadow(color: AppColors.solarEdgeTint.opacity((colorScheme == .dark ? 0.024 : 0.034) * depth), radius: 4 * depth, x: -1, y: -1)
-            .shadow(color: .black.opacity((colorScheme == .dark ? 0.16 : 0.060) * depth), radius: 8 * depth, y: 4)
+            .shadow(
+                color: .black.opacity((colorScheme == .dark ? 0.16 : 0.060) * depth),
+                radius: AppGlassMetrics.Shadow.repeatedRadius * depth,
+                y: AppGlassMetrics.Shadow.repeatedY
+            )
     }
 
     @ViewBuilder
@@ -506,14 +511,15 @@ struct LiquidGlassSurfaceLayer: View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let depth = min(max(thickness, 0.7), 2.1)
         let isEfficient = renderMode == .efficient
+        let usesDirectCompositing = isEfficient || reduceTransparency
 
         // efficient 模式：去掉所有 blendMode(.screen) overlay，用等效直接 opacity 替代。
         // 对于浅色玻璃底色，screen blend 与直接 opacity 视觉效果几乎相同（两者都趋近于1），
         // 但消除 blendMode 可以省去每张卡片 3 个独立的 WindowServer compositing group，
         // 大幅降低海报网格滚动时的 GPU 合成压力。
         let surface = ZStack {
-                if isEfficient {
-                    shape.fill(AppColors.cleanPanelFill)
+                if usesDirectCompositing {
+                    shape.fill(reduceTransparency ? AppColors.elevatedSurface : AppColors.cleanPanelFill)
                 } else {
                     shape.fill(.regularMaterial)
                     shape.fill(AppColors.cleanPanelFill)
@@ -550,7 +556,7 @@ struct LiquidGlassSurfaceLayer: View {
             }
             .clipShape(shape)
             .overlay(alignment: .topLeading) {
-                if isEfficient {
+                if usesDirectCompositing {
                     shape
                         .fill(
                             LinearGradient(
@@ -582,7 +588,7 @@ struct LiquidGlassSurfaceLayer: View {
                 }
             }
             .overlay(alignment: .topLeading) {
-                if !isEfficient {
+                if !usesDirectCompositing {
                     shape
                         .strokeBorder(.white.opacity((colorScheme == .dark ? 0.20 : 0.58) * depth), lineWidth: 0.85)
                         .blendMode(.screen)
@@ -605,11 +611,11 @@ struct LiquidGlassSurfaceLayer: View {
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    lineWidth: 1.0
+                    lineWidth: AppGlassMetrics.Stroke.surface
                 )
             }
             .overlay(alignment: .topLeading) {
-                if isEfficient {
+                if usesDirectCompositing {
                     shape
                         .stroke(.white.opacity((colorScheme == .dark ? 0.13 : 0.46) * depth), lineWidth: 0.55)
                 } else {
@@ -618,8 +624,12 @@ struct LiquidGlassSurfaceLayer: View {
                         .blendMode(.screen)
                 }
             }
-            .shadow(color: AppColors.solarEdgeTint.opacity((colorScheme == .dark ? 0.026 : 0.036) * depth), radius: (isEfficient ? 7 : 11) * depth, x: -2, y: -1)
-            .shadow(color: .black.opacity((colorScheme == .dark ? 0.10 : 0.026) * depth), radius: (isEfficient ? 7 : 10) * depth, y: isEfficient ? 3 : 5)
+            .shadow(color: AppColors.solarEdgeTint.opacity((colorScheme == .dark ? 0.026 : 0.036) * depth), radius: (usesDirectCompositing ? 7 : 11) * depth, x: -2, y: -1)
+            .shadow(
+                color: .black.opacity((colorScheme == .dark ? 0.10 : 0.026) * depth),
+                radius: (usesDirectCompositing ? 7 : AppGlassMetrics.Shadow.surfaceRadius) * depth,
+                y: usesDirectCompositing ? 3 : AppGlassMetrics.Shadow.surfaceY
+            )
 
         if respondsToPointer {
             surface.pointerLiquidLight(cornerRadius: cornerRadius, intensity: 1.30 * depth)
@@ -790,6 +800,51 @@ private struct RepeatedSurfaceHoverModifier: ViewModifier {
                 .allowsHitTesting(false)
             }
             .animation(reduceMotion ? nil : AppMotion.listHover, value: active)
+    }
+}
+
+private struct RepeatedCardChromeModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+    let active: Bool
+    let cornerRadius: CGFloat
+    let tint: Color
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        content
+            .overlay(alignment: .top) {
+                LinearGradient(
+                    colors: [
+                        .clear,
+                        .white.opacity(colorScheme == .dark ? 0.16 : 0.48),
+                        tint.opacity(colorScheme == .dark ? 0.055 : 0.09),
+                        .clear
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(height: active ? 1.15 : 0.8)
+                .padding(.horizontal, cornerRadius * 0.72)
+                .allowsHitTesting(false)
+            }
+            .overlay {
+                shape
+                    .inset(by: 1.2)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                .white.opacity(colorScheme == .dark ? (active ? 0.12 : 0.07) : (active ? 0.26 : 0.16)),
+                                .clear,
+                                tint.opacity(colorScheme == .dark ? 0.035 : 0.055)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 0.65
+                    )
+                    .allowsHitTesting(false)
+            }
     }
 }
 
@@ -1060,6 +1115,113 @@ private struct PointerScrollActivityMonitor: NSViewRepresentable {
                     onScroll?()
                 }
                 return event
+            }
+        }
+
+        deinit {
+            stopMonitoring()
+        }
+    }
+}
+
+/// SwiftUI 的横向 ScrollView 会吞掉其范围内的纵向触控板滚动。
+/// 该桥只把“纵向占优”的滚轮事件交给外层 List/ScrollView，横向滑动仍留给当前条带。
+private struct NestedHorizontalVerticalScrollPassthrough: NSViewRepresentable {
+    func makeNSView(context: Context) -> MonitorView {
+        MonitorView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: MonitorView, context: Context) {}
+
+    static func dismantleNSView(_ nsView: MonitorView, coordinator: ()) {
+        nsView.stopMonitoring()
+    }
+
+    final class MonitorView: NSView {
+        private var scrollMonitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil {
+                stopMonitoring()
+            } else {
+                startMonitoring()
+            }
+        }
+
+        func stopMonitoring() {
+            if let scrollMonitor {
+                NSEvent.removeMonitor(scrollMonitor)
+                self.scrollMonitor = nil
+            }
+        }
+
+        private func startMonitoring() {
+            guard scrollMonitor == nil else { return }
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self,
+                      let window,
+                      event.window === window,
+                      abs(event.scrollingDeltaY) > abs(event.scrollingDeltaX),
+                      event.scrollingDeltaY != 0 else {
+                    return event
+                }
+                let point = convert(event.locationInWindow, from: nil)
+                guard bounds.contains(point),
+                      let outerScrollView = verticalAncestorScrollView(windowPoint: event.locationInWindow) else {
+                    return event
+                }
+                outerScrollView.scrollWheel(with: event)
+                return nil
+            }
+        }
+
+        /// 找到应当接管纵向滚动的外层竖向 `NSScrollView`。
+        /// 关键点：本视图是横向条带的 `.background`（allowsHitTesting=false），它**不一定**位于
+        /// 横向 `NSScrollView` 内部——SwiftUI 常把背景层放在横向滚动视图的同级/外层。
+        /// 因此不能像旧实现那样从 `enclosingScrollView` 的上一层开始找（那样起点已经是页面列表，
+        /// 再往上根本找不到第二个竖向滚动视图，passthrough 整体失效）。
+        /// 正确做法：从自身向上遍历祖先，跳过只能横向滚动的滚动视图，返回第一个可竖向滚动的滚动视图；
+        /// 若祖先链上找不到（背景层被放在横向滚动视图之外），再回退到窗口树里按命中点几何查找。
+        private func verticalAncestorScrollView(windowPoint: CGPoint) -> NSScrollView? {
+            var view: NSView? = superview
+            while let current = view {
+                if let scrollView = current as? NSScrollView,
+                   Self.canScrollVertically(scrollView) {
+                    return scrollView
+                }
+                view = current.superview
+            }
+            return verticalScrollViewInWindow(containing: windowPoint)
+        }
+
+        /// 祖先链不可用时的兜底：在窗口内收集所有竖向 `NSScrollView`，取包含命中点且最贴合的一个。
+        private func verticalScrollViewInWindow(containing windowPoint: CGPoint) -> NSScrollView? {
+            guard let contentView = window?.contentView else { return nil }
+            var scrollViews: [NSScrollView] = []
+            Self.collectScrollViews(in: contentView, into: &scrollViews)
+            return scrollViews
+                .filter { Self.canScrollVertically($0) }
+                .filter { $0.convert($0.bounds, to: nil).contains(windowPoint) }
+                // 命中多层嵌套时取可视面积最小（最内层）的竖向滚动视图。
+                .min { lhs, rhs in
+                    let l = lhs.convert(lhs.bounds, to: nil)
+                    let r = rhs.convert(rhs.bounds, to: nil)
+                    return l.width * l.height < r.width * r.height
+                }
+        }
+
+        private static func canScrollVertically(_ scrollView: NSScrollView) -> Bool {
+            guard let documentView = scrollView.documentView else { return false }
+            return documentView.bounds.height > scrollView.contentView.bounds.height + 1
+        }
+
+        private static func collectScrollViews(in view: NSView, into result: inout [NSScrollView]) {
+            if let scrollView = view as? NSScrollView {
+                result.append(scrollView)
+            }
+            for subview in view.subviews {
+                collectScrollViews(in: subview, into: &result)
             }
         }
 
@@ -1367,11 +1529,17 @@ private struct SuppressHoverDuringScrollModifier: ViewModifier {
 
 struct SidebarGlassBackground: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         ZStack {
-            Rectangle()
-                .fill(.ultraThinMaterial)
+            if reduceTransparency {
+                Rectangle()
+                    .fill(AppColors.background)
+            } else {
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+            }
             // 主蓝调渐变：与更深的页面底色协调，侧边栏呈蓝冰色
             LinearGradient(
                 colors: [
@@ -1404,11 +1572,19 @@ struct SidebarGlassBackground: View {
 }
 
 extension View {
-    func surfaceBackground(selected: Bool = false, cornerRadius: CGFloat = 12, thickness: Double = 1.18) -> some View {
+    func surfaceBackground(
+        selected: Bool = false,
+        cornerRadius: CGFloat = AppRadius.control,
+        thickness: Double = AppGlassMetrics.Thickness.surface
+    ) -> some View {
         modifier(SurfaceBackground(selected: selected, cornerRadius: cornerRadius, thickness: thickness))
     }
 
-    func staticSurfaceBackground(selected: Bool = false, cornerRadius: CGFloat = 12, thickness: Double = 1.18) -> some View {
+    func staticSurfaceBackground(
+        selected: Bool = false,
+        cornerRadius: CGFloat = AppRadius.control,
+        thickness: Double = AppGlassMetrics.Thickness.surface
+    ) -> some View {
         background {
             LiquidGlassSurfaceLayer(selected: selected, cornerRadius: cornerRadius, thickness: thickness, respondsToPointer: false, renderMode: GlassSurfaceRole.repeated.renderMode)
         }
@@ -1419,7 +1595,15 @@ extension View {
         modifier(RepeatedSurfaceHoverModifier(active: active, cornerRadius: cornerRadius, tint: tint, intensity: intensity))
     }
 
-    func liquidGlass(cornerRadius: CGFloat = 14, selected: Bool = false, thickness: Double = 1.18) -> some View {
+    func repeatedCardChrome(_ active: Bool = false, cornerRadius: CGFloat = AppCardMetrics.repeatedCornerRadius, tint: Color = AppColors.pointerLightTint) -> some View {
+        modifier(RepeatedCardChromeModifier(active: active, cornerRadius: cornerRadius, tint: tint))
+    }
+
+    func liquidGlass(
+        cornerRadius: CGFloat = 14,
+        selected: Bool = false,
+        thickness: Double = AppGlassMetrics.Thickness.surface
+    ) -> some View {
         modifier(SurfaceBackground(selected: selected, cornerRadius: cornerRadius, thickness: thickness))
     }
 
@@ -1450,6 +1634,13 @@ extension View {
         modifier(SuppressHoverDuringScrollModifier())
     }
 
+    func verticalScrollPassthroughFromNestedHorizontal() -> some View {
+        background {
+            NestedHorizontalVerticalScrollPassthrough()
+                .allowsHitTesting(false)
+        }
+    }
+
     func horizontalMouseDragScroll(
         enabled: Bool = true,
         onDraggingChanged: @escaping (Bool) -> Void = { _ in }
@@ -1470,15 +1661,57 @@ extension View {
     }
 }
 
+private struct GlassFocusRingModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+    let active: Bool
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if active {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(
+                            AppColors.selectedGlassTint.opacity(
+                                colorScheme == .dark
+                                    ? AppGlassMetrics.Focus.innerOpacityDark
+                                    : AppGlassMetrics.Focus.innerOpacityLight
+                            ),
+                            lineWidth: AppGlassMetrics.Stroke.focusInner
+                        )
+                        .allowsHitTesting(false)
+                }
+            }
+            .overlay {
+                if active {
+                    RoundedRectangle(
+                        cornerRadius: cornerRadius + AppGlassMetrics.Focus.outerPadding,
+                        style: .continuous
+                    )
+                    .strokeBorder(
+                        AppColors.pointerLightTint.opacity(
+                            colorScheme == .dark
+                                ? AppGlassMetrics.Focus.outerOpacityDark
+                                : AppGlassMetrics.Focus.outerOpacityLight
+                        ),
+                        lineWidth: AppGlassMetrics.Stroke.focusOuter
+                    )
+                    .padding(-AppGlassMetrics.Focus.outerPadding)
+                    .allowsHitTesting(false)
+                }
+            }
+    }
+}
+
 struct LiquidGlassButtonStyle: ButtonStyle {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var cornerRadius: CGFloat = 12
     var horizontalPadding: CGFloat = 12
-    var minHeight: CGFloat = 32
+    var minHeight: CGFloat = AppControlMetrics.defaultButtonHeight
     var prominent = false
-    var thickness: Double = 1.18
+    var thickness: Double = AppGlassMetrics.Thickness.control
 
     func makeBody(configuration: Configuration) -> some View {
         LiquidGlassButtonStyleBody(
@@ -1495,7 +1728,9 @@ struct LiquidGlassButtonStyle: ButtonStyle {
 private struct LiquidGlassButtonStyleBody: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.isFocused) private var isFocused
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let configuration: ButtonStyle.Configuration
     let cornerRadius: CGFloat
     let horizontalPadding: CGFloat
@@ -1508,7 +1743,7 @@ private struct LiquidGlassButtonStyleBody: View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let depth = min(max(thickness, 0.75), 2.0)
         let pressed = configuration.isPressed
-        let active = isEnabled && (isHovering || pressed)
+        let active = isEnabled && (isHovering || pressed || isFocused)
 
         configuration.label
             .font(.callout.weight(.semibold))
@@ -1528,7 +1763,11 @@ private struct LiquidGlassButtonStyleBody: View {
                         )
                     } else {
                         // 非强调按钮：暖白半透明底，避免按钮底部露出冷蓝直角色块。
-                        shape.fill(AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.40 : 0.66))
+                        shape.fill(
+                            reduceTransparency
+                                ? AppColors.elevatedSurface
+                                : AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.40 : 0.66)
+                        )
                     }
                     if !prominent {
                         shape.fill(
@@ -1607,6 +1846,7 @@ private struct LiquidGlassButtonStyleBody: View {
                 }
             }
             .clipShape(shape)
+            .modifier(GlassFocusRingModifier(active: isEnabled && isFocused, cornerRadius: cornerRadius))
             // 按钮底部色块根因是外投影带 y 偏移：在暖白玻璃面上会被看成按钮下方的独立托盘。
             // 这里不再给普通/强调按钮画任何向下偏移的外影，层级改由内高光、描边和边缘光表达。
             .shadow(
@@ -1621,7 +1861,11 @@ private struct LiquidGlassButtonStyleBody: View {
                 radius: prominent ? 1.4 : 0,
                 y: prominent ? 0.5 : 0
             )
-            .pointerLiquidEdge(cornerRadius: cornerRadius, tint: prominent ? AppColors.selectedGlassTint : AppColors.pointerLightTint, intensity: (prominent ? (active ? 0.24 : 0.14) : (active ? 1.06 : 0.72)) * depth)
+            .pointerLiquidEdge(
+                cornerRadius: cornerRadius,
+                tint: prominent ? AppColors.selectedGlassTint : AppColors.pointerLightTint,
+                intensity: (prominent ? (active ? 0.24 : 0.14) : (active ? 1.06 : 0.72)) * depth
+            )
             .opacity(isEnabled ? (pressed ? 0.86 : 1) : AppControlMetrics.disabledControlOpacity)
             .brightness(isHovering && isEnabled && !pressed ? (prominent ? 0.018 : 0.010) : 0)
             .onHover { hovering in
@@ -1629,6 +1873,7 @@ private struct LiquidGlassButtonStyleBody: View {
             }
             .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
             .animation(reduceMotion ? nil : AppMotion.fast, value: pressed)
+            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
     }
 }
 
@@ -1638,8 +1883,8 @@ struct RepeatedGlassButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var cornerRadius: CGFloat = 12
     var horizontalPadding: CGFloat = 12
-    var minHeight: CGFloat = 32
-    var thickness: Double = 1.0
+    var minHeight: CGFloat = AppControlMetrics.defaultButtonHeight
+    var thickness: Double = AppGlassMetrics.Thickness.repeated
 
     func makeBody(configuration: Configuration) -> some View {
         RepeatedGlassButtonStyleBody(
@@ -1655,7 +1900,9 @@ struct RepeatedGlassButtonStyle: ButtonStyle {
 private struct RepeatedGlassButtonStyleBody: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.isFocused) private var isFocused
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let configuration: ButtonStyle.Configuration
     let cornerRadius: CGFloat
     let horizontalPadding: CGFloat
@@ -1667,7 +1914,7 @@ private struct RepeatedGlassButtonStyleBody: View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let depth = min(max(thickness, 0.75), 1.6)
         let pressed = configuration.isPressed
-        let active = isEnabled && (isHovering || pressed)
+        let active = isEnabled && (isHovering || pressed || isFocused)
 
         configuration.label
             .font(.callout.weight(.medium))
@@ -1676,17 +1923,22 @@ private struct RepeatedGlassButtonStyleBody: View {
             .padding(.horizontal, horizontalPadding)
             .frame(minHeight: minHeight)
             .background {
-                shape.fill(
-                    LinearGradient(
-                        colors: [
-                            .white.opacity((colorScheme == .dark ? (active ? 0.22 : 0.14) : (active ? 0.50 : 0.36)) * depth),
-                            AppColors.solarLightTint.opacity((colorScheme == .dark ? (active ? 0.10 : 0.060) : (active ? 0.14 : 0.085)) * depth),
-                            AppColors.cleanFieldFill.opacity(colorScheme == .dark ? (active ? 0.48 : 0.40) : (active ? 0.62 : 0.54))
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+                ZStack {
+                    if reduceTransparency {
+                        shape.fill(AppColors.elevatedSurface)
+                    }
+                    shape.fill(
+                        LinearGradient(
+                            colors: [
+                                .white.opacity((colorScheme == .dark ? (active ? 0.22 : 0.14) : (active ? 0.50 : 0.36)) * depth),
+                                AppColors.solarLightTint.opacity((colorScheme == .dark ? (active ? 0.10 : 0.060) : (active ? 0.14 : 0.085)) * depth),
+                                AppColors.cleanFieldFill.opacity(colorScheme == .dark ? (active ? 0.48 : 0.40) : (active ? 0.62 : 0.54))
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
-                )
+                }
             }
             .overlay {
                 shape.strokeBorder(
@@ -1705,6 +1957,7 @@ private struct RepeatedGlassButtonStyleBody: View {
             }
             .clipShape(shape)
             .contentShape(shape)
+            .modifier(GlassFocusRingModifier(active: isEnabled && isFocused, cornerRadius: cornerRadius))
             .overlay {
                 if pressed {
                     shape
@@ -1724,6 +1977,7 @@ private struct RepeatedGlassButtonStyleBody: View {
             }
             .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
             .animation(reduceMotion ? nil : AppMotion.fast, value: pressed)
+            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
     }
 }
 
@@ -1742,6 +1996,7 @@ struct SubtleIconButtonStyle: ButtonStyle {
 
 private struct SubtleIconButtonStyleBody: View {
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.isFocused) private var isFocused
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let configuration: ButtonStyle.Configuration
     let minSize: CGFloat
@@ -1752,6 +2007,7 @@ private struct SubtleIconButtonStyleBody: View {
         configuration.label
             .frame(minWidth: minSize, minHeight: minSize)
             .contentShape(Rectangle())
+            .modifier(GlassFocusRingModifier(active: isEnabled && isFocused, cornerRadius: min(7, minSize * 0.28)))
             .opacity(configuration.isPressed ? 0.72 : (isEnabled ? 1 : AppControlMetrics.disabledControlOpacity))
             .brightness(active ? (configuration.isPressed ? -0.018 : 0.018) : 0)
             .saturation(active ? 1.08 : 1.0)
@@ -1760,11 +2016,13 @@ private struct SubtleIconButtonStyleBody: View {
             }
             .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
             .animation(reduceMotion ? nil : AppMotion.fast, value: configuration.isPressed)
+            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
     }
 }
 
 private struct HeaderControlGlassBackground: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let cornerRadius: CGFloat
     var highlighted = false
     var focused = false
@@ -1777,7 +2035,11 @@ private struct HeaderControlGlassBackground: ViewModifier {
 
         content
             .background {
-                shape.fill(.regularMaterial)
+                if reduceTransparency {
+                    shape.fill(AppColors.elevatedSurface)
+                } else {
+                    shape.fill(.regularMaterial)
+                }
             }
             .background {
                 shape.fill(AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.54 : 0.76))
@@ -1827,6 +2089,7 @@ private struct HeaderControlGlassBackground: ViewModifier {
                 )
             }
             .clipShape(shape)
+            .modifier(GlassFocusRingModifier(active: focused && enabled, cornerRadius: cornerRadius))
             .shadow(color: .white.opacity(colorScheme == .dark ? 0.020 : 0.20), radius: 1, y: -0.5)
             .shadow(color: AppColors.solarEdgeTint.opacity(colorScheme == .dark ? 0.052 : (focused ? 0.082 : 0.062)), radius: highlighted ? 5 : 7, y: 0)
             .shadow(color: .black.opacity(colorScheme == .dark ? 0.085 : 0.040), radius: 5, y: 1)
@@ -1840,7 +2103,7 @@ struct HeaderActionGlassButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var cornerRadius: CGFloat = 13
     var horizontalPadding: CGFloat = 12
-    var minHeight: CGFloat = 34
+    var minHeight: CGFloat = AppControlMetrics.headerButtonHeight
 
     func makeBody(configuration: Configuration) -> some View {
         HeaderActionGlassButtonStyleBody(
@@ -1854,6 +2117,7 @@ struct HeaderActionGlassButtonStyle: ButtonStyle {
 
 private struct HeaderActionGlassButtonStyleBody: View {
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.isFocused) private var isFocused
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let configuration: ButtonStyle.Configuration
     let cornerRadius: CGFloat
@@ -1863,7 +2127,7 @@ private struct HeaderActionGlassButtonStyleBody: View {
 
     var body: some View {
         let pressed = configuration.isPressed
-        let active = isEnabled && (isHovering || pressed)
+        let active = isEnabled && (isHovering || pressed || isFocused)
 
         configuration.label
             .font(.callout.weight(.semibold))
@@ -1874,6 +2138,7 @@ private struct HeaderActionGlassButtonStyleBody: View {
             .modifier(HeaderControlGlassBackground(
                 cornerRadius: cornerRadius,
                 highlighted: active,
+                focused: isFocused,
                 accent: AppColors.solarEdgeTint,
                 enabled: isEnabled
             ))
@@ -1892,12 +2157,14 @@ private struct HeaderActionGlassButtonStyleBody: View {
             }
             .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
             .animation(reduceMotion ? nil : AppMotion.fast, value: pressed)
+            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
     }
 }
 
 struct GlassCapsuleControl<Content: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.isEnabled) private var isEnabled
     var isSelected: Bool
     var height: CGFloat = 28
@@ -1939,7 +2206,13 @@ struct GlassCapsuleControl<Content: View>: View {
             // 在更深底色上，未选中胶囊白色填充稍加浓，视觉区分度提高。
             .background(
                 Capsule()
-                    .fill(isSelected ? Color.white.opacity(colorScheme == .dark ? 0.30 : 0.76) : Color.white.opacity(colorScheme == .dark ? (isHovering ? 0.24 : 0.17) : (isHovering ? 0.70 : 0.58)))
+                    .fill(
+                        reduceTransparency
+                            ? AppColors.elevatedSurface
+                            : (isSelected
+                                ? Color.white.opacity(colorScheme == .dark ? 0.30 : 0.76)
+                                : Color.white.opacity(colorScheme == .dark ? (isHovering ? 0.24 : 0.17) : (isHovering ? 0.70 : 0.58)))
+                    )
             )
             .overlay {
                 Capsule()
@@ -2049,7 +2322,17 @@ struct AppPageBackground: View {
     }
 }
 
+private struct PageHeaderActionsWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct PageHeader<Actions: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var measuredActionsContentWidth: CGFloat = 0
     let title: String
     let subtitle: String?
     let systemImage: String?
@@ -2090,15 +2373,29 @@ struct PageHeader<Actions: View>: View {
                     .padding(.vertical, 2)
             }
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 6)
+        .padding(.horizontal, AppSpacing.pageHeaderHorizontal)
+        .padding(.vertical, AppSpacing.pageHeaderVertical)
+        .overlay(alignment: .bottomLeading) {
+            LinearGradient(
+                colors: [
+                    AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.22 : 0.30),
+                    AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.11 : 0.16),
+                    .clear
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: 168, height: 0.8)
+            .offset(x: systemImage == nil ? 0 : 58, y: 1)
+            .allowsHitTesting(false)
+        }
         .transaction { transaction in
             transaction.animation = nil
         }
     }
 
     private var titleCluster: some View {
-        HStack(alignment: .center, spacing: 16) {
+        HStack(alignment: .center, spacing: AppSpacing.pageHeaderIconToText) {
             if let systemImage {
                 PlayfulSymbolIcon(systemImage: systemImage, size: 42)
                     .fixedSize()
@@ -2106,13 +2403,16 @@ struct PageHeader<Actions: View>: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(title)
-                    .font(.system(size: 32, weight: .semibold))
+                    .font(.system(size: AppDesignStandard.pageHeaderTitleSize, weight: .semibold))
                     .lineLimit(1)
+                    .minimumScaleFactor(0.86)
                 if let subtitle {
                     Text(subtitle)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                        .lineSpacing(1)
+                        .frame(maxWidth: AppDesignStandard.pageHeaderSubtitleMaxWidth, alignment: .leading)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2121,26 +2421,104 @@ struct PageHeader<Actions: View>: View {
     }
 
     private var actionsCluster: some View {
-        HStack(spacing: 10) {
-            actions
+        ScrollViewReader { proxy in
+            GeometryReader { viewport in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+
+                        HStack(spacing: AppSpacing.pageHeaderActionGap) {
+                            actions
+                        }
+                        // 滚动定位锚点放成 trailing 叠层，不占布局空间——否则它与按钮之间的
+                        // pageHeaderActionGap 会把最右按钮整体往左挤约 10pt，导致按钮右缘与下方卡片不齐。
+                        .overlay(alignment: .trailing) {
+                            Color.clear
+                                .frame(width: 1, height: 1)
+                                .id("page-header-actions-trailing-anchor")
+                        }
+                        .buttonStyle(HeaderActionGlassButtonStyle(
+                            cornerRadius: 13,
+                            horizontalPadding: 12,
+                            minHeight: AppControlMetrics.headerButtonHeight
+                        ))
+                        .fixedSize(horizontal: true, vertical: false)
+                        .background {
+                            GeometryReader { contentProxy in
+                                Color.clear.preference(
+                                    key: PageHeaderActionsWidthPreferenceKey.self,
+                                    value: contentProxy.size.width
+                                )
+                            }
+                        }
+                    }
+                    .frame(
+                        minWidth: max(
+                            viewport.size.width - AppGlassMetrics.Focus.outerPadding * 2,
+                            0
+                        ),
+                        alignment: .trailing
+                    )
+                    .padding(.horizontal, AppGlassMetrics.Focus.outerPadding)
+                    .padding(.vertical, 3)
+                }
+                .verticalScrollPassthroughFromNestedHorizontal()
+                .onAppear {
+                    scrollActionsToTrailingEdge(proxy)
+                }
+                .onChange(of: viewport.size.width) { _ in
+                    scrollActionsToTrailingEdge(proxy)
+                }
+            }
         }
-        .buttonStyle(HeaderActionGlassButtonStyle(cornerRadius: 13, horizontalPadding: 12, minHeight: 34))
-        .fixedSize(horizontal: true, vertical: false)
+        .onPreferenceChange(PageHeaderActionsWidthPreferenceKey.self) { width in
+            guard width > 0, abs(measuredActionsContentWidth - width) > 0.5 else { return }
+            measuredActionsContentWidth = width
+        }
+        .accessibilityElement(children: .contain)
     }
 
     private var compactLayout: some View {
-        HStack(alignment: .bottom, spacing: 20) {
-            titleCluster
-                .layoutPriority(1)
-            Spacer(minLength: 16)
-            actionsCluster
+        GeometryReader { proxy in
+            let availableWidth = max(proxy.size.width, 1)
+            let maximumActionsWidth = max(
+                180,
+                availableWidth - AppDesignStandard.pageHeaderMinimumTitleWidth - 20
+            )
+            let intrinsicActionsWidth = measuredActionsContentWidth > 0
+                ? measuredActionsContentWidth + AppGlassMetrics.Focus.outerPadding * 2
+                : AppDesignStandard.pageHeaderActionsIdealWidth
+            let preferredActionsWidth = min(
+                AppDesignStandard.pageHeaderActionsMaxWidth,
+                max(180, intrinsicActionsWidth)
+            )
+            let actionsWidth = min(preferredActionsWidth, maximumActionsWidth)
+
+            HStack(alignment: .bottom, spacing: 20) {
+                titleCluster
+                    .frame(
+                        width: max(availableWidth - actionsWidth - 20, 1),
+                        alignment: .leading
+                    )
+
+                actionsCluster
+                    .frame(width: actionsWidth, alignment: .trailing)
+                    .clipped()
+            }
+            .frame(width: availableWidth, height: 62, alignment: .bottomLeading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: 62, alignment: .bottom)
+        .frame(height: 62)
+    }
+
+    private func scrollActionsToTrailingEdge(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            proxy.scrollTo("page-header-actions-trailing-anchor", anchor: .trailing)
+        }
     }
 }
 
 struct AppSheetHeader: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
     let subtitle: String?
     let systemImage: String
@@ -2163,8 +2541,30 @@ struct AppSheetHeader: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            PlayfulSymbolIcon(systemImage: systemImage, size: AppSheetMetrics.headerIconSize)
-                .fixedSize()
+            ZStack {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.48 : 0.76))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        .white.opacity(colorScheme == .dark ? 0.24 : 0.74),
+                                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.10 : 0.20),
+                                        AppColors.cleanPanelBorder.opacity(0.48)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                lineWidth: 0.9
+                            )
+                    }
+
+                PlayfulSymbolIcon(systemImage: systemImage, size: AppSheetMetrics.headerIconSize)
+            }
+            .frame(width: AppSheetMetrics.headerIconContainerSize, height: AppSheetMetrics.headerIconContainerSize)
+            .fixedSize()
+            .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
@@ -2182,19 +2582,41 @@ struct AppSheetHeader: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, 13)
+        .overlay(alignment: .bottomLeading) {
+            LinearGradient(
+                colors: [
+                    AppColors.solarEdgeTint.opacity(colorScheme == .dark ? 0.30 : 0.44),
+                    AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.12 : 0.20),
+                    AppColors.cleanPanelBorder.opacity(0.34),
+                    .clear
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: 210, height: 0.8)
+            .padding(.leading, AppSheetMetrics.headerIconContainerSize + 12)
+            .allowsHitTesting(false)
+        }
     }
 }
 
 struct AppInfoNote: View {
+    @Environment(\.colorScheme) private var colorScheme
     let text: String
     var systemImage: String?
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .center, spacing: 9) {
             if let systemImage {
-                Image(systemName: systemImage)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(AppColors.selectedGlassTint.opacity(0.88))
+                ZStack {
+                    Circle()
+                        .fill(AppColors.selectedGlassTint.opacity(colorScheme == .dark ? 0.12 : 0.09))
+                    Image(systemName: systemImage)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(AppColors.selectedGlassTint.opacity(0.88))
+                }
+                .frame(width: 24, height: 24)
             }
             Text(text)
                 .font(.caption)
@@ -2205,6 +2627,69 @@ struct AppInfoNote: View {
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .staticSurfaceBackground(cornerRadius: AppRadius.informationNote, thickness: 0.86)
+    }
+}
+
+struct AppSheetSection<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let title: String
+    let systemImage: String
+    var subtitle: String?
+    @ViewBuilder var content: Content
+
+    init(
+        title: String,
+        systemImage: String,
+        subtitle: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.systemImage = systemImage
+        self.subtitle = subtitle
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            HStack(alignment: .center, spacing: 9) {
+                PlayfulSymbolIcon(systemImage: systemImage, size: 24)
+                    .fixedSize()
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            content
+        }
+        .padding(AppSheetMetrics.sectionContentPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .staticSurfaceBackground(cornerRadius: AppSheetMetrics.sectionCornerRadius)
+        .repeatedCardChrome(false, cornerRadius: AppSheetMetrics.sectionCornerRadius)
+        .overlay(alignment: .topLeading) {
+            LinearGradient(
+                colors: [
+                    AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.11 : 0.18),
+                    .clear
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: 96, height: 1)
+            .padding(.leading, 16)
+            .padding(.top, 1.5)
+            .allowsHitTesting(false)
+        }
     }
 }
 
@@ -2228,7 +2713,86 @@ struct AppInlineNoticeLabel: View {
     }
 }
 
+struct AppSectionHeading: View {
+    let title: String
+    let subtitle: String?
+    let systemImage: String
+    var badgeText: String?
+
+    init(
+        title: String,
+        subtitle: String? = nil,
+        systemImage: String,
+        badgeText: String? = nil
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.systemImage = systemImage
+        self.badgeText = badgeText
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 11) {
+            PlayfulSymbolIcon(systemImage: systemImage, size: 30)
+                .fixedSize()
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.headline)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            if let badgeText {
+                Text(badgeText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppColors.selectedGlassTint.opacity(0.92))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(AppColors.selectedGlassTint.opacity(0.09), in: Capsule())
+                    .overlay {
+                        Capsule()
+                            .strokeBorder(AppColors.cleanPanelBorder.opacity(0.82), lineWidth: 0.75)
+                    }
+                    .fixedSize()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+struct AppStatusBadge: View {
+    let title: String
+    let systemImage: String
+    var tint: Color = AppColors.selectedGlassTint
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(tint.opacity(0.92))
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(AppColors.cleanFieldFill.opacity(0.76), in: Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(tint.opacity(0.20), lineWidth: 0.7)
+            }
+            .fixedSize()
+            .accessibilityElement(children: .combine)
+    }
+}
+
 struct AppSurfaceToolbar<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
     let cornerRadius: CGFloat
     let thickness: Double
     @ViewBuilder var content: Content
@@ -2251,18 +2815,91 @@ struct AppSurfaceToolbar<Content: View>: View {
             }
             .padding(.horizontal, AppSpacing.toolbarHorizontal)
             .padding(.vertical, AppSpacing.toolbarVertical)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(minHeight: AppControlMetrics.defaultButtonHeight)
+            .fixedSize(horizontal: true, vertical: false)
         }
+        .verticalScrollPassthroughFromNestedHorizontal()
         .frame(maxWidth: .infinity, alignment: .leading)
         .clipShape(shape)
         .staticSurfaceBackground(cornerRadius: cornerRadius, thickness: thickness)
         .overlay {
-            shape.stroke(.white.opacity(0.64), lineWidth: 0.7)
+            shape.strokeBorder(
+                AppColors.edgeLightStroke(colorScheme, depth: thickness, intensity: 0.72),
+                lineWidth: 0.8
+            )
+        }
+        .overlay(alignment: .topLeading) {
+            LinearGradient(
+                colors: [
+                    .white.opacity(colorScheme == .dark ? 0.34 : 0.72),
+                    AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.12 : 0.24),
+                    .clear
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(height: 0.8)
+            .padding(.horizontal, cornerRadius * 0.72)
+            .padding(.top, 1.5)
+            .allowsHitTesting(false)
         }
     }
 }
 
+struct AppAdaptiveControlBar<Leading: View, Trailing: View>: View {
+    let cornerRadius: CGFloat
+    let thickness: Double
+    @ViewBuilder var leading: Leading
+    @ViewBuilder var trailing: Trailing
+
+    init(
+        cornerRadius: CGFloat = AppRadius.controlGroup,
+        thickness: Double = 1.04,
+        @ViewBuilder leading: () -> Leading,
+        @ViewBuilder trailing: () -> Trailing
+    ) {
+        self.cornerRadius = cornerRadius
+        self.thickness = thickness
+        self.leading = leading()
+        self.trailing = trailing()
+    }
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                leading
+                Spacer(minLength: 18)
+                trailing
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        leading
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    .padding(.horizontal, 1)
+                }
+                .verticalScrollPassthroughFromNestedHorizontal()
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                HStack(spacing: 10) {
+                    Spacer(minLength: 0)
+                    trailing
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, AppSpacing.controlGroupHorizontal)
+        .padding(.vertical, AppSpacing.controlGroupVertical)
+        .frame(maxWidth: .infinity)
+        .staticSurfaceBackground(cornerRadius: cornerRadius, thickness: thickness)
+        .repeatedCardChrome(false, cornerRadius: cornerRadius)
+    }
+}
+
 struct AppSheetActionFooter<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
     @ViewBuilder var content: Content
 
     init(@ViewBuilder content: () -> Content) {
@@ -2273,6 +2910,21 @@ struct AppSheetActionFooter<Content: View>: View {
         HStack(spacing: AppSpacing.sheetFooter) {
             Spacer(minLength: 0)
             content
+        }
+        .padding(.top, 10)
+        .overlay(alignment: .top) {
+            LinearGradient(
+                colors: [
+                    .clear,
+                    AppColors.cleanPanelBorder.opacity(colorScheme == .dark ? 0.46 : 0.62),
+                    AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.16 : 0.22),
+                    .clear
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(height: 0.7)
+            .allowsHitTesting(false)
         }
     }
 }
@@ -2748,6 +3400,7 @@ private struct TransparentSearchTextField: NSViewRepresentable {
         textField.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .regular)
         textField.textColor = .labelColor
         textField.placeholderAttributedString = placeholderString(placeholder)
+        textField.setAccessibilityLabel(placeholder)
         return textField
     }
 
@@ -2762,6 +3415,7 @@ private struct TransparentSearchTextField: NSViewRepresentable {
         (textField.cell as? NSTextFieldCell)?.drawsBackground = false
         (textField.cell as? NSTextFieldCell)?.backgroundColor = .clear
         textField.textColor = .labelColor
+        textField.setAccessibilityLabel(placeholder)
     }
 
     private func placeholderString(_ value: String) -> NSAttributedString {
@@ -2829,10 +3483,11 @@ private struct TransparentSearchTextField: NSViewRepresentable {
 }
 
 struct GlassSearchField: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isFocused = false
     let placeholder: String
     @Binding var text: String
-    var thickness: Double = 1.28
+    var thickness: Double = AppGlassMetrics.Thickness.headerControl
     var minWidth: CGFloat = 170
     var maxWidth: CGFloat = 260
 
@@ -2841,7 +3496,8 @@ struct GlassSearchField: View {
         let width = adaptiveSearchWidth
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .foregroundStyle(Color.primary.opacity(0.56))
+                .foregroundStyle(isFocused ? AppColors.selectedGlassTint.opacity(0.92) : Color.primary.opacity(0.56))
+                .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
             TransparentSearchTextField(placeholder: placeholder, text: $text, isFocused: $isFocused)
                 .frame(height: 20)
             if !text.isEmpty {
@@ -2851,12 +3507,13 @@ struct GlassSearchField: View {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
-                .pointerLiquidEdge(cornerRadius: 9, intensity: 0.62 * depth)
+                .buttonStyle(SubtleIconButtonStyle(minSize: 20))
+                .accessibilityLabel("清除搜索")
+                .help("清除搜索")
             }
         }
         .padding(.horizontal, 13)
-        .padding(.vertical, 9)
+        .frame(height: AppControlMetrics.searchFieldHeight)
         .frame(width: width)
         .modifier(HeaderControlGlassBackground(
             cornerRadius: 18,
@@ -2865,7 +3522,7 @@ struct GlassSearchField: View {
             enabled: true
         ))
         .pointerLiquidEdge(cornerRadius: 18, intensity: (isFocused ? 1.22 : 1.04) * depth)
-        .animation(AppMotion.fast, value: isFocused)
+        .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
     }
 
     private var adaptiveSearchWidth: CGFloat {
@@ -2878,6 +3535,8 @@ struct GlassSearchField: View {
 
 private struct GlassFormFieldModifier: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @FocusState private var isFocused: Bool
     let cornerRadius: CGFloat
     let thickness: Double
@@ -2890,10 +3549,14 @@ private struct GlassFormFieldModifier: ViewModifier {
             .textFieldStyle(.plain)
             .focused($isFocused)
             .padding(.horizontal, 12)
-            .frame(minHeight: 32)
+            .frame(minHeight: AppControlMetrics.defaultButtonHeight)
             // 表单输入会在设置/弹层里重复出现，用静态玻璃填充保留观感并避免实时采样。
             .background(
-                shape.fill(AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.86 : 0.78))
+                shape.fill(
+                    reduceTransparency
+                        ? AppColors.elevatedSurface
+                        : AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.86 : 0.78)
+                )
             )
             .background(
                 shape.fill(
@@ -2929,9 +3592,10 @@ private struct GlassFormFieldModifier: ViewModifier {
                 )
             }
             .clipShape(shape)
+            .modifier(GlassFocusRingModifier(active: isFocused, cornerRadius: cornerRadius))
             .shadow(color: .black.opacity((colorScheme == .dark ? 0.095 : 0.046) * depth), radius: 5.5, y: 3)
             .pointerLiquidEdge(cornerRadius: cornerRadius, intensity: (isFocused ? 1.16 : 0.86) * depth)
-            .animation(AppMotion.fast, value: isFocused)
+            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
             .onChange(of: isFocused) { focused in
                 guard focused else { return }
                 DispatchQueue.main.async {
@@ -2954,13 +3618,19 @@ extension View {
 struct GlassMenuButton<MenuItems: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     let title: String
     var width: CGFloat?
-    var thickness: Double = 1.22
+    var thickness: Double = AppGlassMetrics.Thickness.control
     @ViewBuilder var menuItems: MenuItems
     @State private var isHovering = false
 
-    init(title: String, width: CGFloat? = nil, thickness: Double = 1.22, @ViewBuilder menuItems: () -> MenuItems) {
+    init(
+        title: String,
+        width: CGFloat? = nil,
+        thickness: Double = AppGlassMetrics.Thickness.control,
+        @ViewBuilder menuItems: () -> MenuItems
+    ) {
         self.title = title
         self.width = width
         self.thickness = thickness
@@ -2983,10 +3653,14 @@ struct GlassMenuButton<MenuItems: View>: View {
             }
             .font(.callout.weight(.medium))
             .padding(.horizontal, 12)
-            .frame(width: width ?? adaptiveMenuControlWidth(for: title), height: 32)
+            .frame(width: width ?? adaptiveMenuControlWidth(for: title), height: AppControlMetrics.defaultButtonHeight)
             // 菜单按钮会在页头和来源行重复出现，这里避免创建实时 material 层。
             .background(
-                shape.fill(AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.86 : 0.78))
+                shape.fill(
+                    reduceTransparency
+                        ? AppColors.elevatedSurface
+                        : AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.86 : 0.78)
+                )
             )
             .background(
                 shape.fill(

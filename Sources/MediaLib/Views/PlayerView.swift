@@ -2583,7 +2583,7 @@ private struct PlayerControlsBar: View {
             }
         } label: {
             Image(systemName: "captions.bubble")
-                .playerControlIcon(palette: palette)
+                .playerControlIcon(selected: showingSubtitlePopover, palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingSubtitlePopover, arrowEdge: .bottom) {
@@ -2604,7 +2604,7 @@ private struct PlayerControlsBar: View {
             }
         } label: {
             Image(systemName: "waveform.circle")
-                .playerControlIcon(palette: palette)
+                .playerControlIcon(selected: showingAudioPopover, palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingAudioPopover, arrowEdge: .bottom) {
@@ -2620,7 +2620,7 @@ private struct PlayerControlsBar: View {
             }
         } label: {
             Image(systemName: volume == 0 ? "speaker.slash" : "speaker.wave.2")
-                .playerControlIcon(palette: palette)
+                .playerControlIcon(selected: showingVolumePopover, palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingVolumePopover, arrowEdge: .bottom) {
@@ -2636,7 +2636,7 @@ private struct PlayerControlsBar: View {
             }
         } label: {
             Image(systemName: "list.triangle")
-                .playerControlIcon(palette: palette)
+                .playerControlIcon(selected: showingEpisodeListPopover, palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingEpisodeListPopover, arrowEdge: .bottom) {
@@ -2655,7 +2655,7 @@ private struct PlayerControlsBar: View {
             }
         } label: {
             Image(systemName: "gearshape")
-                .playerControlIcon(palette: palette)
+                .playerControlIcon(selected: showingSettingsPopover, palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingSettingsPopover, arrowEdge: .bottom) {
@@ -2705,7 +2705,7 @@ private struct PlayerControlsBar: View {
             }
             .foregroundStyle(palette.primary)
             .frame(width: 58, height: 28)
-            .playerCapsuleControl(cornerRadius: 14, palette: palette)
+            .playerCapsuleControl(cornerRadius: 14, selected: showingQualityPopover, palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingQualityPopover, arrowEdge: .bottom) {
@@ -2731,7 +2731,7 @@ private struct PlayerControlsBar: View {
             }
         } label: {
             Image(systemName: "bookmark")
-                .playerControlIcon(palette: palette)
+                .playerControlIcon(selected: showingMarkerPopover, palette: palette)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingMarkerPopover, arrowEdge: .bottom) {
@@ -3208,6 +3208,7 @@ private struct PlayerBufferingOverlay: View {
 }
 
 private struct PlayerBufferingSpinner: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let palette: VideoControlPalette
     @State private var rotation: Double = 0
 
@@ -3231,9 +3232,21 @@ private struct PlayerBufferingSpinner: View {
                 .rotationEffect(.degrees(rotation))
         }
         .onAppear {
-            withAnimation(.linear(duration: 0.86).repeatForever(autoreverses: false)) {
-                rotation = 360
-            }
+            updateRotation()
+        }
+        .onChange(of: reduceMotion) { _ in
+            updateRotation()
+        }
+    }
+
+    private func updateRotation() {
+        guard !reduceMotion else {
+            rotation = 28
+            return
+        }
+        rotation = 0
+        withAnimation(.linear(duration: 0.86).repeatForever(autoreverses: false)) {
+            rotation = 360
         }
     }
 }
@@ -3817,6 +3830,61 @@ private struct PlayerAudioDeviceState: Equatable {
     }
 }
 
+private struct PlayerPopoverHeader: View {
+    let title: String
+    let subtitle: String?
+    let systemImage: String
+    let palette: VideoControlPalette
+    var value: String? = nil
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(palette.primary)
+                .frame(width: 28, height: 28)
+                .background(palette.selectedRowFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(palette.selectedRowStroke, lineWidth: 0.8)
+                }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(palette.primary)
+                    .lineLimit(1)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(palette.subdued)
+                        .lineLimit(1)
+                }
+            }
+            .layoutPriority(1)
+
+            Spacer(minLength: 8)
+
+            if let value, !value.isEmpty {
+                Text(value)
+                    .font(.caption2.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(palette.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+                    .padding(.horizontal, 8)
+                    .frame(height: 24)
+                    .frame(maxWidth: 120)
+                    .background(palette.choiceFill, in: Capsule())
+                    .overlay {
+                        Capsule()
+                            .stroke(palette.rowStroke, lineWidth: 0.7)
+                    }
+            }
+        }
+        .padding(.bottom, 2)
+    }
+}
+
 private struct PlayerVolumePopover: View {
     @EnvironmentObject private var appState: AppState
     let controller: MpvPlayerController
@@ -3841,6 +3909,14 @@ private struct PlayerVolumePopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
+            PlayerPopoverHeader(
+                title: "音量与输出",
+                subtitle: "调整响度与播放设备",
+                systemImage: "speaker.wave.2",
+                palette: palette,
+                value: "\(Int((Double(volume.value) * 100).rounded()))%"
+            )
+
             HStack(spacing: 10) {
                 Image(systemName: volume.value == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
                     .font(.system(size: 15, weight: .semibold))
@@ -5467,9 +5543,12 @@ private struct PlayerSettingsPopover: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 13) {
-                Label("播放器设置", systemImage: "gearshape")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(palette.primary)
+                PlayerPopoverHeader(
+                    title: "播放器设置",
+                    subtitle: "常用播放与时间轴选项",
+                    systemImage: "gearshape",
+                    palette: palette
+                )
 
                 PlayerSettingsGroup(title: "播放", palette: palette) {
                     PlayerSettingRow(title: "倍速", systemImage: "speedometer", palette: palette) {
@@ -5959,9 +6038,13 @@ private struct PlayerMarkerPopover: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
-                Label("章节与播放标记", systemImage: "bookmark")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(palette.primary)
+                PlayerPopoverHeader(
+                    title: "章节与播放标记",
+                    subtitle: "仅管理 MediaLIB 内部索引",
+                    systemImage: "bookmark",
+                    palette: palette,
+                    value: formatTime(currentTime)
+                )
 
                 HStack(spacing: 7) {
                     markerAction("片头开始", systemImage: "play.fill") {
@@ -6125,15 +6208,13 @@ private struct PlayerEpisodeListPopover: View {
     var body: some View {
         let queue = appState.videoQueue
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Label("剧集列表", systemImage: "list.triangle")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(palette.primary)
-                Spacer()
-                Text("\(queue.count) 集")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(palette.subdued)
-            }
+            PlayerPopoverHeader(
+                title: "剧集列表",
+                subtitle: "选择同系列中的其他剧集",
+                systemImage: "list.triangle",
+                palette: palette,
+                value: "\(queue.count) 集"
+            )
 
             ScrollViewReader { proxy in
                 ScrollView {
@@ -6199,9 +6280,13 @@ private struct PlayerQualityPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("清晰度", systemImage: "slider.horizontal.2.square")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(palette.primary)
+            PlayerPopoverHeader(
+                title: "清晰度",
+                subtitle: "根据片源能力切换播放质量",
+                systemImage: "slider.horizontal.2.square",
+                palette: palette,
+                value: options.first(where: { $0.id == selectedID })?.label
+            )
 
             ForEach(options) { option in
                 Button {
@@ -6240,9 +6325,13 @@ private struct PlayerAudioTrackPopover: View {
         let audioTracks = state.audioTracks
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
-                Label("音轨", systemImage: "waveform.circle")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(palette.primary)
+                PlayerPopoverHeader(
+                    title: "音轨",
+                    subtitle: "选择声音轨道与语言",
+                    systemImage: "waveform.circle",
+                    palette: palette,
+                    value: audioTracks.first(where: \.isSelected)?.displayName ?? "自动"
+                )
 
                 Button {
                     controller.selectDefaultAudioTrack()
@@ -6317,9 +6406,13 @@ private struct PlayerSubtitlePopover: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 10) {
                 // Header
-                Label("字幕", systemImage: "captions.bubble")
-                    .font(.callout.weight(.semibold))
-                    .foregroundStyle(palette.primary)
+                PlayerPopoverHeader(
+                    title: "字幕",
+                    subtitle: "内嵌、同目录与在线字幕",
+                    systemImage: "captions.bubble",
+                    palette: palette,
+                    value: trackState.subtitleTracks.first(where: trackState.isPrimarySelected)?.displayName ?? "关闭"
+                )
 
                 // Off + auto-load
                 Button {
@@ -6901,6 +6994,7 @@ private struct VideoProgressScrubber: View {
 }
 
 private struct PlayerMiniSpinner: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var rotation: Double = 0
 
     var body: some View {
@@ -6919,10 +7013,22 @@ private struct PlayerMiniSpinner: View {
             )
             .rotationEffect(.degrees(rotation))
             .onAppear {
-                withAnimation(.linear(duration: 0.82).repeatForever(autoreverses: false)) {
-                    rotation = 360
-                }
+                updateRotation()
             }
+            .onChange(of: reduceMotion) { _ in
+                updateRotation()
+            }
+    }
+
+    private func updateRotation() {
+        guard !reduceMotion else {
+            rotation = 32
+            return
+        }
+        rotation = 0
+        withAnimation(.linear(duration: 0.82).repeatForever(autoreverses: false)) {
+            rotation = 360
+        }
     }
 }
 
@@ -6945,6 +7051,20 @@ private struct PlayerProgressPreviewBubble: View {
                             .scaledToFill()
                             .frame(width: 148, height: 83)
                             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .overlay(alignment: .bottom) {
+                                LinearGradient(
+                                    colors: [.clear, .black.opacity(0.34)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                                .frame(height: 34)
+                                .clipShape(
+                                    UnevenRoundedRectangle(
+                                        bottomLeadingRadius: 8,
+                                        bottomTrailingRadius: 8
+                                    )
+                                )
+                            }
                     } else {
                         VStack(spacing: 7) {
                             PlayerMiniSpinner()
@@ -6955,6 +7075,22 @@ private struct PlayerProgressPreviewBubble: View {
                                 .foregroundStyle(palette.secondary)
                         }
                     }
+
+                    Text(PlayerProgressPreviewBubble.format(time))
+                        .font(.caption2.monospacedDigit().weight(.bold))
+                        .foregroundStyle(image == nil ? palette.primary : Color.white.opacity(0.96))
+                        .padding(.horizontal, 8)
+                        .frame(height: 22)
+                        .background(
+                            image == nil ? palette.choiceFill : Color.black.opacity(0.34),
+                            in: Capsule()
+                        )
+                        .overlay {
+                            Capsule()
+                                .stroke(image == nil ? palette.rowStroke : Color.white.opacity(0.18), lineWidth: 0.7)
+                        }
+                        .padding(7)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
                 }
                 .frame(width: 148, height: 83)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -6984,9 +7120,12 @@ private struct PlayerProgressPreviewBubble: View {
                 }
             }
 
-            Text(PlayerProgressPreviewBubble.format(time))
-                .font(.caption2.monospacedDigit().weight(.semibold))
-                .foregroundStyle(palette.primary)
+            if !showsFrame {
+                Label(PlayerProgressPreviewBubble.format(time), systemImage: "clock")
+                    .font(.caption2.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(palette.primary)
+                    .padding(.horizontal, 3)
+            }
         }
         .padding(showsFrame ? 7 : 9)
         .playerGlass(cornerRadius: showsFrame ? 13 : 11, palette: palette)
@@ -7082,7 +7221,12 @@ private extension View {
         modifier(PlayerGlassModifier(cornerRadius: cornerRadius, palette: palette))
     }
 
-    func playerControlIcon(width: CGFloat = 28, height: CGFloat = 28, palette: VideoControlPalette = .lightContent) -> some View {
+    func playerControlIcon(
+        width: CGFloat = 28,
+        height: CGFloat = 28,
+        selected: Bool = false,
+        palette: VideoControlPalette = .lightContent
+    ) -> some View {
         self
             .font(.system(size: 13, weight: .semibold))
             .frame(width: width, height: height)
@@ -7091,7 +7235,9 @@ private extension View {
                     Circle().fill(.thinMaterial)
                     Circle().fill(
                         LinearGradient(
-                            colors: palette.materialFill,
+                            colors: selected
+                                ? [palette.selectedRowFill, palette.choiceFill]
+                                : palette.materialFill,
                             startPoint: .top,
                             endPoint: .bottom
                         )
@@ -7101,19 +7247,28 @@ private extension View {
             .overlay {
                 Circle().strokeBorder(
                     LinearGradient(
-                        colors: palette.border,
+                        colors: selected
+                            ? [palette.primary.opacity(0.42), palette.selectedRowStroke]
+                            : palette.border,
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    lineWidth: 0.9
+                    lineWidth: selected ? 1.15 : 0.9
                 )
             }
-            .shadow(color: palette.shadow, radius: 2, y: 1)
+            .shadow(color: palette.shadow, radius: selected ? 5 : 2, y: selected ? 2 : 1)
+            .scaleEffect(selected ? 1.035 : 1)
+            .animation(AppMotion.fast, value: selected)
     }
 
     /// `liveMaterial: false`：去掉每个按钮自带的实时 material 与模糊阴影。
     /// 快捷键设置页每行 3 个这种按钮、共约百个，逐个实时模糊是滑动掉帧的主因。
-    func playerCapsuleControl(cornerRadius: CGFloat, palette: VideoControlPalette = .lightContent, liveMaterial: Bool = true) -> some View {
+    func playerCapsuleControl(
+        cornerRadius: CGFloat,
+        selected: Bool = false,
+        palette: VideoControlPalette = .lightContent,
+        liveMaterial: Bool = true
+    ) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         return self
             .background {
@@ -7123,7 +7278,9 @@ private extension View {
                     }
                     shape.fill(
                         LinearGradient(
-                            colors: palette.materialFill,
+                            colors: selected
+                                ? [palette.selectedRowFill, palette.choiceFill]
+                                : palette.materialFill,
                             startPoint: .top,
                             endPoint: .bottom
                         )
@@ -7133,14 +7290,22 @@ private extension View {
             .overlay {
                 shape.strokeBorder(
                     LinearGradient(
-                        colors: palette.border,
+                        colors: selected
+                            ? [palette.primary.opacity(0.42), palette.selectedRowStroke]
+                            : palette.border,
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    lineWidth: 0.9
+                    lineWidth: selected ? 1.15 : 0.9
                 )
             }
-            .shadow(color: liveMaterial ? palette.shadow : .clear, radius: liveMaterial ? 3 : 0, y: liveMaterial ? 1 : 0)
+            .shadow(
+                color: liveMaterial ? palette.shadow : .clear,
+                radius: liveMaterial ? (selected ? 5 : 3) : 0,
+                y: liveMaterial ? (selected ? 2 : 1) : 0
+            )
+            .scaleEffect(selected ? 1.02 : 1)
+            .animation(AppMotion.fast, value: selected)
     }
 }
 
@@ -10202,10 +10367,36 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func updateVideoAspectRatio(from client: LibMpvClient) -> Bool {
-        let width = client.getDouble("dwidth") ?? client.getDouble("width")
-        let height = client.getDouble("dheight") ?? client.getDouble("height")
-        guard let width, let height, width > 0, height > 0 else { return false }
-        let aspect = CGFloat(width / height)
+        let displayWidth = client.getDouble("dwidth")
+        let displayHeight = client.getDouble("dheight")
+        let codedWidth = client.getDouble("video-params/w") ?? client.getDouble("width")
+        let codedHeight = client.getDouble("video-params/h") ?? client.getDouble("height")
+        let sourceRotation = Int(client.getInt64("video-params/rotate") ?? 0)
+        let normalizedRotation = ((sourceRotation % 360) + 360) % 360
+
+        let displayAspect = displayWidth.flatMap { width in
+            displayHeight.flatMap { height in
+                width > 0 && height > 0 ? CGFloat(width / height) : nil
+            }
+        }
+        let rotatedCodedAspect = codedWidth.flatMap { width in
+            codedHeight.flatMap { height -> CGFloat? in
+                guard width > 0, height > 0 else { return nil }
+                let swapsAxes = normalizedRotation == 90 || normalizedRotation == 270
+                return swapsAxes ? CGFloat(height / width) : CGFloat(width / height)
+            }
+        }
+        // 部分 libmpv 构建的 dwidth/dheight 仍返回编码尺寸，未把手机视频的旋转矩阵算进去。
+        // 当源旋转为 90/270 度时，以旋转后的编码比例兜底；若 dwidth/dheight 已正确则两者本就接近。
+        let aspect: CGFloat?
+        if let displayAspect, let rotatedCodedAspect,
+           normalizedRotation == 90 || normalizedRotation == 270,
+           abs(displayAspect - rotatedCodedAspect) > 0.04 {
+            aspect = rotatedCodedAspect
+        } else {
+            aspect = displayAspect ?? rotatedCodedAspect
+        }
+        guard let aspect else { return false }
         guard aspect.isFinite, aspect > 0 else { return false }
         if let current = videoAspectRatio, abs(current - aspect) < 0.01 {
             return true
@@ -10682,7 +10873,9 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
             let shouldProbeMountedNetwork = RemoteVideoQualityPlanner.isMountedNetworkFile(for: item) &&
                 VideoAspectRatioResolver.canProbeLocalFile(for: item)
             let cachedAspect = VideoAspectRatioResolver.cachedAspectRatio(for: item)
-            if shouldProbeMountedNetwork || cachedAspect == nil {
+            // 本地文件总是用 AVAsset 探测「旋转校正后」的真实比例：存库 resolution 不含旋转标签，
+            // 竖屏视频常被记成横屏（如 1920×1080），若直接采用会把竖屏开成横窗。
+            if shouldProbeMountedNetwork || cachedAspect == nil || VideoAspectRatioResolver.canProbeLocalFile(for: item) {
                 if VideoAspectRatioResolver.canProbeLocalFile(for: item) {
                     closeWindow(clearSelection: false)
                     currentItemID = item.id
@@ -11000,29 +11193,42 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
             screen: NSScreen?,
             aspectOverride: CGFloat? = nil
         ) -> NSSize {
-            let visibleFrameWidth = (screen ?? NSScreen.main)?.visibleFrame.width ?? 1440
-            // 勾选「启动窗口宽度」按比例取屏宽（1.0 = 占满）；否则用记忆的上次拖拽宽度。
-            let width: CGFloat
-            let widthIsFullScreen: Bool
-            if settings.videoUseFixedLaunchWidth {
-                let ratio = AppSettings.clampedVideoLaunchWidthRatio(settings.videoLaunchWidthRatio)
-                width = visibleFrameWidth * CGFloat(ratio)
-                widthIsFullScreen = ratio >= 0.999
-            } else {
-                width = VideoWindowSizing.clampedPreferredWidth(settings.videoPlayerPreferredWidth, on: screen)
-                widthIsFullScreen = VideoWindowSizing.usesFullScreenWidth(settings.videoPlayerPreferredWidth, on: screen)
-            }
-            let aspect = aspectOverride ?? videoAspectRatio(for: item)
             let visibleFrame = (screen ?? NSScreen.main)?.visibleFrame
+            let visibleFrameWidth = visibleFrame?.width ?? 1440
             let visibleWidth = visibleFrame?.width ?? 1440
             let visibleHeight = visibleFrame?.height ?? 900
+            let aspect = aspectOverride ?? videoAspectRatio(for: item)
+            // 竖屏视频（高>宽）一律按「高度」定尺寸，避免被开成横窗：
+            //  - 固定启动宽度模式：隐藏地把「宽度百分比」当作「高度百分比」用；
+            //  - 记忆宽度模式：用 0.9 倍屏高（记忆的是横屏宽度，对竖屏无意义）。
+            // 横屏维持原宽度优先逻辑。
+            let isPortrait = aspect.isFinite && aspect > 0 && aspect < 1
+
+            var finalSize: NSSize
+            let widthIsFullScreen: Bool
+            if isPortrait {
+                let heightRatio: CGFloat = settings.videoUseFixedLaunchWidth
+                    ? CGFloat(AppSettings.clampedVideoLaunchWidthRatio(settings.videoLaunchWidthRatio))
+                    : 0.9
+                let targetHeight = visibleHeight * heightRatio
+                finalSize = NSSize(width: targetHeight * aspect, height: targetHeight)
+                widthIsFullScreen = false
+            } else if settings.videoUseFixedLaunchWidth {
+                let ratio = AppSettings.clampedVideoLaunchWidthRatio(settings.videoLaunchWidthRatio)
+                let width = visibleFrameWidth * CGFloat(ratio)
+                finalSize = NSSize(width: width, height: width / aspect)
+                widthIsFullScreen = ratio >= 0.999
+            } else {
+                let width = VideoWindowSizing.clampedPreferredWidth(settings.videoPlayerPreferredWidth, on: screen)
+                widthIsFullScreen = VideoWindowSizing.usesFullScreenWidth(settings.videoPlayerPreferredWidth, on: screen)
+                finalSize = NSSize(width: width, height: width / aspect)
+            }
             // 固定启动宽度时宽度优先：高度允许用满可用区域，否则 94% 高度上限
             // 会把 16:9 的「100% 宽」窗口等比缩小、永远占不满屏幕宽。
             let maxSize = NSSize(
                 width: visibleWidth * (widthIsFullScreen ? 1.0 : 0.985),
                 height: visibleHeight * (settings.videoUseFixedLaunchWidth ? 1.0 : 0.94)
             )
-            var finalSize = NSSize(width: width, height: width / aspect)
             let scale = min(1, maxSize.width / finalSize.width, maxSize.height / finalSize.height)
             if scale < 1 {
                 finalSize.width *= scale
@@ -11034,6 +11240,15 @@ struct VideoPlayerWindowPresenter: NSViewRepresentable {
         private static func minimumPlayerContentSize(for item: MediaItem, aspectOverride: CGFloat? = nil) -> NSSize {
             let aspect = aspectOverride ?? videoAspectRatio(for: item)
             let safeAspect = aspect.isFinite && aspect > 0 ? aspect : 16.0 / 9.0
+            // 竖屏视频必须保留竖向最小尺寸。旧逻辑返回 680×420 横向最小框，
+            // 与 contentAspectRatio 冲突时 AppKit 会优先把窗口撑成横窗。
+            if safeAspect < 1 {
+                let minimumWidth: CGFloat = 360
+                return NSSize(
+                    width: minimumWidth,
+                    height: max(560, minimumWidth / safeAspect)
+                )
+            }
             // 控制条最大宽约 596，加上播放器左右 18pt 安全边和标题栏圆角余量，低于 680pt 时
             // 清晰度/音轨/音量/倍速等按钮会互相挤压；高度给底部两行控制条、锁定按钮和加载层留足空间。
             let minimumWidth = max(VideoWindowSizing.minimumControlSafeWidth, VideoWindowSizing.minimumControlSafeHeight * safeAspect)

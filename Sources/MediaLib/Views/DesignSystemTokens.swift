@@ -3,7 +3,14 @@ import SwiftUI
 enum AppSpacing {
     static let pageHorizontal: CGFloat = 32
     static let pageVertical: CGFloat = 28
+    static let pageHeaderHorizontal: CGFloat = 4
+    static let pageHeaderVertical: CGFloat = 6
+    static let pageHeaderIconToText: CGFloat = 16
+    static let pageHeaderActionGap: CGFloat = 10
     static let card: CGFloat = 14
+    static let settingsSectionHeaderToCard: CGFloat = 12
+    static let settingsSectionContentLeading: CGFloat = 50
+    static let settingsSectionOuterLeading: CGFloat = 28
     static let controlGroupHorizontal: CGFloat = 24
     static let controlGroupVertical: CGFloat = 11
     static let sheetHorizontal: CGFloat = 24
@@ -28,9 +35,48 @@ enum AppRadius {
 }
 
 enum AppEffect {
-    static let defaultGlassThickness = 1.18
-    static let staticGlassThickness = 1.02
-    static let controlGlassThickness = 1.22
+    static let defaultGlassThickness = AppGlassMetrics.Thickness.surface
+    static let staticGlassThickness = AppGlassMetrics.Thickness.repeated
+    static let controlGlassThickness = AppGlassMetrics.Thickness.control
+}
+
+/// 普通页面共享玻璃的视觉层级刻度。
+///
+/// 播放器和音乐展开页继续使用各自的专用视觉 token；这里仅约束普通页面、弹窗、
+/// 工具条、表单与重复卡片，避免在各组件中继续散落近似但不一致的描边和阴影参数。
+enum AppGlassMetrics {
+    enum Thickness {
+        static let repeated = 1.02
+        static let surface = 1.18
+        static let control = 1.22
+        static let headerControl = 1.28
+        static let elevated = 1.36
+    }
+
+    enum Stroke {
+        static let hairline: CGFloat = 0.75
+        static let surface: CGFloat = 1.0
+        static let selected: CGFloat = 1.15
+        static let focusInner: CGFloat = 1.35
+        static let focusOuter: CGFloat = 3.0
+    }
+
+    enum Shadow {
+        static let repeatedRadius: CGFloat = 8
+        static let repeatedY: CGFloat = 4
+        static let surfaceRadius: CGFloat = 10
+        static let surfaceY: CGFloat = 5
+        static let controlRadius: CGFloat = 5
+        static let controlY: CGFloat = 1
+    }
+
+    enum Focus {
+        static let outerPadding: CGFloat = 2
+        static let outerOpacityLight = 0.18
+        static let outerOpacityDark = 0.24
+        static let innerOpacityLight = 0.48
+        static let innerOpacityDark = 0.56
+    }
 }
 
 enum AppSheetMetrics {
@@ -38,22 +84,41 @@ enum AppSheetMetrics {
     static let standardWidth: CGFloat = 560
     static let wideWidth: CGFloat = 620
     static let headerIconSize: CGFloat = 42
+    static let headerIconContainerSize: CGFloat = 52
+    static let sectionCornerRadius: CGFloat = 18
+    static let sectionContentPadding: CGFloat = 16
 }
 
 enum AppControlMetrics {
     static let minMenuWidth: CGFloat = 92
     static let maxMenuWidth: CGFloat = 360
     static let minTouchHeight: CGFloat = 30
-    static let defaultButtonHeight: CGFloat = 32
-    static let headerButtonHeight: CGFloat = 34
+    static let defaultButtonHeight: CGFloat = 34
+    static let headerButtonHeight: CGFloat = 36
+    static let searchFieldHeight: CGFloat = 36
+    static let settingsRowHeight: CGFloat = 36
     /// 统一的禁用态不透明度：所有自定义控件在 isEnabled == false 时整控件降到此值，
     /// 让禁用态在按钮 / 图标 / 页头 / 输入外壳之间观感一致（启用态不受影响）。
     static let disabledControlOpacity: Double = 0.5
 }
 
+enum AppCardMetrics {
+    static let repeatedCornerRadius: CGFloat = 18
+    static let posterCoverCornerRadius: CGFloat = 12
+    static let compactArtworkCornerRadius: CGFloat = 9
+    static let repeatedContentPadding: CGFloat = 14
+    static let musicRowHeight: CGFloat = 60
+    static let emptyStateMinimumHeight: CGFloat = 236
+    static let emptyStateTextWidth: CGFloat = 520
+}
+
 enum AppDesignStandard {
     /// 普通页面使用大标题 PageHeader；弹窗使用 AppSheetHeader，避免 sheet 像完整页面一样过重。
     static let pageHeaderTitleSize: CGFloat = 32
+    static let pageHeaderSubtitleMaxWidth: CGFloat = 680
+    static let pageHeaderMinimumTitleWidth: CGFloat = 220
+    static let pageHeaderActionsIdealWidth: CGFloat = 360
+    static let pageHeaderActionsMaxWidth: CGFloat = 760
     /// 重复列表、网格、设置行优先使用静态玻璃，只有少量页头/主操作控件使用更厚玻璃。
     static let repeatedSurfaceRole = GlassSurfaceRole.repeated
     /// 会打开面板或新流程的按钮文案保留明确动词，必要时使用省略号；即时动作不使用省略号。

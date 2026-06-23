@@ -52,7 +52,12 @@ struct MusicSmartPlaylistSheet: View {
                 systemImage: "music.note.list"
             )
 
-            VStack(spacing: 14) {
+            AppSheetSection(
+                title: "歌单规则",
+                systemImage: "slider.horizontal.3",
+                subtitle: "筛选、排序和数量上限会随音乐库内容自动生效。"
+            ) {
+                VStack(spacing: 14) {
                 SettingsRow(title: "名称", systemImage: "pencil.line") {
                     TextField("智能歌单", text: $name)
                         .textFieldStyle(.plain)
@@ -61,42 +66,40 @@ struct MusicSmartPlaylistSheet: View {
                         .frame(width: adaptiveFieldWidth(text: name, placeholder: "智能歌单"), alignment: .trailing)
                 }
                 SettingsRow(title: "筛选条件", systemImage: "line.3.horizontal.decrease.circle") {
-                    picker(selection: $filter, selectedTitle: filter.displayName) {
+                    picker(selection: $filter, selectedTitle: filter.displayName, accessibilityLabel: "筛选条件") {
                         ForEach(MusicSmartPlaylistFilter.allCases) { option in
                             Text(option.displayName).tag(option)
                         }
                     }
                 }
                 SettingsRow(title: "加入时间", systemImage: "calendar.badge.clock") {
-                    picker(selection: $recency, selectedTitle: recency.displayName) {
+                    picker(selection: $recency, selectedTitle: recency.displayName, accessibilityLabel: "加入时间") {
                         ForEach(MusicSmartPlaylistRecency.allCases) { option in
                             Text(option.displayName).tag(option)
                         }
                     }
                 }
                 SettingsRow(title: "排序方式", systemImage: "arrow.up.arrow.down") {
-                    picker(selection: $sort, selectedTitle: sort.displayName) {
+                    picker(selection: $sort, selectedTitle: sort.displayName, accessibilityLabel: "排序方式") {
                         ForEach(MusicSmartPlaylistSort.allCases) { option in
                             Text(option.displayName).tag(option)
                         }
                     }
                 }
                 SettingsRow(title: "数量上限", systemImage: "number") {
-                    picker(selection: $limit, selectedTitle: limit.displayName) {
+                    picker(selection: $limit, selectedTitle: limit.displayName, accessibilityLabel: "数量上限") {
                         ForEach(MusicSmartPlaylistLimit.allCases) { option in
                             Text(option.displayName).tag(option)
                         }
                     }
                 }
+                }
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .staticSurfaceBackground(cornerRadius: 18)
 
             AppSheetActionFooter {
                 Button("取消", action: onCancel)
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                    .keyboardShortcut(.cancelAction)
                 Button {
                     var playlist = request.playlist
                     playlist.name = trimmedName
@@ -108,8 +111,9 @@ struct MusicSmartPlaylistSheet: View {
                 } label: {
                     Label("保存", systemImage: "checkmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                 .disabled(trimmedName.isEmpty)
+                .keyboardShortcut(.defaultAction)
             }
         }
         .appSheetChrome(width: 580)
@@ -118,10 +122,12 @@ struct MusicSmartPlaylistSheet: View {
     private func picker<SelectionValue: Hashable, Content: View>(
         selection: Binding<SelectionValue>,
         selectedTitle: String,
+        accessibilityLabel: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
         Picker("", selection: selection, content: content)
             .adaptiveMenuControl(selectedTitle: selectedTitle, minWidth: Self.optionMenuMinWidth, maxWidth: Self.optionMenuMaxWidth)
+            .accessibilityLabel(accessibilityLabel)
     }
 
     private static let optionMenuMinWidth: CGFloat = 76

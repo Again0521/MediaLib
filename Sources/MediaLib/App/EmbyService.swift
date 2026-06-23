@@ -93,10 +93,20 @@ struct EmbySubtitleStream: Identifiable, Hashable, Sendable {
     }
 }
 
+/// Emby 条目详情扩展数据：演员 + 艺术照 + 外部 ID（用于相关链接与 TMDB 类似作品补全）。
+struct EmbyDetailExtras {
+    var cast: [TMDBPerson]
+    var crew: [TMDBPerson]
+    var images: [TMDBImage]
+    var tmdbID: String?
+    var tmdbKind: String?
+    var imdbID: String?
+}
+
 struct EmbyService {
     private let clientName = "MediaLIB"
     private let deviceName = Host.current().localizedName ?? "Mac"
-    private let version = "1.0.0"
+    private let version = AppVersion.current
     private let pageSize = 300
 
     private var userAgent: String {
@@ -433,7 +443,7 @@ struct EmbyService {
         var queryItems = [
             URLQueryItem(name: "Recursive", value: "true"),
             URLQueryItem(name: "IncludeItemTypes", value: "Movie,Series,Episode,Audio"),
-            URLQueryItem(name: "Fields", value: "Overview,ProductionYear,RunTimeTicks,ParentId,SeriesId,SeriesName,IndexNumber,ParentIndexNumber,CommunityRating,UserData,ImageTags,MediaSources,MediaStreams,Path,PremiereDate,ProviderIds,Genres"),
+            URLQueryItem(name: "Fields", value: "OriginalTitle,Overview,ProductionYear,RunTimeTicks,ParentId,SeriesId,SeriesName,IndexNumber,ParentIndexNumber,CommunityRating,UserData,ImageTags,BackdropImageTags,MediaSources,MediaStreams,Path,PremiereDate,ProviderIds,Genres"),
             URLQueryItem(name: "StartIndex", value: "\(startIndex)"),
             URLQueryItem(name: "Limit", value: "\(limit)"),
             URLQueryItem(name: "api_key", value: session.accessToken)
@@ -482,12 +492,16 @@ struct EmbyService {
             id: id,
             type: type,
             title: dto.Name,
+            originalTitle: dto.OriginalTitle,
             artist: dto.Artists?.first,
             album: dto.Album,
             trackNumber: dto.IndexNumber,
             year: dto.ProductionYear,
             overview: dto.Overview,
             posterPath: posterURL(for: dto, session: session)?.absoluteString,
+            backdropPath: dto.BackdropImageTags?.isEmpty == false
+                ? backdropImageURL(itemID: dto.Id, index: 0, maxWidth: 1280, session: session)?.absoluteString
+                : nil,
             rating: dto.CommunityRating,
             userRating: Self.seedUserRating(from: dto.CommunityRating),
             runtime: duration.map { Int($0 / 60) },
@@ -615,7 +629,11 @@ struct EmbyService {
         return components?.url
     }
 
-    private func fetchItemDetail(session: EmbySession, itemID: String) async throws -> EmbyItemDTO {
+    private func fetchItemDetail(
+        session: EmbySession,
+        itemID: String,
+        fields: String = "MediaSources,MediaStreams"
+    ) async throws -> EmbyItemDTO {
         let itemURL = session.serverURL
             .appendingPathComponent("Users")
             .appendingPathComponent(session.userID)
@@ -623,7 +641,7 @@ struct EmbyService {
             .appendingPathComponent(itemID)
         var components = URLComponents(url: itemURL, resolvingAgainstBaseURL: false)
         components?.queryItems = [
-            URLQueryItem(name: "Fields", value: "MediaSources,MediaStreams"),
+            URLQueryItem(name: "Fields", value: fields),
             URLQueryItem(name: "api_key", value: session.accessToken)
         ]
         guard let url = components?.url else {
@@ -636,6 +654,125 @@ struct EmbyService {
         let (data, response) = try await URLSession.shared.data(for: request)
         try validate(response: response, data: data)
         return try JSONDecoder().decode(EmbyItemDTO.self, from: data)
+    }
+
+    /// 拉取 Emby 条目的详情扩展：演员（People）、艺术照（Backdrop/Primary 图）、外部 ID（Tmdb/Imdb）。
+    /// 演员/艺术照用 Emby 自有数据；若带 Tmdb ProviderId，调用方可再补 TMDB「类似作品」。
+    func fetchExtras(session: EmbySession, itemID: String) async throws -> EmbyDetailExtras {
+        let dto = try await fetchItemDetail(
+            session: session,
+            itemID: itemID,
+            fields: "People,ProviderIds,Overview,Genres,BackdropImageTags"
+        )
+
+        let people: [TMDBPerson] = (dto.People ?? []).prefix(28).compactMap { person in
+            guard let name = person.Name, !name.isEmpty else { return nil }
+            let role = person.Role?.isEmpty == false ? person.Role! : Self.localizedPersonType(person.personType)
+            return TMDBPerson(
+                id: person.Id.flatMap { Int($0) } ?? name.hashValue,
+                stableID: "\(session.stableIDPrefix)-person-\(person.Id ?? String(name.hashValue))",
+                name: name,
+                role: role,
+                profileURL: personImageURL(personID: person.Id, tag: person.PrimaryImageTag, session: session)?.absoluteString,
+                category: ["actor", "gueststar"].contains((person.personType ?? "Actor").lowercased()) ? "cast" : "crew",
+                department: person.personType
+            )
+        }
+        let castTypes = Set(["actor", "gueststar"])
+        let cast = people.filter { person in
+            guard let dtoPerson = dto.People?.first(where: { ($0.Name ?? "") == person.name }) else { return true }
+            return castTypes.contains((dtoPerson.personType ?? "Actor").lowercased())
+        }
+        let crew = people.filter { person in !cast.contains(where: { $0.id == person.id }) }
+
+        var images: [TMDBImage] = []
+        let backdropCount = dto.BackdropImageTags?.count ?? 0
+        for index in 0..<backdropCount {
+            guard let thumb = backdropImageURL(itemID: dto.Id, index: index, maxWidth: 500, session: session),
+                  let full = backdropImageURL(itemID: dto.Id, index: index, maxWidth: 1280, session: session) else { continue }
+            images.append(TMDBImage(
+                id: "\(session.stableIDPrefix)-\(dto.Id)-backdrop-\(index)",
+                thumbURL: thumb.absoluteString,
+                fullURL: full.absoluteString,
+                aspectRatio: 1.78,
+                kind: "backdrop"
+            ))
+        }
+        if dto.ImageTags?.Primary != nil,
+           let thumb = primaryImageURL(itemID: dto.Id, maxWidth: 500, session: session),
+           let full = primaryImageURL(itemID: dto.Id, maxWidth: 1280, session: session) {
+            images.append(TMDBImage(
+                id: "\(session.stableIDPrefix)-\(dto.Id)-primary",
+                thumbURL: thumb.absoluteString,
+                fullURL: full.absoluteString,
+                aspectRatio: 0.67,
+                kind: "poster"
+            ))
+        }
+
+        let tmdbID = dto.ProviderIds?["Tmdb"] ?? dto.ProviderIds?["TmdbId"]
+        let imdbID = dto.ProviderIds?["Imdb"] ?? dto.ProviderIds?["IMDB"]
+        let tmdbKind = (dto.type.lowercased() == "movie") ? "movie" : "tv"
+
+        return EmbyDetailExtras(cast: cast, crew: crew, images: images, tmdbID: tmdbID, tmdbKind: tmdbKind, imdbID: imdbID)
+    }
+
+    private func personImageURL(personID: String?, tag: String?, session: EmbySession) -> URL? {
+        guard let personID, tag != nil else { return nil }
+        let url = session.serverURL
+            .appendingPathComponent("Items")
+            .appendingPathComponent(personID)
+            .appendingPathComponent("Images")
+            .appendingPathComponent("Primary")
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "maxWidth", value: "185"),
+            URLQueryItem(name: "quality", value: "90"),
+            URLQueryItem(name: "api_key", value: session.accessToken)
+        ]
+        return components?.url
+    }
+
+    private func backdropImageURL(itemID: String, index: Int, maxWidth: Int, session: EmbySession) -> URL? {
+        let url = session.serverURL
+            .appendingPathComponent("Items")
+            .appendingPathComponent(itemID)
+            .appendingPathComponent("Images")
+            .appendingPathComponent("Backdrop")
+            .appendingPathComponent("\(index)")
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "maxWidth", value: "\(maxWidth)"),
+            URLQueryItem(name: "quality", value: "90"),
+            URLQueryItem(name: "api_key", value: session.accessToken)
+        ]
+        return components?.url
+    }
+
+    private func primaryImageURL(itemID: String, maxWidth: Int, session: EmbySession) -> URL? {
+        let url = session.serverURL
+            .appendingPathComponent("Items")
+            .appendingPathComponent(itemID)
+            .appendingPathComponent("Images")
+            .appendingPathComponent("Primary")
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "maxWidth", value: "\(maxWidth)"),
+            URLQueryItem(name: "quality", value: "90"),
+            URLQueryItem(name: "api_key", value: session.accessToken)
+        ]
+        return components?.url
+    }
+
+    private static func localizedPersonType(_ type: String?) -> String {
+        switch type {
+        case "Actor": return "演员"
+        case "Director": return "导演"
+        case "Writer": return "编剧"
+        case "Producer": return "制片"
+        case "Composer", "GuestStar": return "演员"
+        default: return type ?? "演员"
+        }
     }
 
     private func sendAuthenticated(
@@ -849,6 +986,7 @@ private struct EmbyItemsResponse: Decodable {
 private struct EmbyItemDTO: Decodable {
     let Id: String
     let Name: String
+    let OriginalTitle: String?
     let type: String
     let Overview: String?
     let ProductionYear: Int?
@@ -866,10 +1004,14 @@ private struct EmbyItemDTO: Decodable {
     let CollectionType: String?
     let MediaSources: [EmbyMediaSourceDTO]?
     let Genres: [String]?
+    let People: [EmbyPersonDTO]?
+    let ProviderIds: [String: String]?
+    let BackdropImageTags: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case Id
         case Name
+        case OriginalTitle
         case type = "Type"
         case Overview
         case ProductionYear
@@ -887,6 +1029,23 @@ private struct EmbyItemDTO: Decodable {
         case CollectionType
         case MediaSources
         case Genres
+        case People
+        case ProviderIds
+        case BackdropImageTags
+    }
+}
+
+private struct EmbyPersonDTO: Decodable {
+    let Id: String?
+    let Name: String?
+    let Role: String?
+    let personType: String?
+    let PrimaryImageTag: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case Id, Name, Role
+        case personType = "Type"
+        case PrimaryImageTag
     }
 }
 

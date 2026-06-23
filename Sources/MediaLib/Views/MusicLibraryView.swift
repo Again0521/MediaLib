@@ -737,28 +737,11 @@ struct MusicLibraryView: View {
     }
 
     private var musicControls: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
-                MusicFilterModeCapsules(selection: $filterMode, modes: availableFilterModes)
-
-                Spacer(minLength: 18)
-
-                sortModeMenu
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                MusicFilterModeCapsules(selection: $filterMode, modes: availableFilterModes)
-
-                HStack {
-                    Spacer(minLength: 0)
-                    sortModeMenu
-                }
-            }
+        AppAdaptiveControlBar {
+            MusicFilterModeCapsules(selection: $filterMode, modes: availableFilterModes)
+        } trailing: {
+            sortModeMenu
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 11)
-        .frame(maxWidth: .infinity)
-        .staticSurfaceBackground(cornerRadius: 16, thickness: 1.04)
     }
 
     private var sortModeMenu: some View {
@@ -894,13 +877,13 @@ struct MusicLibraryView: View {
 
     private var subtitle: String {
         switch section {
-        case .songs: return "浏览音乐库中的全部歌曲。"
-        case .albums: return "按专辑浏览歌曲。"
-        case .artists: return "按艺术家浏览歌曲。"
-        case .playlists: return "管理手动歌单与智能歌单。"
-        case .recent: return "查看最近播放的歌曲。"
-        case .favorites: return "查看已喜欢的歌曲。"
-        case .unmatched: return "查看信息或封面尚未补全的歌曲。"
+        case .songs: return "浏览音乐库中的全部歌曲 · \(displayedTrackRows.count) 首"
+        case .albums: return "按专辑浏览歌曲 · \(displayedAlbumGroups.count) 张"
+        case .artists: return "按艺术家浏览歌曲 · \(displayedArtistGroups.count) 位"
+        case .playlists: return "管理手动歌单与智能歌单 · \(filteredPlaylists.count) 个"
+        case .recent: return "查看最近播放的歌曲 · \(displayedTrackRows.count) 首"
+        case .favorites: return "查看已喜欢的歌曲 · \(displayedTrackRows.count) 首"
+        case .unmatched: return "查看信息或封面尚未补全的歌曲 · \(displayedTrackRows.count) 首"
         }
     }
 
@@ -1243,7 +1226,7 @@ private struct MusicCollectionTrackList: View {
                     } label: {
                         Label("导出 M3U", systemImage: "square.and.arrow.up")
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
                     .disabled(tracks.isEmpty)
                 }
 
@@ -1253,7 +1236,7 @@ private struct MusicCollectionTrackList: View {
                     } label: {
                         Label("重命名", systemImage: "pencil")
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
 
                     Button(role: .destructive) {
                         onDeletePlaylist(playlist)
@@ -1261,7 +1244,7 @@ private struct MusicCollectionTrackList: View {
                         Label("删除", systemImage: "trash")
                             .foregroundStyle(.red)
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
                 }
 
                 if playlist == nil {
@@ -1279,7 +1262,7 @@ private struct MusicCollectionTrackList: View {
                 } label: {
                     Label("播放全部", systemImage: "play.fill")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
@@ -1324,6 +1307,27 @@ private struct MusicTrackRowModel: Identifiable, Sendable {
     let durationText: String
 
     var id: String { track.id }
+}
+
+struct MusicCompactStatusBadge: View {
+    let title: String
+    let systemImage: String
+    var tint: Color = AppColors.selectedGlassTint
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .font(.system(size: 9.5, weight: .semibold))
+            .foregroundStyle(tint.opacity(0.92))
+            .lineLimit(1)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2.5)
+            .background(AppColors.cleanFieldFill.opacity(0.72), in: Capsule())
+            .overlay {
+                Capsule()
+                    .strokeBorder(tint.opacity(0.18), lineWidth: 0.65)
+            }
+            .fixedSize()
+    }
 }
 
 private struct MusicPlaylistTrackListView: View {
@@ -1614,23 +1618,60 @@ private struct MusicSongRow: View {
 
     var body: some View {
         let hoverActive = isHovering && !suppressHoverDuringScroll
+        let isCurrent = appState.activePlayerItem?.id == row.track.id
         let rowShape = RoundedRectangle(cornerRadius: 12, style: .continuous)
 
         HStack(spacing: 12) {
             MusicRowArtwork(path: row.track.posterPath, title: row.track.title)
                 .frame(width: 42, height: 42)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: AppCardMetrics.compactArtworkCornerRadius, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: AppCardMetrics.compactArtworkCornerRadius, style: .continuous)
+                        .strokeBorder(.white.opacity(hoverActive ? 0.42 : 0.20), lineWidth: 0.8)
+                }
                 .scaleEffect(!reduceMotion && hoverActive ? 1.035 : 1)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(row.titleText)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
-                if let fileName = row.fileName {
-                    Text(fileName)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text(row.titleText)
+                        .font(.callout.weight(.medium))
                         .lineLimit(1)
+
+                    if isCurrent {
+                        MusicCompactStatusBadge(
+                            title: "播放中",
+                            systemImage: "speaker.wave.2.fill"
+                        )
+                    }
+                }
+
+                HStack(spacing: 5) {
+                    if let fileName = row.fileName {
+                        Text(fileName)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    if row.track.favorite {
+                        MusicCompactStatusBadge(
+                            title: "喜欢",
+                            systemImage: "heart.fill",
+                            tint: .red
+                        )
+                    }
+                    if row.track.isRemoteResource {
+                        MusicCompactStatusBadge(
+                            title: "远程",
+                            systemImage: "cloud"
+                        )
+                    }
+                    if showsResetPlayCountAction, row.track.playCountValue > 0 {
+                        MusicCompactStatusBadge(
+                            title: "\(row.track.playCountValue) 次",
+                            systemImage: "play.circle"
+                        )
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1697,7 +1738,7 @@ private struct MusicSongRow: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
-        .frame(height: 58)
+        .frame(height: AppCardMetrics.musicRowHeight)
         .background {
             if hoverActive {
                 LiquidGlassSurfaceLayer(
@@ -1716,6 +1757,16 @@ private struct MusicSongRow: View {
                 .fill(AppColors.solarEdgeTint.opacity(hoverActive ? (colorScheme == .dark ? 0.22 : 0.28) : 0))
                 .frame(width: 3, height: 28)
                 .padding(.leading, 2)
+        }
+        .overlay(alignment: .bottom) {
+            LinearGradient(
+                colors: [.clear, AppColors.cleanPanelBorder.opacity(0.54), .clear],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(height: 0.5)
+            .padding(.horizontal, 8)
+            .allowsHitTesting(false)
         }
         .scaleEffect(!reduceMotion && hoverActive ? 1.002 : 1)
         .contentShape(rowShape)
@@ -1856,6 +1907,14 @@ private struct MusicAlbumCard: View {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .strokeBorder(.white.opacity(hoverActive ? 0.58 : 0.28), lineWidth: hoverActive ? 1.1 : 0.8)
                 }
+                .overlay {
+                    LinearGradient(
+                        colors: [.white.opacity(hoverActive ? 0.16 : 0.07), .clear, AppColors.pointerLightTint.opacity(hoverActive ? 0.08 : 0.025)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
                 .pointerInspectTilt(enabled: !suppressHoverDuringScroll, cornerRadius: 16)
 
             MarqueeText(text: album.key.title, font: .headline)
@@ -1864,17 +1923,41 @@ private struct MusicAlbumCard: View {
                 .frame(height: 15)
                 .foregroundStyle(.secondary)
 
+            HStack(spacing: 6) {
+                if album.favoriteCount > 0 {
+                    MusicCompactStatusBadge(
+                        title: "\(album.favoriteCount) 首喜欢",
+                        systemImage: "heart.fill",
+                        tint: .red
+                    )
+                }
+                if showsResetPlayCountAction, album.playCount > 0 {
+                    MusicCompactStatusBadge(
+                        title: "\(album.playCount) 次播放",
+                        systemImage: "play.circle"
+                    )
+                }
+                if album.remoteCount > 0 {
+                    MusicCompactStatusBadge(
+                        title: "\(album.remoteCount) 首远程",
+                        systemImage: "cloud"
+                    )
+                }
+            }
+            .frame(height: 21, alignment: .leading)
+
             Button {
                 onPlay()
             } label: {
                 Label("播放", systemImage: "play.fill")
             }
-            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
+            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
         }
-        .padding(14)
-        .staticSurfaceBackground(cornerRadius: 18)
-        .repeatedSurfaceHover(hoverActive, cornerRadius: 18, tint: AppColors.pointerLightTint, intensity: 0.82)
-        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(AppCardMetrics.repeatedContentPadding)
+        .staticSurfaceBackground(cornerRadius: AppCardMetrics.repeatedCornerRadius)
+        .repeatedCardChrome(hoverActive)
+        .repeatedSurfaceHover(hoverActive, cornerRadius: AppCardMetrics.repeatedCornerRadius, tint: AppColors.pointerLightTint, intensity: 0.82)
+        .contentShape(RoundedRectangle(cornerRadius: AppCardMetrics.repeatedCornerRadius, style: .continuous))
         // #1 同 PosterCardView：保留封面 3D 检视效果，只把悬停卡片 zIndex 抬到上层，
         // 让放大干净地盖在邻格之上，修掉相互裁切/把相邻卡片撑歪的 bug。
         .zIndex(hoverActive ? 1 : 0)
@@ -1941,11 +2024,23 @@ private struct MusicArtistRow: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(AppColors.accentGradient)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0.28), .clear, AppColors.pointerLightTint.opacity(0.10)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
                 Image(systemName: "person.fill")
                     .font(.title2)
                     .foregroundStyle(.white)
             }
             .frame(width: 54, height: 54)
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(.white.opacity(hoverActive ? 0.54 : 0.30), lineWidth: 0.9)
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(artist.name)
@@ -1953,6 +2048,27 @@ private struct MusicArtistRow: View {
                 Text("\(artist.tracks.count) 首歌曲 · \(artist.albumCount) 张专辑")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    if artist.favoriteCount > 0 {
+                        MusicCompactStatusBadge(
+                            title: "\(artist.favoriteCount) 首喜欢",
+                            systemImage: "heart.fill",
+                            tint: .red
+                        )
+                    }
+                    if showsResetPlayCountAction, artist.playCount > 0 {
+                        MusicCompactStatusBadge(
+                            title: "\(artist.playCount) 次播放",
+                            systemImage: "play.circle"
+                        )
+                    }
+                    if artist.remoteCount > 0 {
+                        MusicCompactStatusBadge(
+                            title: "\(artist.remoteCount) 首远程",
+                            systemImage: "cloud"
+                        )
+                    }
+                }
             }
             Spacer()
             Button {
@@ -1960,19 +2076,20 @@ private struct MusicArtistRow: View {
             } label: {
                 Label("播放", systemImage: "play.fill")
             }
-            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
+            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
         }
-        .padding(14)
+        .padding(AppCardMetrics.repeatedContentPadding)
         .background {
             LiquidGlassSurfaceLayer(
                 selected: hoverActive,
-                cornerRadius: 18,
+                cornerRadius: AppCardMetrics.repeatedCornerRadius,
                 thickness: hoverActive ? 1.08 : 1.0,
                 respondsToPointer: false,
                 renderMode: GlassSurfaceRole.repeatedHover.renderMode
             )
         }
-        .repeatedSurfaceHover(hoverActive, cornerRadius: 18, tint: AppColors.pointerLightTint, intensity: 0.92)
+        .repeatedCardChrome(hoverActive)
+        .repeatedSurfaceHover(hoverActive, cornerRadius: AppCardMetrics.repeatedCornerRadius, tint: AppColors.pointerLightTint, intensity: 0.92)
         .contentShape(shape)
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hoverActive)
         .onHover { hovering in
@@ -2192,11 +2309,23 @@ private struct MusicPlaylistCard: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(AppColors.accentGradient)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0.28), .clear, AppColors.pointerLightTint.opacity(0.10)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
                 Image(systemName: isPinnedFavorite ? "heart.fill" : "music.note.list")
                     .font(.title2)
                     .foregroundStyle(.white)
             }
             .frame(width: 54, height: 54)
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(.white.opacity(hoverActive ? 0.54 : 0.30), lineWidth: 0.9)
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(playlist.name)
@@ -2205,6 +2334,22 @@ private struct MusicPlaylistCard: View {
                 Text("\(tracks.count) 首歌曲")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    if isPinnedFavorite {
+                        MusicCompactStatusBadge(
+                            title: "喜欢歌曲",
+                            systemImage: "heart.fill",
+                            tint: .red
+                        )
+                    }
+                    let remoteCount = tracks.filter(\.isRemoteResource).count
+                    if remoteCount > 0 {
+                        MusicCompactStatusBadge(
+                            title: "\(remoteCount) 首远程",
+                            systemImage: "cloud"
+                        )
+                    }
+                }
             }
 
             Spacer()
@@ -2214,7 +2359,7 @@ private struct MusicPlaylistCard: View {
             } label: {
                 Label("播放", systemImage: "play.fill")
             }
-            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
+            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
             .disabled(tracks.isEmpty)
 
             if !isPinnedFavorite {
@@ -2239,10 +2384,11 @@ private struct MusicPlaylistCard: View {
                 .help("歌单管理")
             }
         }
-        .padding(14)
-        .staticSurfaceBackground(cornerRadius: 18)
-        .repeatedSurfaceHover(hoverActive, cornerRadius: 18, tint: AppColors.pointerLightTint, intensity: 0.82)
-        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(AppCardMetrics.repeatedContentPadding)
+        .staticSurfaceBackground(cornerRadius: AppCardMetrics.repeatedCornerRadius)
+        .repeatedCardChrome(hoverActive)
+        .repeatedSurfaceHover(hoverActive, cornerRadius: AppCardMetrics.repeatedCornerRadius, tint: AppColors.pointerLightTint, intensity: 0.82)
+        .contentShape(RoundedRectangle(cornerRadius: AppCardMetrics.repeatedCornerRadius, style: .continuous))
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hoverActive)
         .onHover { hovering in
             guard !suppressHoverDuringScroll else {
@@ -2299,6 +2445,8 @@ private struct MusicAlbumGroup: Identifiable, Sendable {
     var id: String { "\(key.artist)-\(key.title)" }
     var coverPath: String? { tracks.first?.posterPath }
     var playCount: Int { tracks.reduce(0) { $0 + $1.playCountValue } }
+    var favoriteCount: Int { tracks.filter(\.favorite).count }
+    var remoteCount: Int { tracks.filter(\.isRemoteResource).count }
     var latestUpdatedAt: Date { tracks.map(\.updatedAt).max() ?? .distantPast }
 }
 
@@ -2308,6 +2456,8 @@ private struct MusicArtistGroup: Identifiable, Sendable {
 
     var id: String { name }
     var playCount: Int { tracks.reduce(0) { $0 + $1.playCountValue } }
+    var favoriteCount: Int { tracks.filter(\.favorite).count }
+    var remoteCount: Int { tracks.filter(\.isRemoteResource).count }
     var albumCount: Int {
         Set(tracks.map { musicDisplayAlbum($0.album) }).count
     }

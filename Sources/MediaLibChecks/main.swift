@@ -15,6 +15,24 @@ check(MediaType.privateCollection.rawValue == "private", "Privacy media type sho
 check(AppSettings.defaultHomeTabs.contains(.overview), "Default home tabs should include overview")
 check(AppSettings.defaultHomeTabs.contains(.offline), "Default home tabs should include offline entry")
 check(AppSettings().enabledHomeTabs.count >= 8, "Home should expose expanded configurable tabs")
+check(AppSettings().themePreset == .classic, "New installs should default to the clear blue theme")
+check(AppSettings().musicPlayerVisualScheme == .liuli, "New installs should default to the Liuli music player")
+check(AppThemePreset.allCases.count == 8, "Theme picker should expose seven curated presets plus custom")
+check(!AppThemePreset.allCases.contains(.apricot), "Legacy apricot theme should not remain selectable")
+check(!AppThemePreset.allCases.contains(.grape), "Legacy grape theme should not remain selectable")
+check(!AppThemePreset.allCases.contains(.oled), "Legacy night theme should not remain selectable")
+check(!AppThemePreset.allCases.contains(.seaSalt), "Legacy sea salt theme should not remain selectable")
+check(AppThemePreset.allCases.contains(.mica), "Theme picker should include moon mica")
+check(AppThemePreset.allCases.contains(.sandGold), "Theme picker should include sand gold")
+check(AppThemePreset.allCases.contains(.duskViolet), "Theme picker should include dusk violet")
+let legacyApricotTheme = try JSONDecoder().decode(AppSettings.self, from: #"{"themePreset":"apricot"}"#.data(using: .utf8)!)
+check(legacyApricotTheme.themePreset == .sandGold, "Legacy apricot theme should migrate to sand gold")
+let legacyGrapeTheme = try JSONDecoder().decode(AppSettings.self, from: #"{"themePreset":"grape"}"#.data(using: .utf8)!)
+check(legacyGrapeTheme.themePreset == .mica, "Legacy grape theme should migrate to moon mica")
+let legacyNightTheme = try JSONDecoder().decode(AppSettings.self, from: #"{"themePreset":"oled"}"#.data(using: .utf8)!)
+check(legacyNightTheme.themePreset == .duskViolet, "Legacy night theme should migrate to dusk violet")
+let legacySeaSaltTheme = try JSONDecoder().decode(AppSettings.self, from: #"{"themePreset":"seaSalt"}"#.data(using: .utf8)!)
+check(legacySeaSaltTheme.themePreset == .duskViolet, "Legacy sea salt theme should migrate to dusk violet")
 
 let embyRemoteItem = MediaItem(
     id: "emby-remote-check",
@@ -323,6 +341,7 @@ let playbackMarkerRepository = PlaybackMarkerRepository(database: database)
 let metadataCorrectionRepository = MetadataCorrectionRepository(database: database)
 let remoteConnectorAccountRepository = RemoteConnectorAccountRepository(database: database)
 let syncConflictRepository = SyncConflictRepository(database: database)
+let mediaDetailRepository = MediaDetailRepository(database: database)
 let initialSchemaVersion = try database.schemaVersion()
 check(initialSchemaVersion == DatabaseManager.currentSchemaVersion, "Database should migrate to current schema version")
 let mediaSourceColumns = try database.query("PRAGMA table_info(media_sources)") { row in row.string(1) ?? "" }
@@ -365,6 +384,23 @@ let batchTables = try database.query(
     """
 ) { row in row.string(0) ?? "" }
 check(batchTables.count == 3, "Schema v18 should include metadata, sync, and connector tables")
+let detailTables = try database.query(
+    """
+    SELECT name FROM sqlite_master
+    WHERE type = 'table'
+      AND name IN (
+        'media_detail_metadata',
+        'media_external_ids',
+        'media_people',
+        'media_person_external_ids',
+        'media_credits',
+        'media_artwork',
+        'media_related_titles',
+        'media_detail_backfill_jobs'
+      )
+    """
+) { row in row.string(0) ?? "" }
+check(detailTables.count == 8, "Schema v19 should include persistent detail, people, artwork, relation, and backfill tables")
 
 let source = MediaSource(
     name: "测试媒体源",
@@ -423,6 +459,143 @@ try mediaRepository.upsert(show)
 try mediaRepository.upsert(episode)
 try mediaRepository.upsert(loudnessTrack)
 try mediaRepository.upsert(collectionOnlyMovie)
+let detailPerson = MediaPerson(
+    id: "tmdb-person-17419",
+    name: "Bryan Cranston",
+    profileURL: "https://image.tmdb.org/t/p/w185/test.jpg",
+    biography: "Actor biography",
+    birthday: "1956-03-07",
+    placeOfBirth: "Hollywood",
+    knownForDepartment: "Acting",
+    externalIDs: [MediaExternalID(provider: "tmdb", value: "17419")],
+    knownFor: [
+        MediaPersonWork(
+            id: "tmdb:tv:1396",
+            title: "Breaking Bad",
+            year: 2008,
+            role: "Walter White",
+            mediaKind: "tv"
+        )
+    ],
+    filmography: [
+        MediaPersonWork(
+            id: "tmdb:tv:1396",
+            title: "Breaking Bad",
+            year: 2008,
+            role: "Walter White",
+            mediaKind: "tv"
+        )
+    ]
+)
+let detailSnapshot = MediaDetailSnapshot(
+    metadata: MediaDetailMetadata(
+        mediaID: show.id,
+        status: "Ended",
+        firstAirDate: "2008-01-20",
+        endDate: "2013-09-29",
+        seasonCount: 5,
+        episodeCount: 62,
+        contentRating: "TV-MA",
+        originalLanguage: "en",
+        countries: ["US"],
+        productionCompanies: ["Sony Pictures Television"],
+        networks: ["AMC"],
+        trailerURL: "https://www.youtube.com/watch?v=test",
+        provider: "TMDB",
+        language: "zh-CN"
+    ),
+    externalIDs: [
+        MediaExternalID(provider: "tmdb", value: "tv:1396"),
+        MediaExternalID(provider: "imdb", value: "tt0903747")
+    ],
+    people: [detailPerson],
+    credits: [
+        MediaCredit(
+            id: "\(show.id)-cast-17419",
+            mediaID: show.id,
+            personID: detailPerson.id,
+            category: "cast",
+            role: "Walter White",
+            department: "Acting",
+            order: 0
+        )
+    ],
+    artwork: [
+        MediaArtwork(
+            id: "\(show.id)-backdrop",
+            mediaID: show.id,
+            kind: "backdrop",
+            thumbURL: "https://image.tmdb.org/t/p/w500/test.jpg",
+            fullURL: "https://image.tmdb.org/t/p/original/test.jpg",
+            aspectRatio: 1.78
+        )
+    ],
+    relatedTitles: [
+        MediaRelatedTitle(
+            id: "\(show.id)-similar-60059",
+            mediaID: show.id,
+            relation: "similar",
+            externalID: "tmdb:tv:60059",
+            title: "Better Call Saul",
+            year: 2015
+        )
+    ]
+)
+try mediaDetailRepository.save(detailSnapshot)
+let fetchedDetailSnapshot = try mediaDetailRepository.fetch(mediaID: show.id)
+check(fetchedDetailSnapshot?.metadata.seasonCount == 5, "Detail metadata should round-trip")
+check(fetchedDetailSnapshot?.externalIDs.contains(MediaExternalID(provider: "imdb", value: "tt0903747")) == true, "Detail external IDs should round-trip")
+check(fetchedDetailSnapshot?.people.first?.biography == "Actor biography", "Person biography should round-trip")
+check(fetchedDetailSnapshot?.credits.first?.role == "Walter White", "Media credit should round-trip")
+check(fetchedDetailSnapshot?.artwork.first?.kind == "backdrop", "Artwork should round-trip")
+check(fetchedDetailSnapshot?.relatedTitles.first?.title == "Better Call Saul", "Related title should round-trip")
+let personLibraryCredits = try mediaDetailRepository.libraryCredits(personID: detailPerson.id)
+check(personLibraryCredits.first?.media.id == show.id, "Person library query should use persisted credits")
+check(personLibraryCredits.first?.credit.role == "Walter White", "Person library query should preserve role")
+let detailSearchTerms = try mediaDetailRepository.searchTermsByMediaID()
+check(detailSearchTerms[show.id]?.contains("Bryan Cranston") == true, "Detail search index should include people")
+check(detailSearchTerms[show.id]?.contains("Walter White") == true, "Detail search index should include character roles")
+check(detailSearchTerms[show.id]?.contains("AMC") == true, "Detail search index should include networks")
+let externalMediaIDIndex = try mediaDetailRepository.externalMediaIDIndex()
+check(externalMediaIDIndex["imdb:tt0903747"] == show.id, "External ID index should resolve library media")
+let mediaIDsByPersonID = try mediaDetailRepository.mediaIDsByPersonID()
+check(mediaIDsByPersonID[detailPerson.id]?.contains(show.id) == true, "Credit cache should map people to library media")
+let detailCompleteness = try mediaDetailRepository.detailCompleteness(mediaIDs: [show.id])
+check(detailCompleteness[show.id] == nil, "Complete detail snapshot should not report metadata gaps")
+try mediaDetailRepository.prepareBackfill(mediaIDs: [show.id])
+let pendingDetailBackfillIDs = try mediaDetailRepository.pendingBackfillMediaIDs()
+check(pendingDetailBackfillIDs.contains(show.id), "Detail backfill job should persist")
+try mediaDetailRepository.markBackfillRunning(mediaID: show.id)
+try mediaDetailRepository.markBackfillCompleted(mediaID: show.id)
+let completedDetailBackfillIDs = try mediaDetailRepository.pendingBackfillMediaIDs()
+check(!completedDetailBackfillIDs.contains(show.id), "Completed detail backfill should leave pending queue")
+let cascadeMovie = MediaItem(id: "detail-cascade-movie", type: .movie, title: "Cascade Movie")
+try mediaRepository.upsert(cascadeMovie)
+let cascadePerson = MediaPerson(id: "detail-cascade-person", name: "Cascade Person")
+try mediaDetailRepository.save(
+    MediaDetailSnapshot(
+        metadata: MediaDetailMetadata(
+            mediaID: cascadeMovie.id,
+            provider: "check",
+            language: "zh-CN"
+        ),
+        people: [cascadePerson],
+        credits: [
+            MediaCredit(
+                id: "detail-cascade-credit",
+                mediaID: cascadeMovie.id,
+                personID: cascadePerson.id,
+                category: "cast",
+                role: "Actor"
+            )
+        ]
+    )
+)
+try mediaRepository.deleteItems(ids: [cascadeMovie.id])
+let deletedCascadeDetail = try mediaDetailRepository.fetch(mediaID: cascadeMovie.id)
+let deletedCascadePerson = try mediaDetailRepository.fetchPerson(id: cascadePerson.id)
+check(deletedCascadeDetail == nil, "Deleting media should cascade detail metadata")
+check(deletedCascadePerson == nil, "Deleting the final credit should clean an orphaned person")
 let literalSearchItem = MediaItem(
     id: "literal-search-under_score",
     type: .movie,

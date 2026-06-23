@@ -17,7 +17,7 @@ enum VideoLibrarySection: String, CaseIterable, Identifiable, Sendable {
     case unwatched
     case watched
 
-    var id: String { rawValue }
+    var id: String { "video-\(rawValue)" }
 
     var title: String {
         switch self {
@@ -65,7 +65,7 @@ enum MusicLibrarySection: String, CaseIterable, Identifiable, Sendable {
     case favorites
     case unmatched
 
-    var id: String { rawValue }
+    var id: String { "music-\(rawValue)" }
 
     static var sidebarCases: [MusicLibrarySection] {
         allCases.filter { $0 != .favorites && $0 != .unmatched }
@@ -103,11 +103,11 @@ enum EmbyLibrarySection: String, CaseIterable, Identifiable, Sendable {
     case watchlist
     case favorites
 
-    var id: String { rawValue }
+    var id: String { "remote-\(rawValue)" }
 
     var title: String {
         switch self {
-        case .videos: return "视频"
+        case .videos: return "全部视频"
         case .music: return "音乐"
         case .recent: return "最近播放"
         case .watchlist: return "想看"
@@ -126,6 +126,30 @@ enum EmbyLibrarySection: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum AlbumLibrarySection: String, CaseIterable, Identifiable, Sendable {
+    case all
+    case photos
+    case videos
+
+    var id: String { "album-\(rawValue)" }
+
+    var title: String {
+        switch self {
+        case .all: return "全部"
+        case .photos: return "照片"
+        case .videos: return "录像"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .all: return "square.grid.2x2"
+        case .photos: return "photo"
+        case .videos: return "video"
+        }
+    }
+}
+
 struct EmbyRenameRequest: Identifiable {
     let sourceID: String
     var name: String
@@ -135,6 +159,7 @@ struct EmbyRenameRequest: Identifiable {
 enum SidebarDestination: Hashable, Identifiable, Sendable {
     case home
     case video(VideoLibrarySection)
+    case album(AlbumLibrarySection)
     case music(MusicLibrarySection)
     case embySection(String, EmbyLibrarySection)
     case embyLibrary(String)
@@ -150,6 +175,7 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
         switch self {
         case .home: return "home"
         case .video(let section): return "video-\(section.rawValue)"
+        case .album(let section): return "album-\(section.rawValue)"
         case .music(let section): return "music-\(section.rawValue)"
         case .embySection(let sourceID, let section): return "emby-section-\(sourceID)__\(section.rawValue)"
         case .embyLibrary(let libraryID): return "emby-library-\(libraryID)"
@@ -182,6 +208,10 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
             }
             guard let section = VideoLibrarySection(rawValue: raw) else { return nil }
             self = .video(section)
+        } else if storedID.hasPrefix("album-") {
+            let raw = String(storedID.dropFirst("album-".count))
+            guard let section = AlbumLibrarySection(rawValue: raw) else { return nil }
+            self = .album(section)
         } else if storedID.hasPrefix("music-smart-playlist-") {
             let playlistID = String(storedID.dropFirst("music-smart-playlist-".count))
             guard !playlistID.isEmpty else { return nil }
@@ -232,6 +262,7 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
         switch self {
         case .home: return "首页"
         case .video(let section): return section.title
+        case .album(let section): return section.title
         case .music(let section): return section.title
         case .embySection(_, let section): return section.title
         case .embyLibrary: return "远程分类"
@@ -249,6 +280,7 @@ enum SidebarDestination: Hashable, Identifiable, Sendable {
         switch self {
         case .home: return "house"
         case .video(let section): return section.systemImage
+        case .album(let section): return section.systemImage
         case .music(let section): return section.systemImage
         case .embySection(_, let section): return section.systemImage
         case .embyLibrary: return "rectangle.stack"
@@ -269,6 +301,7 @@ struct ContentView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selection: SidebarDestination? = .home
     @State private var isVideoExpanded = true
+    @State private var isAlbumExpanded = true
     @State private var isMusicExpanded = true
     /// 已折叠的 Emby 来源（默认全部展开；只记录被用户折叠的）。
     @State private var collapsedEmbySourceIDs: Set<String> = []
@@ -278,6 +311,7 @@ struct ContentView: View {
     // 已完全覆盖窗口时开启/关闭，使 chrome 切换引起的 navigationRoot 重排被覆盖层遮挡。
     @State private var musicImmersive = false
     @State private var musicController = MpvPlayerController()
+    @StateObject private var systemPhotoLibrary = SystemPhotoLibraryStore()
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
     @State private var musicTransitionTask: Task<Void, Never>?
     @State private var musicTransitionSuppressesBackground = false
@@ -317,6 +351,7 @@ struct ContentView: View {
                         .environment(\.suppressPointerHoverDuringScroll, musicExpandedOverlayActive)
                         .environment(\.mainLayoutTransitionActive, mainLayoutTransitionActive)
                         .glassPerformanceMode(backgroundGlassPerformanceMode)
+                        .environmentObject(systemPhotoLibrary)
                         // 全屏音乐播放器已完全盖住窗口时，把背后的整库界面从树上卸掉，
                         // 释放列表、海报墙和筛选结果的视图资源；收起时重新挂回。
                         .id(musicBackgroundRootSuspended ? "music-root-suspended" : "music-root-active")
@@ -675,24 +710,33 @@ struct ContentView: View {
 
     private var navigationRoot: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
-            List(selection: $selection) {
-                Section(appState.localized("媒体库")) {
+            // 不再使用 List 的 selection 绑定：`.sidebar` 样式下系统会用强调色画选中框（蓝框），
+            // 且 .tint 无法可靠抑制。改为 List 仅承载内容、各行自管选中（自绘 SidebarSelectionPill），
+            // 彻底移除系统 NSTableView 选中高亮。
+            List {
+                Section {
                     sidebarRow(.home)
 
                     sidebarGroupSpacer
 
-                    DisclosureGroup(isExpanded: $isVideoExpanded) {
-                        // 「正在观看」「未观看」「已观看」都不再作为左侧栏分类，
-                        // 仅保留各分类页面内的同名子页面（筛选标签）。
-                        let sections = appState.visibleVideoSections.filter {
-                            $0 != .watching && $0 != .unwatched && $0 != .watched
-                        }
-                        if sections.isEmpty {
+                    // 「正在观看」「未观看」「已观看」都不再作为左侧栏分类，
+                    // 仅保留各分类页面内的同名子页面（筛选标签）。
+                    let videoSections = appState.visibleVideoSections.filter {
+                        $0 != .watching && $0 != .unwatched && $0 != .watched
+                    }
+                    SidebarGroupHeaderButton(
+                        systemImage: "film",
+                        title: appState.localized("视频"),
+                        isExpanded: $isVideoExpanded,
+                        collapsedCount: videoSections.count + appState.videoSmartCollections.count + appState.videoManualCollections.count
+                    )
+                    if isVideoExpanded {
+                        if videoSections.isEmpty {
                             Label(appState.localized("暂无视频"), systemImage: "film")
                                 .foregroundStyle(.secondary)
                         } else {
-                            ForEach(sections) { section in
-                                sidebarRow(.video(section))
+                            ForEach(videoSections) { section in
+                                sidebarRow(.video(section), indented: true)
                             }
                         }
                         ForEach(appState.videoSmartCollections) { collection in
@@ -713,8 +757,14 @@ struct ContentView: View {
                                     // 与其它目录行字体保持一致。
                                     .font(.body)
                             }
+                            .padding(.horizontal, SidebarMetrics.rowHPad)
+                            .padding(.vertical, SidebarMetrics.rowVPad)
                         }
                         .buttonStyle(SidebarInlineActionButtonStyle())
+                        .padding(.leading, SidebarMetrics.childIndent)
+                        .listRowInsets(EdgeInsets(top: 1, leading: SidebarMetrics.basePadding, bottom: 1, trailing: SidebarMetrics.basePadding))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                         Button {
                             manualCollectionEditor = .create()
                         } label: {
@@ -723,30 +773,27 @@ struct ContentView: View {
                                 Text(appState.localized("新建集合"))
                                     .font(.body)
                             }
+                            .padding(.horizontal, SidebarMetrics.rowHPad)
+                            .padding(.vertical, SidebarMetrics.rowVPad)
                         }
                         .buttonStyle(SidebarInlineActionButtonStyle())
-                    } label: {
-                        Button {
-                            withAnimation(AppMotion.sidebar) {
-                                isVideoExpanded.toggle()
-                            }
-                        } label: {
-                            HStack(spacing: 10) {
-                                PlayfulSymbolIcon(systemImage: "film", size: 22)
-                                Text(appState.localized("视频"))
-                                Spacer(minLength: 0)
-                            }
-                            .font(.callout.weight(.semibold))
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
+                        .padding(.leading, SidebarMetrics.childIndent)
+                        .listRowInsets(EdgeInsets(top: 1, leading: SidebarMetrics.basePadding, bottom: 1, trailing: SidebarMetrics.basePadding))
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                     }
 
                     sidebarGroupSpacer
 
-                    DisclosureGroup(isExpanded: $isMusicExpanded) {
+                    SidebarGroupHeaderButton(
+                        systemImage: "music.note",
+                        title: appState.localized("音乐"),
+                        isExpanded: $isMusicExpanded,
+                        collapsedCount: MusicLibrarySection.sidebarCases.count + appState.musicSmartPlaylists.count
+                    )
+                    if isMusicExpanded {
                         ForEach(MusicLibrarySection.sidebarCases) { section in
-                            sidebarRow(.music(section))
+                            sidebarRow(.music(section), indented: true)
                         }
                         // 仅在有智能歌单时才显示分隔线 + 列表；空列表下不再多出一条分割线，
                         // 否则会让「音乐↔远程媒体库」的间距大于「视频↔音乐」，造成不统一。
@@ -756,21 +803,22 @@ struct ContentView: View {
                                 musicSmartPlaylistSidebarRow(playlist)
                             }
                         }
-                    } label: {
-                        Button {
-                            withAnimation(AppMotion.sidebar) {
-                                isMusicExpanded.toggle()
+                    }
+
+                    if appState.showsAlbumSection {
+                        sidebarGroupSpacer
+
+                        SidebarGroupHeaderButton(
+                            systemImage: "photo.on.rectangle.angled",
+                            title: appState.localized("相册"),
+                            isExpanded: $isAlbumExpanded,
+                            collapsedCount: AlbumLibrarySection.allCases.count
+                        )
+                        if isAlbumExpanded {
+                            ForEach(AlbumLibrarySection.allCases) { section in
+                                sidebarRow(.album(section), indented: true)
                             }
-                        } label: {
-                            HStack(spacing: 10) {
-                                PlayfulSymbolIcon(systemImage: "music.note", size: 22)
-                                Text(appState.localized("音乐"))
-                                Spacer(minLength: 0)
-                            }
-                            .font(.callout.weight(.semibold))
-                            .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
                     }
 
                     // 每个远程媒体库来源各自一个一级目录（可重命名），内含该源的分区与媒体库。
@@ -778,18 +826,24 @@ struct ContentView: View {
                         sidebarGroupSpacer
                         embySourceGroup(for: source)
                     }
+                } header: {
+                    SidebarSectionHeader(title: appState.localized("媒体库"))
                 }
 
-                Section(appState.localized("管理")) {
+                Section {
                     sidebarRow(.sources)
                     sidebarRow(.health)
                     sidebarRow(.tasks)
                     sidebarRow(.settings)
+                } header: {
+                    SidebarSectionHeader(title: appState.localized("管理"))
                 }
             }
             .scrollContentBackground(.hidden)
             .background(SidebarGlassBackground())
             .listStyle(.sidebar)
+            // 选中态已完全由自绘 SidebarSelectionPill 接管（List 无 selection 绑定，不会有系统蓝框）；
+            // tint 仅供 Disclosure 箭头等附属控件跟随主题。
             .tint(AppColors.selectedGlassTint)
             .id(appState.themeRevision)
             .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 280)
@@ -798,13 +852,15 @@ struct ContentView: View {
             }
             .onChange(of: selection) { _ in
                 storedSelectionID = selection?.id ?? "home"
-                appState.selectedItem = nil
-                appState.selectedItemReturnAnchorID = nil
+                appState.clearDetailNavigation()
             }
         } detail: {
             ZStack {
                 if let startupError = appState.startupError {
                     StartupErrorView(message: startupError)
+                } else if let selectedPersonID = appState.selectedPersonID {
+                    PersonDetailView(personID: selectedPersonID)
+                        .environmentObject(appState)
                 } else if let selectedItem = appState.selectedItem {
                     let destination = selection ?? .home
                     DetailView(
@@ -1139,18 +1195,15 @@ struct ContentView: View {
             (appState.musicRepeatMode == .repeatAll && appState.musicQueue.count <= 1)
     }
 
-    private func sidebarRow(_ destination: SidebarDestination) -> some View {
+    private func sidebarRow(_ destination: SidebarDestination, indented: Bool = false) -> some View {
         let selected = selection == destination
-        return HStack(spacing: 10) {
-            PlayfulSymbolIcon(systemImage: destination.systemImage, size: 22, selected: selected)
+        return SidebarSelectableRow(selected: selected, indent: indented, action: { selection = destination }) {
+            PlayfulSymbolIcon(systemImage: destination.systemImage, size: 22)
                 .id(appState.themeRevision)
             Text(appState.localized(title(for: destination)))
+                .foregroundStyle(.primary)
+                .fontWeight(selected ? .semibold : .regular)
         }
-            .tag(destination)
-            .transaction { transaction in
-                transaction.disablesAnimations = true
-                transaction.animation = nil
-            }
     }
 
     /// 一级目录之间的小间距占位行（首页/视频/音乐/各远程来源之间统一留白）。
@@ -1165,11 +1218,13 @@ struct ContentView: View {
     }
 
     private func smartCollectionSidebarRow(_ collection: VideoSmartCollection) -> some View {
-        HStack(spacing: 10) {
+        let selected = selection == .smartCollection(collection.id)
+        return SidebarSelectableRow(selected: selected, indent: true, action: { selection = .smartCollection(collection.id) }) {
             PlayfulSymbolIcon(systemImage: "sparkles.rectangle.stack", size: 22)
             Text(collection.name)
+                .foregroundStyle(.primary)
+                .fontWeight(selected ? .semibold : .regular)
         }
-        .tag(SidebarDestination.smartCollection(collection.id))
         .contextMenu {
             Button {
                 smartCollectionEditor = .edit(collection)
@@ -1194,7 +1249,7 @@ struct ContentView: View {
 
     private func manualCollectionSidebarRow(_ collection: VideoManualCollection, previewItems: [MediaItem]) -> some View {
         let selected = selection == .manualCollection(collection.id)
-        return HStack(spacing: 10) {
+        return SidebarSelectableRow(selected: selected, indent: true, action: { selection = .manualCollection(collection.id) }) {
             VideoManualCollectionCoverView(
                 items: previewItems,
                 title: collection.name,
@@ -1204,8 +1259,9 @@ struct ContentView: View {
                 selected: selected
             )
             Text(collection.name)
+                .foregroundStyle(.primary)
+                .fontWeight(selected ? .semibold : .regular)
         }
-        .tag(SidebarDestination.manualCollection(collection.id))
         .contextMenu {
             Button {
                 manualCollectionEditor = .edit(collection)
@@ -1231,38 +1287,30 @@ struct ContentView: View {
     @ViewBuilder
     private func embySourceGroup(for source: MediaSource) -> some View {
         let libraries = appState.embyLibraries.filter { $0.sourceID == source.id }
-        DisclosureGroup(isExpanded: embyExpansionBinding(source.id)) {
-            ForEach(EmbyLibrarySection.allCases) { section in
-                if appState.hasEmbyItems(for: section, sourceID: source.id) {
-                    sidebarRow(.embySection(source.id, section))
-                }
+        let sectionsWithItems = EmbyLibrarySection.allCases.filter {
+            appState.hasEmbyItems(for: $0, sourceID: source.id)
+        }
+        let expansion = embyExpansionBinding(source.id)
+        SidebarGroupHeaderButton(
+            systemImage: "server.rack",
+            title: source.name,
+            isExpanded: expansion,
+            collapsedCount: sectionsWithItems.count + libraries.count
+        )
+        .contextMenu {
+            Button {
+                embyRenameRequest = EmbyRenameRequest(sourceID: source.id, name: source.name)
+            } label: {
+                Label("重命名", systemImage: "pencil")
+            }
+        }
+        if expansion.wrappedValue {
+            ForEach(sectionsWithItems) { section in
+                sidebarRow(.embySection(source.id, section), indented: true)
             }
             // 同一来源内：视频/收藏与各媒体库目录之间不再插入分隔线与额外间距，保持紧凑一致。
             ForEach(libraries) { library in
-                sidebarRow(.embyLibrary(library.id))
-            }
-        } label: {
-            Button {
-                let binding = embyExpansionBinding(source.id)
-                withAnimation(AppMotion.sidebar) {
-                    binding.wrappedValue.toggle()
-                }
-            } label: {
-                HStack(spacing: 10) {
-                    PlayfulSymbolIcon(systemImage: "server.rack", size: 22)
-                    Text(source.name)
-                    Spacer(minLength: 0)
-                }
-                .font(.callout.weight(.semibold))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .contextMenu {
-                Button {
-                    embyRenameRequest = EmbyRenameRequest(sourceID: source.id, name: source.name)
-                } label: {
-                    Label("重命名", systemImage: "pencil")
-                }
+                sidebarRow(.embyLibrary(library.id), indented: true)
             }
         }
     }
@@ -1281,11 +1329,13 @@ struct ContentView: View {
     }
 
     private func musicSmartPlaylistSidebarRow(_ playlist: MusicSmartPlaylist) -> some View {
-        HStack(spacing: 10) {
+        let selected = selection == .musicSmartPlaylist(playlist.id)
+        return SidebarSelectableRow(selected: selected, indent: true, action: { selection = .musicSmartPlaylist(playlist.id) }) {
             PlayfulSymbolIcon(systemImage: "music.note.list", size: 22)
             Text(playlist.name)
+                .foregroundStyle(.primary)
+                .fontWeight(selected ? .semibold : .regular)
         }
-        .tag(SidebarDestination.musicSmartPlaylist(playlist.id))
         .contextMenu {
             Button {
                 musicSmartPlaylistEditor = .edit(playlist)
@@ -1343,7 +1393,12 @@ struct ContentView: View {
     private func detailView(for destination: SidebarDestination) -> some View {
         switch destination {
         case .home:
+            let returnContext = appState.detailReturnContext?.destinationID == destination.id
+                ? appState.detailReturnContext
+                : nil
             HomeView(
+                initialSearchText: returnContext?.searchText ?? "",
+                initialReturnAnchorID: returnContext?.anchorID,
                 onOpenHealthCenter: {
                     selection = .health
                 },
@@ -1353,12 +1408,30 @@ struct ContentView: View {
             )
         case .video(.privacy):
             if appState.canDisplayPrivateItems {
-                LibraryView(destination: destination)
+                LibraryView(
+                    destination: destination,
+                    initialSearchText: appState.detailReturnContext?.destinationID == destination.id
+                        ? appState.detailReturnContext?.searchText ?? ""
+                        : "",
+                    initialReturnAnchorID: appState.detailReturnContext?.destinationID == destination.id
+                        ? appState.detailReturnContext?.anchorID
+                        : nil
+                )
             } else {
                 PrivacyLockView()
             }
         case .video:
-            LibraryView(destination: destination)
+            LibraryView(
+                destination: destination,
+                initialSearchText: appState.detailReturnContext?.destinationID == destination.id
+                    ? appState.detailReturnContext?.searchText ?? ""
+                    : "",
+                initialReturnAnchorID: appState.detailReturnContext?.destinationID == destination.id
+                    ? appState.detailReturnContext?.anchorID
+                    : nil
+            )
+        case .album(let section):
+            AlbumLibraryView(section: section)
         case .music(let section):
             MusicLibraryView(section: section) {
                 musicSmartPlaylistEditor = .create()
@@ -1372,9 +1445,21 @@ struct ContentView: View {
                 EmptyStateView(title: "智能歌单不存在", systemImage: "music.note.list", message: "该智能歌单可能已被删除。")
             }
         case .embySection, .embyLibrary, .smartCollection, .manualCollection:
-            LibraryView(destination: destination)
+            LibraryView(
+                destination: destination,
+                initialSearchText: appState.detailReturnContext?.destinationID == destination.id
+                    ? appState.detailReturnContext?.searchText ?? ""
+                    : "",
+                initialReturnAnchorID: appState.detailReturnContext?.destinationID == destination.id
+                    ? appState.detailReturnContext?.anchorID
+                    : nil
+            )
         case .health:
-            LibraryHealthCenterView()
+            LibraryHealthCenterView(
+                initialReturnAnchorID: appState.detailReturnContext?.destinationID == destination.id
+                    ? appState.detailReturnContext?.anchorID
+                    : nil
+            )
         case .tasks:
             BackgroundTaskCenterView()
         case .sources:
@@ -1382,6 +1467,237 @@ struct ContentView: View {
         case .settings:
             SettingsView()
         }
+    }
+}
+
+/// 侧边栏一级分组的玻璃图标砖：把分组图标裹进贴合 app 语言的小玻璃方砖，强化「分组锚点」层级。
+private struct SidebarGlassIconTile: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let systemImage: String
+    var size: CGFloat = 26
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 7, style: .continuous)
+        let tint = AppColors.selectedGlassTint
+        ZStack {
+            shape.fill(tint.opacity(colorScheme == .dark ? 0.20 : 0.13))
+            shape.fill(
+                LinearGradient(
+                    colors: [.white.opacity(colorScheme == .dark ? 0.10 : 0.30), .clear],
+                    startPoint: .top,
+                    endPoint: .center
+                )
+            )
+            shape.strokeBorder(
+                LinearGradient(
+                    colors: [
+                        .white.opacity(colorScheme == .dark ? 0.22 : 0.50),
+                        tint.opacity(0.24)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                lineWidth: 0.8
+            )
+            PlayfulSymbolIcon(systemImage: systemImage, size: size * 0.82)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// 折叠时显示的子项计数徽标：不展开也能知道分组里有多少内容；展开后隐藏避免冗余。
+private struct SidebarCountBadge: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let count: Int
+
+    var body: some View {
+        Text("\(count)")
+            .font(.caption2.weight(.semibold).monospacedDigit())
+            .foregroundStyle(AppColors.selectedGlassTint.opacity(0.95))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1.5)
+            .background(
+                Capsule().fill(AppColors.selectedGlassTint.opacity(colorScheme == .dark ? 0.18 : 0.12))
+            )
+            .transition(.opacity.combined(with: .scale(scale: 0.85)))
+    }
+}
+
+/// 侧边栏统一度量：基础留白、二级缩进、胶囊内边距与圆角。集中管理保证一/二级层级与间距一致。
+private enum SidebarMetrics {
+    static let basePadding: CGFloat = 8     // 行外缘到内容的基础左右留白（listRowInsets）
+    static let childIndent: CGFloat = 18    // 二级目录相对一级目录的缩进量
+    static let rowHPad: CGFloat = 9         // 胶囊内左右内边距
+    static let rowVPad: CGFloat = 6.5       // 胶囊内上下内边距
+    static let pillCorner: CGFloat = 8
+    static let sectionHeaderLeading: CGFloat = 22  // 分区标题内容左 padding：把光点推到一级行图标列，消除错开
+}
+
+/// 侧边栏选中/悬停底：贴合 app 自身玻璃语言的「半透明霜化主题色」——
+/// 现代 macOS 选中观感（淡色 wash + 左上柔光 + hairline 描边 + 极轻辉光），文字与图标保留本色，
+/// 不再用高饱和实底压白字（那是 Big Sur 之前的旧观感，显廉价）。作为内容 .background 绘制，随内容缩进。
+private struct SidebarSelectionPill: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let selected: Bool
+    var hovering: Bool = false
+    var pressed: Bool = false
+    var cornerRadius: CGFloat = SidebarMetrics.pillCorner
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let tint = AppColors.selectedGlassTint
+        ZStack {
+            if selected {
+                // 半透明霜化主题色 wash
+                shape.fill(tint.opacity(colorScheme == .dark ? 0.30 : 0.165))
+                // 左上柔光，给玻璃质感而非塑料块
+                shape.fill(
+                    LinearGradient(
+                        colors: [.white.opacity(colorScheme == .dark ? 0.10 : 0.22), .clear],
+                        startPoint: .topLeading,
+                        endPoint: .center
+                    )
+                )
+                // hairline 主题色描边
+                shape.strokeBorder(tint.opacity(colorScheme == .dark ? 0.46 : 0.30), lineWidth: 0.8)
+            } else if hovering || pressed {
+                shape.fill(tint.opacity((colorScheme == .dark ? 0.12 : 0.075) * (pressed ? 1.4 : 1)))
+            }
+        }
+        .shadow(
+            color: selected ? tint.opacity(colorScheme == .dark ? 0.20 : 0.10) : .clear,
+            radius: selected ? 4 : 0,
+            y: selected ? 1 : 0
+        )
+    }
+}
+
+/// 侧边栏一级分组头部：玻璃图标砖 + 标题 + 折叠计数 + 自定义旋转箭头（token 化动效 + reduce-motion 守卫）。
+/// 取代系统 DisclosureGroup（避免系统三角形与自绘箭头双重指示），子行直接由调用方按展开态条件渲染为 List 行。
+private struct SidebarGroupHeaderButton: View {
+    let systemImage: String
+    let title: String
+    @Binding var isExpanded: Bool
+    var collapsedCount: Int = 0
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button {
+            withAnimation(reduceMotion ? nil : AppMotion.sidebar) {
+                isExpanded.toggle()
+            }
+        } label: {
+            HStack(spacing: 10) {
+                SidebarGlassIconTile(systemImage: systemImage)
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                Spacer(minLength: 4)
+                if !isExpanded && collapsedCount > 0 {
+                    SidebarCountBadge(count: collapsedCount)
+                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .animation(reduceMotion ? nil : AppMotion.sidebar, value: isExpanded)
+            }
+            .padding(.horizontal, SidebarMetrics.rowHPad)
+            .padding(.vertical, SidebarMetrics.rowVPad)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(SidebarSelectionPill(selected: false, hovering: hovering))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SidebarRowButtonStyle(cornerRadius: SidebarMetrics.pillCorner))
+        .listRowInsets(EdgeInsets(top: 1, leading: SidebarMetrics.basePadding, bottom: 1, trailing: SidebarMetrics.basePadding))
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .onHover { hovering = $0 }
+        .animation(reduceMotion ? nil : AppMotion.listHover, value: hovering)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityValue(isExpanded ? "已展开" : "已折叠")
+    }
+}
+
+/// 侧边栏可选行：自管选中（不依赖 List selection，避免系统蓝色选中框）。
+/// 整行为一个 plain Button，点选即设置 selection；SidebarSelectionPill 作为内容 .background（随内容缩进）。
+/// `indent` 为二级目录开启，使其在一级目录下形成明确的上下级缩进关系。
+private struct SidebarSelectableRow<Label: View>: View {
+    let selected: Bool
+    var indent: Bool = false
+    let action: () -> Void
+    @ViewBuilder var label: () -> Label
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                label()
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, SidebarMetrics.rowHPad)
+            .padding(.vertical, SidebarMetrics.rowVPad)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(SidebarSelectionPill(selected: selected, hovering: hovering))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SidebarRowButtonStyle(cornerRadius: SidebarMetrics.pillCorner))
+        .padding(.leading, indent ? SidebarMetrics.childIndent : 0)
+        .listRowInsets(EdgeInsets(top: 1, leading: SidebarMetrics.basePadding, bottom: 1, trailing: SidebarMetrics.basePadding))
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .onHover { hovering = $0 }
+        .animation(reduceMotion ? nil : AppMotion.listHover, value: hovering)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+private struct SidebarRowButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let cornerRadius: CGFloat
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.82 : 1)
+            .brightness(configuration.isPressed ? -0.018 : 0)
+            .overlay {
+                if isFocused {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(AppColors.selectedGlassTint.opacity(0.78), lineWidth: 1.4)
+                        .padding(1)
+                        .allowsHitTesting(false)
+                }
+            }
+            .animation(reduceMotion ? nil : AppMotion.fast, value: configuration.isPressed)
+            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
+    }
+}
+
+/// 侧边栏分区标题：克制的字距 + 中性二级色 + 行首主题色光点，强化层级且不喧宾夺主。
+private struct SidebarSectionHeader: View {
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(AppColors.selectedGlassTint.opacity(0.55))
+                .frame(width: 4, height: 4)
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .tracking(0.7)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        // 分区标题与下方一级行的图标列左对齐：section header 的 listRowInsets.leading 被系统忽略，
+        // 改用内容 .padding(.leading) 把光点推到一级行的图标列，消除错开。
+        .padding(.leading, SidebarMetrics.sectionHeaderLeading)
+        .textCase(nil)
+        .padding(.top, 6)
+        .padding(.bottom, 3)
     }
 }
 
@@ -2258,14 +2574,16 @@ struct EmbySourceRenameSheet: View {
 
             AppSheetActionFooter {
                 Button("取消", action: onCancel)
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                    .keyboardShortcut(.cancelAction)
                 Button {
                     onSave(name.trimmingCharacters(in: .whitespacesAndNewlines))
                 } label: {
                     Label("保存", systemImage: "checkmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                 .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .keyboardShortcut(.defaultAction)
             }
         }
         .appSheetChrome(width: 460)

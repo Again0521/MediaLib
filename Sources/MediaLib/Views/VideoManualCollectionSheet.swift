@@ -49,7 +49,12 @@ struct VideoManualCollectionSheet: View {
                 systemImage: "rectangle.stack"
             )
 
-            VStack(spacing: 14) {
+            AppSheetSection(
+                title: "集合设置",
+                systemImage: "rectangle.stack",
+                subtitle: "名称与首页展示只影响 MediaLIB 内部整理方式。"
+            ) {
+                VStack(spacing: 14) {
                 SettingsRow(title: "名称", systemImage: "pencil.line") {
                     TextField("集合", text: $name)
                         .textFieldStyle(.plain)
@@ -61,16 +66,15 @@ struct VideoManualCollectionSheet: View {
                     Toggle("", isOn: $showOnHome)
                         .labelsHidden()
                         .toggleStyle(.switch)
+                        .accessibilityLabel("首页展示")
+                }
                 }
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .staticSurfaceBackground(cornerRadius: 18)
 
             AppSheetActionFooter {
                 Button("取消", action: onCancel)
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                    .keyboardShortcut(.cancelAction)
                 Button {
                     var collection = request.collection
                     collection.name = trimmedName
@@ -79,8 +83,9 @@ struct VideoManualCollectionSheet: View {
                 } label: {
                     Label("保存", systemImage: "checkmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 32, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
                 .disabled(trimmedName.isEmpty)
+                .keyboardShortcut(.defaultAction)
             }
         }
         .appSheetChrome(width: 520)
