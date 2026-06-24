@@ -112,6 +112,7 @@ struct HomeView: View {
     @State private var inlineReturnContentReady: Bool
     @State private var overviewVerticalReturnReady: Bool
     @State private var overviewHorizontalReturnReady: Bool
+    @State private var homeReturnFallbackTask: Task<Void, Never>?
     @AppStorage("MediaLib.home.selectedTab") private var selectedTabRaw = HomeTab.overview.rawValue
 
     init(
@@ -225,6 +226,8 @@ struct HomeView: View {
                 inlineReturnContentReady = true
                 overviewVerticalReturnReady = true
                 overviewHorizontalReturnReady = true
+            } else {
+                scheduleHomeReturnVisibilityFallback()
             }
             appState.showInterfaceTipOnce(
                 key: "home.overview.boards",
@@ -1123,6 +1126,7 @@ struct HomeView: View {
 
     private func finishHomeReturnRestorationIfReady() {
         guard overviewVerticalReturnReady, overviewHorizontalReturnReady else { return }
+        homeReturnFallbackTask?.cancel()
         var transaction = Transaction()
         transaction.disablesAnimations = true
         transaction.animation = nil
@@ -1136,22 +1140,45 @@ struct HomeView: View {
         )
     }
 
+    /// 返回首页时的可见性兜底：锚点恢复链路一旦未能走完（总览分区刷新时序、锚点对应内容
+    /// 在返回后已不存在、或子分区回调缺失），内容会卡在 opacity 0 形成空白页。这里在短暂
+    /// 延时后强制把页面标记为就绪，确保返回首页永不出现空白页；成功恢复时该任务会被取消。
+    private func scheduleHomeReturnVisibilityFallback() {
+        homeReturnFallbackTask?.cancel()
+        homeReturnFallbackTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled else { return }
+            overviewVerticalReturnReady = true
+            overviewHorizontalReturnReady = true
+            finishHomeReturnRestorationIfReady()
+        }
+    }
+
     private func restoreOverviewAnchorIfNeeded(_ anchorID: String?, scrollProxy: ScrollViewProxy) {
         guard currentTab == .overview,
               let anchorID,
-              restoredOverviewAnchorID != anchorID,
-              let board = overviewBoards.first(where: { $0.items.contains(where: { $0.id == anchorID }) }) else { return }
+              restoredOverviewAnchorID != anchorID else { return }
         restoredOverviewAnchorID = anchorID
-        let boardAnchorID = "overview-board-\(board.id)"
         Task { @MainActor in
+            // 让出一帧，等总览分区快照在 onAppear 中刷新完成后再查找锚点所属分区；
+            // 否则首帧 overviewBoards 仍为空会找不到分区，使页面永久停在 opacity 0（空白页）。
             await Task.yield()
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            transaction.animation = nil
-            withTransaction(transaction) {
-                scrollProxy.scrollTo(boardAnchorID, anchor: .center)
+            if let board = overviewBoards.first(where: { $0.items.contains(where: { $0.id == anchorID }) }) {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                transaction.animation = nil
+                withTransaction(transaction) {
+                    scrollProxy.scrollTo("overview-board-\(board.id)", anchor: .center)
+                }
+                await Task.yield()
+                // 水平方向由命中分区的 HomeOverviewBoard 回调 completeOverviewHorizontalRestoration 置位。
+            } else {
+                // 锚点对应内容在返回后已不在任何分区（推荐/继续观看会变化）：放弃滚动定位，
+                // 但仍需把水平方向标记就绪，否则两方向缺一会让内容一直不可见。
+                overviewHorizontalReturnReady = true
             }
-            await Task.yield()
+            // 无论锚点是否仍存在，都必须把垂直方向标记为就绪让内容显示出来——
+            // 锚点定位只是“尽力而为”的滚动，绝不能成为内容可见性的前置条件。
             overviewVerticalReturnReady = true
             finishHomeReturnRestorationIfReady()
         }

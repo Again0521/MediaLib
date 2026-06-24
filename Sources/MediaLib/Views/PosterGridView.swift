@@ -164,13 +164,12 @@ struct PosterGridList<Leading: View>: View {
     var body: some View {
         GeometryReader { proxy in
             let columns = columnCount(for: proxy.size.width)
-            let itemWidth = resolvedItemWidth(for: proxy.size.width, columns: columns)
             // 等宽 flexible 列：网格自动填满可用宽度，左右边界都与上方卡片栏对齐、随窗口自适应。
             let gridItems = Array(
                 repeating: GridItem(.flexible(), spacing: interItemSpacing, alignment: .top),
                 count: max(columns, 1)
             )
-            let cacheSize = cacheTargetSize(itemWidth: itemWidth)
+            let cacheSize = ArtworkImageCache.posterGridTargetSize
 
             ScrollViewReader { scrollProxy in
                 ScrollView {
@@ -246,17 +245,6 @@ struct PosterGridList<Leading: View>: View {
         let available = max(width - AppSpacing.pageHorizontal * 2, appState.settings.posterMinWidth)
         let minWidth = max(appState.settings.posterMinWidth, 80)
         return max(1, Int((available + interItemSpacing) / (minWidth + interItemSpacing)))
-    }
-
-    private func resolvedItemWidth(for width: CGFloat, columns: Int) -> CGFloat {
-        let available = max(width - AppSpacing.pageHorizontal * 2, appState.settings.posterMinWidth)
-        let spacing = interItemSpacing * CGFloat(max(columns - 1, 0))
-        return max((available - spacing) / CGFloat(max(columns, 1)), 1)
-    }
-
-    private func cacheTargetSize(itemWidth: CGFloat) -> CGSize {
-        let targetWidth = min(max(itemWidth * 1.6, 180), 460)
-        return CGSize(width: targetWidth, height: targetWidth * 1.5)
     }
 
     private func restoreAnchorIfNeeded(_ anchorID: String?, scrollProxy: ScrollViewProxy) {
@@ -399,6 +387,7 @@ struct PosterCardView: View {
         let cropRatio: CGFloat = item.type == .music ? 1 : (2.0 / 3.0)
         let hoverActive = isHovering && !suppressHoverDuringScroll
         let coverRadius = AppCardMetrics.posterCoverCornerRadius
+        let resolvedBadgeTexts = badgeTexts
 
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .bottomLeading) {
@@ -426,9 +415,9 @@ struct PosterCardView: View {
                         .transition(.opacity)
                     }
 
-                if !badgeTexts.isEmpty {
+                if !resolvedBadgeTexts.isEmpty {
                     PosterBadgeFlowLayout(horizontalSpacing: 5, verticalSpacing: 4) {
-                        ForEach(badgeTexts, id: \.self) { text in
+                        ForEach(resolvedBadgeTexts, id: \.self) { text in
                             badge(text)
                         }
                     }
@@ -473,7 +462,8 @@ struct PosterCardView: View {
                 }
             }
             .pointerInspectTilt(enabled: usesInspectHover && !isSelectionActive, cornerRadius: coverRadius)
-            .scaleEffect(hoverActive && !reduceMotion ? 1.018 : 1)
+            // 悬停放大只围绕封面底边做视觉扩展：文字区保持同一基线，不再被封面中心缩放带着“顶开/下压”。
+            .scaleEffect(hoverActive && !reduceMotion ? 1.018 : 1, anchor: .bottom)
             .shadow(
                 color: hoverActive ? AppColors.pointerLightTint.opacity(0.16) : .clear,
                 radius: hoverActive ? 11 : 0,
@@ -484,8 +474,9 @@ struct PosterCardView: View {
                 handlePrimaryTap()
             }
 
-            MarqueeText(text: item.cardTitle, font: .headline)
-                .frame(height: 20)
+            posterTitle(hoverActive: hoverActive)
+                .frame(height: 20, alignment: .topLeading)
+                .animation(nil, value: hoverActive)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     handlePrimaryTap()
@@ -519,6 +510,19 @@ struct PosterCardView: View {
                 showsDeletePlaybackHistory: showsDeletePlaybackHistory,
                 currentManualCollectionID: currentManualCollectionID
             )
+        }
+    }
+
+    @ViewBuilder
+    private func posterTitle(hoverActive: Bool) -> some View {
+        if hoverActive {
+            MarqueeText(text: item.cardTitle, font: .headline)
+        } else {
+            Text(item.cardTitle)
+                .font(.headline)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -736,8 +740,6 @@ private struct RemotePosterImage: View {
     let targetSize: CGSize
     let placeholder: AnyView
     @State private var image: NSImage?
-    @State private var loadedKey = ""
-    @State private var releaseTask: Task<Void, Never>?
 
     var body: some View {
         // 优先同步命中内存缓存，避免列表行回收后重新出现时先闪一帧占位图（默认封面）再加载真图。
@@ -756,30 +758,18 @@ private struct RemotePosterImage: View {
             }
         }
         .task(id: cacheKey) {
-            releaseTask?.cancel()
-            let key = cacheKey
-            guard image == nil || loadedKey != key else { return }
-            loadedKey = key
-            image = ArtworkImageCache.cachedImage(path: url.absoluteString, targetSize: targetSize)
-            guard image == nil else { return }
+            // 切歌/换 URL 后先丢弃上一首残留封面，避免旧图非 nil 时 displayImage 仍优先显示旧封面
+            // （「底色已换、封面未换」）；清空后回落到新封面的同步缓存命中或占位，再按需异步加载。
+            if image != nil { image = nil }
+            // 同步缓存命中已经由 displayImage 直接绘制；不要再写 @State 触发第二轮 body。
+            guard ArtworkImageCache.cachedImage(path: url.absoluteString, targetSize: targetSize) == nil else { return }
             let loaded = SendablePosterImage(await ArtworkImageCache.remoteImageAsync(url: url, targetSize: targetSize))
-            guard loadedKey == key else { return }
+            guard !Task.isCancelled else { return }
             image = loaded.image
         }
         .onDisappear {
-            releaseTask?.cancel()
-            releaseTask = Task { @MainActor in
-                do {
-                    try await Task.sleep(nanoseconds: 2_500_000_000)
-                } catch {
-                    return
-                }
-                image = nil
-            }
-        }
-        .onAppear {
-            releaseTask?.cancel()
-            releaseTask = nil
+            // 内存复用交给统一 NSCache；避免快速滚动时为每格创建延迟 Task 并长期保留像素。
+            image = nil
         }
         .accessibilityLabel(title)
     }
@@ -880,10 +870,6 @@ private struct LocalPosterImage: View {
     let targetSize: CGSize
     let placeholder: AnyView
     @State private var image: NSImage?
-    @State private var loadedPath: String?
-    @State private var loadedRevision = -1
-    @State private var loadedTargetID = ""
-    @State private var releaseTask: Task<Void, Never>?
 
     var body: some View {
         // 优先同步命中内存缓存，避免列表行回收后重新出现时先闪一帧占位图再加载真图（专辑封面闪烁）。
@@ -902,38 +888,22 @@ private struct LocalPosterImage: View {
             }
         }
         .task(id: cacheKey) {
-            releaseTask?.cancel()
-            // posterRevision 仅在 reload()（元数据/封面真实变化）时递增，
-            // 文件存在性健康检查不触发它，避免该检查完成后全量图片重载。
-            let revision = appState.posterRevision
-            let targetID = targetIdentity
-            guard image == nil || loadedPath != path || loadedRevision != revision || loadedTargetID != targetID else { return }
-            loadedPath = path
-            loadedRevision = revision
-            loadedTargetID = targetID
-            image = ArtworkImageCache.cachedImage(path: path, targetSize: targetSize)
-            guard image == nil, path != nil else { return }
-            let loaded = await Task.detached(priority: .utility) {
-                SendablePosterImage(ArtworkImageCache.image(path: path, targetSize: targetSize))
-            }.value
-            guard loadedPath == path, loadedTargetID == targetID else { return }
+            // cacheKey 变化（如音乐展开页切歌换封面路径）时先丢弃上一首残留封面：
+            // 否则旧图非 nil 会让原先的 `guard image == nil` 直接 return，且 displayImage
+            // （image ?? 缓存）优先取旧图，出现「底色已换、封面仍停在上一首」。清空后
+            // displayImage 回落到新封面的同步缓存命中或占位，再按需异步加载。
+            if image != nil { image = nil }
+            guard let path else { return }
+            // 缓存命中由 displayImage 零状态更新绘制，防止预热后的卡片仍逐格二次刷新。
+            guard ArtworkImageCache.cachedImage(path: path, targetSize: targetSize) == nil else { return }
+            let loaded = SendablePosterImage(
+                await ArtworkImageCache.localImageAsync(path: path, targetSize: targetSize)
+            )
+            guard !Task.isCancelled else { return }
             image = loaded.image
         }
         .onDisappear {
-            releaseTask?.cancel()
-            releaseTask = Task { @MainActor in
-                do {
-                    // 1.2s 足以覆盖快速滚动"回头"的场景；ArtworkImageCache 独立缓存兜底。
-                    try await Task.sleep(nanoseconds: 1_200_000_000)
-                } catch {
-                    return
-                }
-                image = nil
-            }
-        }
-        .onAppear {
-            releaseTask?.cancel()
-            releaseTask = nil
+            image = nil
         }
     }
 

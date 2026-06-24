@@ -63,108 +63,108 @@ struct ShelfTimelineSnapshot: Equatable {
 enum ShelfDesignSystem {
     /// 唱片几何。书架整体放大（封面 ×1.5）、铺满窗口宽度成一长排（排版：hero 居中 + 身后一长排薄玻璃封面）。
     enum Plate {
-        static let cornerRadius: CGFloat = 14
+        static var cornerRadius: CGFloat { MusicThemeConfig.active.shelf.plate.cornerRadius }
         /// 唱片边长占可用宽/高的比例与上下限（R1 ×1.5；R12 再 ×1.1，整体更大）。
-        static let widthFraction: CGFloat = 0.194
-        static let heightFraction: CGFloat = 0.50
+        static var widthFraction: CGFloat { MusicThemeConfig.active.shelf.plate.widthFraction }
+        static var heightFraction: CGFloat { MusicThemeConfig.active.shelf.plate.heightFraction }
         // 下限降到 96：窄/矮窗口里唱片随可用空间收缩以**完整放进书架区**（旧 152 会强行撑大→溢出窗口顶部被裁切）。
-        static let minSide: CGFloat = 96
-        static let maxSide: CGFloat = 314
+        static var minSide: CGFloat { MusicThemeConfig.active.shelf.plate.minSide }
+        static var maxSide: CGFloat { MusicThemeConfig.active.shelf.plate.maxSide }
         /// 第一张邻居相对中心的水平间距（占边长比例）：贴近效果图，中心卡两侧露出大封面。
-        static let firstGapFraction: CGFloat = 1.04
+        static var firstGapFraction: CGFloat { MusicThemeConfig.active.shelf.plate.firstGapFraction }
         /// 第 2 张起按窗口半宽展开，歌曲足够多时书架能贯穿整个播放器左右边缘。
-        static let edgeReachFraction: CGFloat = 0.83
-        static let edgeInsetFraction: CGFloat = 0.08
-        static let spineDecay: CGFloat = 6.8
+        static var edgeReachFraction: CGFloat { MusicThemeConfig.active.shelf.plate.edgeReachFraction }
+        static var edgeInsetFraction: CGFloat { MusicThemeConfig.active.shelf.plate.edgeInsetFraction }
+        static var spineDecay: CGFloat { MusicThemeConfig.active.shelf.plate.spineDecay }
         /// 渲染窗口：中心两侧最多渲染多少张（具体数量再按窗口宽度自适应）。
         /// 性能：湖光唱片墙最重的是每张卡的图片、玻璃、倒影和离屏合成；远端卡已经小且靠近边缘，
         /// 收到 11 后仍能铺满常见窗口，同时少挂 6 张左右的实时卡片。
-        static let visibleEachSide: Int = 14
+        static var visibleEachSide: Int { MusicThemeConfig.active.shelf.plate.visibleEachSide }
         /// 倒影高度占边长比例 / 不透明度 / 与唱片底缘的间隙。
-        static let reflectionFraction: CGFloat = 0.5
-        static let reflectionOpacity: Double = 0.26
-        static let reflectionGap: CGFloat = 4
+        static var reflectionFraction: CGFloat { MusicThemeConfig.active.shelf.plate.reflectionFraction }
+        static var reflectionOpacity: Double { MusicThemeConfig.active.shelf.plate.reflectionOpacity }
+        static var reflectionGap: CGFloat { MusicThemeConfig.active.shelf.plate.reflectionGap }
         /// 近大远小：scale 随 |diffF| 指数衰减（中心≈1，远处收小到 farScaleFloor）。
-        static let scaleDecay: CGFloat = 3.6
-        static let farScaleFloor: CGFloat = 0.58
+        static var scaleDecay: CGFloat { MusicThemeConfig.active.shelf.plate.scaleDecay }
+        static var farScaleFloor: CGFloat { MusicThemeConfig.active.shelf.plate.farScaleFloor }
         /// 一阶邻卡(|diff|=1)的近大远小 scale —— 作为"行中线"参照：
         /// hero 放大后用它反推竖直落点，使中心与两侧封面中心严格齐平（与上面的 scale 公式同源）。
         static let neighborScale: CGFloat = farScaleFloor + (1 - farScaleFloor) * CGFloat(exp(-1.0 / Double(scaleDecay)))
         /// 近清远淡：distFadeStart 张内全清晰，之后每张线性变淡，distOpacityFloor 封底。
-        static let distFadeStart: CGFloat = 1.15
-        static let distFadePerStep: CGFloat = 0.125
-        static let distOpacityFloor: Double = 0.12
+        static var distFadeStart: CGFloat { MusicThemeConfig.active.shelf.plate.distFadeStart }
+        static var distFadePerStep: CGFloat { MusicThemeConfig.active.shelf.plate.distFadePerStep }
+        static var distOpacityFloor: Double { MusicThemeConfig.active.shelf.plate.distOpacityFloor }
     }
 
     /// 横向排布的边缘羽化与基线（斜放书架同样复用这些字段）。
     enum Row {
-        static let edgeFadeStart: CGFloat = 11.4     // 书架重新贯穿屏幕：只让最外缘 2~3 张柔化淡出，避免中段变空
-        static let edgeFadeEnd: CGFloat = 14.2
-        static let baselineFraction: CGFloat = 0.62  // 唱片竖直中心占书架区高度比：偏下陈列、给顶部留余量（实际再被 top/bottom 限位钳制）
-        static let topSafeInset: CGFloat = 26
-        static let bottomSafeInset: CGFloat = 16
+        static var edgeFadeStart: CGFloat { MusicThemeConfig.active.shelf.row.edgeFadeStart } // 书架重新贯穿屏幕：只让最外缘 2~3 张柔化淡出，避免中段变空
+        static var edgeFadeEnd: CGFloat { MusicThemeConfig.active.shelf.row.edgeFadeEnd }
+        static var baselineFraction: CGFloat { MusicThemeConfig.active.shelf.row.baselineFraction } // 唱片竖直中心占书架区高度比：偏下陈列、给顶部留余量（实际再被 top/bottom 限位钳制）
+        static var topSafeInset: CGFloat { MusicThemeConfig.active.shelf.row.topSafeInset }
+        static var bottomSafeInset: CGFloat { MusicThemeConfig.active.shelf.row.bottomSafeInset }
     }
 
     /// 效果图式封面墙：中心外的唱片仍是薄封面卡，只做轻微 Y 轴透视和密集重叠；
     /// 正在播放的那张 = hero，平放正对 + 前置 + 柔光边缘。
     enum Angle {
-        static let baseAngle: Double = 10      // 第一张邻居只轻微透视，贴近效果图的正面封面墙
-        static let stepAngle: Double = 0.45    // 越远越略侧，但不再转成实体侧面
-        static let maxAngle: Double = 18       // 薄封面卡的透视上限
-        static let perspective: CGFloat = 0.42 // 轻透视，避免厚砖感
-        static let flattenBand: CGFloat = 0.5  // |diffF| 小于此值视为中心 hero（平放）
-        static let heroScale: CGFloat = 1.26   // hero 抽出后的放大（播放时）
-        static let heroPausedScale: CGFloat = 1.18 // 暂停时略小
-        static let heroDrop: CGFloat = 4       // hero 底边基本贴合架面，只略微压前
-        static let shelfRaise: CGFloat = 0     // 两侧封面与中心共享同一架面
+        static var baseAngle: Double { MusicThemeConfig.active.shelf.angle.baseAngle } // 第一张邻居只轻微透视，贴近效果图的正面封面墙
+        static var stepAngle: Double { MusicThemeConfig.active.shelf.angle.stepAngle } // 越远越略侧，但不再转成实体侧面
+        static var maxAngle: Double { MusicThemeConfig.active.shelf.angle.maxAngle } // 薄封面卡的透视上限
+        static var perspective: CGFloat { MusicThemeConfig.active.shelf.angle.perspective } // 轻透视，避免厚砖感
+        static var flattenBand: CGFloat { MusicThemeConfig.active.shelf.angle.flattenBand } // |diffF| 小于此值视为中心 hero（平放）
+        static var heroScale: CGFloat { MusicThemeConfig.active.shelf.angle.heroScale } // hero 抽出后的放大（播放时）
+        static var heroPausedScale: CGFloat { MusicThemeConfig.active.shelf.angle.heroPausedScale } // 暂停时略小
+        static var heroDrop: CGFloat { MusicThemeConfig.active.shelf.angle.heroDrop } // hero 底边基本贴合架面，只略微压前
+        static var shelfRaise: CGFloat { MusicThemeConfig.active.shelf.angle.shelfRaise } // 两侧封面与中心共享同一架面
         /// 两侧封面中心相对中心唱片的**轻微上扬**量（×plateSize×(1−scale)）：
         /// 0 = 所有中心严格水平；>0 = 越远的封面中心越往上抬一点点，连线读作"轻轻上扬的翼线"而非下坠。
-        static let edgeCenterRise: CGFloat = 0.08
-        static let farDimPerStep: Double = 0.018 // 每远离一张压暗多少（R1 减弱：靠 opacity 表达"远=淡"，不靠压黑）
-        static let dimFloor: Double = 0.82      // 压暗下限（抬高：远卡淡而不脏，避免两侧发黑）
+        static var edgeCenterRise: CGFloat { MusicThemeConfig.active.shelf.angle.edgeCenterRise }
+        static var farDimPerStep: Double { MusicThemeConfig.active.shelf.angle.farDimPerStep } // 每远离一张压暗多少（R1 减弱：靠 opacity 表达"远=淡"，不靠压黑）
+        static var dimFloor: Double { MusicThemeConfig.active.shelf.angle.dimFloor } // 压暗下限（抬高：远卡淡而不脏，避免两侧发黑）
     }
 
     /// 薄玻璃封面卡：不再画正四棱柱，只用封面、柔光棱线、镜面反光和浅倒影贴近效果图。
     enum Card {
-        static let cornerRadius: CGFloat = 10
-        static let edgeLineWidth: CGFloat = 1.1
-        static let heroEdgeLineWidth: CGFloat = 1.6
-        static let sheenOpacity: Double = 0.26
-        static let heroGlowOpacity: Double = 0.54
-        static let shelfGlowOpacity: Double = 0.18
+        static var cornerRadius: CGFloat { MusicThemeConfig.active.shelf.card.cornerRadius }
+        static var edgeLineWidth: CGFloat { MusicThemeConfig.active.shelf.card.edgeLineWidth }
+        static var heroEdgeLineWidth: CGFloat { MusicThemeConfig.active.shelf.card.heroEdgeLineWidth }
+        static var sheenOpacity: Double { MusicThemeConfig.active.shelf.card.sheenOpacity }
+        static var heroGlowOpacity: Double { MusicThemeConfig.active.shelf.card.heroGlowOpacity }
+        static var shelfGlowOpacity: Double { MusicThemeConfig.active.shelf.card.shelfGlowOpacity }
     }
 
     /// 顶部白色柔和面光源（物理光照）：一束位于书架正上方、略偏前的柔光，
     /// 给中心封面最强的顶沿高光描边，越靠两侧（离光心越远、越斜）描边越淡。
     /// 光也影响：顶部 bloom、玻璃 sheen 方向（朝向光心）、地面倒影亮度。
     enum Light {
-        static let bloomOpacity: Double = 0.72       // 书架上方面光源 bloom 强度（.screen）
-        static let bloomWidthScale: CGFloat = 3.0    // bloom 椭圆宽度（相对 hero 边长）
-        static let bloomHeightScale: CGFloat = 2.0   // bloom 椭圆高度
-        static let bloomRise: CGFloat = 0.56         // bloom 中心相对 hero 顶沿再上移（×plateSize；下移=更明显照到 hero）
-        static let skylightOpacity: Double = 0.18    // 全窗顶部天光（.screen，仅上半）
-        static let rimCenter: Double = 0.92          // 中心封面顶沿高光强度
-        static let rimFalloff: Double = 0.30         // 每远离一张高光衰减
-        static let rimFloor: Double = 0.10           // 远卡仍保留极弱顶沿光
-        static let sheenCenter: Double = 1.0         // 中心 sheen 系数；两侧按 rim 比例缩
+        static var bloomOpacity: Double { MusicThemeConfig.active.shelf.light.bloomOpacity } // 书架上方面光源 bloom 强度（.screen）
+        static var bloomWidthScale: CGFloat { MusicThemeConfig.active.shelf.light.bloomWidthScale } // bloom 椭圆宽度（相对 hero 边长）
+        static var bloomHeightScale: CGFloat { MusicThemeConfig.active.shelf.light.bloomHeightScale } // bloom 椭圆高度
+        static var bloomRise: CGFloat { MusicThemeConfig.active.shelf.light.bloomRise } // bloom 中心相对 hero 顶沿再上移（×plateSize；下移=更明显照到 hero）
+        static var skylightOpacity: Double { MusicThemeConfig.active.shelf.light.skylightOpacity } // 全窗顶部天光（.screen，仅上半）
+        static var rimCenter: Double { MusicThemeConfig.active.shelf.light.rimCenter } // 中心封面顶沿高光强度
+        static var rimFalloff: Double { MusicThemeConfig.active.shelf.light.rimFalloff } // 每远离一张高光衰减
+        static var rimFloor: Double { MusicThemeConfig.active.shelf.light.rimFloor } // 远卡仍保留极弱顶沿光
+        static var sheenCenter: Double { MusicThemeConfig.active.shelf.light.sheenCenter } // 中心 sheen 系数；两侧按 rim 比例缩
     }
 
     /// 性能分级：远处又小又淡的卡降级渲染（视觉几乎无损，省大量离屏/混合层）。
     /// 近景带（|diffF|≤premiumDetailBand）保持全玻璃高光；之外渲染精简卡（仅封面+一层柔光+细描边）。
     enum Perf {
-        static let premiumDetailBand: CGFloat = 4.5  // 此距离内=全玻璃高光（hero/邻卡）；之外=精简卡
-        static let dofStart: CGFloat = 1.0           // 景深从一阶邻卡外开始，不让中心/近邻变糊
-        static let dofFullDistance: CGFloat = 8.5    // 到该距离达到最大模糊，之后保持，不再归零
-        static let dofMaxBlur: CGFloat = 5.2         // 远处稳定保持最糊，修复“中间糊、最远清”
-        static let shadowBand: CGFloat = 3.0         // 仅近景带投影（远卡阴影在 0.12 透明度下不可见）
-        static let reflectionBand: CGFloat = 1.25    // 仅中心与一阶邻卡保留倒影；二阶以上水面镜像几乎不可辨
-        static let hoverMoveThreshold: CGFloat = 6.0 // 鼠标移动超过该距离才重新命中唱片
+        static var premiumDetailBand: CGFloat { MusicThemeConfig.active.shelf.perf.premiumDetailBand } // 此距离内=全玻璃高光（hero/邻卡）；之外=精简卡
+        static var dofStart: CGFloat { MusicThemeConfig.active.shelf.perf.dofStart } // 景深从一阶邻卡外开始，不让中心/近邻变糊
+        static var dofFullDistance: CGFloat { MusicThemeConfig.active.shelf.perf.dofFullDistance } // 到该距离达到最大模糊，之后保持，不再归零
+        static var dofMaxBlur: CGFloat { MusicThemeConfig.active.shelf.perf.dofMaxBlur } // 远处稳定保持最糊，修复“中间糊、最远清”
+        static var shadowBand: CGFloat { MusicThemeConfig.active.shelf.perf.shadowBand } // 仅近景带投影（远卡阴影在 0.12 透明度下不可见）
+        static var reflectionBand: CGFloat { MusicThemeConfig.active.shelf.perf.reflectionBand } // 仅中心与一阶邻卡保留倒影；二阶以上水面镜像几乎不可辨
+        static var hoverMoveThreshold: CGFloat { MusicThemeConfig.active.shelf.perf.hoverMoveThreshold } // 鼠标移动超过该距离才重新命中唱片
         static let hoverSampleInterval: TimeInterval = 1.0 / 30.0
         static let auroraFrameInterval: TimeInterval = 1.0 / 20.0 // 极光底板是低频漂移，20Hz 比逐层 repeatForever 更稳
         static let lightFieldFrameInterval: TimeInterval = 1.0 / 24.0 // 单 Canvas 水光的受控刷新率；慢速光效 24Hz 足够平滑
-        static let fullCoverCacheSide: CGFloat = 360  // hero/近景封面保持高分辨率
-        static let liteCoverCacheSide: CGFloat = 180  // 远卡显示尺寸约 90~170pt，半分辨率视觉无损且少解码/内存
-        static let reflectionCacheSide: CGFloat = 220 // 倒影独立低清晰度，保持水面柔化观感
+        static var fullCoverCacheSide: CGFloat { MusicThemeConfig.active.shelf.perf.fullCoverCacheSide } // hero/近景封面保持高分辨率
+        static var liteCoverCacheSide: CGFloat { MusicThemeConfig.active.shelf.perf.liteCoverCacheSide } // 远卡显示尺寸约 90~170pt，半分辨率视觉无损且少解码/内存
+        static var reflectionCacheSide: CGFloat { MusicThemeConfig.active.shelf.perf.reflectionCacheSide } // 倒影独立低清晰度，保持水面柔化观感
     }
 
     /// 前景悬浮 chrome 的统一高程刻度（skill §4 elevation-consistent / effects-match-style）：
@@ -173,12 +173,12 @@ enum ShelfDesignSystem {
     enum Elevation {
         /// surface：主控制面（Dock）—— 更高更沉。
         static let surfaceColor = Color.black.opacity(0.26)
-        static let surfaceRadius: CGFloat = 20
-        static let surfaceY: CGFloat = 10
+        static var surfaceRadius: CGFloat { MusicThemeConfig.active.shelf.elevation.surfaceRadius }
+        static var surfaceY: CGFloat { MusicThemeConfig.active.shelf.elevation.surfaceY }
         /// floating：轻浮元素（顶部提示胶囊）—— 浅浅托起、与背景拉开层次即可。
         static let floatingColor = Color.black.opacity(0.18)
-        static let floatingRadius: CGFloat = 9
-        static let floatingY: CGFloat = 3
+        static var floatingRadius: CGFloat { MusicThemeConfig.active.shelf.elevation.floatingRadius }
+        static var floatingY: CGFloat { MusicThemeConfig.active.shelf.elevation.floatingY }
     }
 
     enum Motion {
@@ -208,51 +208,51 @@ enum ShelfDesignSystem {
 
     /// 「向下拉当前唱片 → 单曲循环」手势。
     enum Pull {
-        static let threshold: CGFloat = 56   // 实际竖直位移超过此值即触发
-        static let maxOffset: CGFloat = 124  // 橡皮筋下拉位移上限
-        static let resistance: CGFloat = 190  // 越大越「沉」
-        static let tapSlop: CGFloat = 6       // 位移小于此视为点击（播放/暂停）
+        static var threshold: CGFloat { MusicThemeConfig.active.shelf.pull.threshold } // 实际竖直位移超过此值即触发
+        static var maxOffset: CGFloat { MusicThemeConfig.active.shelf.pull.maxOffset } // 橡皮筋下拉位移上限
+        static var resistance: CGFloat { MusicThemeConfig.active.shelf.pull.resistance } // 越大越「沉」
+        static var tapSlop: CGFloat { MusicThemeConfig.active.shelf.pull.tapSlop } // 位移小于此视为点击（播放/暂停）
     }
 
     /// 「长按当前唱片 → 再晃动 → 唱片跟随鼠标，拖出卡片长龙」。
     enum Gather {
-        static let longPress: Double = 0.32       // 长按多久后进入「待拾起」
+        static var longPress: Double { MusicThemeConfig.active.shelf.gather.longPress } // 长按多久后进入「待拾起」
         // 早期明确下拉的竖直阈值：调大以免长按期间手指微微下飘被误判成下拉（导致长按被取消、拾不起来）。
-        static let pullCommitDown: CGFloat = 46
-        static let shakeWindow: TimeInterval = 0.45     // 晃动判定的时间窗
-        static let shakeMinPath: CGFloat = 60           // 窗内最小路径长度（放宽，更易晃动拾起）
+        static var pullCommitDown: CGFloat { MusicThemeConfig.active.shelf.gather.pullCommitDown }
+        static var shakeWindow: TimeInterval { MusicThemeConfig.active.shelf.gather.shakeWindow } // 晃动判定的时间窗
+        static var shakeMinPath: CGFloat { MusicThemeConfig.active.shelf.gather.shakeMinPath } // 窗内最小路径长度（放宽，更易晃动拾起）
         static let shakeMinReversals = 2                // 窗内最小方向反转次数
         /// 待拾起(primed)后，指针移动超过此距离即拾起（晃动的兜底——保证「长按后一拖就跟手」不会拾不起来）。
-        static let pickupMove: CGFloat = 14
+        static var pickupMove: CGFloat { MusicThemeConfig.active.shelf.gather.pickupMove }
     }
 
     /// 跟随鼠标的「卡片长龙」（参考手机多选图标后拖动：所有卡片排成一列跟着手指走，靠后的越滞后）。
     enum Dragon {
-        static let chainSpacing: CGFloat = 30 // 每张沿「运动反方向」相对前一张的堆叠间距（拖尾长龙）
-        static let dirSmoothing: CGFloat = 0.28 // 拖动方向平滑系数（越小越跟手但越抖）
-        static let tiltPerRank: Double = 1.2 // 每张多一点 Z 倾斜，长龙更灵动
-        static let tiltMax: Double = 9
-        static let springBase: Double = 0.18    // 领头卡跟手弹簧
-        static let springPerRank: Double = 0.05 // 越靠后弹簧越慢 → 拖尾「长龙」
-        static let damping: Double = 0.76
+        static var chainSpacing: CGFloat { MusicThemeConfig.active.shelf.dragon.chainSpacing } // 每张沿「运动反方向」相对前一张的堆叠间距（拖尾长龙）
+        static var dirSmoothing: CGFloat { MusicThemeConfig.active.shelf.dragon.dirSmoothing } // 拖动方向平滑系数（越小越跟手但越抖）
+        static var tiltPerRank: Double { MusicThemeConfig.active.shelf.dragon.tiltPerRank } // 每张多一点 Z 倾斜，长龙更灵动
+        static var tiltMax: Double { MusicThemeConfig.active.shelf.dragon.tiltMax }
+        static var springBase: Double { MusicThemeConfig.active.shelf.dragon.springBase } // 领头卡跟手弹簧
+        static var springPerRank: Double { MusicThemeConfig.active.shelf.dragon.springPerRank } // 越靠后弹簧越慢 → 拖尾「长龙」
+        static var damping: Double { MusicThemeConfig.active.shelf.dragon.damping }
     }
 
     /// 「滚动 → 沿时间轴翻看历史/待播」。
     enum Browse {
-        static let trackpadSensitivity: CGFloat = 0.011 // 触控板精确像素 → 卡片单位
-        static let wheelSensitivity: CGFloat = 0.34      // 鼠标滚轮行 → 卡片单位
-        static let overscroll: CGFloat = 0.5             // 首/末卡片外的回弹余量
-        static let returnDelay: UInt64 = 1_600_000_000   // 无操作多久后回弹到当前曲（ns）
+        static var trackpadSensitivity: CGFloat { MusicThemeConfig.active.shelf.browse.trackpadSensitivity } // 触控板精确像素 → 卡片单位
+        static var wheelSensitivity: CGFloat { MusicThemeConfig.active.shelf.browse.wheelSensitivity } // 鼠标滚轮行 → 卡片单位
+        static var overscroll: CGFloat { MusicThemeConfig.active.shelf.browse.overscroll } // 首/末卡片外的回弹余量
+        static var returnDelay: UInt64 { MusicThemeConfig.active.shelf.browse.returnDelay } // 无操作多久后回弹到当前曲（ns）
     }
 
     /// 文字层级。
     enum FontSize {
-        static let title: CGFloat = 28       // 正在播放曲名（加大）
-        static let subtitle: CGFloat = 14    // 艺术家 · 专辑
-        static let lyricActive: CGFloat = 34
-        static let lyricContext: CGFloat = 19
-        static let time: CGFloat = 12
-        static let hint: CGFloat = 11
+        static var title: CGFloat { MusicThemeConfig.active.shelf.fontSize.title } // 正在播放曲名（加大）
+        static var subtitle: CGFloat { MusicThemeConfig.active.shelf.fontSize.subtitle } // 艺术家 · 专辑
+        static var lyricActive: CGFloat { MusicThemeConfig.active.shelf.fontSize.lyricActive }
+        static var lyricContext: CGFloat { MusicThemeConfig.active.shelf.fontSize.lyricContext }
+        static var time: CGFloat { MusicThemeConfig.active.shelf.fontSize.time }
+        static var hint: CGFloat { MusicThemeConfig.active.shelf.fontSize.hint }
     }
 }
 
@@ -452,39 +452,25 @@ struct MusicShelfPlayerStage: View {
     /// 但闭包里的纯局部布局值不一定立即重算。显式保存尺寸，确保 ShelfStageLayout 随窗口更新。
     @State private var stageSize: CGSize = .zero
 
-    init(
-        currentItem: MediaItem,
-        controller: MpvPlayerController,
-        palette: AlbumColorPalette,
-        lyrics: String,
-        timedLyrics: [TimedLyricLine],
-        lyricTimingSource: LyricTimingSource,
-        hasDisplayLyrics: Bool,
-        isFetchingLyrics: Bool,
-        coverGlowEnabled: Bool,
-        artworkReady: Bool,
-        entranceReady: Bool,
-        reduceMotion: Bool,
-        colorScheme: ColorScheme,
-        onFetchLyrics: @escaping () -> Void,
-        onMinimize: @escaping () -> Void
-    ) {
-        self.currentItem = currentItem
-        self.controller = controller
-        self.palette = palette
-        self.lyrics = lyrics
-        self.timedLyrics = timedLyrics
-        self.lyricTimingSource = lyricTimingSource
-        self.hasDisplayLyrics = hasDisplayLyrics
-        self.isFetchingLyrics = isFetchingLyrics
-        self.coverGlowEnabled = coverGlowEnabled
-        self.artworkReady = artworkReady
-        self.entranceReady = entranceReady
-        self.reduceMotion = reduceMotion
-        self.colorScheme = colorScheme
-        self.onFetchLyrics = onFetchLyrics
-        self.onMinimize = onMinimize
-        _playbackFlag = StateObject(wrappedValue: ShelfControllerProjection(controller: controller) { $0.isPlaying })
+    /// R1：业务数据统一经 `MusicPlaybackContext` 注入；内部仍解包到原有存储属性，
+    /// body 与所有用法零改动（纯接口收敛、等价重构）。
+    init(context: MusicPlaybackContext) {
+        self.currentItem = context.item
+        self.controller = context.controller
+        self.palette = context.palette
+        self.lyrics = context.lyrics
+        self.timedLyrics = context.timedLyrics
+        self.lyricTimingSource = context.lyricTimingSource
+        self.hasDisplayLyrics = context.hasDisplayLyrics
+        self.isFetchingLyrics = context.isFetchingLyrics
+        self.coverGlowEnabled = context.coverGlowEnabled
+        self.artworkReady = context.artworkReady
+        self.entranceReady = context.entranceReady
+        self.reduceMotion = context.reduceMotion
+        self.colorScheme = context.colorScheme
+        self.onFetchLyrics = context.fetchLyrics
+        self.onMinimize = context.requestMinimize
+        _playbackFlag = StateObject(wrappedValue: ShelfControllerProjection(controller: context.controller) { $0.isPlaying })
     }
 
     /// 本次队列全量（已播放不出队）：空队列时退化为仅当前曲。

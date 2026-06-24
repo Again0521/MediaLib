@@ -13,9 +13,9 @@ enum MusicPlayerVisualTokens {
     /// 圆角：三块玻璃（歌词卡 / 控制栏 / 收起按钮）保留各自圆角差异，
     /// 但磨砂浓度、描边渐变、顶/底高光逻辑必须同源（见 FloatingLyricsGlass）。
     enum Radius {
-        static let card: CGFloat = 36
-        static let control: CGFloat = 24
-        static let chrome: CGFloat = 23
+        static var card: CGFloat { MusicThemeConfig.active.visual.radius.card }
+        static var control: CGFloat { MusicThemeConfig.active.visual.radius.control }
+        static var chrome: CGFloat { MusicThemeConfig.active.visual.radius.chrome }
     }
 
     /// 玻璃材质（明/暗双模式同源参数）。
@@ -39,20 +39,20 @@ enum MusicPlayerVisualTokens {
     /// 封面发光（§2）。
     enum Glow {
         /// 外层环境光有效半径抵达歌词卡边缘后再多出的距离（pt），即"轻微触达并略超过"。
-        static let edgeOvershoot: CGFloat = 52
+        static var edgeOvershoot: CGFloat { MusicThemeConfig.active.visual.glow.edgeOvershoot }
         /// 几何落点换算出的 reach 夹紧区间（相对 posterSize 的倍数）。
-        static let minReach: CGFloat = 2.14
-        static let maxReach: CGFloat = 6.4
+        static var minReach: CGFloat { MusicThemeConfig.active.visual.glow.minReach }
+        static var maxReach: CGFloat { MusicThemeConfig.active.visual.glow.maxReach }
         /// SDF glow 使用整块 frame 做衰减画布，可见光程 ≈ frame半径。
-        static let bloomVisibleFraction: CGFloat = 1.0
+        static var bloomVisibleFraction: CGFloat { MusicThemeConfig.active.visual.glow.bloomVisibleFraction }
         /// 低彩封面略收光程，避免白灰封面大面积雾化。
-        static let lowVibrancyDamp: Double = 0.82
+        static var lowVibrancyDamp: Double { MusicThemeConfig.active.visual.glow.lowVibrancyDamp }
         /// 几何不可用（stacked）时的兜底 reach（再经视图层 vibrancy 轻微缩放）。
-        static let fallbackReach: CGFloat = 4.4
+        static var fallbackReach: CGFloat { MusicThemeConfig.active.visual.glow.fallbackReach }
         /// 近场 bloom 饱和度封顶，避免彩色封面近场霓虹感。
-        static let nearSaturationCap: Double = 1.18
+        static var nearSaturationCap: Double { MusicThemeConfig.active.visual.glow.nearSaturationCap }
         /// 暂停"掉色温"：glow 降到 0 时彩色投影饱和度向中性靠拢，最低保留比例。
-        static let pausedShadowSaturationFloor: Double = 0.45
+        static var pausedShadowSaturationFloor: Double { MusicThemeConfig.active.visual.glow.pausedShadowSaturationFloor }
     }
 
     /// 封面光浸染到玻璃卡边缘（§2.3）。
@@ -60,70 +60,70 @@ enum MusicPlayerVisualTokens {
         // 组件染色不再固定铺满整条边，而是再乘以布局计算出的真实入射强度。
         // 这些值只定义“玻璃吃到光后的材质反应”，光能不能到由 AlbumComponentLight 决定。
         // R4 氛围增强：让"歌曲发光"对控制栏/收起按钮的浸染更明显。
-        static let lyricsIntensity: Double = 0.0
-        static let controlsIntensity: Double = 0.74
-        static let chromeIntensity: Double = 0.34
-        static let lyricsReach: Double = 0.245
-        static let controlsReach: Double = 0.31
-        static let chromeReach: Double = 0.21
+        static var lyricsIntensity: Double { MusicThemeConfig.active.visual.spill.lyricsIntensity }
+        static var controlsIntensity: Double { MusicThemeConfig.active.visual.spill.controlsIntensity }
+        static var chromeIntensity: Double { MusicThemeConfig.active.visual.spill.chromeIntensity }
+        static var lyricsReach: Double { MusicThemeConfig.active.visual.spill.lyricsReach }
+        static var controlsReach: Double { MusicThemeConfig.active.visual.spill.controlsReach }
+        static var chromeReach: Double { MusicThemeConfig.active.visual.spill.chromeReach }
         // 主增益：同时放大三块玻璃的浸染漫入强度（含歌词卡右侧平衡光），让光"软软漫进卡片"更明显。
-        static let chromaTravelBase: Double = 0.37
-        static let chromaTravelVibrancy: Double = 0.18
-        static let innerPeak: Double = 0.02
-        static let innerPrimary: Double = 0.064
-        static let innerSecondary: Double = 0.13
-        static let innerFade: Double = 0.22
-        static let pausedResidual: Double = 0.055
-        static let pauseNearFadeDuration: Double = 0.22
-        static let pauseFarDelay: UInt64 = 260_000_000
-        static let pauseFarFadeDuration: Double = 0.28
-        static let playRiseDuration: Double = 0.24
+        static var chromaTravelBase: Double { MusicThemeConfig.active.visual.spill.chromaTravelBase }
+        static var chromaTravelVibrancy: Double { MusicThemeConfig.active.visual.spill.chromaTravelVibrancy }
+        static var innerPeak: Double { MusicThemeConfig.active.visual.spill.innerPeak }
+        static var innerPrimary: Double { MusicThemeConfig.active.visual.spill.innerPrimary }
+        static var innerSecondary: Double { MusicThemeConfig.active.visual.spill.innerSecondary }
+        static var innerFade: Double { MusicThemeConfig.active.visual.spill.innerFade }
+        static var pausedResidual: Double { MusicThemeConfig.active.visual.spill.pausedResidual }
+        static var pauseNearFadeDuration: Double { MusicThemeConfig.active.visual.spill.pauseNearFadeDuration }
+        static var pauseFarDelay: UInt64 { MusicThemeConfig.active.visual.spill.pauseFarDelay }
+        static var pauseFarFadeDuration: Double { MusicThemeConfig.active.visual.spill.pauseFarFadeDuration }
+        static var playRiseDuration: Double { MusicThemeConfig.active.visual.spill.playRiseDuration }
     }
 
     /// 展开页底部控制栏：高度必须固定，避免封面取色、文字状态或玻璃背景改变布局。
     enum Controls {
-        static let expandedHeight: CGFloat = 128
-        static let expandedMaxWidth: CGFloat = 424
+        static var expandedHeight: CGFloat { MusicThemeConfig.active.visual.controls.expandedHeight }
+        static var expandedMaxWidth: CGFloat { MusicThemeConfig.active.visual.controls.expandedMaxWidth }
     }
 
     /// 歌词景深（§3）。
     enum Lyrics {
         /// 距当前行的距离模糊分段（index = distance，0 为当前行恒不模糊）。
         static let distanceBlur: [CGFloat] = [0, 1.1, 2.5, 4.1, 6.2]
-        static let distanceBlurMax: CGFloat = 8.6
+        static var distanceBlurMax: CGFloat { MusicThemeConfig.active.visual.lyrics.distanceBlurMax }
         /// 距当前行 2~3 行起，叠加一点点固定模糊，强化"上下比中间更糊"的位置感（克制）。
-        static let edgeExtraBlur: CGFloat = 1.70
+        static var edgeExtraBlur: CGFloat { MusicThemeConfig.active.visual.lyrics.edgeExtraBlur }
         /// 按行距估算该行在卡片中窗外的归一化位置，避免只按距离导致边缘景深不稳定。
-        static let edgePositionStep: CGFloat = 0.18
+        static var edgePositionStep: CGFloat { MusicThemeConfig.active.visual.lyrics.edgePositionStep }
         /// 清晰中窗高度比（中间约 40% 高度保持全清晰，两端羽化）。
-        static let clearWindowRatio: Double = 0.40
-        static let browseClearDuration: Double = 0.22
-        static let browseRecoverDuration: Double = 1.65
-        static let viewportStabilityDelay: UInt64 = 780_000_000
+        static var clearWindowRatio: Double { MusicThemeConfig.active.visual.lyrics.clearWindowRatio }
+        static var browseClearDuration: Double { MusicThemeConfig.active.visual.lyrics.browseClearDuration }
+        static var browseRecoverDuration: Double { MusicThemeConfig.active.visual.lyrics.browseRecoverDuration }
+        static var viewportStabilityDelay: UInt64 { MusicThemeConfig.active.visual.lyrics.viewportStabilityDelay }
         /// 手动浏览歌词后，保持 4 秒清晰阅读窗口，再恢复自动居中与景深。
-        static let browseFallbackResumeDelay: UInt64 = 4_000_000_000
+        static var browseFallbackResumeDelay: UInt64 { MusicThemeConfig.active.visual.lyrics.browseFallbackResumeDelay }
     }
 
     /// 播放按钮 / 进度条主色加深（§5）：deepTint = 降亮 0.84、提饱和 1.10、亮度夹 0.40–0.82。
     enum Tint {
-        static let playSaturation: CGFloat = 1.10
-        static let playBrightness: CGFloat = 0.84
-        static let playMinSaturation: CGFloat = 0.30
-        static let playMaxSaturation: CGFloat = 0.96
-        static let playMinBrightness: CGFloat = 0.40
-        static let playMaxBrightness: CGFloat = 0.82
-        static let playPressedScale: CGFloat = 0.96
+        static var playSaturation: CGFloat { MusicThemeConfig.active.visual.tint.playSaturation }
+        static var playBrightness: CGFloat { MusicThemeConfig.active.visual.tint.playBrightness }
+        static var playMinSaturation: CGFloat { MusicThemeConfig.active.visual.tint.playMinSaturation }
+        static var playMaxSaturation: CGFloat { MusicThemeConfig.active.visual.tint.playMaxSaturation }
+        static var playMinBrightness: CGFloat { MusicThemeConfig.active.visual.tint.playMinBrightness }
+        static var playMaxBrightness: CGFloat { MusicThemeConfig.active.visual.tint.playMaxBrightness }
+        static var playPressedScale: CGFloat { MusicThemeConfig.active.visual.tint.playPressedScale }
     }
 
     /// 进度条（§5.1）。
     enum Progress {
-        static let thumbActiveGrowth: CGFloat = 2
-        static let thumbGlowRadius: CGFloat = 7
-        static let sheenDuration: Double = 7.8
+        static var thumbActiveGrowth: CGFloat { MusicThemeConfig.active.visual.progress.thumbActiveGrowth }
+        static var thumbGlowRadius: CGFloat { MusicThemeConfig.active.visual.progress.thumbGlowRadius }
+        static var sheenDuration: Double { MusicThemeConfig.active.visual.progress.sheenDuration }
         static func sheenOpacity(dark: Bool) -> Double { dark ? 0.16 : 0.20 }
-        static let sheenWidthMin: CGFloat = 22
-        static let sheenWidthMax: CGFloat = 94
-        static let sheenWidthRatio: CGFloat = 0.34
+        static var sheenWidthMin: CGFloat { MusicThemeConfig.active.visual.progress.sheenWidthMin }
+        static var sheenWidthMax: CGFloat { MusicThemeConfig.active.visual.progress.sheenWidthMax }
+        static var sheenWidthRatio: CGFloat { MusicThemeConfig.active.visual.progress.sheenWidthRatio }
     }
 
     /// 专辑取色（§4）：保证彩色封面优先取真实不同色相；接近单色时才退化为克制类比三色。
@@ -131,31 +131,31 @@ enum MusicPlayerVisualTokens {
         // 真实封面常见"鲜艳色只占小块面积、其余是中性背景/肤色"（如制服+白墙）。
         // 阈值偏高 + normalizer 偏大会把这类封面判成中性→灰底板→封面不发光、发光没颜色。
         // 下调让"有明显鲜艳块"的封面走彩色方案并拿到足够 vibrancy，同时仍靠面积权重防止指甲油级别夺主色。
-        static let colorfulFractionThreshold: Double = 0.10
-        static let vibrancyNormalizer: Double = 0.24
-        static let secondaryHueDistance: Double = 0.06
-        static let accentHueDistance: Double = 0.08
-        static let secondaryHueWeightFraction: Double = 0.12
-        static let accentHueWeightFraction: Double = 0.10
-        static let analogousSecondaryHueOffset: CGFloat = 0.040
-        static let analogousAccentHueOffset: CGFloat = -0.042
-        static let neutralColorHintFraction: Double = 0.11
-        static let neutralTopHueFraction: Double = 0.065
-        static let neutralSecondHueDistance: Double = 0.10
-        static let neutralAnalogousSecondaryHueOffset: CGFloat = 0.035
-        static let neutralAnalogousAccentHueOffset: CGFloat = -0.035
+        static var colorfulFractionThreshold: Double { MusicThemeConfig.active.visual.palette.colorfulFractionThreshold }
+        static var vibrancyNormalizer: Double { MusicThemeConfig.active.visual.palette.vibrancyNormalizer }
+        static var secondaryHueDistance: Double { MusicThemeConfig.active.visual.palette.secondaryHueDistance }
+        static var accentHueDistance: Double { MusicThemeConfig.active.visual.palette.accentHueDistance }
+        static var secondaryHueWeightFraction: Double { MusicThemeConfig.active.visual.palette.secondaryHueWeightFraction }
+        static var accentHueWeightFraction: Double { MusicThemeConfig.active.visual.palette.accentHueWeightFraction }
+        static var analogousSecondaryHueOffset: CGFloat { MusicThemeConfig.active.visual.palette.analogousSecondaryHueOffset }
+        static var analogousAccentHueOffset: CGFloat { MusicThemeConfig.active.visual.palette.analogousAccentHueOffset }
+        static var neutralColorHintFraction: Double { MusicThemeConfig.active.visual.palette.neutralColorHintFraction }
+        static var neutralTopHueFraction: Double { MusicThemeConfig.active.visual.palette.neutralTopHueFraction }
+        static var neutralSecondHueDistance: Double { MusicThemeConfig.active.visual.palette.neutralSecondHueDistance }
+        static var neutralAnalogousSecondaryHueOffset: CGFloat { MusicThemeConfig.active.visual.palette.neutralAnalogousSecondaryHueOffset }
+        static var neutralAnalogousAccentHueOffset: CGFloat { MusicThemeConfig.active.visual.palette.neutralAnalogousAccentHueOffset }
     }
 
     /// 浅色 / 低彩专辑下的文字可读性 scrim（§6.5）。
     /// 只在文字层下方叠极淡中性暗化，不用 multiply/overlay，不参与专辑 glow 合成。
     enum TextScrim {
-        static let brightLuminanceStart: Double = 0.62
-        static let brightLuminanceEnd: Double = 0.82
-        static let lowVibrancyThreshold: Double = 0.38
-        static let lyricsMaxOpacity: Double = 0.052
-        static let controlsMaxOpacity: Double = 0.036
-        static let centerMultiplier: Double = 1.0
-        static let edgeMultiplier: Double = 0.30
+        static var brightLuminanceStart: Double { MusicThemeConfig.active.visual.textScrim.brightLuminanceStart }
+        static var brightLuminanceEnd: Double { MusicThemeConfig.active.visual.textScrim.brightLuminanceEnd }
+        static var lowVibrancyThreshold: Double { MusicThemeConfig.active.visual.textScrim.lowVibrancyThreshold }
+        static var lyricsMaxOpacity: Double { MusicThemeConfig.active.visual.textScrim.lyricsMaxOpacity }
+        static var controlsMaxOpacity: Double { MusicThemeConfig.active.visual.textScrim.controlsMaxOpacity }
+        static var centerMultiplier: Double { MusicThemeConfig.active.visual.textScrim.centerMultiplier }
+        static var edgeMultiplier: Double { MusicThemeConfig.active.visual.textScrim.edgeMultiplier }
     }
 }
 
@@ -621,8 +621,6 @@ struct MusicPlayerView: View {
     @State private var glassLayerReady = false  // 重型封面纹理延迟出现；轻量玻璃底从首帧常驻，避免断层
     @State private var entrancePhase = 0
     @State private var resumeAutoScrollTask: Task<Void, Never>?
-    /// 无界：控制栏底部在内容坐标空间里的 maxY，用于让右侧频谱与之底对齐。
-    @State private var wujieControlsBottom: CGFloat = 0
 
     private var currentItem: MediaItem {
         if let active = appState.activePlayerItem, active.type == .music {
@@ -641,36 +639,52 @@ struct MusicPlayerView: View {
         !cleaned.hasPrefix("在线歌词获取失败")
     }
 
+    /// 业务 → 主题 的统一接口（R1）。每次 body 重算时从宿主 `@State` 直接构造，
+    /// 把原先散落传给湖光的 15 个入参收敛成一个与主题无关的载体。
+    /// 与改前逐参一一对应（含派生 artworkReady / entranceReady），行为等价。
+    private var playbackContext: MusicPlaybackContext {
+        MusicPlaybackContext(
+            item: currentItem,
+            palette: albumPalette,
+            lyrics: lyrics,
+            timedLyrics: timedLyrics,
+            lyricTimingSource: lyricTimingSource,
+            hasDisplayLyrics: hasDisplayLyrics,
+            isFetchingLyrics: isFetchingLyrics,
+            coverGlowEnabled: appState.settings.musicAlbumCoverGlowEnabled,
+            artworkReady: glassLayerReady,
+            entranceReady: reduceMotion || entrancePhase >= 1,
+            entrancePhase: entrancePhase,
+            reduceMotion: reduceMotion,
+            colorScheme: colorScheme,
+            userIsBrowsingLyrics: $userIsBrowsingLyrics,
+            controller: controller,
+            fetchLyrics: { Task { await fetchLyrics() } },
+            requestMinimize: onRequestMinimize,
+            pauseLyricAutoScroll: pauseLyricAutoScroll
+        )
+    }
+
     var body: some View {
-        // 整窗底层由 expandedPlayer 内部的 MetalAlbumBackdropView 铺满：
+        // 整窗底层由 MusicExpandedStage 内部的 MetalAlbumBackdropView 铺满：
         // 它是一块覆盖标题栏区域的【不透明】专辑取色底（符合原方案"第一层不透明"）。
         // 性能根因修复：之前用 behindWindow 整窗毛玻璃会让 WindowServer 为整窗持有一份模糊后的桌面副本，
         // 内存飙到 400M+ 并拖累系统。改为不透明底色后 WindowServer 不再做整窗离屏模糊；磨砂质感由上层
         // 歌词卡/控制栏的局部 material 提供（局部、面积小，开销可控）。底色不透明也彻底盖住标题栏白条。
         ZStack {
-            if isShelf {
-                // 书架方案：完全隔离的根视图，自带底板/书架/歌词/进度/音量；
-                // 复用 MusicPlayerView 已加载的歌词与取色（经下面的 .onAppear/.onChange 维护）。
-                MusicShelfPlayerStage(
-                    currentItem: currentItem,
-                    controller: controller,
-                    palette: albumPalette,
-                    lyrics: lyrics,
-                    timedLyrics: timedLyrics,
-                    lyricTimingSource: lyricTimingSource,
-                    hasDisplayLyrics: hasDisplayLyrics,
-                    isFetchingLyrics: isFetchingLyrics,
-                    coverGlowEnabled: appState.settings.musicAlbumCoverGlowEnabled,
-                    artworkReady: glassLayerReady,
-                    entranceReady: reduceMotion || entrancePhase >= 1,
-                    reduceMotion: reduceMotion,
-                    colorScheme: colorScheme,
-                    onFetchLyrics: { Task { await fetchLyrics() } },
-                    onMinimize: onRequestMinimize
-                )
-            } else {
-                expandedPlayer
+            // 主题渲染子树按 musicThemeRevision 重建：用户在设置里「重新加载 / 恢复默认」主题参数后
+            // bump 该值即可让主题层重新读取 MusicThemeConfig.active（无需重启）。.id 只套在两个 Stage 上、
+            // 不套在带 onAppear 的 ZStack 上——故宿主已加载的歌词/取色/入场状态保留，不会重放入场或重拉歌词。
+            Group {
+                if isShelf {
+                    // 书架方案：完全隔离的根视图，自带底板/书架/歌词/进度/音量；
+                    // 复用 MusicPlayerView 已加载的歌词与取色（经下面的 .onAppear/.onChange 维护）。
+                    MusicShelfPlayerStage(context: playbackContext)
+                } else {
+                    MusicExpandedStage(context: playbackContext, variant: isWujie ? .wujie : .liuli)
+                }
             }
+            .id(appState.musicThemeRevision)
         }
         .ignoresSafeArea(.all)
         .onAppear {
@@ -721,318 +735,14 @@ struct MusicPlayerView: View {
         }
     }
 
-    private var expandedPlayer: some View {
-        GeometryReader { geometry in
-            let layout = MusicExpandedLayout(size: geometry.size)
-            let lyricsPanelReady = reduceMotion || entrancePhase >= 1
-            // 无界：整体下移左栏，让封面/标题让开顶部的「收起 / 更多」按钮；发光中心同步下移半个量保持对齐。
-            let wujieContentDrop: CGFloat = (isWujie && !layout.stackedLayout) ? MusicWujieTokens.contentDrop : 0
-            let wujieGlowDrop: CGFloat = wujieContentDrop * 0.5
-            // 无界：左右两侧各加一点外边距——左栏（连同发光）右移、右侧歌词列右沿内收，整体更透气。
-            let wujieSideInset: CGFloat = (isWujie && !layout.stackedLayout) ? MusicWujieTokens.sideInset : 0
-
-            ZStack(alignment: .topLeading) {
-                MetalAlbumBackdropView(
-                    posterPath: currentItem.posterPath,
-                    title: currentItem.title,
-                    palette: albumPalette,
-                    artworkReady: glassLayerReady,
-                    albumLightCenter: layout.albumLightCenter,
-                    glassIntensity: 1.0,
-                    reduceMotion: reduceMotion,
-                    dynamicEffectsEnabled: false,
-                    colorScheme: colorScheme
-                )
-                .transaction { transaction in
-                    transaction.animation = nil
-                }
-                .zIndex(0)
-
-                AlbumGlobalGlassVeil(palette: albumPalette, colorScheme: colorScheme)
-                    .allowsHitTesting(false)
-                    .zIndex(0.5)
-
-                // 真·封面发光：放大封面 + 重高斯模糊 + 圆角方形羽化，铺在清晰封面正后方（见 AlbumGlowBlurCover）。
-                // 无界方案把发光画布扩到整窗（fullScreenGlowSide），让封面柔光延伸至整个屏幕；
-                // 琉璃方案保持原局部光程（glowBlurSide），互不影响。
-                AlbumGlowBlurCover(
-                    posterPath: currentItem.posterPath,
-                    controller: controller,
-                    displaySide: isWujie ? layout.fullScreenGlowSide : layout.glowBlurSide,
-                    coverSide: layout.coverDisplaySide,
-                    coverGlowEnabled: appState.settings.musicAlbumCoverGlowEnabled,
-                    intensity: isWujie ? 0.42 : 1.0,
-                    saturation: isWujie ? 0.34 : 1.0
-                )
-                .position(x: layout.albumLightCenter.x + wujieSideInset, y: layout.albumLightCenter.y + wujieGlowDrop)
-                .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
-                .allowsHitTesting(false)
-                .zIndex(1)
-
-                if isWujie {
-                    WujieEnvironmentWash(palette: albumPalette)
-                        .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
-                        .allowsHitTesting(false)
-                        .zIndex(1.5)
-                }
-
-                ZStack(alignment: .topLeading) {
-                    if layout.stackedLayout {
-                        ScrollView {
-                            VStack(spacing: 28) {
-                                schemeIdentityPanel(
-                                    posterSize: min(layout.posterSize, 230),
-                                    glowReach: layout.albumGlowReach,
-                                    controlsLight: layout.controlsLight
-                                )
-                                    .frame(maxWidth: 360)
-                                    .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
-                                    .offset(y: reduceMotion || entrancePhase >= 1 ? 0 : 18)
-                                    .scaleEffect(reduceMotion || entrancePhase >= 1 ? 1 : 0.982)
-
-                                if lyricsPanelReady {
-                                    schemeLyricsPanel(light: layout.lyricsLight)
-                                        .frame(height: layout.stackedLyricsHeight)
-                                        .opacity(reduceMotion || entrancePhase >= 2 ? 1 : 0)
-                                        .offset(y: reduceMotion || entrancePhase >= 2 ? 0 : 22)
-                                        .scaleEffect(reduceMotion || entrancePhase >= 2 ? 1 : 0.986)
-                                } else {
-                                    Color.clear
-                                        .frame(height: layout.stackedLyricsHeight)
-                                }
-                            }
-                            .padding(.horizontal, layout.sideInset)
-                            .padding(.top, 82)
-                            .padding(.bottom, layout.verticalInset)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        schemeIdentityPanel(
-                            posterSize: layout.posterSize,
-                            glowReach: layout.albumGlowReach,
-                            controlsLight: layout.controlsLight
-                        )
-                            .frame(width: layout.leftRect.width, height: layout.leftRect.height - wujieContentDrop, alignment: .center)
-                            .offset(x: layout.leftRect.minX + wujieSideInset, y: layout.leftRect.minY + wujieContentDrop)
-                            .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
-                            .scaleEffect(reduceMotion || entrancePhase >= 1 ? 1 : 0.982, anchor: .center)
-
-                        if lyricsPanelReady {
-                            let lyricsColumnWidth = layout.lyricsRect.width - wujieSideInset
-                            // 频谱：基线（频谱/倒影分界）对齐隔空播放所在工具行的按钮底部。
-                            // 歌词视口的下边界也对齐到这条基线，让最底部淡出歌词与频谱交界处视觉咬合。
-                            let spectrumViewHeight: CGFloat = 132
-                            let spectrumBaselineY = wujieControlsBottom
-                            let spectrumTopY = spectrumBaselineY - spectrumViewHeight * WujieSpectrum.baselineFromTopFraction
-                            let wujieLyricsTop = layout.albumLightCenter.y + wujieContentDrop - layout.coverDisplaySide * 0.5
-                            let showSpectrum = isWujie && wujieControlsBottom > wujieLyricsTop + 280
-                            // 无界：歌词视觉区顶部与展开封面顶部对齐，底部与工具行按钮底部 / 频谱基线对齐。
-                            // `MusicTimedLyricsScrollView` 仍用视口中心锁定被播放行，因此被唱行留在该视觉区中部。
-                            let wujieLyricsBottom = wujieControlsBottom > 1
-                                ? spectrumBaselineY
-                                : layout.lyricsRect.maxY
-                            let wujieLyricsHeight = isWujie
-                                ? max(wujieLyricsBottom - wujieLyricsTop, 300)
-                                : layout.lyricsRect.height
-                            let wujieLyricsY = wujieLyricsBottom - wujieLyricsHeight
-
-                            schemeLyricsPanel(light: layout.lyricsLight)
-                                .frame(width: lyricsColumnWidth, height: isWujie ? wujieLyricsHeight : layout.lyricsRect.height)
-                                .offset(
-                                    x: layout.lyricsRect.minX,
-                                    y: isWujie ? wujieLyricsY : layout.lyricsRect.minY
-                                )
-                                .opacity(reduceMotion || entrancePhase >= 2 ? 1 : 0)
-                                .scaleEffect(reduceMotion || entrancePhase >= 2 ? 1 : 0.986, anchor: .center)
-
-                            if showSpectrum {
-                                WujieSpectrum(controller: controller, palette: albumPalette)
-                                    .frame(width: lyricsColumnWidth, height: spectrumViewHeight)
-                                    .offset(x: layout.lyricsRect.minX, y: spectrumTopY)
-                                    .opacity(reduceMotion || entrancePhase >= 2 ? 1 : 0)
-                            }
-                        }
-                    }
-
-                    floatingMinimizeButton
-                        .frame(width: layout.minimizeButtonRect.width, height: layout.minimizeButtonRect.height)
-                        .position(x: layout.minimizeButtonRect.midX, y: layout.minimizeButtonRect.midY)
-                        .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
-                        .transition(.opacity)
-                        .zIndex(40)
-
-                    if isWujie {
-                        WujieMoreButton(
-                            item: currentItem,
-                            palette: albumPalette,
-                            onFetchLyrics: { Task { await fetchLyrics() } }
-                        )
-                        .position(x: geometry.size.width - layout.minimizeButtonRect.minX - 20, y: layout.minimizeButtonRect.midY)
-                        .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
-                        .transition(.opacity)
-                        .zIndex(41)
-                    }
-                }
-                .frame(width: geometry.size.width, height: geometry.size.height)
-                .coordinateSpace(name: "wujieContent")
-                .onPreferenceChange(WujieControlsBottomKey.self) { value in
-                    if abs(value - wujieControlsBottom) > 0.5 {
-                        wujieControlsBottom = value
-                    }
-                }
-                .glassPerformanceMode(.full)
-                .zIndex(2)
-            }
-            .frame(width: geometry.size.width, height: geometry.size.height)
-            .clipped()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // 外层不再重复铺同色全屏底：内部背景已完全覆盖，减少一层全窗绘制。
-    }
-
     private var isWujie: Bool {
         appState.settings.musicPlayerVisualScheme == .wujie
     }
 
     /// 书架方案（第三款主题）：整窗换成完全隔离的 `MusicShelfPlayerStage`，
-    /// 琉璃/无界（`expandedPlayer` 内含 `isWujie` 全部逻辑）一字不改。详见 MusicShelfPlayerView.swift。
+    /// 琉璃/无界（`MusicExpandedStage` 内含 `isWujie` 全部逻辑）一字不改。详见 MusicShelfPlayerView.swift。
     private var isShelf: Bool {
         appState.settings.musicPlayerVisualScheme == .shelf
-    }
-
-    @ViewBuilder
-    private func schemeIdentityPanel(posterSize: CGFloat, glowReach: CGFloat, controlsLight: AlbumComponentLight) -> some View {
-        if isWujie {
-            borderlessIdentityPanel(posterSize: posterSize, glowReach: glowReach, controlsLight: controlsLight)
-        } else {
-            musicIdentityPanel(posterSize: posterSize, glowReach: glowReach, controlsLight: controlsLight)
-        }
-    }
-
-    @ViewBuilder
-    private func schemeLyricsPanel(light: AlbumComponentLight) -> some View {
-        if isWujie {
-            borderlessLyricsPanel(light: light)
-        } else {
-            lyricsPanel(light: light)
-        }
-    }
-
-    // MARK: - 无界（Borderless）方案
-
-    /// 无界左栏（R1 重制）：委托给隔离的 `WujieIdentityColumn`——环境中的封面 + 影院级编辑标题 + 统一控制栈。
-    /// glowReach / controlsLight 由共享布局保留传入，无界左栏当前不需要（封面发光由整窗 AlbumGlowBlurCover 提供）。
-    /// 琉璃 `musicIdentityPanel` 与底栏 mini 播放器零改动。详见文件末尾「无界重做」区。
-    private func borderlessIdentityPanel(posterSize: CGFloat, glowReach: CGFloat, controlsLight: AlbumComponentLight) -> some View {
-        WujieIdentityColumn(
-            item: currentItem,
-            controller: controller,
-            palette: albumPalette,
-            posterSize: posterSize,
-            coverGlowEnabled: appState.settings.musicAlbumCoverGlowEnabled
-        )
-    }
-
-    /// 无界右栏（R4 重制）：委托给隔离的 `WujieLyricsColumn`——歌词纯净悬浮于底板、左对齐、被唱行恒锁视口中心。
-    /// 逐字歌词行为（居中/可见行数/无卡片）原样沿用、参数收口到 WujieDesignSystem.Lyrics。light 参数无界不需要（旧实现亦未用）。
-    private func borderlessLyricsPanel(light: AlbumComponentLight) -> some View {
-        WujieLyricsColumn(
-            controller: controller,
-            itemID: currentItem.id,
-            lyrics: lyrics,
-            timedLyrics: timedLyrics,
-            timingSource: lyricTimingSource,
-            hasDisplayLyrics: hasDisplayLyrics,
-            isFetchingLyrics: isFetchingLyrics,
-            palette: albumPalette,
-            userIsBrowsingLyrics: $userIsBrowsingLyrics,
-            onFetchLyrics: {
-                Task { await fetchLyrics() }
-            },
-            onPauseAutoScroll: pauseLyricAutoScroll
-        )
-    }
-
-    private func musicIdentityPanel(posterSize: CGFloat, glowReach: CGFloat, controlsLight: AlbumComponentLight) -> some View {
-        VStack(spacing: 16) {
-            Spacer(minLength: 0)
-
-            MusicExpandedArtwork(
-                item: currentItem,
-                controller: controller,
-                palette: albumPalette,
-                posterSize: posterSize,
-                glowReach: glowReach,
-                coverGlowEnabled: appState.settings.musicAlbumCoverGlowEnabled
-            )
-            .frame(width: posterSize, height: posterSize)
-
-            VStack(spacing: 7) {
-                Text(currentItem.title)
-                    .font(.system(size: 30, weight: .semibold))
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.72)
-                    .multilineTextAlignment(.center)
-                    .shadow(color: albumPalette.primary.color.opacity(colorScheme == .dark ? 0.18 : 0.10), radius: 10, y: 3)
-                HStack(spacing: 6) {
-                    if let artist = currentItem.artist, !artist.isEmpty {
-                        Text(artist)
-                    }
-                    if currentItem.artist?.isEmpty == false, currentItem.album?.isEmpty == false {
-                        Text("·").foregroundStyle(.primary.opacity(0.4))
-                    }
-                    if let album = currentItem.album, !album.isEmpty {
-                        Text(album)
-                    }
-                    if (currentItem.artist?.isEmpty ?? true) && (currentItem.album?.isEmpty ?? true) {
-                        Text("未知艺人")
-                    }
-                }
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.primary.opacity(0.62))
-                .lineLimit(1)
-                .minimumScaleFactor(0.78)
-                .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.12 : 0.04), radius: 5, y: 2)
-            }
-            .frame(maxHeight: 82)
-
-            MusicExpandedControls(item: currentItem, controller: controller, palette: albumPalette, light: controlsLight)
-                .layoutPriority(1)
-
-            Spacer(minLength: 0)
-        }
-        .frame(maxHeight: .infinity)
-    }
-
-    private var floatingMinimizeButton: some View {
-        Button {
-            onRequestMinimize()
-        } label: {
-            MusicChromeButtonContent(systemImage: "chevron.down", palette: albumPalette, controller: controller)
-        }
-        .buttonStyle(MusicGlassPressStyle(pressScale: 0.95))
-        .contentShape(Capsule())
-        .help("最小化播放器")
-        .accessibilityLabel("最小化播放器")
-    }
-
-    private func lyricsPanel(light: AlbumComponentLight) -> some View {
-            MusicExpandedLyricsPanel(
-                controller: controller,
-                itemID: currentItem.id,
-                lyrics: lyrics,
-            timedLyrics: timedLyrics,
-            timingSource: lyricTimingSource,
-            hasDisplayLyrics: hasDisplayLyrics,
-            isFetchingLyrics: isFetchingLyrics,
-            palette: albumPalette,
-            light: light,
-            userIsBrowsingLyrics: $userIsBrowsingLyrics,
-            onFetchLyrics: {
-                Task { await fetchLyrics() }
-            },
-            onPauseAutoScroll: pauseLyricAutoScroll
-        )
     }
 
     private func close() {
@@ -1577,76 +1287,7 @@ private struct MusicPlayerPointerLightScope: ViewModifier {
     }
 }
 
-// MARK: - 展开页封面高斯底板
-
-private struct AlbumBlurredBackdropLayer: View {
-    let posterPath: String?
-    let title: String
-    let palette: AlbumColorPalette
-    let canvasSize: CGSize
-    let isReady: Bool
-    let colorScheme: ColorScheme
-    @State private var image: NSImage?
-    @State private var loadedKey = ""
-
-    private var bakeKey: String {
-        let width = Int(max(canvasSize.width, 1).rounded())
-        let height = Int(max(canvasSize.height, 1).rounded())
-        return "\(posterPath ?? "")|\(title)|\(width)x\(height)|\(colorScheme == .dark ? "dark" : "light")"
-    }
-
-    var body: some View {
-        ZStack {
-            palette.backdropBaseColor(for: colorScheme)
-
-            if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.medium)
-                    .scaledToFill()
-                    .frame(width: canvasSize.width, height: canvasSize.height)
-                    .clipped()
-                    .transition(.opacity)
-            } else {
-                AlbumBackdropFallbackWash(palette: palette, colorScheme: colorScheme)
-            }
-
-            AlbumBackdropFallbackWash(palette: palette, colorScheme: colorScheme)
-                .blendMode(colorScheme == .dark ? .plusLighter : .screen)
-                .opacity(colorScheme == .dark ? 0.22 : 0.16)
-        }
-        .frame(width: canvasSize.width, height: canvasSize.height)
-        .clipped()
-        .opacity(isReady ? 1 : 0.96)
-        .animation(AppMotion.standard, value: loadedKey)
-        .task(id: bakeKey) {
-            await load()
-        }
-    }
-
-    @MainActor
-    private func load() async {
-        let key = bakeKey
-        guard key != loadedKey || image == nil else { return }
-        let path = posterPath
-        let title = title
-        let size = canvasSize
-        let scheme = colorScheme
-        let baked = await Task.detached(priority: .userInitiated) {
-            SendableAlbumBackdropImage(AlbumBlurredBackdropBaker.bake(
-                path: path,
-                title: title,
-                canvasSize: size,
-                colorScheme: scheme
-            ))
-        }.value
-        guard !Task.isCancelled else { return }
-        image = baked.image
-        loadedKey = key
-    }
-}
-
-private struct AlbumGlobalGlassVeil: View {
+struct AlbumGlobalGlassVeil: View {
     let palette: AlbumColorPalette
     let colorScheme: ColorScheme
 
@@ -1684,148 +1325,6 @@ private struct AlbumGlobalGlassVeil: View {
     }
 }
 
-private struct AlbumBackdropFallbackWash: View {
-    let palette: AlbumColorPalette
-    let colorScheme: ColorScheme
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    palette.secondary.color.opacity(colorScheme == .dark ? 0.30 : 0.26),
-                    palette.primary.color.opacity(colorScheme == .dark ? 0.24 : 0.22),
-                    palette.accent.color.opacity(colorScheme == .dark ? 0.22 : 0.18)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            RadialGradient(
-                colors: [
-                    palette.primary.color.opacity(colorScheme == .dark ? 0.38 : 0.34),
-                    .clear
-                ],
-                center: .leading,
-                startRadius: 40,
-                endRadius: 620
-            )
-            RadialGradient(
-                colors: [
-                    palette.secondary.color.opacity(colorScheme == .dark ? 0.26 : 0.22),
-                    .clear
-                ],
-                center: .trailing,
-                startRadius: 80,
-                endRadius: 760
-            )
-            RadialGradient(
-                colors: [
-                    palette.accent.color.opacity(colorScheme == .dark ? 0.20 : 0.18),
-                    .clear
-                ],
-                center: .bottomLeading,
-                startRadius: 80,
-                endRadius: 780
-            )
-        }
-    }
-}
-
-private enum AlbumBlurredBackdropBaker {
-    private static let ciContext = CIContext(options: [.useSoftwareRenderer: false])
-    private static let cacheLock = NSLock()
-    private static var cache: [String: NSImage] = [:]
-    private static var order: [String] = []
-    private static let maxEntries = 8
-
-    static func bake(path: String?, title: String, canvasSize: CGSize, colorScheme: ColorScheme) -> NSImage? {
-        guard canvasSize.width > 16, canvasSize.height > 16 else { return nil }
-        let pixelWidth = max(420, min(Int((canvasSize.width * 0.70).rounded()), 1180))
-        let pixelHeight = max(300, min(Int((canvasSize.height * 0.70).rounded()), 820))
-        let key = "\(path ?? title)|\(pixelWidth)x\(pixelHeight)|\(colorScheme == .dark ? "dark" : "light")"
-        cacheLock.lock()
-        if let cached = cache[key] { cacheLock.unlock(); return cached }
-        cacheLock.unlock()
-
-        guard let cover = loadCover(path: path, title: title) else { return nil }
-        let input = CIImage(cgImage: cover)
-        let src = input.extent
-        guard src.width > 1, src.height > 1 else { return nil }
-        let canvas = CGRect(x: 0, y: 0, width: CGFloat(pixelWidth), height: CGFloat(pixelHeight))
-
-        let scale = max(canvas.width / src.width, canvas.height / src.height)
-        let placed = input.transformed(by: CGAffineTransform(
-            a: scale, b: 0, c: 0, d: scale,
-            tx: canvas.midX - src.width * scale * 0.5,
-            ty: canvas.midY - src.height * scale * 0.5
-        ))
-
-        let blurRadius = min(max(min(canvas.width, canvas.height) * 0.145, 52), 118)
-        let blurred = placed
-            .clampedToExtent()
-            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: blurRadius])
-            .cropped(to: canvas)
-
-        let tuned = blurred
-            .applyingFilter("CIColorControls", parameters: [
-                kCIInputSaturationKey: colorScheme == .dark ? 1.10 : 1.08,
-                kCIInputBrightnessKey: colorScheme == .dark ? -0.015 : 0.018,
-                kCIInputContrastKey: colorScheme == .dark ? 0.94 : 0.90
-            ])
-            .applyingFilter("CIGammaAdjust", parameters: ["inputPower": colorScheme == .dark ? 0.96 : 0.90])
-            .cropped(to: canvas)
-
-        let veil = CIImage(color: CIColor(
-            red: colorScheme == .dark ? 0.03 : 1.0,
-            green: colorScheme == .dark ? 0.035 : 1.0,
-            blue: colorScheme == .dark ? 0.04 : 1.0,
-            alpha: colorScheme == .dark ? 0.05 : 0.135
-        )).cropped(to: canvas)
-        let composed = veil
-            .applyingFilter("CISourceOverCompositing", parameters: [kCIInputBackgroundImageKey: tuned])
-            .cropped(to: canvas)
-
-        guard let cg = ciContext.createCGImage(composed, from: canvas) else { return nil }
-        let image = NSImage(cgImage: cg, size: NSSize(width: canvasSize.width, height: canvasSize.height))
-
-        cacheLock.lock()
-        cache[key] = image
-        order.append(key)
-        while order.count > maxEntries, let oldest = order.first {
-            order.removeFirst()
-            cache.removeValue(forKey: oldest)
-        }
-        cacheLock.unlock()
-        return image
-    }
-
-    private nonisolated static func loadCover(path: String?, title: String) -> CGImage? {
-#if DEBUG
-        if let path, let debug = MusicPlayerVisualDebugFixtures.coverCGImage(forPath: path, size: 420) {
-            return debug
-        }
-#endif
-        if let path,
-           let ns = ArtworkImageCache.image(path: path, targetSize: CGSize(width: 520, height: 520)) {
-            if let cg = ns.cgImage(forProposedRect: nil, context: nil, hints: nil) { return cg }
-            if let tiff = ns.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) {
-                return bitmap.cgImage
-            }
-        }
-        let fallback = NSImage(size: NSSize(width: 420, height: 420))
-        fallback.lockFocus()
-        let hash = abs(title.hashValue)
-        let hue = CGFloat(hash % 360) / 360.0
-        NSColor(calibratedHue: hue, saturation: 0.36, brightness: 0.74, alpha: 1).setFill()
-        NSRect(x: 0, y: 0, width: 420, height: 420).fill()
-        NSColor(calibratedHue: fmod(hue + 0.09, 1), saturation: 0.30, brightness: 0.88, alpha: 1).setFill()
-        NSBezierPath(ovalIn: NSRect(x: -80, y: 130, width: 340, height: 340)).fill()
-        NSColor(calibratedHue: fmod(hue + 0.58, 1), saturation: 0.22, brightness: 0.68, alpha: 1).setFill()
-        NSBezierPath(ovalIn: NSRect(x: 190, y: -80, width: 360, height: 360)).fill()
-        fallback.unlockFocus()
-        return fallback.cgImage(forProposedRect: nil, context: nil, hints: nil)
-    }
-}
-
 private struct SendableAlbumBackdropImage: @unchecked Sendable {
     let image: NSImage?
 
@@ -1839,7 +1338,7 @@ private struct SendableAlbumBackdropImage: @unchecked Sendable {
 /// 把专辑封面本身放大到 ~2x、做重高斯模糊、并把边缘羽化成透明，铺在清晰封面的正后方。
 /// 封面的真实颜色因此向四周柔和溢出，看起来"封面在发光"。不做低频色场/亮度门控等复杂处理——
 /// 就是参考图里那种"封面底部叠一张模糊大封面"的直接做法。烘焙成静态图缓存，运行期只贴图，零逐帧成本。
-private struct AlbumGlowBlurCover: View {
+struct AlbumGlowBlurCover: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let posterPath: String?
@@ -2831,7 +2330,7 @@ private enum AlbumGlowBlurCoverBaker {
 
 // MARK: - 封面高斯模糊发光层
 
-private struct MusicExpandedArtwork: View {
+struct MusicExpandedArtwork: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let item: MediaItem
@@ -3261,7 +2760,7 @@ private struct MusicExpandedArtworkShadowLayer: NSViewRepresentable {
     }
 }
 
-private struct MusicExpandedLyricsPanel: View {
+struct MusicExpandedLyricsPanel: View {
     @Environment(\.colorScheme) private var colorScheme
     let controller: MpvPlayerController
     let itemID: String
@@ -3420,12 +2919,12 @@ private struct MusicExpandedLyricsPanel: View {
 }
 
 /// 无界（Borderless）方案的**布局锚点** token（仅经 `isWujie` 门控生效，琉璃不受影响）。
-/// 注：左栏的间距/字阶/排版已收口到「无界重做」区的 `WujieDesignSystem`；这里只保留 expandedPlayer 共享布局胶水用到的两个几何锚点。
+/// 注：左栏的间距/字阶/排版已收口到「无界重做」区的 `WujieDesignSystem`；这里只保留 MusicExpandedStage 共享布局胶水用到的两个几何锚点。
 enum MusicWujieTokens {
     /// 左栏整体下移量，让封面 / 标题让开顶部「收起 / 更多」按钮。
-    static let contentDrop: CGFloat = 38
+    static var contentDrop: CGFloat { MusicThemeConfig.active.wujie.contentDrop }
     /// 左右对称外边距：左栏（连同发光）右移、右侧歌词列右沿内收。
-    static let sideInset: CGFloat = 26
+    static var sideInset: CGFloat { MusicThemeConfig.active.wujie.sideInset }
 }
 
 
@@ -3857,7 +3356,7 @@ private struct LyricStageLightLayer: NSViewRepresentable {
 /// 封面发光照射到玻璃组件边缘的光晕渗入效果。
 /// 播放时：封面光沿指定入射边浸染入内，并产生柔和的彩色边缘高光。
 /// 暂停时：随封面收缩动画同步淡出（由 near-to-far 机制驱动）。
-private struct AlbumComponentLight: Equatable {
+struct AlbumComponentLight: Equatable {
     let strength: Double
     /// 受光边上的相对焦点。leading/trailing = y，top = x。
     let focus: Double
@@ -4737,25 +4236,8 @@ private struct MusicTimedLyricsScrollView: View {
 
 // MARK: - 无界（Borderless）控制组件
 
-/// 无界裸图标按钮：只保留核心图标，无任何玻璃/描边底；按下用透明度+缩放反馈（不改变布局）。
-/// 命中区固定 44×44（满足可访问性最小触达），图标颜色/字号由 label 自身决定。
-private struct MusicBareIconButtonStyle: ButtonStyle {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var hitSize: CGFloat = 44
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .frame(width: hitSize, height: hitSize)
-            .contentShape(Rectangle())
-            .opacity(configuration.isPressed ? 0.5 : 1)
-            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.88 : 1)
-            .animation(AppMotion.fast, value: configuration.isPressed)
-    }
-}
-
-
 /// 无界右上角「更多」菜单：复制歌曲信息 / 在访达显示 / 重新获取歌词。无边框磨砂玻璃圆。
-private struct WujieMoreButton: View {
+struct WujieMoreButton: View {
     let item: MediaItem
     let palette: AlbumColorPalette
     var size: CGFloat = 44
@@ -4803,7 +4285,7 @@ private struct WujieMoreButton: View {
 
 
 /// 无界：上报控制栏底部在 "wujieContent" 坐标空间里的 maxY，供右侧频谱与之底对齐。
-private struct WujieControlsBottomKey: PreferenceKey {
+struct WujieControlsBottomKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
@@ -4817,7 +4299,7 @@ private struct WujieControlsBottomKey: PreferenceKey {
 /// - 回落：主题色快速下落（白帽白色区随之变大、像悬在上方），白色峰帽再缓慢跟着落下。
 /// 基线下方是逐渐羽化消失的倒影；柱体顶端也用渐变淡出，不会"突然出现"。
 /// 基线（频谱与倒影的分界）对齐左侧控制栏底部按钮。专用于无界。
-private struct WujieSpectrum: View {
+struct WujieSpectrum: View {
     let controller: MpvPlayerController
     let palette: AlbumColorPalette
     @StateObject private var model: WujieSpectrumModel
@@ -5056,7 +4538,7 @@ private struct WujieStatusLine: View {
 
 
 
-private struct MusicExpandedControls: View {
+struct MusicExpandedControls: View {
     let controller: MpvPlayerController
     let item: MediaItem
     let palette: AlbumColorPalette
@@ -7883,7 +7365,7 @@ private struct MusicIconButtonStyle: ButtonStyle {
 
 /// 形状无关的玻璃按压样式：按下时整块标签短暂提亮（玻璃高光）并轻微缩小，
 /// 而非简单改透明度。用于自带完整玻璃外观的按钮（主播放键、收起键），与 MusicIconButtonStyle 的反馈语言一致。
-private struct MusicGlassPressStyle: ButtonStyle {
+struct MusicGlassPressStyle: ButtonStyle {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var pressScale: CGFloat = 0.95
@@ -7951,7 +7433,7 @@ private struct LRCLibLyrics: Decodable {
     var syncedLyrics: String?
 }
 
-private struct MusicChromeButtonContent: View {
+struct MusicChromeButtonContent: View {
     let systemImage: String
     let palette: AlbumColorPalette
     let controller: MpvPlayerController
@@ -7983,7 +7465,7 @@ private struct MusicChromeButtonContent: View {
     }
 }
 
-private struct MusicExpandedLayout {
+struct MusicExpandedLayout {
     let stackedLayout: Bool
     let sideInset: CGFloat
     let verticalInset: CGFloat
@@ -10092,7 +9574,7 @@ private actor AlbumPaletteStore {
 // 去掉一切卡片/容器，专辑色满铺成「环境」；控制走统一状态系统（default/hover/pressed/disabled 一处统一）；
 // 一个主 CTA（播放）+ 从属次级；影院级编辑标题。读 ui-ux-pro-max(design-system) 的三层 token 方法落到 SwiftUI。
 //
-// 隔离保证：本区全部以 `Wujie` 前缀命名，仅经 expandedPlayer 的 `isWujie` 分支生效（左栏入口 = borderlessIdentityPanel）；
+// 隔离保证：本区全部以 `Wujie` 前缀命名，仅经 MusicExpandedStage 的 `isWujie` 分支生效（左栏入口 = schemeIdentityPanel 的无界分支）；
 // 不改任何琉璃方案代码（musicIdentityPanel / lyricsPanel / MusicExpanded*）与底栏 mini 播放器；
 // 复用的底层引擎（滑杆 MusicMiniSeekSlider / 频谱 WujieSpectrum / 数据观察器 / 状态行 WujieStatusLine）均为只读复用，不改其行为；封面已 fork 为 WujieArtwork。
 //
@@ -10107,26 +9589,26 @@ enum WujieDesignSystem {
 
     /// 8pt 基准间距刻度。
     enum Space {
-        static let xxs: CGFloat = 4
-        static let xs: CGFloat = 8
-        static let sm: CGFloat = 12
-        static let md: CGFloat = 16
-        static let lg: CGFloat = 20
-        static let xl: CGFloat = 24
-        static let xxl: CGFloat = 28
-        static let xxxl: CGFloat = 32
+        static var xxs: CGFloat { MusicThemeConfig.active.wujieDesign.space.xxs }
+        static var xs: CGFloat { MusicThemeConfig.active.wujieDesign.space.xs }
+        static var sm: CGFloat { MusicThemeConfig.active.wujieDesign.space.sm }
+        static var md: CGFloat { MusicThemeConfig.active.wujieDesign.space.md }
+        static var lg: CGFloat { MusicThemeConfig.active.wujieDesign.space.lg }
+        static var xl: CGFloat { MusicThemeConfig.active.wujieDesign.space.xl }
+        static var xxl: CGFloat { MusicThemeConfig.active.wujieDesign.space.xxl }
+        static var xxxl: CGFloat { MusicThemeConfig.active.wujieDesign.space.xxxl }
     }
 
     /// 字阶（pt）。无界为影院级大标题。
     enum FontSize {
-        static let title: CGFloat = 34       // 影院级大标题
-        static let eyebrow: CGFloat = 11     // 「正在播放」眉标
-        static let artist: CGFloat = 16      // 艺人名（主，medium）
-        static let album: CGFloat = 16       // 专辑名（次，regular，更低对比）
-        static let time: CGFloat = 12        // 进度两端时间（tabular）
-        static let iconPrimary: CGFloat = 25 // 上一/下一曲
-        static let iconMode: CGFloat = 20    // 随机/循环
-        static let iconUtility: CGFloat = 18 // 喜欢/音量/隔空/队列
+        static var title: CGFloat { MusicThemeConfig.active.wujieDesign.fontSize.title } // 影院级大标题
+        static var eyebrow: CGFloat { MusicThemeConfig.active.wujieDesign.fontSize.eyebrow } // 「正在播放」眉标
+        static var artist: CGFloat { MusicThemeConfig.active.wujieDesign.fontSize.artist } // 艺人名（主，medium）
+        static var album: CGFloat { MusicThemeConfig.active.wujieDesign.fontSize.album } // 专辑名（次，regular，更低对比）
+        static var time: CGFloat { MusicThemeConfig.active.wujieDesign.fontSize.time } // 进度两端时间（tabular）
+        static var iconPrimary: CGFloat { MusicThemeConfig.active.wujieDesign.fontSize.iconPrimary } // 上一/下一曲
+        static var iconMode: CGFloat { MusicThemeConfig.active.wujieDesign.fontSize.iconMode } // 随机/循环
+        static var iconUtility: CGFloat { MusicThemeConfig.active.wujieDesign.fontSize.iconUtility } // 喜欢/音量/隔空/队列
     }
 
     enum Weight {
@@ -10136,23 +9618,23 @@ enum WujieDesignSystem {
     }
 
     enum Tracking {
-        static let title: CGFloat = -0.5     // 大号粗体标题收紧字距，质感更精致
-        static let eyebrow: CGFloat = 2.6    // 眉标加字距，编辑级气质
+        static var title: CGFloat { MusicThemeConfig.active.wujieDesign.tracking.title } // 大号粗体标题收紧字距，质感更精致
+        static var eyebrow: CGFloat { MusicThemeConfig.active.wujieDesign.tracking.eyebrow } // 眉标加字距，编辑级气质
     }
 
     /// resting（语义）不透明度刻度。交互态（hover/press/disabled）一律交给 `WujieIconButtonStyle`。
     enum Opacity {
-        static let textSecondary: Double = 0.62 // 副行兜底
-        static let eyebrow: Double = 0.42       // 眉标
-        static let artistName: Double = 0.74    // 艺人名（主）
-        static let albumName: Double = 0.5      // 专辑名（次）
-        static let separator: Double = 0.3      // 中点分隔符
-        static let timeLabel: Double = 0.66     // 进度时间
-        static let iconStrong: Double = 0.92    // 上一/下一曲 resting
-        static let iconIdle: Double = 0.52      // 模式键/工具键 未激活 resting
-        static let disabledControl: Double = 0.4 // 禁用整控件透明度乘子（skill: 0.38~0.5）
-        static let pressDim: Double = 0.6        // 按下透明度乘子
-        static let hoverWash: Double = 0.06      // hover 时极淡圆形高亮
+        static var textSecondary: Double { MusicThemeConfig.active.wujieDesign.opacity.textSecondary } // 副行兜底
+        static var eyebrow: Double { MusicThemeConfig.active.wujieDesign.opacity.eyebrow } // 眉标
+        static var artistName: Double { MusicThemeConfig.active.wujieDesign.opacity.artistName } // 艺人名（主）
+        static var albumName: Double { MusicThemeConfig.active.wujieDesign.opacity.albumName } // 专辑名（次）
+        static var separator: Double { MusicThemeConfig.active.wujieDesign.opacity.separator } // 中点分隔符
+        static var timeLabel: Double { MusicThemeConfig.active.wujieDesign.opacity.timeLabel } // 进度时间
+        static var iconStrong: Double { MusicThemeConfig.active.wujieDesign.opacity.iconStrong } // 上一/下一曲 resting
+        static var iconIdle: Double { MusicThemeConfig.active.wujieDesign.opacity.iconIdle } // 模式键/工具键 未激活 resting
+        static var disabledControl: Double { MusicThemeConfig.active.wujieDesign.opacity.disabledControl } // 禁用整控件透明度乘子（skill: 0.38~0.5）
+        static var pressDim: Double { MusicThemeConfig.active.wujieDesign.opacity.pressDim } // 按下透明度乘子
+        static var hoverWash: Double { MusicThemeConfig.active.wujieDesign.opacity.hoverWash } // hover 时极淡圆形高亮
     }
 
     /// 动效：统一节奏（skill: motion-consistency + spring-physics）。
@@ -10194,19 +9676,19 @@ enum WujieDesignSystem {
 
     /// 歌词列组件规格。逐字歌词的「居中 / 可见行数 / 无卡片」行为是用户反复打磨过的，故 R4 原样沿用这些值（仅集中到此一处），不擅自改动。
     enum Lyrics {
-        static let fontSize: CGFloat = 27                 // 逐字歌词行基准字号
-        static let rowSpacing: CGFloat = 18               // 歌词行之间的呼吸感
-        static let fadeExpansion: CGFloat = 0.15          // 清晰带外扩（露更多行）
-        static let verticalPaddingFraction: CGFloat = 0.5 // 首/末行也能精确落视口中心
+        static var fontSize: CGFloat { MusicThemeConfig.active.wujieDesign.lyrics.fontSize } // 逐字歌词行基准字号
+        static var rowSpacing: CGFloat { MusicThemeConfig.active.wujieDesign.lyrics.rowSpacing } // 歌词行之间的呼吸感
+        static var fadeExpansion: CGFloat { MusicThemeConfig.active.wujieDesign.lyrics.fadeExpansion } // 清晰带外扩（露更多行）
+        static var verticalPaddingFraction: CGFloat { MusicThemeConfig.active.wujieDesign.lyrics.verticalPaddingFraction } // 首/末行也能精确落视口中心
         static let extendedVisibility = true              // 放宽远处行透明度衰减
-        static let lineHorizontalPadding: CGFloat = 6     // 行内水平 padding（传引擎）
-        static let columnLeading: CGFloat = 46            // 列左内边距（与封面/控制拉开）
-        static let columnTrailing: CGFloat = 22           // 列右内边距（与左外边距对称）
-        static let columnTopPadding: CGFloat = 0          // 让淡出边界对齐封面顶部
-        static let columnBottomPadding: CGFloat = 0       // 让底部淡出边界对齐频谱基线
-        static let untimedFontSize: CGFloat = 27          // 无逐字时间的纯文本歌词（R4 由 22 提到 27，与逐字一致）
-        static let untimedOpacity: Double = 0.84
-        static let untimedLineSpacing: CGFloat = 15
+        static var lineHorizontalPadding: CGFloat { MusicThemeConfig.active.wujieDesign.lyrics.lineHorizontalPadding } // 行内水平 padding（传引擎）
+        static var columnLeading: CGFloat { MusicThemeConfig.active.wujieDesign.lyrics.columnLeading } // 列左内边距（与封面/控制拉开）
+        static var columnTrailing: CGFloat { MusicThemeConfig.active.wujieDesign.lyrics.columnTrailing } // 列右内边距（与左外边距对称）
+        static var columnTopPadding: CGFloat { MusicThemeConfig.active.wujieDesign.lyrics.columnTopPadding } // 让淡出边界对齐封面顶部
+        static var columnBottomPadding: CGFloat { MusicThemeConfig.active.wujieDesign.lyrics.columnBottomPadding } // 让底部淡出边界对齐频谱基线
+        static var untimedFontSize: CGFloat { MusicThemeConfig.active.wujieDesign.lyrics.untimedFontSize } // 无逐字时间的纯文本歌词（R4 由 22 提到 27，与逐字一致）
+        static var untimedOpacity: Double { MusicThemeConfig.active.wujieDesign.lyrics.untimedOpacity }
+        static var untimedLineSpacing: CGFloat { MusicThemeConfig.active.wujieDesign.lyrics.untimedLineSpacing }
     }
 }
 

@@ -126,7 +126,17 @@ struct AlbumLibraryView: View {
     }
 
     private var dateGroups: [AlbumDateGroup] {
-        AlbumDateGroup.grouped(items)
+        // 性能：分组涉及逐项 Calendar.startOfDay + 每组 DateFormatter，原先每次 body 求值都全量重算，
+        // 是相册/系统照片页滑动掉帧的主因之一。cachedAlbumItems 只在媒体库变更（libraryRevision 自增）时改变，
+        // 故以 (section, sortOrder, libraryRevision) 为键做单条记忆化；命中时连 items（filter+reverse）都不重算。
+        AlbumDateGroupCache.groups(
+            key: AlbumDateGroupCache.Key(
+                section: section,
+                sortOrder: sortOrder,
+                revision: appState.libraryRevision
+            ),
+            build: { items }
+        )
     }
 
     var body: some View {
@@ -746,6 +756,28 @@ private extension ISO8601DateFormatter {
         formatter.formatOptions = [.withFullDate]
         return formatter
     }()
+}
+
+/// 相册日期分组的单条记忆化缓存。相册一次只展示一个分区，last-one-wins 单条缓存即可命中绝大多数
+/// 重复 body 求值；仅在主线程的 SwiftUI body 中访问（与同模块的 MusicLibrarySnapshotCache 同样模式），
+/// 故无需上限或加锁。无副作用、命中即返回上次结果，不改变任何分组逻辑或视觉表现。
+private enum AlbumDateGroupCache {
+    struct Key: Equatable {
+        let section: AlbumLibrarySection
+        let sortOrder: AlbumSortOrder
+        let revision: Int
+    }
+
+    private static var cachedKey: Key?
+    private static var cachedValue: [AlbumDateGroup] = []
+
+    static func groups(key: Key, build: () -> [MediaItem]) -> [AlbumDateGroup] {
+        if let cachedKey, cachedKey == key { return cachedValue }
+        let groups = AlbumDateGroup.grouped(build())
+        cachedKey = key
+        cachedValue = groups
+        return groups
+    }
 }
 
 // MARK: - 网格单元

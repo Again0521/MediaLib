@@ -49,6 +49,29 @@ struct DetailView: View {
             .sorted { ($0.season ?? Int.max) < ($1.season ?? Int.max) }
     }
 
+    /// 单条记忆化分季：原先每次 body 求值（滚动、展开/折叠季、详情快照加载等）都重跑 Dictionary 分组+排序。
+    /// children(for:) 已是 O(1) 缓存读取，分季结果只取决于 (item.id, libraryRevision)，故以此为键单条缓存。
+    /// 命中即返回，不改变任何分组/排序逻辑或展示。
+    private enum SeasonGroupsCache {
+        struct Key: Equatable {
+            let itemID: String
+            let revision: Int
+        }
+        static var cachedKey: Key?
+        static var cachedValue: [SeasonGroup] = []
+    }
+
+    private func cachedSeasonGroups(for episodes: [MediaItem]) -> [SeasonGroup] {
+        let key = SeasonGroupsCache.Key(itemID: item.id, revision: appState.libraryRevision)
+        if let cachedKey = SeasonGroupsCache.cachedKey, cachedKey == key {
+            return SeasonGroupsCache.cachedValue
+        }
+        let groups = seasonGroups(for: episodes)
+        SeasonGroupsCache.cachedKey = key
+        SeasonGroupsCache.cachedValue = groups
+        return groups
+    }
+
     var body: some View {
         let episodes = appState.children(for: item)
 
@@ -88,7 +111,7 @@ struct DetailView: View {
 
             if !episodes.isEmpty {
                 detailRow(top: 12, bottom: 6) { episodeHeader(episodes) }
-                let groups = seasonGroups(for: episodes)
+                let groups = cachedSeasonGroups(for: episodes)
                 if groups.count > 1 {
                     // 多季：按季分组、可折叠；进入详情默认全部折叠。
                     ForEach(groups) { group in
@@ -250,11 +273,6 @@ struct DetailView: View {
     private func episodeRow(_ episode: MediaItem) -> some View {
         EpisodeRowView(episode: episode, selected: selectedEpisodeID == episode.id)
             .contentShape(Rectangle())
-            .background {
-                EpisodeMouseDownSelectionMonitor {
-                    selectedEpisodeID = episode.id
-                }
-            }
             .onTapGesture(count: 2) {
                 selectedEpisodeID = episode.id
                 appState.play(episode, preserveSelection: true)
@@ -498,7 +516,11 @@ struct DetailView: View {
         .padding(18)
         // 去掉原本盖在卡片上的灰色氛围层（模糊海报 + cleanPanelFill 灰渐变），
         // 仅保留下面这张圆角玻璃卡片本体与描边。
-        .surfaceBackground(cornerRadius: 24)
+        // 性能：hero 是详情列表里最大的一张卡，原先用实时 .regularMaterial 玻璃，
+        // 列表上滑时这块大面积模糊层每帧都要离屏重合成，是“上滑卡顿”的主因。
+        // 改用与海报卡同源的静态玻璃（无离屏材质、不采样指针），滚动恒定流畅；
+        // 厚度由加强后的 flatSurface 投影补足，观感不降。
+        .staticSurfaceBackground(cornerRadius: 24, thickness: 1.3)
         .repeatedCardChrome(false, cornerRadius: 24)
     }
 
@@ -723,68 +745,6 @@ private struct DetailGenreTagFlow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// 只观察剧集行内的左键按下，不消费事件；选中态立即更新，SwiftUI 仍可继续识别单击和双击。
-private struct EpisodeMouseDownSelectionMonitor: NSViewRepresentable {
-    let onMouseDown: () -> Void
-
-    func makeNSView(context: Context) -> MonitorView {
-        let view = MonitorView(frame: .zero)
-        view.onMouseDown = onMouseDown
-        return view
-    }
-
-    func updateNSView(_ nsView: MonitorView, context: Context) {
-        nsView.onMouseDown = onMouseDown
-    }
-
-    static func dismantleNSView(_ nsView: MonitorView, coordinator: ()) {
-        nsView.stopMonitoring()
-    }
-
-    final class MonitorView: NSView {
-        var onMouseDown: (() -> Void)?
-        private var monitor: Any?
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            if window == nil {
-                stopMonitoring()
-            } else {
-                startMonitoring()
-            }
-        }
-
-        func stopMonitoring() {
-            if let monitor {
-                NSEvent.removeMonitor(monitor)
-                self.monitor = nil
-            }
-        }
-
-        private func startMonitoring() {
-            guard monitor == nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-                guard let self,
-                      let window,
-                      event.window === window,
-                      !isHidden,
-                      alphaValue > 0 else {
-                    return event
-                }
-                let point = convert(event.locationInWindow, from: nil)
-                if bounds.contains(point) {
-                    onMouseDown?()
-                }
-                return event
-            }
-        }
-
-        deinit {
-            stopMonitoring()
-        }
     }
 }
 

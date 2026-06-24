@@ -2,7 +2,13 @@ import AppKit
 import Foundation
 import MediaLibCore
 import Network
+import OSLog
 import SwiftUI
+
+private let versionMaintenanceLogger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "MediaLib",
+    category: "VersionMaintenance"
+)
 
 struct AppAlert: Identifiable {
     let id = UUID()
@@ -421,6 +427,9 @@ final class AppState: ObservableObject {
     @Published var selectedItemIDs: Set<String> = []
     /// 配色切换计数：每次切换预设 +1，驱动整窗"加载过场"覆盖层在下层刷新界面，避免逐控件慢慢变色。
     @Published var themeRevision = 0
+    /// 音乐主题参数（MusicThemeConfig）刷新计数：用户「重新加载 / 恢复默认」后 +1，
+    /// 触发音乐播放器主题子树按 .id 重建并重新读取 MusicThemeConfig.active（无需重启）。
+    @Published var musicThemeRevision = 0
     @Published var startupError: String?
     @Published var privacyUnlocked = false
     @Published var privacyPINConfigured = false
@@ -449,7 +458,7 @@ final class AppState: ObservableObject {
     @Published private(set) var isConnectingEmby = false
     @Published private(set) var isConnectingJellyfin = false
     @Published private(set) var isConnectingPlex = false
-    private var detailBackfillTask: Task<Void, Never>?
+    private var version122MaintenanceTask: Task<Void, Never>?
     @Published var musicMetadataFetchProgress = ""
     @Published private(set) var libraryRevision = 0
     /// 仅在 reload() 完成（元数据/封面路径真实变化）时递增；文件存在性检查不会触发它。
@@ -524,6 +533,7 @@ final class AppState: ObservableObject {
     private var remountingNetworkSourceIDs: Set<String> = []
     private var cachedTopLevelItems: [MediaItem] = []
     private var cachedPrivateTopLevelItems: [MediaItem] = []
+    private var cachedItemsByID: [String: MediaItem] = [:]
     private var cachedMusicTracks: [MediaItem] = []
     private var cachedMusicTracksByID: [String: MediaItem] = [:]
     private var cachedEmbyTopLevelItems: [MediaItem] = []
@@ -544,6 +554,7 @@ final class AppState: ObservableObject {
     private var cachedVisibleVideoSections: [VideoLibrarySection] = []
     private var cachedAvailableHomeTabs: Set<HomeTab> = [.overview]
     private var cachedVideoEntriesByItemID: [String: VideoCacheEntry] = [:]
+    private var cachedVideoSeriesStatesByID: [String: VideoSeriesCacheState] = [:]
     private var cachedOfflineSources: [MediaSource] = []
     private var cachedOfflineSourceIDs: Set<String> = []
     private var cachedHomeStats = HomeStatsSnapshot()
@@ -688,7 +699,7 @@ final class AppState: ObservableObject {
             configureAutomaticScan()
             configureLocalFileEventMonitoring()
             configureAutomaticTMDBMatch()
-            scheduleVersion19DetailBackfillIfNeeded()
+            scheduleVersion122MaintenanceIfNeeded()
         } catch {
             self.directories = nil
             self.logger = nil
@@ -722,7 +733,7 @@ final class AppState: ObservableObject {
     }
 
     deinit {
-        detailBackfillTask?.cancel()
+        version122MaintenanceTask?.cancel()
         detailEnrichmentTasks.values.forEach { $0.cancel() }
         networkPathMonitor?.cancel()
         if let appDidBecomeActiveObserver {
@@ -853,6 +864,10 @@ final class AppState: ObservableObject {
 
     var musicTracks: [MediaItem] {
         cachedMusicTracks
+    }
+
+    func item(withID id: String) -> MediaItem? {
+        cachedItemsByID[id] ?? items.first { $0.id == id }
     }
 
     var embySources: [MediaSource] {
@@ -1739,13 +1754,7 @@ final class AppState: ObservableObject {
     }
 
     func videoCacheState(for item: MediaItem) -> VideoSeriesCacheState {
-        let episodes = children(for: item).filter { cacheableVideoCandidate($0) || isVideoCached($0) }
-        guard !episodes.isEmpty else {
-            return isVideoCached(item) ? .complete : .none
-        }
-        let cachedCount = episodes.filter { isVideoCached($0) }.count
-        if cachedCount == 0 { return .none }
-        return cachedCount == episodes.count ? .complete : .partial
+        cachedVideoSeriesStatesByID[item.id] ?? (isVideoCached(item) ? .complete : .none)
     }
 
     func includesCachedVideo(_ item: MediaItem) -> Bool {
@@ -1758,12 +1767,35 @@ final class AppState: ObservableObject {
     }
 
     private func rebuildHomeOfflineVideoCache() {
+        rebuildVideoSeriesCacheStates()
         cachedHomeOfflineVideoItems = cachedHomeVideoItems.filter { includesCachedVideo($0) }
         if cachedHomeOfflineVideoItems.isEmpty {
             cachedAvailableHomeTabs.remove(.offline)
         } else {
             cachedAvailableHomeTabs.insert(.offline)
         }
+    }
+
+    private func rebuildVideoSeriesCacheStates() {
+        var states: [String: VideoSeriesCacheState] = [:]
+        states.reserveCapacity(cachedChildrenByParentID.count)
+        for (parentID, children) in cachedChildrenByParentID {
+            let candidates = children.filter { cacheableVideoCandidate($0) || cachedVideoEntriesByItemID[$0.id] != nil }
+            guard !candidates.isEmpty else { continue }
+            let cachedCount = candidates.reduce(into: 0) { count, child in
+                if cachedVideoEntriesByItemID[child.id] != nil {
+                    count += 1
+                }
+            }
+            if cachedCount == 0 {
+                states[parentID] = VideoSeriesCacheState.none
+            } else if cachedCount == candidates.count {
+                states[parentID] = .complete
+            } else {
+                states[parentID] = .partial
+            }
+        }
+        cachedVideoSeriesStatesByID = states
     }
 
     func cachedVideoScopeIDs(in items: [MediaItem]) -> Set<String> {
@@ -2958,9 +2990,11 @@ final class AppState: ObservableObject {
                 return $0.title.localizedStandardCompare($1.title) == .orderedAscending
             }
         }
+        rebuildVideoSeriesCacheStates()
 
         cachedTopLevelItems = topLevelRaw.sorted { $0.updatedAt > $1.updatedAt }
         cachedPrivateTopLevelItems = privateTopLevelRaw.sorted { $0.updatedAt > $1.updatedAt }
+        cachedItemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
         cachedMusicTracks = musicTracksRaw.sorted { lhs, rhs in
             let leftAlbum = lhs.album ?? ""
             let rightAlbum = rhs.album ?? ""
@@ -3561,7 +3595,6 @@ final class AppState: ObservableObject {
             )
             try await importPlexItems(source: source, session: session)
             reload()
-            scheduleVersion19DetailBackfillIfNeeded()
             finishBackgroundTask(id: taskID, errors: [])
             alert = AppAlert(title: "Plex 已连接", message: "\(hostName) 的媒体库已同步到 Plex 目录。")
         } catch {
@@ -3668,7 +3701,6 @@ final class AppState: ObservableObject {
             )
             try await importEmbyItems(source: source, session: session)
             reload()
-            scheduleVersion19DetailBackfillIfNeeded()
             finishBackgroundTask(id: taskID, errors: [])
             alert = AppAlert(title: "\(provider.displayName) 已连接", message: "\(hostName) 的媒体库已同步到 \(provider.mediaSourceDisplayName) 目录。")
         } catch {
@@ -3801,7 +3833,6 @@ final class AppState: ObservableObject {
             }
             finishBackgroundTask(id: taskID, errors: [])
             reload()
-            scheduleVersion19DetailBackfillIfNeeded()
         } catch {
             finishBackgroundTask(id: taskID, errors: [error.localizedDescription])
             if !presentEmbyRestrictionIfNeeded(error, serverHost: Self.embyServerHost(for: source)) {
@@ -3825,7 +3856,6 @@ final class AppState: ObservableObject {
             }
             finishBackgroundTask(id: taskID, errors: [])
             reload()
-            scheduleVersion19DetailBackfillIfNeeded()
         } catch {
             finishBackgroundTask(id: taskID, errors: [error.localizedDescription])
             showError("Plex 同步失败", error)
@@ -3980,7 +4010,10 @@ final class AppState: ObservableObject {
             var completed = completedURLStrings
             for url in remainingURLs {
                 guard !Task.isCancelled else { return }
-                _ = await ArtworkImageCache.prewarmRemoteImage(url: url, targetSize: CGSize(width: 260, height: 390))
+                _ = await ArtworkImageCache.prewarmRemoteImage(
+                    url: url,
+                    targetSize: ArtworkImageCache.posterGridTargetSize
+                )
                 completed.insert(url.absoluteString)
                 self.persistArtworkWarmupProgress(
                     sourceID: source.id,
@@ -4251,7 +4284,8 @@ final class AppState: ObservableObject {
         if let externalID, !externalID.isEmpty {
             let normalizedID = externalID.lowercased()
             if let mediaID = mediaExternalIDIndex[normalizedID],
-               let item = candidates.first(where: { $0.id == mediaID }) {
+               let item = item(withID: mediaID),
+               candidates.contains(where: { $0.id == mediaID }) {
                 return item
             }
             if let item = candidates.first(where: {
@@ -4523,90 +4557,269 @@ final class AppState: ObservableObject {
         )
     }
 
-    /// v19 将详情扩展改为结构化索引。任务状态持久化到 SQLite，退出后可继续，
-    /// 且只处理顶层影视条目，不再通过全量重同步远程来源间接补齐。
-    private func scheduleVersion19DetailBackfillIfNeeded() {
-        guard detailBackfillTask == nil, let mediaDetailRepository else { return }
-        let candidates = topLevelItems.filter {
-            $0.type != .music && $0.type != .photo && $0.type != .homeVideo && $0.type != .privateCollection
-        }
-        do {
-            try mediaDetailRepository.prepareBackfill(mediaIDs: candidates.map(\.id))
-        } catch {
-            logger?.log("详情升级任务准备失败：\(error.localizedDescription)", level: .warning)
-            return
-        }
+    private static let version122MetadataAuditCompletedKey =
+        "MediaLib.migration.1.2.2.videoMetadataAudit.completed"
+    private static let version122ArtworkRebuildCompletedKey =
+        "MediaLib.migration.1.2.2.remoteArtworkRebuild.completed"
+    /// 标记“旧缓存已清理 + 任务已启动过一次”：用于在重新预热中途退出后，
+    /// 下次启动时**继续**而不是再次清空已经预热好的封面、重头来过。
+    private static let version122ArtworkRebuildStartedKey =
+        "MediaLib.migration.1.2.2.remoteArtworkRebuild.started"
+    /// 1.2.2 重新预热在封面进度文件中使用的保留键（真实媒体源 id 不会与之冲突）。
+    private static let version122ArtworkRebuildProgressKey =
+        "__medialib.migration.1.2.2.remoteArtworkRebuild__"
 
-        detailBackfillTask = Task { [weak self] in
+    /// 1.2.2 及以后首次启动只运行这一轮维护。两个任务串行执行，避免元数据网络请求、
+    /// 封面下载和图片解码同时争抢资源；完整结束后写入永久标记，不在后续版本自动重跑。
+    private func scheduleVersion122MaintenanceIfNeeded() {
+        guard version122MaintenanceTask == nil else { return }
+        let defaults = UserDefaults.standard
+        let needsMetadataAudit = !defaults.bool(forKey: Self.version122MetadataAuditCompletedKey)
+        let needsArtworkRebuild = !defaults.bool(forKey: Self.version122ArtworkRebuildCompletedKey)
+        guard needsMetadataAudit || needsArtworkRebuild else { return }
+        versionMaintenanceLogger.info(
+            "Scheduling 1.2.2 maintenance metadata=\(needsMetadataAudit) artwork=\(needsArtworkRebuild)"
+        )
+
+        version122MaintenanceTask = Task { [weak self] in
             do {
-                try await Task.sleep(nanoseconds: 900_000_000)
+                try await Task.sleep(nanoseconds: 1_000_000_000)
             } catch {
                 return
             }
             guard let self, !Task.isCancelled else { return }
-            let pending = (try? mediaDetailRepository.pendingBackfillMediaIDs()) ?? []
-            guard !pending.isEmpty else {
-                self.detailBackfillTask = nil
-                return
+            if needsMetadataAudit {
+                await self.runVersion122VideoMetadataAudit()
             }
-            let taskID = self.beginBackgroundTask(
-                kind: .metadataSupplement,
-                title: "影视详情资料升级",
-                detail: "准备补齐 \(pending.count) 个影视项目",
-                progress: 0,
-                isCancellable: false
+            guard !Task.isCancelled else { return }
+            if needsArtworkRebuild {
+                await self.runVersion122ArtworkRebuild()
+            }
+            self.version122MaintenanceTask = nil
+        }
+    }
+
+    private func runVersion122VideoMetadataAudit() async {
+        let candidates = topLevelItems.filter {
+            $0.type != .music &&
+                $0.type != .photo &&
+                $0.type != .homeVideo &&
+                $0.type != .privateCollection &&
+                metadataFetchEnabled(for: $0)
+        }
+        let taskID = beginBackgroundTask(
+            kind: .metadataSupplement,
+            title: "1.2.2 视频元数据核验",
+            detail: "正在检查 \(candidates.count) 个影视项目",
+            progress: 0,
+            isCancellable: false
+        )
+        versionMaintenanceLogger.info("Starting 1.2.2 video metadata audit candidates=\(candidates.count)")
+
+        let localPosterPaths = candidates.compactMap { item -> (String, String)? in
+            guard let path = item.posterPath,
+                  URL(string: path)?.scheme == nil else { return nil }
+            return (item.id, path)
+        }
+        let missingLocalPosterIDs = await Task.detached(priority: .utility) {
+            Set(localPosterPaths.compactMap { id, path in
+                FileManager.default.fileExists(atPath: path) ? nil : id
+            })
+        }.value
+        let completeness = (try? mediaDetailRepository?.detailCompleteness(
+            mediaIDs: candidates.map(\.id)
+        )) ?? [:]
+        let auditItems = candidates.filter {
+            Self.isMissingCoreMetadata($0) ||
+                missingLocalPosterIDs.contains($0.id) ||
+                completeness[$0.id] != nil
+        }
+
+        guard !auditItems.isEmpty else {
+            updateBackgroundTask(id: taskID, progress: 1, detail: "视频元数据检查完成，无需补充")
+            finishBackgroundTask(id: taskID, errors: [])
+            UserDefaults.standard.set(true, forKey: Self.version122MetadataAuditCompletedKey)
+            versionMaintenanceLogger.info("Completed 1.2.2 video metadata audit with no missing items")
+            return
+        }
+
+        let hasTMDBKey = !(settings.tmdbAPIKey?
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let service = MetadataSearchService()
+        var completed = 0
+        var updated = 0
+        var unresolved = 0
+        var errors: [String] = []
+
+        for item in auditItems {
+            if Task.isCancelled { return }
+            updateBackgroundTask(
+                id: taskID,
+                progress: Double(completed) / Double(max(auditItems.count, 1)),
+                detail: "核验 \(completed + 1)/\(auditItems.count)：\(item.cardTitle)"
             )
-            var completed = 0
-            var errors: [String] = []
-            let chunks = stride(from: 0, to: pending.count, by: 2).map {
-                Array(pending[$0..<min($0 + 2, pending.count)])
+
+            let needsCore = Self.isMissingCoreMetadata(item) || missingLocalPosterIDs.contains(item.id)
+            if needsCore, hasTMDBKey {
+                if let update = await bestSupplementalVideoUpdate(for: item, service: service) {
+                    do {
+                        try updateMetadata(id: item.id, metadata: update, source: "version-1.2.2-metadata-audit")
+                        updated += 1
+                    } catch {
+                        errors.append(error.localizedDescription)
+                    }
+                } else {
+                    unresolved += 1
+                }
+            } else if needsCore {
+                unresolved += 1
             }
-            for chunk in chunks {
-                if Task.isCancelled { break }
-                await withTaskGroup(of: (String, String?).self) { group in
-                    for mediaID in chunk {
-                        group.addTask { @MainActor [weak self] in
-                            guard let self,
-                                  let item = self.items.first(where: { $0.id == mediaID }) else {
-                                return (mediaID, "条目已不存在")
-                            }
-                            try? mediaDetailRepository.markBackfillRunning(mediaID: mediaID)
-                            let needsTMDB = !Self.isRemoteMediaServerItem(item)
-                            let hasTMDBKey = !(self.settings.tmdbAPIKey?
-                                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-                            if needsTMDB && !hasTMDBKey {
-                                try? mediaDetailRepository.markBackfillWaitingForConfiguration(mediaID: mediaID)
-                                return (mediaID, nil)
-                            }
-                            if await self.loadDetailSnapshot(for: item, forceRefresh: true) != nil {
-                                try? mediaDetailRepository.markBackfillCompleted(mediaID: mediaID)
-                                return (mediaID, nil)
-                            }
-                            let message = "未能获取详情资料"
-                            try? mediaDetailRepository.markBackfillFailed(mediaID: mediaID, error: message)
-                            return (mediaID, message)
-                        }
-                    }
-                    for await (_, error) in group {
-                        completed += 1
-                        if let error { errors.append(error) }
-                        self.updateBackgroundTask(
-                            id: taskID,
-                            progress: Double(completed) / Double(max(pending.count, 1)),
-                            detail: "已检查 \(completed)/\(pending.count) 个影视项目"
-                        )
-                    }
+
+            if completeness[item.id] != nil {
+                let canFetchDetails = Self.isRemoteMediaServerItem(item) || hasTMDBKey
+                if canFetchDetails {
+                    _ = await loadDetailSnapshot(for: item, forceRefresh: true)
+                } else {
+                    unresolved += 1
                 }
             }
-            self.updateBackgroundTask(
-                id: taskID,
-                progress: 1,
-                detail: errors.isEmpty ? "影视详情资料已完成升级" : "部分条目将在稍后自动重试"
-            )
-            self.finishBackgroundTask(id: taskID, errors: Array(errors.prefix(8)))
-            self.detailBackfillTask = nil
-            self.scheduleVersion19DetailBackfillIfNeeded()
+            completed += 1
         }
+
+        reload()
+        let remainingDetailGaps = (try? mediaDetailRepository?.detailCompleteness(
+            mediaIDs: auditItems.map(\.id)
+        ).count) ?? 0
+        unresolved += remainingDetailGaps
+        let summary = unresolved > 0
+            ? "已核验 \(completed) 项，补充 \(updated) 项，\(unresolved) 项保留到片库健康中心"
+            : "已核验 \(completed) 项，补充 \(updated) 项"
+        updateBackgroundTask(id: taskID, progress: 1, detail: summary)
+        finishBackgroundTask(id: taskID, errors: Array(errors.prefix(8)))
+        UserDefaults.standard.set(true, forKey: Self.version122MetadataAuditCompletedKey)
+        versionMaintenanceLogger.info(
+            "Completed 1.2.2 video metadata audit checked=\(completed) updated=\(updated) unresolved=\(unresolved)"
+        )
+        logger?.log("1.2.2 视频元数据核验完成：checked=\(completed) updated=\(updated) unresolved=\(unresolved)")
+    }
+
+    private func runVersion122ArtworkRebuild() async {
+        let defaults = UserDefaults.standard
+        let progressKey = Self.version122ArtworkRebuildProgressKey
+        // 首次运行需要先清空旧缓存；中途退出后再次进入则视为“继续”，跳过清空步骤，
+        // 否则会把上次已经预热好的封面又全部抹掉、重头下载。
+        // 兼容已经写过进度但还没来得及写 started 标记的旧任务：只要有 1.2.2 进度记录，
+        // 就视为续跑，避免再次清空缓存导致从头下载。
+        let hasSavedProgress = !(artworkWarmupProgressRecord(for: progressKey)?.completedURLs.isEmpty ?? true)
+        let isResuming = defaults.bool(forKey: Self.version122ArtworkRebuildStartedKey) || hasSavedProgress
+
+        let taskID = beginBackgroundTask(
+            kind: .artworkWarmup,
+            title: "1.2.2 封面重新预热",
+            detail: isResuming ? "正在恢复上次的预热进度" : "正在清理旧封面缓存",
+            progress: 0,
+            isCancellable: false
+        )
+        versionMaintenanceLogger.info("Starting 1.2.2 remote artwork rebuild resuming=\(isResuming)")
+
+        embyArtworkWarmupTasks.values.forEach { $0.cancel() }
+        embyArtworkWarmupTasks.removeAll()
+
+        if !isResuming {
+            // 首次：清掉整个进度文件（含各源旧的预热进度，与原行为一致）和旧的烘焙封面，
+            // 然后立刻落一个“已启动”标记，确保即便清理后马上退出，下次也能从“继续”进入。
+            if let progressURL = artworkWarmupProgressURL {
+                try? FileManager.default.removeItem(at: progressURL)
+            }
+            await ArtworkImageCache.clearRemotePrebakedArtwork()
+            posterRevision += 1
+            defaults.set(true, forKey: Self.version122ArtworkRebuildStartedKey)
+        }
+
+        let urls = artworkWarmupURLs(for: items)
+        guard !urls.isEmpty else {
+            updateBackgroundTask(id: taskID, progress: 1, detail: "旧封面缓存已清理，当前没有远程封面")
+            finishBackgroundTask(id: taskID, errors: [])
+            clearArtworkWarmupProgress(sourceID: progressKey)
+            defaults.set(true, forKey: Self.version122ArtworkRebuildCompletedKey)
+            versionMaintenanceLogger.info("Completed 1.2.2 remote artwork rebuild with no remote artwork")
+            return
+        }
+
+        // 读取上次进度，并与本次需要预热的 URL 取交集（媒体源可能已变化），跳过已完成的。
+        let currentURLStrings = Set(urls.map(\.absoluteString))
+        var completedURLStrings = Set(artworkWarmupProgressRecord(for: progressKey)?.completedURLs ?? [])
+        completedURLStrings.formIntersection(currentURLStrings)
+        let totalCount = urls.count
+        let remainingURLs = urls.filter { !completedURLStrings.contains($0.absoluteString) }
+
+        persistArtworkWarmupProgress(
+            sourceID: progressKey,
+            completedURLs: completedURLStrings,
+            totalCount: totalCount
+        )
+
+        var completed = completedURLStrings.count
+        var failures = 0
+        updateBackgroundTask(
+            id: taskID,
+            progress: Double(completed) / Double(max(totalCount, 1)),
+            detail: completed > 0
+                ? "继续预热 \(completed)/\(totalCount) 张封面"
+                : "准备预热 \(totalCount) 张封面"
+        )
+
+        let chunks = stride(from: 0, to: remainingURLs.count, by: 4).map {
+            Array(remainingURLs[$0..<min($0 + 4, remainingURLs.count)])
+        }
+        for chunk in chunks {
+            // 取消（含退出 App）时直接返回：进度已逐块持久化，下次启动会从此处继续。
+            if Task.isCancelled { return }
+            let results = await withTaskGroup(of: (String, Bool).self) { group -> [(String, Bool)] in
+                for url in chunk {
+                    group.addTask {
+                        let succeeded = await ArtworkImageCache.prewarmRemoteImage(
+                            url: url,
+                            targetSize: ArtworkImageCache.posterGridTargetSize
+                        )
+                        return (url.absoluteString, succeeded)
+                    }
+                }
+                var collected: [(String, Bool)] = []
+                for await result in group { collected.append(result) }
+                return collected
+            }
+            for (urlString, succeeded) in results {
+                completed += 1
+                if !succeeded { failures += 1 }
+                // 与 Emby 预热一致：无论成功与否都记为已处理，保证可终止、不重复下载。
+                completedURLStrings.insert(urlString)
+            }
+            persistArtworkWarmupProgress(
+                sourceID: progressKey,
+                completedURLs: completedURLStrings,
+                totalCount: totalCount
+            )
+            updateBackgroundTask(
+                id: taskID,
+                progress: Double(completed) / Double(max(totalCount, 1)),
+                detail: "已重新预热 \(completed)/\(totalCount) 张封面"
+            )
+        }
+
+        let summary = failures > 0
+            ? "已重新预热 \(completed - failures) 张，\(failures) 张下载失败"
+            : "已重新预热 \(completed) 张封面"
+        updateBackgroundTask(id: taskID, progress: 1, detail: summary)
+        // 失败的远程 URL 已按“已处理”写入进度，确保任务可终止；这里不把任务中心标成失败，
+        // 避免 1.2.2 一次性维护长期留在失败列表。用户可通过对应来源刷新继续补图。
+        finishBackgroundTask(id: taskID, errors: [])
+        clearArtworkWarmupProgress(sourceID: progressKey)
+        defaults.set(true, forKey: Self.version122ArtworkRebuildCompletedKey)
+        versionMaintenanceLogger.info(
+            "Completed 1.2.2 remote artwork rebuild total=\(totalCount) failed=\(failures)"
+        )
+        logger?.log("1.2.2 封面重新预热完成：total=\(totalCount) failed=\(failures)")
     }
 
     func syncEmbyPlayback(_ report: PlayerPlaybackReport) {
@@ -7881,6 +8094,7 @@ final class AppState: ObservableObject {
         }
 
         items = items.map(updated)
+        cachedItemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
         musicQueue = musicQueue.map(updated)
         if let activePlayerItem {
             self.activePlayerItem = updated(activePlayerItem)
@@ -7979,6 +8193,7 @@ final class AppState: ObservableObject {
         }
 
         items = items.map(updated)
+        cachedItemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
         musicQueue = musicQueue.map(updated)
         if let activePlayerItem {
             self.activePlayerItem = updated(activePlayerItem)
@@ -8105,6 +8320,7 @@ final class AppState: ObservableObject {
         }
 
         items = items.map(updated)
+        cachedItemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
         musicQueue = musicQueue.map(updated)
         if let parentID = items.first(where: { $0.id == id })?.parentID,
            let children = cachedChildrenByParentID[parentID] {
@@ -8199,6 +8415,7 @@ final class AppState: ObservableObject {
         }
 
         items = items.map(updated)
+        cachedItemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
         if let parentID = items.first(where: { $0.id == id })?.parentID,
            let children = cachedChildrenByParentID[parentID] {
             cachedChildrenByParentID[parentID] = children.map(updated)
@@ -8487,6 +8704,7 @@ final class AppState: ObservableObject {
         }
 
         items = items.map(updated)
+        cachedItemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
         musicQueue = musicQueue.map(updated)
         if let parentID = items.first(where: { $0.id == id })?.parentID,
            let children = cachedChildrenByParentID[parentID] {
@@ -9987,6 +10205,29 @@ extension AppState {
     /// 在 init / 设置变更时调用；配合 @Published settings 触发的级联刷新即时生效。
     func applyThemePalette() {
         AppColors.activeTheme = AppThemeResolver.resolve(for: settings)
+    }
+
+    // MARK: - 音乐主题参数文件（MusicThemeConfig）
+
+    /// 从配置文件重新加载音乐主题参数并即时应用（无需重启）。
+    func reloadMusicThemeConfig() {
+        MusicThemeConfigStore.reload()
+        musicThemeRevision &+= 1
+    }
+
+    /// 一键恢复默认：删除/重写默认模板并复位参数，即时应用。
+    func resetMusicThemeConfig() {
+        MusicThemeConfigStore.resetToDefaults()
+        musicThemeRevision &+= 1
+    }
+
+    /// 在访达中定位主题参数文件（不存在则先写一份默认模板），供用户直接编辑。
+    func revealMusicThemeConfigFile() {
+        guard let url = MusicThemeConfigStore.fileURL else { return }
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? MusicThemeConfigStore.writeTemplate(MusicThemeConfig())
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     private func publishThemePaletteChange() {

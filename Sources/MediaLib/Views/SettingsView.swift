@@ -282,6 +282,18 @@ struct SettingsView: View {
                 SettingsToggleRow(title: "封面发光", systemImage: "sparkles", isOn: binding(\.musicAlbumCoverGlowEnabled))
                 SettingsDescription(text: "开启时展开播放器使用封面原图的多层柔光；关闭后只保留主色的浅柔阴影，暂停时同样收起光效。")
 
+                SettingsRow(title: "主题参数自定义", systemImage: "slider.horizontal.3") {
+                    HStack(spacing: 8) {
+                        Button("打开配置文件") { appState.revealMusicThemeConfigFile() }
+                            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
+                        Button("重新加载") { appState.reloadMusicThemeConfig() }
+                            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
+                        Button("恢复默认") { appState.resetMusicThemeConfig() }
+                            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
+                    }
+                }
+                SettingsDescription(text: "高级：编辑 ~/Library/Application Support/MediaLib/Themes/music-theme.json 可微调三套主题（琉璃 / 无界 / 湖光）的玻璃浓度、发光、圆角、字号、间距等数值。改完点「重新加载」即时生效，无需重启；「恢复默认」清空全部自定义。极端数值可能影响观感或性能，随时可「恢复默认」还原。")
+
                 SettingsRow(title: "音乐响度均衡", systemImage: "waveform.badge.magnifyingglass") {
                     Picker("音乐响度均衡", selection: binding(\.musicLoudnessNormalization)) {
                         ForEach(MusicLoudnessNormalization.allCases) { mode in

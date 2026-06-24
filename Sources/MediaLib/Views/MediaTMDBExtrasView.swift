@@ -11,6 +11,7 @@ struct MediaTMDBExtrasView: View {
     var onOpenArtwork: ([MediaImageViewerEntry], Int) -> Void = { _, _ in }
 
     @State private var isExpanded = true
+    @State private var cachedLibraryRelated: [MediaRelatedTitle] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -18,6 +19,9 @@ struct MediaTMDBExtrasView: View {
             if isExpanded {
                 detailSections
             }
+        }
+        .task(id: item.id) {
+            cachedLibraryRelated = appState.libraryRecommendations(for: item, snapshot: snapshot)
         }
     }
 
@@ -258,7 +262,7 @@ struct MediaTMDBExtrasView: View {
 
     private var libraryRelated: [MediaRelatedTitle] {
         let directlyRecommendedLibraryIDs = Set(rankedRelated.compactMap(\.localMediaID))
-        return appState.libraryRecommendations(for: item, snapshot: snapshot)
+        return cachedLibraryRelated
             .filter { related in
                 guard let localMediaID = related.localMediaID else { return false }
                 return !directlyRecommendedLibraryIDs.contains(localMediaID)
@@ -281,7 +285,7 @@ struct MediaTMDBExtrasView: View {
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         return Button {
             if let localID = related.localMediaID,
-               let localItem = appState.items.first(where: { $0.id == localID }),
+               let localItem = appState.item(withID: localID),
                !(appState.isPrivateItem(localItem) && !appState.canDisplayPrivateItems) {
                 appState.presentRelatedDetail(localItem)
             } else if let url = tmdbURL(for: related.externalID) {
@@ -330,7 +334,7 @@ struct MediaTMDBExtrasView: View {
     @ViewBuilder
     private func relatedPoster(_ related: MediaRelatedTitle) -> some View {
         if let localID = related.localMediaID,
-           let localItem = appState.items.first(where: { $0.id == localID }),
+           let localItem = appState.item(withID: localID),
            !(appState.isPrivateItem(localItem) && !appState.canDisplayPrivateItems) {
             PosterImage(path: localItem.posterPath, title: localItem.title, mediaType: localItem.type)
                 .aspectRatio(2.0 / 3.0, contentMode: .fill)
@@ -369,7 +373,7 @@ struct MediaTMDBExtrasView: View {
             score += max(0, 1.1 - Double(abs(year - currentYear)) / 8)
         }
         if let localID = related.localMediaID,
-           let local = appState.items.first(where: { $0.id == localID }) {
+           let local = appState.item(withID: localID) {
             score += Double(currentGenres.intersection(genreKeys(for: local)).count) * 1.1
             if local.favorite { score += 0.5 }
             if local.watchlist { score += 0.6 }

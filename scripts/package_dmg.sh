@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="MediaLib"
 DISPLAY_NAME="MediaLIB"
 BUNDLE_ID="com.local.MediaLib"
-VERSION="1.2.1"
-BUILD="15"
+VERSION="1.2.2"
+BUILD="17"
 DIST_DIR="$ROOT_DIR/dist"
 BUILD_ROOT="/private/tmp/MediaLib-package"
 APP_BUNDLE="$BUILD_ROOT/$DISPLAY_NAME.app"
@@ -296,7 +296,7 @@ CODESIGN_IDENTITY="-"
 if STABLE_IDENTITY="$("$ROOT_DIR/scripts/ensure_local_signing_identity.sh" 2>/dev/null)" \
    && [ -n "$STABLE_IDENTITY" ]; then
   CODESIGN_IDENTITY="$STABLE_IDENTITY"
-  echo "codesign: 使用稳定本地身份「$CODESIGN_IDENTITY」签名。"
+  echo "codesign: 使用稳定本地身份「${CODESIGN_IDENTITY}」签名。"
 else
   echo "warning: 未能创建/获取稳定签名身份，回退到 ad-hoc 签名；系统照片与通知权限将每次启动重新弹窗。" >&2
 fi

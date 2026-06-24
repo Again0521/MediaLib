@@ -19,10 +19,33 @@ struct GlobalSearchView: View {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// 单条记忆化搜索结果：原先每次 body 求值都对全库做拼音匹配过滤（后台扫描频繁发布状态时尤其浪费）。
+    /// 结果只取决于 (query, 库内容, 隐私可见性)，故以此为键单条缓存；命中即返回，不改变任何匹配逻辑或展示。
+    private enum ResultsCache {
+        struct Key: Equatable {
+            let query: String
+            let revision: Int
+            let privacyVisible: Bool
+        }
+        static var cachedKey: Key?
+        static var cachedValue: [Group] = []
+    }
+
     private var groups: [Group] {
         let q = trimmedQuery
         guard !q.isEmpty else { return [] }
         let privacyVisible = appState.privacyPINConfigured && appState.privacyUnlocked
+        let key = ResultsCache.Key(query: q, revision: appState.libraryRevision, privacyVisible: privacyVisible)
+        if let cachedKey = ResultsCache.cachedKey, cachedKey == key {
+            return ResultsCache.cachedValue
+        }
+        let result = buildGroups(query: q, privacyVisible: privacyVisible)
+        ResultsCache.cachedKey = key
+        ResultsCache.cachedValue = result
+        return result
+    }
+
+    private func buildGroups(query q: String, privacyVisible: Bool) -> [Group] {
         let matched = appState.items.filter { item in
             guard item.type != .episode else { return false }
             if appState.isPrivateItem(item) && !privacyVisible { return false }

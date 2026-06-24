@@ -8,6 +8,9 @@ struct PersonDetailView: View {
 
     @State private var person: MediaPerson?
     @State private var persistedLibraryCredits: [MediaPersonLibraryCredit] = []
+    @State private var persistedLibraryItems: [MediaItem] = []
+    @State private var persistedLibraryWorks: [MediaPersonWork] = []
+    @State private var showsFullFilmography = false
     @State private var isLoading = false
 
     var body: some View {
@@ -77,8 +80,18 @@ struct PersonDetailView: View {
         .frame(minWidth: 820, minHeight: 620)
         .task(id: personID) {
             isLoading = true
-            person = await appState.personDetail(personID: personID)
-            persistedLibraryCredits = appState.libraryCredits(personID: personID)
+            let loadedPerson = await appState.personDetail(personID: personID)
+            let credits = appState.libraryCredits(personID: personID)
+            let items = loadedPerson.map {
+                appState.libraryItems(person: $0, directCredits: credits)
+            } ?? credits.map(\.media)
+            person = loadedPerson
+            persistedLibraryCredits = credits
+            persistedLibraryItems = items
+            persistedLibraryWorks = loadedPerson.map {
+                makeLibraryWorks(items: items, credits: credits, person: $0)
+            } ?? []
+            showsFullFilmography = false
             isLoading = false
         }
     }
@@ -88,21 +101,21 @@ struct PersonDetailView: View {
     }
 
     private var libraryItems: [MediaItem] {
-        guard let person else { return libraryCredits.map(\.media) }
-        return appState.libraryItems(
-            person: person,
-            directCredits: libraryCredits
-        )
+        persistedLibraryItems
     }
 
     private var libraryWorks: [MediaPersonWork] {
-        libraryItems.map { item in
-            let directRole = libraryCredits.first(where: { $0.media.id == item.id })?.credit.role
+        persistedLibraryWorks
+    }
+
+    private func makeLibraryWorks(items: [MediaItem], credits: [MediaPersonLibraryCredit], person: MediaPerson) -> [MediaPersonWork] {
+        items.map { item in
+            let directRole = credits.first(where: { $0.media.id == item.id })?.credit.role
             return MediaPersonWork(
                 id: item.externalID ?? item.id,
                 title: item.title,
                 year: item.year,
-                role: directRole?.nilIfEmpty ?? matchedFilmographyRole(for: item),
+                role: directRole?.nilIfEmpty ?? matchedFilmographyRole(for: item, person: person),
                 mediaKind: item.type.rawValue,
                 posterURL: item.posterPath,
                 popularity: item.rating
@@ -110,8 +123,7 @@ struct PersonDetailView: View {
         }
     }
 
-    private func matchedFilmographyRole(for item: MediaItem) -> String? {
-        guard let person else { return nil }
+    private func matchedFilmographyRole(for item: MediaItem, person: MediaPerson) -> String? {
         return (person.knownFor + person.filmography).first {
             appState.libraryItem(
                 matchingExternalID: $0.id,
@@ -165,7 +177,7 @@ struct PersonDetailView: View {
             }
         }
         .padding(18)
-        .surfaceBackground(cornerRadius: 24)
+        .staticSurfaceBackground(cornerRadius: 24, thickness: 1.3)
         .repeatedCardChrome(false, cornerRadius: 24)
     }
 
@@ -275,10 +287,16 @@ struct PersonDetailView: View {
 
     private func filmographySection(_ works: [MediaPersonWork]) -> some View {
         let groups = Dictionary(grouping: works) { $0.mediaKind == "movie" ? "电影" : "电视" }
+        let visibleLimitPerGroup = showsFullFilmography ? Int.max : 40
+        let visibleCount = groups.values.reduce(0) { total, values in
+            total + min(values.count, visibleLimitPerGroup)
+        }
         return VStack(alignment: .leading, spacing: 16) {
             AppSectionHeading(
                 title: "完整履历",
-                subtitle: "\(works.count) 项",
+                subtitle: showsFullFilmography || visibleCount >= works.count
+                    ? "\(works.count) 项"
+                    : "先显示 \(visibleCount)/\(works.count) 项",
                 systemImage: "list.bullet.rectangle"
             )
             ForEach(["电影", "电视"], id: \.self) { groupName in
@@ -286,7 +304,7 @@ struct PersonDetailView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(groupName)
                             .font(.headline)
-                        ForEach(values) { work in
+                        ForEach(Array(values.prefix(visibleLimitPerGroup))) { work in
                             Button {
                                 open(work)
                             } label: {
@@ -315,6 +333,18 @@ struct PersonDetailView: View {
                                 .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                        }
+                        if values.count > visibleLimitPerGroup {
+                            Button {
+                                withAnimation(AppMotion.standard) {
+                                    showsFullFilmography = true
+                                }
+                            } label: {
+                                Label("展开全部 \(values.count) 项\(groupName)履历", systemImage: "chevron.down")
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 10, minHeight: 28))
+                            .padding(.top, 2)
                         }
                     }
                 }

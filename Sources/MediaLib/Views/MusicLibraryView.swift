@@ -181,6 +181,32 @@ private func musicDisplayAlbum(_ value: String?) -> String {
 private enum MusicLibrarySnapshotBuilder {
     static func snapshot(from input: MusicLibrarySnapshotBuildInput) -> MusicLibrarySnapshotCache.Snapshot {
         let tracks = resolvedTracks(from: input.tracks, input: input)
+        switch input.section {
+        case .albums:
+            return MusicLibrarySnapshotCache.Snapshot(
+                rows: [],
+                albums: albumGroups(from: tracks, sortMode: input.sortMode, sortOrder: input.sortOrder),
+                artists: []
+            )
+        case .artists:
+            return MusicLibrarySnapshotCache.Snapshot(
+                rows: [],
+                albums: [],
+                artists: artistGroups(from: tracks, sortMode: input.sortMode, sortOrder: input.sortOrder)
+            )
+        case .playlists:
+            return MusicLibrarySnapshotCache.Snapshot(rows: [], albums: [], artists: [])
+        case .songs, .recent, .favorites, .unmatched:
+            return MusicLibrarySnapshotCache.Snapshot(
+                rows: rowModels(from: tracks),
+                albums: [],
+                artists: []
+            )
+        }
+    }
+
+    static func completeSnapshot(from input: MusicLibrarySnapshotBuildInput) -> MusicLibrarySnapshotCache.Snapshot {
+        let tracks = resolvedTracks(from: input.tracks, input: input)
         return MusicLibrarySnapshotCache.Snapshot(
             rows: rowModels(from: tracks),
             albums: albumGroups(from: tracks, sortMode: input.sortMode, sortOrder: input.sortOrder),
@@ -654,7 +680,9 @@ struct MusicLibraryView: View {
             sortOrder: sortOrder,
             filterMode: filterMode,
             revision: appState.libraryRevision,
-            lyricsRevision: MusicLyricsPresenceCache.revision
+            // 歌词存在性只影响「有歌词」筛选；其它页面不应因为后台扫完歌词文件而整页快照失效、
+            // 重新分组专辑/艺术家或重建上千行歌曲模型。
+            lyricsRevision: filterMode == .withLyrics ? MusicLyricsPresenceCache.revision : 0
         )
     }
 
@@ -666,7 +694,11 @@ struct MusicLibraryView: View {
     private func refreshVisibleContent(for targetSection: MusicLibrarySection, deferred: Bool = false) {
         contentRefreshTask?.cancel()
         let baseTracks = appState.items(for: .music(targetSection), searchText: "")
-        scheduleLyricsPresenceRefresh(for: baseTracks, section: targetSection)
+        if filterMode == .withLyrics {
+            scheduleLyricsPresenceRefresh(for: baseTracks, section: targetSection)
+        } else {
+            lyricsRefreshTask?.cancel()
+        }
 
         let key = snapshotKey(for: targetSection)
         if let snapshot = MusicLibrarySnapshotCache.snapshot(for: key) {

@@ -44,6 +44,10 @@ final class MediaLibAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 在任何音乐播放器界面渲染前，把用户主题参数文件加载进 MusicThemeConfig.active
+        // （无文件则写一份默认模板供编辑）。音乐界面仅在用户打开播放器时渲染，远晚于此回调。
+        MusicThemeConfigStore.bootstrap()
+
         // SwiftUI 可能在本回调前后才创建窗口；前几帧连续套用，确保第一帧可见时标题栏已透明、无标题。
         for delay in [0.0, 0.0, 0.02, 0.05, 0.12] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {

@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Foundation
 import ImageIO
+import OSLog
 import SwiftUI
 
 enum AppColors {
@@ -99,9 +100,11 @@ enum AppColors {
             glassTint = AppColors.dynamic(
                 light: theme.lightLight.appThemeWithAlpha(0.32),
                 dark:  theme.lightDark.appThemeWithAlpha(0.24))
+            // 卡片底色：相对页面底色提亮更多、并提高不透明度，让卡片明确浮在背景之上，
+            // 不再因半透明而与底色糊在一起（浅色 +0.085→+0.115 / α0.78→0.90，深色 +0.13→+0.16 / α0.78→0.88）。
             cleanPanelFill = AppColors.dynamic(
-                light: theme.baseLight.appThemeLightened(by: 0.085).appThemeWithAlpha(0.78),
-                dark:  theme.baseDark.appThemeLightened(by: 0.13).appThemeWithAlpha(0.78))
+                light: theme.baseLight.appThemeLightened(by: 0.115).appThemeWithAlpha(0.90),
+                dark:  theme.baseDark.appThemeLightened(by: 0.16).appThemeWithAlpha(0.88))
             cleanFieldFill = AppColors.dynamic(
                 light: theme.baseLight.appThemeLightened(by: 0.060).appThemeWithAlpha(0.58),
                 dark:  theme.baseDark.appThemeLightened(by: 0.18).appThemeWithAlpha(0.66))
@@ -263,13 +266,12 @@ private struct MainLayoutTransitionActiveKey: EnvironmentKey {
 enum GlassSurfaceRenderMode {
     case material
     case efficient
-    /// 最廉价档：单层填充 + 单条渐变描边，零 shadow / 零 material / 零 blendMode。
-    /// 用于在列表 / 网格 / 设置分组中大量重复出现的表面，消除每元件 2 个离屏阴影通道。
+    /// 仅供明确不需要系统材质的极小重复控件使用。
     case flat
 }
 
-/// 表面语义比单个渲染档更重要：重复出现的列表/网格/设置元素必须留在 cheap 档，
-/// hover/selected 也不能重新挂 material、大阴影或连续 pointer 采样。
+/// 重复卡片继续使用系统感的静态玻璃，保留完整阴影、高光和深浅色响应；
+/// 少量主表面使用实时系统材质，避免在密集网格中为每格创建模糊采样层。
 enum GlassSurfaceRole {
     case rich
     case repeated
@@ -498,11 +500,26 @@ struct LiquidGlassSurfaceLayer: View {
                 )
             }
             .clipShape(shape)
-            .shadow(color: AppColors.solarEdgeTint.opacity((colorScheme == .dark ? 0.024 : 0.034) * depth), radius: 4 * depth, x: -1, y: -1)
+            // 左上冷光投影：保留方向性，强度略提，让卡片像被屏外左上光源轻轻托起。
             .shadow(
-                color: .black.opacity((colorScheme == .dark ? 0.16 : 0.060) * depth),
-                radius: AppGlassMetrics.Shadow.repeatedRadius * depth,
-                y: AppGlassMetrics.Shadow.repeatedY
+                color: AppColors.solarEdgeTint.opacity((colorScheme == .dark ? 0.030 : 0.045) * depth),
+                radius: 8 * depth,
+                x: -2,
+                y: -1
+            )
+            // 主环境投影：在“有厚度”和“不发黑”之间取平衡——较前一版降一档不透明度、
+            // 加大模糊半径让投影更柔和扩散（柔光而非硬黑边），仍保留卡片从底色浮起的层次。
+            .shadow(
+                color: .black.opacity((colorScheme == .dark ? 0.13 : 0.050) * depth),
+                radius: 14 * depth,
+                y: 5
+            )
+            // 紧贴卡片下沿的接触投影：降不透明度并略放大半径，使下沿暗边更柔、不再像硬黑线，
+            // 仍提供必要的“落地”厚度感（去掉则卡片会像贴纸一样平铺在背景上）。
+            .shadow(
+                color: .black.opacity((colorScheme == .dark ? 0.10 : 0.038) * depth),
+                radius: 3.5,
+                y: 1.5
             )
     }
 
@@ -624,11 +641,18 @@ struct LiquidGlassSurfaceLayer: View {
                         .blendMode(.screen)
                 }
             }
-            .shadow(color: AppColors.solarEdgeTint.opacity((colorScheme == .dark ? 0.026 : 0.036) * depth), radius: (usesDirectCompositing ? 7 : 11) * depth, x: -2, y: -1)
+            .shadow(color: AppColors.solarEdgeTint.opacity((colorScheme == .dark ? 0.030 : 0.044) * depth), radius: (usesDirectCompositing ? 7 : 11) * depth, x: -2, y: -1)
+            // 主表面环境投影：与 flatSurface 同步降档 + 加大模糊，更柔和扩散、不发黑，仍保层次。
             .shadow(
-                color: .black.opacity((colorScheme == .dark ? 0.10 : 0.026) * depth),
-                radius: (usesDirectCompositing ? 7 : AppGlassMetrics.Shadow.surfaceRadius) * depth,
-                y: usesDirectCompositing ? 3 : AppGlassMetrics.Shadow.surfaceY
+                color: .black.opacity((colorScheme == .dark ? 0.12 : 0.046) * depth),
+                radius: (usesDirectCompositing ? 10 : AppGlassMetrics.Shadow.surfaceRadius + 4) * depth,
+                y: usesDirectCompositing ? 4 : AppGlassMetrics.Shadow.surfaceY
+            )
+            // 接触投影：贴近下沿的暗边，降不透明度并略放大半径使其更柔，保留主表面卡片的落地厚度感。
+            .shadow(
+                color: .black.opacity((colorScheme == .dark ? 0.095 : 0.034) * depth),
+                radius: 3.5,
+                y: 1.5
             )
 
         if respondsToPointer {
@@ -1494,6 +1518,7 @@ private struct ListHighlightSuppressor: NSViewRepresentable {
 private struct SuppressHoverDuringScrollModifier: ViewModifier {
     @State private var isScrolling = false
     @State private var resetTask: Task<Void, Never>?
+    @State private var lastScrollEventAt = Date.distantPast
 
     func body(content: Content) -> some View {
         content
@@ -1511,18 +1536,24 @@ private struct SuppressHoverDuringScrollModifier: ViewModifier {
     }
 
     private func markScrolling() {
+        lastScrollEventAt = Date()
         if !isScrolling {
             isScrolling = true
         }
-        resetTask?.cancel()
+        guard resetTask == nil else { return }
         resetTask = Task { @MainActor in
-            do {
-                try await Task.sleep(nanoseconds: 220_000_000)
-            } catch {
-                return
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 220_000_000)
+                } catch {
+                    return
+                }
+                if Date().timeIntervalSince(lastScrollEventAt) >= 0.20 {
+                    isScrolling = false
+                    resetTask = nil
+                    return
+                }
             }
-            isScrolling = false
-            resetTask = nil
         }
     }
 }
@@ -2271,24 +2302,25 @@ struct AppPageBackground: View {
             }
             // 降低透明度模式下省去环境光与 screen 混合，只保留实色底，同时减少页面级合成组。
             if includeDirectionalLight && !reduceTransparency {
-                // 太阳光从左上柔和射入：降低高光强度、扩大过渡范围，避免左上角出现刺眼亮斑。
+                // 太阳光从左上柔和射入：恢复方向性受光——把高光收得更靠近左上角并提一档强度，
+                // 让“光源在左上”的方向感清晰可读，同时过渡范围仍足够柔和，不形成刺眼亮斑。
                 RadialGradient(
                     colors: [
-                        .white.opacity(colorScheme == .dark ? 0.08 : 0.18),
-                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.12 : 0.18),
-                        AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.06 : 0.10),
-                        .white.opacity(colorScheme == .dark ? 0.018 : 0.052),
+                        .white.opacity(colorScheme == .dark ? 0.11 : 0.24),
+                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.15 : 0.22),
+                        AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.075 : 0.12),
+                        .white.opacity(colorScheme == .dark ? 0.022 : 0.060),
                         .clear
                     ],
-                    center: UnitPoint(x: -0.18, y: -0.24),
+                    center: UnitPoint(x: -0.14, y: -0.20),
                     startRadius: 0,
-                    endRadius: 1780
+                    endRadius: 1480
                 )
                 LinearGradient(
                     colors: [
-                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.080 : 0.115),
-                        AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.045 : 0.072),
-                        .white.opacity(colorScheme == .dark ? 0.012 : 0.042),
+                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.095 : 0.140),
+                        AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.055 : 0.085),
+                        .white.opacity(colorScheme == .dark ? 0.018 : 0.050),
                         .clear,
                         .clear
                     ],
@@ -2298,8 +2330,8 @@ struct AppPageBackground: View {
                 .blendMode(.screen)
                 LinearGradient(
                     colors: [
-                        .white.opacity(colorScheme == .dark ? 0.036 : 0.12),
-                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.050 : 0.080),
+                        .white.opacity(colorScheme == .dark ? 0.045 : 0.150),
+                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.060 : 0.100),
                         .clear
                     ],
                     startPoint: UnitPoint(x: 0.02, y: -0.12),
@@ -3743,13 +3775,95 @@ extension View {
     }
 }
 
+private enum PosterPerformanceTelemetry {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "MediaLib",
+        category: "PosterPerformance"
+    )
+    private static let lock = NSLock()
+    private static var memoryHits = 0
+    private static var memoryMisses = 0
+    private static var diskHits = 0
+    private static var diskMisses = 0
+    private static var diskMilliseconds = 0.0
+    private static var decodeCount = 0
+    private static var decodeMilliseconds = 0.0
+    private static var maxDecodeMilliseconds = 0.0
+    private static var didLogConfiguration = false
+
+    static func noteConfiguration() {
+        lock.lock()
+        guard !didLogConfiguration else {
+            lock.unlock()
+            return
+        }
+        didLogConfiguration = true
+        lock.unlock()
+        logger.info("Poster cache configured: shared 300x450 point bucket, 256 MiB decoded memory cache")
+    }
+
+    static func recordMemoryLookup(hit: Bool) {
+        lock.lock()
+        if hit {
+            memoryHits += 1
+        } else {
+            memoryMisses += 1
+        }
+        let total = memoryHits + memoryMisses
+        let shouldLog = total.isMultiple(of: 250)
+        let hits = memoryHits
+        let misses = memoryMisses
+        lock.unlock()
+        if shouldLog {
+            logger.debug("Poster memory cache: hits=\(hits) misses=\(misses)")
+        }
+    }
+
+    static func recordDiskRead(hit: Bool, milliseconds: Double) {
+        lock.lock()
+        if hit {
+            diskHits += 1
+        } else {
+            diskMisses += 1
+        }
+        diskMilliseconds += milliseconds
+        let total = diskHits + diskMisses
+        let shouldLog = total.isMultiple(of: 100)
+        let hits = diskHits
+        let misses = diskMisses
+        let average = diskMilliseconds / Double(max(total, 1))
+        lock.unlock()
+        if shouldLog {
+            logger.debug("Poster disk cache: hits=\(hits) misses=\(misses) avgMs=\(average, format: .fixed(precision: 2))")
+        }
+    }
+
+    static func recordDecode(milliseconds: Double) {
+        lock.lock()
+        decodeCount += 1
+        decodeMilliseconds += milliseconds
+        maxDecodeMilliseconds = max(maxDecodeMilliseconds, milliseconds)
+        let shouldLog = decodeCount.isMultiple(of: 100)
+        let count = decodeCount
+        let average = decodeMilliseconds / Double(max(count, 1))
+        let maximum = maxDecodeMilliseconds
+        lock.unlock()
+        if shouldLog {
+            logger.debug("Poster decode: count=\(count) avgMs=\(average, format: .fixed(precision: 2)) maxMs=\(maximum, format: .fixed(precision: 2))")
+        }
+    }
+}
+
 enum ArtworkImageCache {
+    /// 海报墙与远程封面预热共用同一尺寸档，避免“已预热”却因缓存键不同重新解码。
+    static let posterGridTargetSize = CGSize(width: 300, height: 450)
     private static let cache = NSCache<NSString, NSImage>()
     private static let remoteStore = ArtworkRemoteImageStore(
         maxConcurrentFetches: 4,
-        maxDiskCacheBytes: 256 * 1024 * 1024,
-        maxDiskCacheFiles: 1600
+        maxDiskCacheBytes: 512 * 1024 * 1024,
+        maxDiskCacheFiles: 6000
     )
+    private static let decodeCoordinator = ArtworkDecodeCoordinator(maxConcurrentDecodes: 3)
     private static var missingPaths: [String: MissingArtworkEntry] = [:]
     private static var aspectRatios: [String: CGFloat] = [:]
     private static var missingAccessOrder: [String] = []
@@ -3765,10 +3879,11 @@ enum ArtworkImageCache {
     private static let defaultTargetSize = CGSize(width: 420, height: 420)
 
     static func configureIfNeeded() {
+        PosterPerformanceTelemetry.noteConfiguration()
         // 提高缓存上限，减少滚动时封面被驱逐后重新解码导致的掉帧与闪烁。
         // Emby 等大体量库（数百~上千海报）滚动时尤其依赖更大的常驻缓存避免反复驱逐→闪烁。
         cache.countLimit = 1200
-        cache.totalCostLimit = 160 * 1024 * 1024
+        cache.totalCostLimit = 256 * 1024 * 1024
     }
 
     static func cachedImage(path: String?, targetSize: CGSize? = nil) -> NSImage? {
@@ -3778,7 +3893,9 @@ enum ArtworkImageCache {
         let isMissing = cachedMissingPathIsFresh(path)
         lock.unlock()
         guard !isMissing else { return nil }
-        return cache.object(forKey: cacheKey(path: path, targetSize: targetSize))
+        let image = cache.object(forKey: cacheKey(path: path, targetSize: targetSize))
+        PosterPerformanceTelemetry.recordMemoryLookup(hit: image != nil)
+        return image
     }
 
     static func cachedAspectRatio(path: String?) -> CGFloat? {
@@ -3822,6 +3939,7 @@ enum ArtworkImageCache {
         if let cached = cache.object(forKey: key) {
             return cached
         }
+        let decodeStart = CFAbsoluteTimeGetCurrent()
         guard FileManager.default.fileExists(atPath: path),
               let image = downsampledImage(path: path, targetSize: targetSize ?? defaultTargetSize) else {
             lock.lock()
@@ -3829,12 +3947,64 @@ enum ArtworkImageCache {
             lock.unlock()
             return nil
         }
+        PosterPerformanceTelemetry.recordDecode(
+            milliseconds: (CFAbsoluteTimeGetCurrent() - decodeStart) * 1_000
+        )
         let pixelCost = image.pixelCost
         cache.setObject(image, forKey: key, cost: pixelCost)
         lock.lock()
         storeAspectRatioLocked(normalizedAspectRatio(for: image), path: path)
         lock.unlock()
         return image
+    }
+
+    static func localImageAsync(path: String, targetSize: CGSize? = nil) async -> NSImage? {
+        configureIfNeeded()
+#if DEBUG
+        if let debugCover = MusicPlayerVisualDebugFixtures.coverImage(
+            forPath: path,
+            size: Int(max(targetSize?.width ?? defaultTargetSize.width, targetSize?.height ?? defaultTargetSize.height))
+        ) {
+            return debugCover
+        }
+        if path == MusicPlayerVisualDebugFixtures.quadrantCoverPath {
+            let side = Int(max(targetSize?.width ?? defaultTargetSize.width, targetSize?.height ?? defaultTargetSize.height))
+            return MusicPlayerVisualDebugFixtures.quadrantCoverImage(size: side)
+        }
+#endif
+        if let remoteURL = remoteURL(from: path) {
+            return await remoteImageAsync(url: remoteURL, targetSize: targetSize)
+        }
+        if cachedMissingPath(path) {
+            return nil
+        }
+
+        let resolvedTargetSize = targetSize ?? defaultTargetSize
+        let key = cacheKey(path: path, targetSize: resolvedTargetSize)
+        if let cached = cache.object(forKey: key) {
+            return cached
+        }
+
+        let decoded = await decodeCoordinator.decode(key: key as String) {
+            let decodeStart = CFAbsoluteTimeGetCurrent()
+            guard FileManager.default.fileExists(atPath: path) else {
+                return SendableArtworkImage(nil)
+            }
+            let image = downsampledImage(path: path, targetSize: resolvedTargetSize)
+            PosterPerformanceTelemetry.recordDecode(
+                milliseconds: (CFAbsoluteTimeGetCurrent() - decodeStart) * 1_000
+            )
+            return SendableArtworkImage(image)
+        }
+        guard let decoded else {
+            if !Task.isCancelled {
+                storeMissingPath(path, isRemote: false)
+            }
+            return nil
+        }
+        cache.setObject(decoded, forKey: key, cost: decoded.pixelCost)
+        storeAspectRatio(normalizedAspectRatio(for: decoded), path: path)
+        return decoded
     }
 
     static func remoteImage(url: URL, targetSize: CGSize? = nil) -> NSImage? {
@@ -3910,6 +4080,24 @@ enum ArtworkImageCache {
         lock.unlock()
     }
 
+    /// 版本升级维护使用：清理旧尺寸/旧策略留下的远程封面与解码缓存。
+    /// 本地扫描生成的封面文件不在这里删除，避免破坏媒体条目保存的本地路径。
+    static func clearRemotePrebakedArtwork() async {
+        clearMemoryCaches()
+        await decodeCoordinator.cancelAll()
+        await remoteStore.removeAll()
+    }
+
+    private static func clearMemoryCaches() {
+        cache.removeAllObjects()
+        lock.lock()
+        missingPaths.removeAll()
+        aspectRatios.removeAll()
+        missingAccessOrder.removeAll()
+        aspectAccessOrder.removeAll()
+        lock.unlock()
+    }
+
     private static func cachedMissingPathIsFresh(_ path: String) -> Bool {
         guard let entry = missingPaths[path] else { return false }
         if Date() < entry.retryAfter {
@@ -3980,9 +4168,14 @@ enum ArtworkImageCache {
     }
 
     private static func decodeRemoteImage(data: Data, path: String, key: NSString, targetSize: CGSize) async -> NSImage? {
-        let decoded = await Task.detached(priority: .utility) {
-            SendableArtworkImage(downsampledImage(data: data, targetSize: targetSize))
-        }.value.image
+        let decoded = await decodeCoordinator.decode(key: key as String) {
+            let decodeStart = CFAbsoluteTimeGetCurrent()
+            let image = downsampledImage(data: data, targetSize: targetSize)
+            PosterPerformanceTelemetry.recordDecode(
+                milliseconds: (CFAbsoluteTimeGetCurrent() - decodeStart) * 1_000
+            )
+            return SendableArtworkImage(image)
+        }
         guard let decoded else { return nil }
         cache.setObject(decoded, forKey: key, cost: decoded.pixelCost)
         storeAspectRatio(normalizedAspectRatio(for: decoded), path: path)
@@ -4014,7 +4207,7 @@ enum ArtworkImageCache {
     }
 
     private static func roundedPixelSize(for targetSize: CGSize) -> CGSize {
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let scale: CGFloat = 2
         let width = max(targetSize.width, 1) * scale
         let height = max(targetSize.height, 1) * scale
         let bucket: CGFloat = 64
@@ -4069,7 +4262,7 @@ enum ArtworkImageCache {
 
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
 
-        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        let scale: CGFloat = 2
         return NSImage(
             cgImage: cgImage,
             size: CGSize(width: CGFloat(cgImage.width) / scale, height: CGFloat(cgImage.height) / scale)
@@ -4098,6 +4291,74 @@ private struct MissingArtworkEntry {
     let failureCount: Int
 }
 
+private actor ArtworkDecodeCoordinator {
+    private let maxConcurrentDecodes: Int
+    private var activeDecodes = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var inFlight: [String: (id: UUID, task: Task<SendableArtworkImage, Never>)] = [:]
+
+    init(maxConcurrentDecodes: Int) {
+        self.maxConcurrentDecodes = max(1, maxConcurrentDecodes)
+    }
+
+    func cancelAll() {
+        inFlight.values.forEach { $0.task.cancel() }
+        inFlight.removeAll()
+    }
+
+    func decode(
+        key: String,
+        operation: @escaping @Sendable () -> SendableArtworkImage
+    ) async -> NSImage? {
+        if let entry = inFlight[key] {
+            return await entry.task.value.image
+        }
+
+        let requestID = UUID()
+        let task = Task<SendableArtworkImage, Never> { [weak self] in
+            guard let self else { return SendableArtworkImage(nil) }
+            return await self.runWithPermit(operation)
+        }
+        inFlight[key] = (requestID, task)
+        let result = await task.value
+        if inFlight[key]?.id == requestID {
+            inFlight.removeValue(forKey: key)
+        }
+        return result.image
+    }
+
+    private func runWithPermit(
+        _ operation: @escaping @Sendable () -> SendableArtworkImage
+    ) async -> SendableArtworkImage {
+        await acquire()
+        guard !Task.isCancelled else {
+            release()
+            return SendableArtworkImage(nil)
+        }
+        let result = await Task.detached(priority: .utility, operation: operation).value
+        release()
+        return result
+    }
+
+    private func acquire() async {
+        if activeDecodes < maxConcurrentDecodes {
+            activeDecodes += 1
+            return
+        }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    private func release() {
+        if waiters.isEmpty {
+            activeDecodes = max(activeDecodes - 1, 0)
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 private actor ArtworkRemoteImageStore {
     private let maxConcurrentFetches: Int
     private let maxDiskCacheBytes: Int
@@ -4105,7 +4366,10 @@ private actor ArtworkRemoteImageStore {
     private let cacheDirectory: URL?
     private var activeFetches = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
-    private var inFlightRequests: [String: Task<Data?, Never>] = [:]
+    private var inFlightRequests: [String: (id: UUID, task: Task<Data?, Never>)] = [:]
+    private var writesSinceLastPrune = 0
+    private var lastPruneAt = Date.distantPast
+    private var cacheGeneration = 0
 
     init(maxConcurrentFetches: Int, maxDiskCacheBytes: Int, maxDiskCacheFiles: Int) {
         self.maxConcurrentFetches = max(1, maxConcurrentFetches)
@@ -4128,29 +4392,58 @@ private actor ArtworkRemoteImageStore {
     }
 
     func data(for cacheID: String, url: URL, timeout: TimeInterval, maxBytes: Int) async -> Data? {
-        if let cached = diskData(cacheID: cacheID, maxBytes: maxBytes) {
-            return cached
+        if let entry = inFlightRequests[cacheID] {
+            return await entry.task.value
         }
 
-        if let task = inFlightRequests[cacheID] {
-            return await task.value
+        let cacheURL = cacheFileURL(cacheID: cacheID)
+        let generation = cacheGeneration
+        let requestID = UUID()
+        let task = Task<Data?, Never> { [weak self] in
+            if let cacheURL,
+               let cached = await Self.readDiskData(url: cacheURL, maxBytes: maxBytes) {
+                return cached
+            }
+            guard let self else { return nil }
+            return await self.fetchWithPermit(
+                cacheID: cacheID,
+                url: url,
+                timeout: timeout,
+                maxBytes: maxBytes,
+                generation: generation
+            )
         }
-
-        let task = Task<Data?, Never> {
-            await acquire()
-            defer { release() }
-            if Task.isCancelled { return nil }
-            return await fetchAndStore(cacheID: cacheID, url: url, timeout: timeout, maxBytes: maxBytes)
-        }
-        inFlightRequests[cacheID] = task
+        inFlightRequests[cacheID] = (requestID, task)
         let data = await task.value
-        inFlightRequests.removeValue(forKey: cacheID)
+        if inFlightRequests[cacheID]?.id == requestID {
+            inFlightRequests.removeValue(forKey: cacheID)
+        }
         return data
     }
 
     func remove(cacheID: String) {
         guard let url = cacheFileURL(cacheID: cacheID) else { return }
         try? FileManager.default.removeItem(at: url)
+    }
+
+    func removeAll() async {
+        cacheGeneration &+= 1
+        inFlightRequests.values.forEach { $0.task.cancel() }
+        inFlightRequests.removeAll()
+        writesSinceLastPrune = 0
+        lastPruneAt = .distantPast
+        guard let cacheDirectory else { return }
+        await Task.detached(priority: .utility) {
+            let fileManager = FileManager.default
+            guard let urls = try? fileManager.contentsOfDirectory(
+                at: cacheDirectory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { return }
+            for url in urls where url.pathExtension == "img" {
+                try? fileManager.removeItem(at: url)
+            }
+        }.value
     }
 
     private func acquire() async {
@@ -4172,20 +4465,52 @@ private actor ArtworkRemoteImageStore {
         }
     }
 
-    private func diskData(cacheID: String, maxBytes: Int) -> Data? {
-        guard let url = cacheFileURL(cacheID: cacheID),
-              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let fileSize = attributes[.size] as? NSNumber,
-              fileSize.intValue > 0,
-              fileSize.intValue <= maxBytes,
-              let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
-            return nil
+    private func fetchWithPermit(
+        cacheID: String,
+        url: URL,
+        timeout: TimeInterval,
+        maxBytes: Int,
+        generation: Int
+    ) async -> Data? {
+        await acquire()
+        defer { release() }
+        if Task.isCancelled { return nil }
+        return await fetchAndStore(
+            cacheID: cacheID,
+            url: url,
+            timeout: timeout,
+            maxBytes: maxBytes,
+            generation: generation
+        )
+    }
+
+    private nonisolated static func readDiskData(url: URL, maxBytes: Int) async -> Data? {
+        let start = CFAbsoluteTimeGetCurrent()
+        let task = Task.detached(priority: .utility) { () -> Data? in
+            guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+                  let fileSize = values.fileSize,
+                  fileSize > 0,
+                  fileSize <= maxBytes else {
+                return nil
+            }
+            // 不在每次滚动命中时写 modificationDate；该写操作会把纯读取变成串行磁盘写热点。
+            return try? Data(contentsOf: url, options: [.mappedIfSafe])
         }
-        touch(url)
+        let data = await task.value
+        PosterPerformanceTelemetry.recordDiskRead(
+            hit: data != nil,
+            milliseconds: (CFAbsoluteTimeGetCurrent() - start) * 1_000
+        )
         return data
     }
 
-    private func fetchAndStore(cacheID: String, url: URL, timeout: TimeInterval, maxBytes: Int) async -> Data? {
+    private func fetchAndStore(
+        cacheID: String,
+        url: URL,
+        timeout: TimeInterval,
+        maxBytes: Int,
+        generation: Int
+    ) async -> Data? {
         var request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: timeout)
         request.setValue("MediaLIB/1.0 local macOS media library", forHTTPHeaderField: "User-Agent")
 
@@ -4200,10 +4525,9 @@ private actor ArtworkRemoteImageStore {
                 return nil
             }
 
-            if let fileURL = cacheFileURL(cacheID: cacheID) {
+            if generation == cacheGeneration, let fileURL = cacheFileURL(cacheID: cacheID) {
                 try? data.write(to: fileURL, options: [.atomic])
-                touch(fileURL)
-                pruneDiskCacheIfNeeded()
+                pruneDiskCacheAfterWriteIfNeeded()
             }
             return data
         } catch {
@@ -4215,8 +4539,15 @@ private actor ArtworkRemoteImageStore {
         cacheDirectory?.appendingPathComponent("\(cacheID).img", isDirectory: false)
     }
 
-    private func touch(_ url: URL) {
-        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+    private func pruneDiskCacheAfterWriteIfNeeded() {
+        writesSinceLastPrune += 1
+        let now = Date()
+        guard writesSinceLastPrune >= 32 || now.timeIntervalSince(lastPruneAt) >= 60 else {
+            return
+        }
+        writesSinceLastPrune = 0
+        lastPruneAt = now
+        pruneDiskCacheIfNeeded()
     }
 
     private func pruneDiskCacheIfNeeded() {
