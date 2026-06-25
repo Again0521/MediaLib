@@ -4080,6 +4080,35 @@ enum ArtworkImageCache {
         await remoteImageAsync(url: url, targetSize: targetSize) != nil
     }
 
+    static func prewarmImages(paths: [String], targetSize: CGSize? = nil) async {
+        let uniquePaths = Array(NSOrderedSet(array: paths)).compactMap { $0 as? String }
+        guard !uniquePaths.isEmpty else { return }
+        await withTaskGroup(of: Void.self) { group in
+            var iterator = uniquePaths.makeIterator()
+            let parallelism = min(6, uniquePaths.count)
+
+            func enqueueNext() {
+                guard let path = iterator.next() else { return }
+                group.addTask(priority: .utility) {
+                    guard !Task.isCancelled else { return }
+                    guard ArtworkImageCache.cachedImage(path: path, targetSize: targetSize) == nil else { return }
+                    if let remoteURL = ArtworkImageCache.remoteURL(from: path) {
+                        _ = await ArtworkImageCache.remoteImageAsync(url: remoteURL, targetSize: targetSize)
+                    } else {
+                        _ = await ArtworkImageCache.localImageAsync(path: path, targetSize: targetSize)
+                    }
+                }
+            }
+
+            for _ in 0..<parallelism {
+                enqueueNext()
+            }
+            while await group.next() != nil {
+                enqueueNext()
+            }
+        }
+    }
+
     static func invalidateMissing(path: String?) {
         guard let path else { return }
         lock.lock()

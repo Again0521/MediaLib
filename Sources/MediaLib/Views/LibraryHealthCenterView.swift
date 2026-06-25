@@ -1,3 +1,4 @@
+import AppKit
 import MediaLibCore
 import SwiftUI
 
@@ -24,6 +25,7 @@ struct LibraryHealthCenterView: View {
                     if hasIssues {
                         offlineSourcesSection
                         missingFilesSection
+                        failedLinksSection
                         duplicateGroupsSection
                         missingMetadataSection
                         missingDetailMetadataSection
@@ -150,6 +152,9 @@ struct LibraryHealthCenterView: View {
                 value: appState.missingMetadataItems.count + appState.detailMetadataGapItems.count,
                 systemImage: "tag.slash"
             )
+            if !appState.unhealthyURLItems.isEmpty {
+                healthMetric(title: "失效链接", value: appState.unhealthyURLItems.count, systemImage: "link.badge.plus")
+            }
         }
     }
 
@@ -372,12 +377,41 @@ struct LibraryHealthCenterView: View {
         .healthRow()
     }
 
+    @ViewBuilder
+    private var failedLinksSection: some View {
+        if !appState.unhealthyURLItems.isEmpty {
+            healthSection(title: "失效链接", subtitle: "URL 媒体源中无法访问或无法解析为视频的地址。可复制链接排查，或从「其他视频」移除。", systemImage: "link.badge.plus") {
+                ForEach(appState.unhealthyURLItems) { item in
+                    healthItemRow(item, detail: "\(appState.urlItemHealthState(for: item).displayName) · \(item.filePath ?? "")") {
+                        Button {
+                            if let link = item.filePath {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(link, forType: .string)
+                                appState.showFloatingNotice(title: "已复制链接", message: link, kind: .success)
+                            }
+                        } label: {
+                            Label("复制链接", systemImage: "link")
+                        }
+                        Button(role: .destructive) {
+                            appState.removeURLVideos(ids: [item.id])
+                        } label: {
+                            Label("移除", systemImage: "trash")
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    .id(item.id)
+                }
+            }
+        }
+    }
+
     private var hasIssues: Bool {
         !appState.offlineSources.isEmpty ||
             !appState.missingFileItems.isEmpty ||
             !appState.duplicateTitleGroups.isEmpty ||
             !appState.missingMetadataItems.isEmpty ||
-            !appState.detailMetadataGapItems.isEmpty
+            !appState.detailMetadataGapItems.isEmpty ||
+            !appState.unhealthyURLItems.isEmpty
     }
 
     private var safeMissingItems: [MediaItem] {

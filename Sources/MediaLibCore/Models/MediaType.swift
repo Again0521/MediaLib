@@ -24,7 +24,7 @@ public enum MediaType: String, Codable, CaseIterable, Identifiable, Sendable {
         case .anime: return "动漫"
         case .documentary: return "纪录片"
         case .variety: return "综艺"
-        case .homeVideo: return "家庭录像"
+        case .homeVideo: return "其他视频"
         case .music: return "音乐"
         case .other: return "其他"
         case .privateCollection: return "保险库"

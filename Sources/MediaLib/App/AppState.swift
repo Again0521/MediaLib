@@ -4,6 +4,7 @@ import MediaLibCore
 import Network
 import OSLog
 import SwiftUI
+import UniformTypeIdentifiers
 
 private let versionMaintenanceLogger = Logger(
     subsystem: Bundle.main.bundleIdentifier ?? "MediaLib",
@@ -14,6 +15,43 @@ struct AppAlert: Identifiable {
     let id = UUID()
     let title: String
     let message: String
+}
+
+/// 自定义封面 / 背景图的目标类型。
+enum VideoArtworkKind {
+    case poster
+    case backdrop
+}
+
+/// URL 视频链接的健康状态：通过可达性与是否可解析判断。
+enum URLItemHealthState: String, Sendable {
+    case unknown      // 未探测（非 http(s) 协议或尚未检查）
+    case checking     // 正在检查
+    case ok           // 可达且像是可解析的视频
+    case unreachable  // 无法访问（超时 / 4xx / 5xx）
+    case unparseable  // 可访问但疑似不是视频（返回网页等）
+
+    var isUnhealthy: Bool { self == .unreachable || self == .unparseable }
+
+    var displayName: String {
+        switch self {
+        case .unknown: return "未检查"
+        case .checking: return "检查中"
+        case .ok: return "可访问"
+        case .unreachable: return "无法访问"
+        case .unparseable: return "无法解析"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .unknown: return "questionmark.circle"
+        case .checking: return "arrow.triangle.2.circlepath"
+        case .ok: return "checkmark.circle"
+        case .unreachable: return "exclamationmark.circle"
+        case .unparseable: return "questionmark.diamond"
+        }
+    }
 }
 
 enum AppFloatingNoticeKind: Equatable, Sendable {
@@ -470,6 +508,13 @@ final class AppState: ObservableObject {
     @Published var musicQueue: [MediaItem] = []
     @Published var musicRepeatMode: MusicRepeatMode = .sequential
     @Published var musicShuffleEnabled = false
+    // 随机播放洗牌袋：一次性乱序序列（每首播完才轮空，整袋放完再重洗），替代旧的无状态
+    // randomElement()（会重复、且整队列未放完就反复抽同一首）。`musicShuffleBagKey` 记录
+    // 洗牌袋是基于哪份队列构建的（队列 ID 列表），队列变化时自动重建。
+    private var musicShuffleBag: [String] = []
+    private var musicShuffleBagKey: [String] = []
+    // 随机播放历史栈：记录已随机播放过的曲目 ID，使「上一首」能真正回到上一次随机播放的曲目。
+    private var musicShuffleHistory: [String] = []
     @Published var musicPlaylists: [MusicPlaylist] = []
     @Published var videoSmartCollections: [VideoSmartCollection] = []
     @Published var videoManualCollections: [VideoManualCollection] = []
@@ -483,6 +528,8 @@ final class AppState: ObservableObject {
     @Published private(set) var detailMetadataGapsByMediaID: [String: Set<String>] = [:]
     @Published private(set) var detailSearchTermsByMediaID: [String: [String]] = [:]
     @Published private(set) var mediaSearchRevision = 0
+    private var mediaSearchFieldsCacheRevision = -1
+    private var mediaSearchFieldsCache: [String: [String?]] = [:]
     @Published var videoManualCollectionCreationRequest: VideoManualCollectionCreationRequest?
     @Published var videoOfflineSubscriptionLimitRequest: VideoOfflineSubscriptionLimitRequest?
     @Published var musicSmartPlaylists: [MusicSmartPlaylist] = []
@@ -591,6 +638,9 @@ final class AppState: ObservableObject {
     private var cachedVideoSeriesStatesByID: [String: VideoSeriesCacheState] = [:]
     private var cachedOfflineSources: [MediaSource] = []
     private var cachedOfflineSourceIDs: Set<String> = []
+    private var cachedURLItemHealthByID: [String: URLItemHealthState] = [:]
+    private var urlHealthTask: Task<Void, Never>?
+    private var urlHealthRefreshID = UUID()
     private var cachedHomeStats = HomeStatsSnapshot()
     private var mediaExternalIDIndex: [String: String] = [:]
     private var mediaIDsByPersonID: [String: Set<String>] = [:]
@@ -994,6 +1044,13 @@ final class AppState: ObservableObject {
     }
 
     func mediaSearchFields(for item: MediaItem) -> [String?] {
+        if mediaSearchFieldsCacheRevision != mediaSearchRevision {
+            mediaSearchFieldsCacheRevision = mediaSearchRevision
+            mediaSearchFieldsCache.removeAll(keepingCapacity: true)
+        }
+        if let cached = mediaSearchFieldsCache[item.id] {
+            return cached
+        }
         var fields: [String?] = [
             item.title,
             item.originalTitle,
@@ -1021,6 +1078,7 @@ final class AppState: ObservableObject {
                 episode.episodeNumber.map { "第 \($0) 集" }
             ])
         }
+        mediaSearchFieldsCache[item.id] = fields
         return fields
     }
 
@@ -2977,7 +3035,8 @@ final class AppState: ObservableObject {
                 continue
             }
 
-            if !isPrivate, Self.isMissingCoreMetadata(item),
+            // 其他视频（含 URL 来源）不参与元数据拉取，不计入元数据缺口。
+            if !isPrivate, item.type != .homeVideo, Self.isMissingCoreMetadata(item),
                !Self.sourcePathExcluded(item.sourcePath, in: healthExcludedSourcePaths) {
                 missingMetadataRaw.append(item)
             }
@@ -3257,7 +3316,7 @@ final class AppState: ObservableObject {
             (.anime, ["动漫", "动画", "番剧", "新番", "国漫", "日漫", "anime", "animation", "bangumi", "cartoon"]),
             (.documentary, ["纪录", "纪实", "documentary", "docu"]),
             (.variety, ["综艺", "真人秀", "脱口秀", "variety", "reality", "talk show", "talkshow"]),
-            (.homeVideo, ["家庭录像", "家庭视频", "家庭影像", "自拍视频", "生活录像", "home video", "homevideo", "homevideos", "home movie", "home movies"]),
+            (.homeVideo, ["其他视频", "家庭录像", "家庭视频", "家庭影像", "自拍视频", "生活录像", "home video", "homevideo", "homevideos", "home movie", "home movies", "other video", "other videos"]),
             (.movie, ["电影", "影片", "影院", "movie", "movies", "film", "cinema"]),
             (.tvShow, ["电视剧", "剧集", "连续剧", "美剧", "日剧", "韩剧", "英剧", "华语剧", "tv", "series", "drama", "shows"])
         ]
@@ -3279,7 +3338,7 @@ final class AppState: ObservableObject {
             (.anime, ["动画", "动漫", "animation", "anime"]),
             (.documentary, ["纪录", "documentary"]),
             (.variety, ["综艺", "真人秀", "脱口秀", "reality", "talk", "variety"]),
-            (.homeVideo, ["家庭录像", "家庭视频", "home video", "homevideo", "home movie"])
+            (.homeVideo, ["其他视频", "家庭录像", "家庭视频", "home video", "homevideo", "home movie", "other video"])
         ]
         return rules.first { _, keywords in keywords.contains { normalized.contains($0) } }?.0
     }
@@ -3325,6 +3384,7 @@ final class AppState: ObservableObject {
 
     private func scheduleFileHealthRefresh() {
         fileHealthTask?.cancel()
+        refreshURLSourceHealth()
         let refreshID = UUID()
         fileHealthRefreshID = refreshID
         cachedMissingFileItems = []
@@ -3369,7 +3429,9 @@ final class AppState: ObservableObject {
                 })
 
                 let offlineSourceIDs = Set(sourceSnapshots.compactMap { source -> String? in
+                    // URL 媒体源没有磁盘路径，健康判定由可达性检查负责，不在此处标记离线。
                     guard !source.sourceKind.isRemoteMediaServer,
+                          source.sourceKind != .url,
                           source.includeInHealthCheck,
                           !FileManager.default.fileExists(atPath: source.path) else {
                         return nil
@@ -3534,6 +3596,417 @@ final class AppState: ObservableObject {
             showInitialIndexingTipIfNeeded()
         } catch {
             showError("添加媒体源失败", error)
+        }
+    }
+
+    // MARK: - URL 视频媒体源
+
+    /// 所有用户添加的 URL 视频聚合在这个虚拟来源路径下。
+    static let urlMediaSourcePath = "urlsource://local"
+    /// 串流地址允许的协议（mpv 原生支持）。
+    static let urlMediaSchemes: Set<String> = ["http", "https", "rtsp", "rtmp", "rtp", "mms", "srt", "udp", "ftp"]
+
+    /// 当前的 URL 媒体源容器（最多一个）。
+    var urlMediaSource: MediaSource? {
+        sources.first { $0.sourceKind == .url }
+    }
+
+    /// URL 媒体源下的全部视频条目，按添加时间倒序。
+    var urlSourceItems: [MediaItem] {
+        items
+            .filter { $0.sourcePath == Self.urlMediaSourcePath }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    @discardableResult
+    private func ensureURLMediaSource() -> MediaSource? {
+        if let existing = urlMediaSource { return existing }
+        guard let sourceRepository else { return nil }
+        let source = MediaSource(
+            name: "URL媒体源",
+            path: Self.urlMediaSourcePath,
+            mediaType: .homeVideo,
+            recursive: false,
+            autoScan: false,
+            includeInMetadataFetch: false,
+            includeInHealthCheck: true
+        )
+        do {
+            try sourceRepository.save(source)
+            return source
+        } catch {
+            showError("创建 URL 媒体源失败", error)
+            return nil
+        }
+    }
+
+    /// 校验并规范化用户输入的视频地址。
+    func normalizedURLSourceString(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let comps = URLComponents(string: trimmed),
+              let scheme = comps.scheme?.lowercased(),
+              Self.urlMediaSchemes.contains(scheme),
+              (comps.host?.isEmpty == false) else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private func defaultTitle(forURL urlString: String) -> String {
+        if let url = URL(string: urlString) {
+            let last = url.lastPathComponent
+            if !last.isEmpty, last != "/" {
+                let stem = (last as NSString).deletingPathExtension
+                return stem.isEmpty ? last : stem
+            }
+            if let host = url.host, !host.isEmpty { return host }
+        }
+        return "URL 视频"
+    }
+
+    @discardableResult
+    func addURLVideo(urlString: String, title: String = "") -> Bool {
+        guard let mediaRepository else { return false }
+        guard let normalized = normalizedURLSourceString(urlString) else {
+            alert = AppAlert(title: "链接无效", message: "请输入以 http(s)、rtsp、rtmp 等协议开头的有效视频地址。")
+            return false
+        }
+        let id = StableID.make(prefix: "url", value: normalized)
+        if items.contains(where: { $0.id == id }) {
+            alert = AppAlert(title: "链接已存在", message: "该地址已经在 URL 媒体源中。")
+            return false
+        }
+        guard ensureURLMediaSource() != nil else { return false }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalTitle = trimmedTitle.isEmpty ? defaultTitle(forURL: normalized) : trimmedTitle
+        let item = MediaItem(
+            id: id,
+            type: .homeVideo,
+            title: finalTitle,
+            sourcePath: Self.urlMediaSourcePath,
+            filePath: normalized
+        )
+        do {
+            try mediaRepository.upsert(item)
+            reload()
+            // 自动从画面截取封面（失败静默，用户仍可手动截取或选择自定义封面）。
+            if canCaptureVideoCover(for: item) {
+                captureVideoCover(for: item, silent: true)
+            }
+            return true
+        } catch {
+            showError("添加 URL 视频失败", error)
+            return false
+        }
+    }
+
+    /// 统计一段文本里有多少个不重复的可添加链接（支持每行一个的批量粘贴）。
+    func addableURLCount(in raw: String) -> Int {
+        let lines = raw.split(whereSeparator: { $0.isNewline }).map(String.init)
+        let candidates = lines.isEmpty ? [raw] : lines
+        var seen = Set<String>()
+        for line in candidates {
+            if let normalized = normalizedURLSourceString(line) {
+                seen.insert(normalized)
+            }
+        }
+        return seen.count
+    }
+
+    /// 批量添加链接：每行一个，自动去重、跳过无效和已存在项。返回新增数量。
+    @discardableResult
+    func addURLVideos(fromMultiline raw: String) -> Int {
+        let lines = raw.split(whereSeparator: { $0.isNewline })
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard lines.count > 1 else {
+            return addURLVideo(urlString: lines.first ?? raw) ? 1 : 0
+        }
+        guard let mediaRepository else { return 0 }
+        var newItems: [MediaItem] = []
+        var seenIDs = Set(items.map(\.id))
+        for line in lines {
+            guard let normalized = normalizedURLSourceString(line) else { continue }
+            let id = StableID.make(prefix: "url", value: normalized)
+            guard seenIDs.insert(id).inserted else { continue }
+            newItems.append(MediaItem(
+                id: id,
+                type: .homeVideo,
+                title: defaultTitle(forURL: normalized),
+                sourcePath: Self.urlMediaSourcePath,
+                filePath: normalized
+            ))
+        }
+        guard !newItems.isEmpty else {
+            alert = AppAlert(title: "未添加任何链接", message: "这些地址要么无效，要么已存在。")
+            return 0
+        }
+        guard ensureURLMediaSource() != nil else { return 0 }
+        do {
+            for item in newItems {
+                try mediaRepository.upsert(item)
+            }
+            reload()
+            for item in newItems where canCaptureVideoCover(for: item) {
+                captureVideoCover(for: item, silent: true)
+            }
+            showFloatingNotice(title: "已添加 \(newItems.count) 个链接", kind: .success)
+            return newItems.count
+        } catch {
+            showError("批量添加链接失败", error)
+            return 0
+        }
+    }
+
+    @discardableResult
+    func updateURLVideo(_ item: MediaItem, urlString: String, title: String) -> Bool {
+        guard let mediaRepository else { return false }
+        guard let normalized = normalizedURLSourceString(urlString) else {
+            alert = AppAlert(title: "链接无效", message: "请输入有效的视频地址。")
+            return false
+        }
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalTitle = trimmedTitle.isEmpty ? defaultTitle(forURL: normalized) : trimmedTitle
+        let newID = StableID.make(prefix: "url", value: normalized)
+        if newID != item.id, items.contains(where: { $0.id == newID }) {
+            alert = AppAlert(title: "链接已存在", message: "已有相同地址的条目。")
+            return false
+        }
+        var updated = item
+        updated.id = newID
+        updated.title = finalTitle
+        updated.filePath = normalized
+        updated.updatedAt = Date()
+        do {
+            if newID != item.id {
+                try mediaRepository.deleteItems(ids: [item.id])
+            }
+            try mediaRepository.upsert(updated)
+            reload()
+            return true
+        } catch {
+            showError("更新 URL 视频失败", error)
+            return false
+        }
+    }
+
+    func removeURLVideos(ids: [String]) {
+        guard let mediaRepository, !ids.isEmpty else { return }
+        let removalSet = Set(ids)
+        do {
+            try mediaRepository.deleteItems(ids: ids)
+            // URL 媒体源清空后，移除空的虚拟容器。
+            let remaining = items.contains { $0.sourcePath == Self.urlMediaSourcePath && !removalSet.contains($0.id) }
+            if !remaining, let source = urlMediaSource {
+                try sourceRepository?.delete(id: source.id)
+            }
+            reload()
+        } catch {
+            showError("删除 URL 视频失败", error)
+        }
+    }
+
+    /// 该条目是否属于 URL 媒体源。
+    func isURLSourceItem(_ item: MediaItem) -> Bool {
+        item.sourcePath == Self.urlMediaSourcePath
+    }
+
+    // MARK: - URL 链接健康（可达性 / 可解析）
+
+    func urlItemHealthState(for item: MediaItem) -> URLItemHealthState {
+        cachedURLItemHealthByID[item.id] ?? .unknown
+    }
+
+    /// URL 媒体源下被判定为失效（无法访问或无法解析）的链接。
+    var unhealthyURLItems: [MediaItem] {
+        guard urlMediaSource?.includeInHealthCheck ?? false else { return [] }
+        return urlSourceItems.filter { cachedURLItemHealthByID[$0.id]?.isUnhealthy == true }
+    }
+
+    /// URL 媒体源整体是否健康（无失效链接）。
+    var urlMediaSourceIsHealthy: Bool {
+        unhealthyURLItems.isEmpty
+    }
+
+    /// 探测 URL 媒体源所有 http(s) 链接的可达性与可解析性。
+    func refreshURLSourceHealth() {
+        urlHealthTask?.cancel()
+        guard urlMediaSource?.includeInHealthCheck ?? false else {
+            cachedURLItemHealthByID = [:]
+            return
+        }
+        let probeItems = urlSourceItems.compactMap { item -> (String, URL)? in
+            guard let filePath = item.filePath,
+                  let url = URL(string: filePath),
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else {
+                return nil
+            }
+            return (item.id, url)
+        }
+        // 清掉已删除条目的旧结果。
+        let liveIDs = Set(urlSourceItems.map(\.id))
+        cachedURLItemHealthByID = cachedURLItemHealthByID.filter { liveIDs.contains($0.key) }
+        guard !probeItems.isEmpty else { return }
+        let refreshID = UUID()
+        urlHealthRefreshID = refreshID
+        for (id, _) in probeItems {
+            cachedURLItemHealthByID[id] = .checking
+        }
+        urlHealthTask = Task { [weak self, probeItems, refreshID] in
+            var results: [String: URLItemHealthState] = [:]
+            await withTaskGroup(of: (String, URLItemHealthState).self) { group in
+                for (id, url) in probeItems {
+                    group.addTask {
+                        (id, await Self.probeURLHealth(url))
+                    }
+                }
+                for await pair in group {
+                    results[pair.0] = pair.1
+                }
+            }
+            await MainActor.run {
+                guard let self, self.urlHealthRefreshID == refreshID else { return }
+                for (id, state) in results {
+                    self.cachedURLItemHealthByID[id] = state
+                }
+                self.libraryRevision += 1
+            }
+        }
+    }
+
+    private static func probeURLHealth(_ url: URL) async -> URLItemHealthState {
+        let session = URLSession.shared
+        var head = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 12)
+        head.httpMethod = "HEAD"
+        if let response = try? await session.data(for: head).1 {
+            return classifyURLResponse(response)
+        }
+        // 部分服务器拒绝 HEAD，改用 1KB 范围 GET 兜底。
+        var ranged = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 12)
+        ranged.httpMethod = "GET"
+        ranged.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
+        if let response = try? await session.data(for: ranged).1 {
+            return classifyURLResponse(response)
+        }
+        return .unreachable
+    }
+
+    private static func classifyURLResponse(_ response: URLResponse) -> URLItemHealthState {
+        guard let http = response as? HTTPURLResponse else { return .ok }
+        if http.statusCode >= 400 { return .unreachable }
+        let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+        // 直链一般是 video/* 或八位字节流 / m3u8；返回网页通常 text/html，多半不是可播放视频。
+        if contentType.contains("text/html") || contentType.contains("application/xhtml") {
+            return .unparseable
+        }
+        return .ok
+    }
+
+    // MARK: - 视频封面截取与自定义
+
+    /// 是否可以从视频画面截取封面（有可解析的视频地址或存在的本地文件）。
+    func canCaptureVideoCover(for item: MediaItem) -> Bool {
+        guard item.type != .music,
+              let filePath = item.filePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !filePath.isEmpty else {
+            return false
+        }
+        if item.isRemoteResource { return true }
+        return FileManager.default.fileExists(atPath: filePath)
+    }
+
+    private func resolvedVideoURL(for item: MediaItem) -> URL? {
+        guard let filePath = item.filePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !filePath.isEmpty else {
+            return nil
+        }
+        if item.isRemoteResource {
+            return URL(string: filePath)
+        }
+        return URL(fileURLWithPath: filePath)
+    }
+
+    /// 从视频画面截取一帧作为封面。`silent` 用于自动截取（仅成功提示）。
+    func captureVideoCover(for item: MediaItem, silent: Bool = false) {
+        guard let directories else {
+            if !silent { alert = AppAlert(title: "无法截取封面", message: "应用数据目录不可用。") }
+            return
+        }
+        guard let videoURL = resolvedVideoURL(for: item) else {
+            if !silent { alert = AppAlert(title: "无法截取封面", message: "这个视频没有可解析的地址。") }
+            return
+        }
+        if !silent {
+            showFloatingNotice(title: "正在截取封面", message: item.title, kind: .info)
+        }
+        let thumbDir = directories.thumbnails
+        let logger = self.logger
+        let mediaID = "\(item.id)-cover-\(Int(Date().timeIntervalSince1970))"
+        Task { [weak self] in
+            let generator = ThumbnailGenerator(outputDirectory: thumbDir, logger: logger)
+            let url = await generator.generateThumbnail(for: videoURL, mediaID: mediaID, ratio: 0.2, avoidBlackFrames: true)
+            await MainActor.run {
+                guard let self else { return }
+                guard let url else {
+                    if !silent {
+                        self.showFloatingNotice(title: "封面截取失败", message: "无法从该视频读取画面。", kind: .warning)
+                    }
+                    return
+                }
+                guard let current = self.items.first(where: { $0.id == item.id }) else { return }
+                ArtworkImageCache.invalidateMissing(path: url.path)
+                self.applyMetadata(MediaMetadataUpdate(posterPath: url.path), to: current)
+                if !silent {
+                    self.showFloatingNotice(title: "已更新封面", message: item.title, kind: .success)
+                }
+            }
+        }
+    }
+
+    /// 弹出文件选择器并把所选图片设为自定义封面或背景。
+    func chooseCustomArtwork(for item: MediaItem, kind: VideoArtworkKind) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [
+            UTType.jpeg, UTType.png, UTType.heic, UTType.tiff,
+            UTType(filenameExtension: "webp"), UTType(filenameExtension: "bmp")
+        ].compactMap { $0 }
+        panel.message = kind == .poster ? "选择自定义封面图片" : "选择自定义背景图片"
+        panel.prompt = "选择"
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
+        importCustomArtwork(for: item, from: sourceURL, kind: kind)
+    }
+
+    /// 把指定图片复制进缩略图目录并设为封面/背景。
+    func importCustomArtwork(for item: MediaItem, from sourceURL: URL, kind: VideoArtworkKind) {
+        guard let thumbnailsDir = directories?.thumbnails else {
+            alert = AppAlert(title: "无法导入封面", message: "应用数据目录不可用。")
+            return
+        }
+        let ext = sourceURL.pathExtension.isEmpty ? "jpg" : sourceURL.pathExtension.lowercased()
+        let suffix = kind == .poster ? "custom-poster" : "custom-backdrop"
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let destURL = thumbnailsDir.appendingPathComponent("\(item.id)-\(suffix)-\(timestamp).\(ext)")
+        do {
+            try FileManager.default.createDirectory(at: thumbnailsDir, withIntermediateDirectories: true)
+            if let existing = try? FileManager.default.contentsOfDirectory(at: thumbnailsDir, includingPropertiesForKeys: nil) {
+                for old in existing where old.lastPathComponent.hasPrefix("\(item.id)-\(suffix)-") {
+                    try? FileManager.default.removeItem(at: old)
+                }
+            }
+            try FileManager.default.copyItem(at: sourceURL, to: destURL)
+            ArtworkImageCache.invalidateMissing(path: destURL.path)
+            switch kind {
+            case .poster:
+                applyMetadata(MediaMetadataUpdate(posterPath: destURL.path), to: item)
+            case .backdrop:
+                applyMetadata(MediaMetadataUpdate(backdropPath: destURL.path), to: item)
+            }
+        } catch {
+            showError("封面导入失败", error)
         }
     }
 
@@ -4329,6 +4802,10 @@ final class AppState: ObservableObject {
         }
     }
 
+    func cachedPersonDetail(personID: String) -> MediaPerson? {
+        try? mediaDetailRepository?.fetchPerson(id: personID)
+    }
+
     func libraryCredits(personID: String) -> [MediaPersonLibraryCredit] {
         let values = (try? mediaDetailRepository?.libraryCredits(personID: personID)) ?? []
         return values.filter { credit in
@@ -5110,7 +5587,7 @@ final class AppState: ObservableObject {
 
     func scanAllSources() {
         let emby = sources.filter { $0.sourceKind.isRemoteMediaServer }
-        let local = sources.filter { !$0.sourceKind.isRemoteMediaServer }
+        let local = sources.filter { !$0.sourceKind.isRemoteMediaServer && $0.sourceKind != .url }
         refreshEmbySources(emby)
         startScanQueue(local)
     }
@@ -5168,7 +5645,7 @@ final class AppState: ObservableObject {
         case .variety:
             scanLocalSources(mediaTypes: [.variety], emptyMessage: "当前综艺分类没有可扫描的媒体源。")
         case .homeVideos:
-            scanLocalSources(mediaTypes: [.homeVideo], emptyMessage: "当前家庭录像分类没有可扫描的媒体源。")
+            scanLocalSources(mediaTypes: [.homeVideo], emptyMessage: "当前其他视频分类没有可扫描的媒体源。")
         case .other:
             scanLocalSources(mediaTypes: [.other], emptyMessage: "当前其他分类没有可扫描的媒体源。")
         case .privacy:
@@ -5215,7 +5692,7 @@ final class AppState: ObservableObject {
 
     private func scanLocalSources(mediaTypes: Set<MediaType>, emptyMessage: String) {
         let matchingSources = sources.filter { source in
-            !source.sourceKind.isRemoteMediaServer && (mediaTypes.contains(source.mediaType) || source.mediaType == .auto)
+            !source.sourceKind.isRemoteMediaServer && source.sourceKind != .url && (mediaTypes.contains(source.mediaType) || source.mediaType == .auto)
         }
         guard !matchingSources.isEmpty else {
             alert = AppAlert(title: "无法扫描", message: "\(emptyMessage) 自动识别来源可在媒体源页面使用“扫描全部”。")
@@ -7229,6 +7706,8 @@ final class AppState: ObservableObject {
 
     func toggleMusicShuffle() {
         musicShuffleEnabled.toggle()
+        // 每次切换都重置洗牌袋与历史：开启时从干净的一轮开始，关闭时不残留陈旧状态。
+        resetShuffleState()
         scheduleMusicQueuePersistence()
     }
 
@@ -7519,9 +7998,13 @@ final class AppState: ObservableObject {
             if musicRepeatMode == .repeatOne {
                 return item
             }
-            if normalizedDirection > 0, musicShuffleEnabled {
-                let candidates = sequence.filter { $0.id != item.id }
-                return candidates.randomElement() ?? item
+            if musicShuffleEnabled {
+                if normalizedDirection > 0 {
+                    return nextShuffleItem(current: item, queue: sequence)
+                } else if let previous = previousShuffleItem(current: item, queue: sequence) {
+                    return previous
+                }
+                // 随机模式下若无历史可回溯，落回下方顺序逻辑（保持原「上一首」兜底行为）。
             }
         } else if let parentID = item.parentID,
                   let parent = items.first(where: { $0.id == parentID }) {
@@ -7543,6 +8026,75 @@ final class AppState: ObservableObject {
         }
         guard sequence.indices.contains(targetIndex) else { return nil }
         return sequence[targetIndex]
+    }
+
+    // MARK: - 随机播放洗牌袋
+
+    /// 返回随机模式下的下一首：从一次性洗牌袋取下一个未播曲目；整袋放完后重洗（循环不停，
+    /// 与旧行为一致但保证「整轮不重复」）。当前曲目入历史栈，供「上一首」回溯。
+    private func nextShuffleItem(current item: MediaItem, queue: [MediaItem]) -> MediaItem? {
+        let queueIDs = queue.map(\.id)
+        guard !queueIDs.isEmpty else { return nil }
+        rebuildShuffleBagIfNeeded(queueIDs: queueIDs)
+
+        // 把当前曲目压入历史（去抖：避免连续相同），并确保它不会立刻又从袋里被抽到。
+        if musicShuffleHistory.last != item.id {
+            musicShuffleHistory.append(item.id)
+        }
+        musicShuffleBag.removeAll { $0 == item.id }
+
+        if musicShuffleBag.isEmpty {
+            // 整袋放完 → 重洗（排除当前曲目，避免与刚播的同一首相邻）。
+            musicShuffleBag = Self.shuffledBag(from: queueIDs, excluding: item.id)
+            musicShuffleBagKey = queueIDs
+        }
+        guard let nextID = musicShuffleBag.first else {
+            // 队列只有当前一首：无其他可选，返回自身（与旧 `?? item` 兜底一致）。
+            return queue.first { $0.id == item.id } ?? item
+        }
+        musicShuffleBag.removeFirst()
+        return queue.first { $0.id == nextID } ?? item
+    }
+
+    /// 返回随机模式下的上一首：从历史栈回退到上一次随机播放过的曲目；无历史则返回 nil
+    /// （调用方落回顺序兜底）。被回退的曲目放回袋首，使其仍会在本轮被播到。
+    private func previousShuffleItem(current item: MediaItem, queue: [MediaItem]) -> MediaItem? {
+        // 丢弃栈顶等于当前曲目的记录（指向自身的占位）。
+        while musicShuffleHistory.last == item.id {
+            musicShuffleHistory.removeLast()
+        }
+        guard let previousID = musicShuffleHistory.popLast(),
+              let previous = queue.first(where: { $0.id == previousID }) else {
+            return nil
+        }
+        // 当前曲目放回袋首，避免回退后它被本轮跳过。
+        if !musicShuffleBag.contains(item.id), queue.contains(where: { $0.id == item.id }) {
+            musicShuffleBag.insert(item.id, at: 0)
+        }
+        return previous
+    }
+
+    private func rebuildShuffleBagIfNeeded(queueIDs: [String]) {
+        guard musicShuffleBagKey != queueIDs || musicShuffleBag.isEmpty else { return }
+        musicShuffleBag = Self.shuffledBag(from: queueIDs, excluding: nil)
+        musicShuffleBagKey = queueIDs
+        // 队列结构变化时，历史中已不在队列里的曲目失去意义；保留仍存在的，按原顺序过滤。
+        let present = Set(queueIDs)
+        musicShuffleHistory.removeAll { !present.contains($0) }
+    }
+
+    private func resetShuffleState() {
+        musicShuffleBag = []
+        musicShuffleBagKey = []
+        musicShuffleHistory = []
+    }
+
+    private static func shuffledBag(from queueIDs: [String], excluding excluded: String?) -> [String] {
+        var bag = queueIDs
+        if let excluded {
+            bag.removeAll { $0 == excluded }
+        }
+        return bag.shuffled()
     }
 
     func openExternally(_ item: MediaItem) {

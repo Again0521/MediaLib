@@ -355,13 +355,6 @@ private struct SystemPhotoGridCell: View {
                         .shadow(color: .black.opacity(0.35), radius: 2)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                         .padding(7)
-                } else if asset.isFavorite {
-                    Image(systemName: "heart.fill")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.pink)
-                        .shadow(color: .black.opacity(0.4), radius: 2)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                        .padding(7)
                 }
             }
             .contentShape(Rectangle())

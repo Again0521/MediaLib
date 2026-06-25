@@ -5130,8 +5130,10 @@ struct MusicMiniPlayerBar: View {
     let onRequestReveal: () -> Void
     let onRequestExpand: () -> Void
     let onRequestClose: () -> Void
-    @State private var albumPalette = AlbumColorPalette.fallback
-    @State private var paletteLoadTask: Task<Void, Never>?
+
+    private var miniChromePalette: AlbumColorPalette {
+        .fallback
+    }
 
     var body: some View {
         Group {
@@ -5140,7 +5142,7 @@ struct MusicMiniPlayerBar: View {
                     .padding(5)
                     .frame(width: 72, height: 72, alignment: .center)
                     .background {
-                        MusicMiniPlayerGlassSurface(palette: albumPalette, cornerRadius: 18)
+                        MusicMiniPlayerGlassSurface(palette: miniChromePalette, cornerRadius: 18)
                     }
                     .transition(.asymmetric(
                         insertion: .opacity.combined(with: .move(edge: .trailing)),
@@ -5150,7 +5152,7 @@ struct MusicMiniPlayerBar: View {
             } else {
                 expandedMiniBar
                     .background {
-                        MusicMiniPlayerGlassSurface(palette: albumPalette, cornerRadius: 18)
+                        MusicMiniPlayerGlassSurface(palette: miniChromePalette, cornerRadius: 18)
                     }
                     .transition(.asymmetric(
                         insertion: .opacity.combined(with: .scale(scale: 0.985, anchor: .trailing)),
@@ -5163,27 +5165,15 @@ struct MusicMiniPlayerBar: View {
         .frame(height: 72)
         .frame(maxWidth: .infinity, alignment: isCollapsed ? .trailing : .bottomLeading)
         .modifier(MusicPlayerPointerLightScope(
-            tint: albumPalette.primary.color,
+            tint: AppColors.pointerLightTint,
             radius: isCollapsed ? 126 : 210,
-            intensity: isCollapsed ? 0.72 : 0.82,
-            updateInterval: isCollapsed ? 1.0 / 18.0 : 1.0 / 24.0,
-            minDistance: isCollapsed ? 10.0 : 8.5
+            intensity: isCollapsed ? 0.54 : 0.62,
+            updateInterval: isCollapsed ? 1.0 / 16.0 : 1.0 / 20.0,
+            minDistance: isCollapsed ? 12.0 : 10.0
         ))
         .glassPerformanceMode(.full)
         .frame(maxWidth: .infinity, alignment: .bottomLeading)
         .allowsHitTesting(true)
-        .onAppear {
-            loadAlbumPalette()
-        }
-        .onChange(of: item.id) { _ in
-            loadAlbumPalette()
-        }
-        .onChange(of: item.posterPath) { _ in
-            loadAlbumPalette()
-        }
-        .onDisappear {
-            paletteLoadTask?.cancel()
-        }
     }
 
     private var expandedMiniBar: some View {
@@ -5192,7 +5182,7 @@ struct MusicMiniPlayerBar: View {
             let showsTrackText = availableWidth >= 590
 
             ZStack {
-                MusicMiniAlbumGlowLayer(palette: albumPalette)
+                MusicMiniNeutralGlassLightLayer()
 
                 HStack(spacing: 12) {
                     trackSummaryButton(showText: showsTrackText)
@@ -5207,16 +5197,16 @@ struct MusicMiniPlayerBar: View {
                     MusicMiniTransportControls(
                         item: item,
                         controller: controller,
-                        palette: albumPalette
+                        palette: miniChromePalette
                     )
                     .fixedSize()
                     .layoutPriority(3)
 
-                    MusicMiniProgressControl(controller: controller, palette: albumPalette)
+                    MusicMiniProgressControl(controller: controller, palette: miniChromePalette)
                         .frame(minWidth: 210, maxWidth: .infinity)
                         .layoutPriority(5)
 
-                    MusicMiniUtilityControls(item: item, controller: controller, palette: albumPalette, onRequestClose: onRequestClose)
+                    MusicMiniUtilityControls(item: item, controller: controller, palette: miniChromePalette, onRequestClose: onRequestClose)
                         .fixedSize()
                         .layoutPriority(2)
                 }
@@ -5233,7 +5223,7 @@ struct MusicMiniPlayerBar: View {
             onRequestReveal()
         } label: {
             ZStack {
-                MusicMiniCollapsedProgressRing(controller: controller, palette: albumPalette)
+                MusicMiniCollapsedProgressRing(controller: controller, palette: miniChromePalette)
                     .frame(width: 62, height: 62)
 
                 PosterImage(path: item.posterPath, title: item.title, mediaType: item.type)
@@ -5249,8 +5239,8 @@ struct MusicMiniPlayerBar: View {
                             .strokeBorder(.white.opacity(0.42), lineWidth: 0.9)
                     }
 
-                MusicMiniPresetSpectrum(controller: controller, palette: albumPalette)
-                    .padding(.bottom, 7)
+                MusicMiniPresetSpectrum(controller: controller, palette: miniChromePalette)
+                    .padding(.bottom, 5)
                     .frame(width: 54, height: 54, alignment: .bottom)
             }
             .frame(width: 62, height: 62)
@@ -5275,7 +5265,7 @@ struct MusicMiniPlayerBar: View {
                                 LinearGradient(
                                     colors: [
                                         .white.opacity(0.72),
-                                        albumPalette.primary.color.opacity(0.22),
+                                        AppColors.pointerLightTint.opacity(0.18),
                                         .white.opacity(0.20)
                                     ],
                                     startPoint: .topLeading,
@@ -5284,7 +5274,7 @@ struct MusicMiniPlayerBar: View {
                                 lineWidth: 0.9
                             )
                     }
-                    .shadow(color: albumPalette.primary.color.opacity(0.12), radius: 8, y: 3)
+                    .shadow(color: AppColors.pointerLightTint.opacity(0.10), radius: 8, y: 3)
 
                 if showText {
                     VStack(alignment: .leading, spacing: 3) {
@@ -5303,7 +5293,7 @@ struct MusicMiniPlayerBar: View {
                         LinearGradient(
                             colors: [
                                 Color.white.opacity(0.20),
-                                albumPalette.primary.color.opacity(0.035),
+                                AppColors.solarLightTint.opacity(0.08),
                                 Color.clear
                             ],
                             startPoint: .leading,
@@ -5318,21 +5308,6 @@ struct MusicMiniPlayerBar: View {
         .help("展开播放器")
     }
 
-    private func loadAlbumPalette() {
-        paletteLoadTask?.cancel()
-        let targetItemID = item.id
-        let targetPath = item.posterPath
-        // 与全屏一致：切歌保留旧取色直到新取色就绪，避免底栏取色瞬间塌成 fallback 再恢复的闪烁。
-        paletteLoadTask = Task {
-            let palette = await AlbumPaletteCache.palette(for: targetPath)
-            await MainActor.run {
-                guard !Task.isCancelled, item.id == targetItemID else { return }
-                withAnimation(AppMotion.standard) {
-                    albumPalette = palette
-                }
-            }
-        }
-    }
 }
 
 private struct MusicMiniCollapsedProgressRing: View {
@@ -5377,9 +5352,8 @@ private struct MusicMiniCollapsedProgressRing: View {
 
 // 迷你条收起态进度投影观察者已物理拆分到 MusicMiniStateObservers.swift（零行为变化）。
 
-private struct MusicMiniAlbumGlowLayer: View {
+private struct MusicMiniNeutralGlassLightLayer: View {
     @Environment(\.colorScheme) private var colorScheme
-    let palette: AlbumColorPalette
 
     var body: some View {
         GeometryReader { proxy in
@@ -5388,9 +5362,9 @@ private struct MusicMiniAlbumGlowLayer: View {
             ZStack(alignment: .leading) {
                 LinearGradient(
                     colors: [
-                        palette.primary.color.opacity(colorScheme == .dark ? 0.30 : 0.22),
-                        palette.accent.color.opacity(colorScheme == .dark ? 0.18 : 0.13),
-                        palette.secondary.color.opacity(colorScheme == .dark ? 0.12 : 0.09),
+                        Color.white.opacity(colorScheme == .dark ? 0.18 : 0.34),
+                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.11 : 0.18),
+                        AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.055 : 0.075),
                         .clear
                     ],
                     startPoint: .leading,
@@ -5401,8 +5375,8 @@ private struct MusicMiniAlbumGlowLayer: View {
                     .fill(
                         RadialGradient(
                             colors: [
-                                palette.primary.color.opacity(colorScheme == .dark ? 0.42 : 0.30),
-                                palette.accent.color.opacity(colorScheme == .dark ? 0.22 : 0.16),
+                                Color.white.opacity(colorScheme == .dark ? 0.22 : 0.38),
+                                AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.12 : 0.20),
                                 .clear
                             ],
                             center: UnitPoint(x: 0.07, y: 0.06),
@@ -5413,7 +5387,7 @@ private struct MusicMiniAlbumGlowLayer: View {
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
             .blendMode(.screen)
-            .opacity(colorScheme == .dark ? 0.58 : 0.46)
+            .opacity(colorScheme == .dark ? 0.42 : 0.50)
             .allowsHitTesting(false)
         }
     }
@@ -5658,17 +5632,17 @@ private struct MusicMiniPresetSpectrum: View {
     var body: some View {
         MusicMiniSpectrumLayerView(
             controller: controller,
-            accentColor: palette.accent.nsColor
+            accentColor: NSColor.controlAccentColor
         )
-        .frame(width: 25, height: 16, alignment: .bottom)
-        .padding(.horizontal, 5)
-        .padding(.vertical, 4)
+        .frame(width: 34, height: 21, alignment: .bottom)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
         .background {
             Capsule()
-                .fill(.black.opacity(0.28))
+                .fill(.black.opacity(0.36))
                 .overlay {
                     Capsule()
-                        .fill(.white.opacity(0.12))
+                        .fill(.white.opacity(0.15))
                         .blendMode(.screen)
                 }
         }
@@ -5819,9 +5793,9 @@ private struct MusicMiniSpectrumLayerView: NSViewRepresentable {
         private func layoutBarsIfNeeded(animated: Bool, forceGeometry: Bool) {
             guard bounds.width > 0, bounds.height > 0, !barLayers.isEmpty else { return }
             let count = barLayers.count
-            let spacing: CGFloat = 2.2
-            let barWidth: CGFloat = 3.2
-            let maxBarHeight: CGFloat = 16
+            let spacing: CGFloat = 2.0
+            let barWidth: CGFloat = 3.4
+            let maxBarHeight: CGFloat = 20
             let totalWidth = CGFloat(count) * barWidth + CGFloat(max(count - 1, 0)) * spacing
             let originX = max((bounds.width - totalWidth) / 2, 0)
             let geometryChanged = forceGeometry || bounds != lastLaidOutBounds || count != lastBarCount
@@ -5846,13 +5820,13 @@ private struct MusicMiniSpectrumLayerView: NSViewRepresentable {
                     bar.position = CGPoint(x: x + barWidth / 2, y: 0)
                 }
                 if needsColorUpdate {
-                    bar.opacity = Float(isPlaying ? 1.0 : 0.58)
+                    bar.opacity = Float(isPlaying ? 1.0 : 0.64)
                     bar.colors = [
-                        NSColor.white.withAlphaComponent(isPlaying ? 0.92 : 0.58).cgColor,
-                        accentColor.withAlphaComponent(isPlaying ? 0.72 : 0.38).cgColor
+                        NSColor.white.withAlphaComponent(isPlaying ? 0.98 : 0.66).cgColor,
+                        accentColor.withAlphaComponent(isPlaying ? 0.86 : 0.44).cgColor
                     ]
                 }
-                bar.transform = CATransform3DMakeScale(1, max(height / maxBarHeight, 0.12), 1)
+                bar.transform = CATransform3DMakeScale(1, max(height / maxBarHeight, 0.16), 1)
             }
             CATransaction.commit()
             needsColorUpdate = false
@@ -5860,14 +5834,15 @@ private struct MusicMiniSpectrumLayerView: NSViewRepresentable {
             lastBarCount = count
         }
 
-        private static let minimumBandBucket = 12
+        private static let minimumBandBucket = 10
         private static let maximumBandBucket = 100
 
         private static func bucketedBands(_ bands: [CGFloat]) -> [Int] {
             guard !bands.isEmpty else { return [minimumBandBucket] }
             return bands.map { band in
-                let clamped = min(max(band, 0.12), 1)
-                return Int((clamped * CGFloat(maximumBandBucket)).rounded())
+                let clamped = min(max(band, 0.08), 1)
+                let emphasized = pow(clamped, 0.62)
+                return Int((emphasized * CGFloat(maximumBandBucket)).rounded())
             }
         }
 

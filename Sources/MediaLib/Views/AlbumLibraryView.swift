@@ -4,7 +4,7 @@ import MediaLibCore
 import SwiftUI
 
 /// 相册一级目录的内容页：照片 App 风格的方形缩略图网格，按拍摄日期分组，二级分段「全部 / 照片 / 录像」。
-/// 照片点开走共享全屏查看器（缩放/平移/翻页/信息/收藏），录像点开直接交给现有视频播放器。
+/// 照片点开走共享全屏查看器（缩放/平移/翻页/信息），录像点开直接交给现有视频播放器。
 enum AlbumContentSource: String, CaseIterable, Identifiable {
     case local
     case system
@@ -357,18 +357,6 @@ struct AlbumLibraryView: View {
                 }
 
                 Button {
-                    favoriteSelected()
-                } label: {
-                    Label("喜欢", systemImage: "heart")
-                }
-                .buttonStyle(LiquidGlassButtonStyle(
-                    cornerRadius: 10,
-                    horizontalPadding: 12,
-                    minHeight: AppControlMetrics.defaultButtonHeight
-                ))
-                .disabled(selectedIDs.isEmpty || systemPhotoLibrary.isManaging)
-
-                Button {
                     shareSelected()
                 } label: {
                     Label("分享", systemImage: "square.and.arrow.up")
@@ -529,17 +517,6 @@ struct AlbumLibraryView: View {
         picker.show(relativeTo: .zero, of: view, preferredEdge: .minY)
     }
 
-    private func favoriteSelected() {
-        if contentSource == .system {
-            let ids = Array(selectedIDs)
-            Task {
-                _ = await systemPhotoLibrary.setFavorite(assetIDs: ids, favorite: true)
-            }
-        } else {
-            appState.setAlbumItemsFavorite(selectedItems, favorite: true)
-        }
-    }
-
     // MARK: - 头部
 
     private var header: some View {
@@ -648,6 +625,7 @@ struct AlbumLibraryView: View {
                     get: { viewerIndex ?? start },
                     set: { viewerIndex = $0 }
                 ),
+                allowsFavorite: false,
                 onClose: { viewerIndex = nil },
                 onPlayVideo: { entry in
                     viewerIndex = nil
@@ -668,17 +646,8 @@ struct AlbumLibraryView: View {
                     get: { viewerIndex ?? start },
                     set: { viewerIndex = $0 }
                 ),
-                allowsFavorite: true,
+                allowsFavorite: false,
                 onClose: { viewerIndex = nil },
-                onToggleFavorite: { entry in
-                    guard let id = entry.photoAssetID else { return }
-                    Task {
-                        _ = await systemPhotoLibrary.setFavorite(
-                            assetIDs: [id],
-                            favorite: !entry.isFavorite
-                        )
-                    }
-                },
                 onShare: { entry in
                     guard let id = entry.photoAssetID else { return }
                     shareSystemAssets([id])
@@ -817,16 +786,6 @@ private struct AlbumGridCell: View {
                             .padding(6)
                     }
                 }
-                .overlay(alignment: .topTrailing) {
-                    if item.favorite {
-                        Image(systemName: "heart.fill")
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(.white)
-                            .shadow(color: .black.opacity(0.4), radius: 2, y: 1)
-                            .padding(7)
-                    }
-                }
-
                 if isVideo {
                     HStack(spacing: 4) {
                         Image(systemName: "play.fill")
@@ -849,9 +808,6 @@ private struct AlbumGridCell: View {
         .help(item.title)
         .contextMenu {
             Button(isVideo ? "播放" : "查看", systemImage: isVideo ? "play.fill" : "eye") { onOpen() }
-            Button(item.favorite ? "取消喜欢" : "加入喜欢", systemImage: item.favorite ? "heart.slash" : "heart") {
-                appState.toggleFavorite(item)
-            }
             if let path = item.filePath {
                 Divider()
                 Button("在访达中显示", systemImage: "folder") {

@@ -120,6 +120,9 @@ public struct MediaSource: Identifiable, Codable, Hashable {
     }
 
     public var sourceKind: MediaSourceKind {
+        if path.hasPrefix("urlsource://") {
+            return .url
+        }
         if path.hasPrefix("emby://") {
             return .emby
         }
@@ -164,6 +167,8 @@ public enum MediaSourceKind: String, Codable, Hashable {
     case plex
     case smb
     case ftp
+    /// 用户添加的网络视频地址（http/rtsp 等）聚合成的虚拟来源，不对应磁盘目录。
+    case url
 
     public var isRemoteMediaServer: Bool {
         self == .emby || self == .jellyfin || self == .plex
@@ -177,6 +182,7 @@ public enum MediaSourceKind: String, Codable, Hashable {
         case .plex: return "Plex"
         case .smb: return "SMB"
         case .ftp: return "FTP"
+        case .url: return "URL"
         }
     }
 }

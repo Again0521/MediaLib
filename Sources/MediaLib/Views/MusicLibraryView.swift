@@ -127,7 +127,7 @@ private enum MusicLibrarySnapshotCache {
     static func store(_ snapshot: Snapshot, for key: Key) {
         values[key] = snapshot
         markRecentlyUsed(key)
-        if values.count > 16 {
+        if values.count > 24 {
             // 只在超出上限时排序一次，正常命中路径零开销。
             let oldest = accessTick.min { $0.value < $1.value }?.key
             if let oldest {
@@ -146,6 +146,7 @@ private enum MusicLibrarySnapshotCache {
 private struct MusicLibrarySnapshotBuildInput: Sendable {
     let section: MusicLibrarySection
     let tracks: [MediaItem]
+    let searchFieldsByTrackID: [String: [String?]]
     let searchText: String
     let sortMode: MusicSortMode
     let sortOrder: MusicSortOrder
@@ -221,7 +222,10 @@ private enum MusicLibrarySnapshotBuilder {
             searched = tracks
         } else {
             searched = tracks.filter {
-                PinyinSearchMatcher.matches(query: query, in: [$0.title, $0.originalTitle, $0.artist, $0.album])
+                PinyinSearchMatcher.matches(
+                    query: query,
+                    in: input.searchFieldsByTrackID[$0.id] ?? [$0.title, $0.originalTitle, $0.artist, $0.album]
+                )
             }
         }
 
@@ -735,6 +739,11 @@ struct MusicLibraryView: View {
         let input = MusicLibrarySnapshotBuildInput(
             section: targetSection,
             tracks: baseTracks,
+            searchFieldsByTrackID: Dictionary(
+                uniqueKeysWithValues: baseTracks.map {
+                    ($0.id, [$0.title, $0.originalTitle, $0.artist, $0.album, $0.genre, $0.collectionTitle, $0.externalID])
+                }
+            ),
             searchText: key.searchText,
             sortMode: key.sortMode,
             sortOrder: key.sortOrder,

@@ -387,7 +387,7 @@ struct MetadataSearchService {
             request.url = keyedURL
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw MetadataSearchError.invalidResponse
         }
@@ -460,7 +460,7 @@ struct MetadataSearchService {
         guard let url = components?.url else { throw MetadataSearchError.invalidRequest }
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw MetadataSearchError.invalidResponse }
         let decoded = try JSONDecoder().decode(DeezerSearchResponse.self, from: data)
         return decoded.data.prefix(12).map { track in
@@ -491,7 +491,7 @@ struct MetadataSearchService {
         request.timeoutInterval = 12
         request.setValue("https://music.163.com", forHTTPHeaderField: "Referer")
         request.setValue(Self.browserUserAgent, forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw MetadataSearchError.invalidResponse }
         let decoded = try JSONDecoder().decode(NeteaseSearchResponse.self, from: data)
         return (decoded.result?.songs ?? []).prefix(12).map { song in
@@ -527,7 +527,7 @@ struct MetadataSearchService {
         request.timeoutInterval = 12
         request.setValue("https://y.qq.com", forHTTPHeaderField: "Referer")
         request.setValue(Self.browserUserAgent, forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw MetadataSearchError.invalidResponse }
         let decoded = try JSONDecoder().decode(QQSearchResponse.self, from: data)
         return (decoded.data?.song?.list ?? []).prefix(12).map { song in
@@ -563,7 +563,7 @@ struct MetadataSearchService {
         guard let url = components?.url else { throw MetadataSearchError.invalidRequest }
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw MetadataSearchError.invalidResponse }
         let decoded = try JSONDecoder().decode(LastFMSearchResponse.self, from: data)
         return (decoded.results?.trackmatches?.track ?? []).prefix(12).map { track in
@@ -595,7 +595,7 @@ struct MetadataSearchService {
         request.timeoutInterval = 12
         request.setValue("MediaLIB/1.0 (local macOS media library)", forHTTPHeaderField: "User-Agent")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else {
             throw MetadataSearchError.invalidResponse
         }
@@ -668,7 +668,7 @@ struct MetadataSearchService {
         request.timeoutInterval = 18
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await HTTPClient.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty else {
                 return nil
             }

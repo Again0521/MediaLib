@@ -26,7 +26,7 @@ enum VideoLibrarySection: String, CaseIterable, Identifiable, Sendable {
         case .anime: return "动漫"
         case .documentaries: return "纪录片"
         case .variety: return "综艺"
-        case .homeVideos: return "家庭录像"
+        case .homeVideos: return "其他视频"
         case .other: return "其他"
         case .privacy: return "保险库"
         case .watching: return "正在观看"

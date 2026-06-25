@@ -153,7 +153,7 @@ struct EmbyService {
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = try JSONEncoder().encode(EmbyLoginRequest(Username: username, Pw: password))
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         try validate(response: response, data: data)
         let payload = try JSONDecoder().decode(EmbyLoginResponse.self, from: data)
         return EmbySession(
@@ -214,7 +214,7 @@ struct EmbyService {
         request.setValue(authorizationHeader(accessToken: session.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         try validate(response: response, data: data)
         let payload = try JSONDecoder().decode(EmbyItemsResponse.self, from: data)
         return payload.Items
@@ -323,7 +323,7 @@ struct EmbyService {
         var request = URLRequest(url: url)
         request.setValue(authorizationHeader(accessToken: session.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         try validate(response: response, data: data)
         return data
     }
@@ -394,8 +394,14 @@ struct EmbyService {
         var syntheticSeriesCandidates: [String: EmbyItemDTO] = [:]
         var startIndex = 0
         var totalRecordCount: Int?
+        // 防御：若服务器忽略 StartIndex/Limit（每次返回相同非空页）且不返回 TotalRecordCount，
+        // 原循环 pageCount>0 恒真会无限翻页。用「绝对页数上限」+「连续页无新增去重项即中止」双闸。
+        var pageIndex = 0
+        let maxPageIterations = 10_000
 
         repeat {
+            pageIndex += 1
+            let importedCountBeforePage = imported.count
             let payload = try await fetchItemPage(
                 session: session,
                 parentID: parentID,
@@ -413,8 +419,15 @@ struct EmbyService {
 
             let pageCount = payload.Items.count
             guard pageCount > 0 else { break }
+            // 整页都是已见 ID 且没有 total 兜底 → 服务器在重复同一批，停止以免死循环。
+            if imported.count == importedCountBeforePage, totalRecordCount == nil {
+                break
+            }
             startIndex += pageCount
             if let totalRecordCount, startIndex >= totalRecordCount {
+                break
+            }
+            if pageIndex >= maxPageIterations {
                 break
             }
         } while true
@@ -459,7 +472,7 @@ struct EmbyService {
         request.setValue(authorizationHeader(accessToken: session.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         try validate(response: response, data: data)
         return try JSONDecoder().decode(EmbyItemsResponse.self, from: data)
     }
@@ -651,7 +664,7 @@ struct EmbyService {
         request.setValue(authorizationHeader(accessToken: session.accessToken), forHTTPHeaderField: "X-Emby-Authorization")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         try validate(response: response, data: data)
         return try JSONDecoder().decode(EmbyItemDTO.self, from: data)
     }
@@ -798,7 +811,7 @@ struct EmbyService {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         try validate(response: response, data: data)
     }
 

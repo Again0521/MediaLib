@@ -119,6 +119,8 @@ private struct AddMediaSourceWizardSheet: View {
     @State private var includeInHealthCheck = true
     @State private var preferMetadataWriteToSource = false
     @State private var remoteTraceSyncMode: RemoteTraceSyncMode = .bidirectional
+    @State private var urlInput = ""
+    @State private var urlTitleInput = ""
 
     private let columns = [GridItem(.adaptive(minimum: 188), spacing: 10)]
     private let mediaTypes: [MediaType] = [
@@ -219,6 +221,8 @@ private struct AddMediaSourceWizardSheet: View {
             switch selectedKind {
             case .local:
                 localConfiguration
+            case .url:
+                urlConfiguration
             case .network:
                 networkConfiguration
             case .emby, .jellyfin, .plex:
@@ -339,6 +343,21 @@ private struct AddMediaSourceWizardSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var urlConfiguration: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            sectionTitle("视频地址")
+            TextField("https://example.com/video.mp4 或 rtsp://…", text: $urlInput)
+                .glassFormField()
+
+            sectionTitle("名称（可选）")
+            TextField("留空则自动取文件名", text: $urlTitleInput)
+                .glassFormField()
+
+            AppInfoNote(text: "添加后会出现在「其他视频」分类，与本地视频一致支持播放、下载和封面管理。多个地址会合并到同一个 URL 媒体源，可在媒体源行的「管理」中增删改查。", systemImage: "link")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private var remoteConfiguration: some View {
         VStack(alignment: .leading, spacing: 14) {
             sectionTitle("服务器")
@@ -364,6 +383,7 @@ private struct AddMediaSourceWizardSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             SourceBehaviorSettingsPanel(
                 isRemoteMediaServer: selectedKind.isRemoteMediaServer,
+                mediaType: mediaType,
                 includeInMetadataFetch: $includeInMetadataFetch,
                 includeInHealthCheck: $includeInHealthCheck,
                 preferMetadataWriteToSource: $preferMetadataWriteToSource,
@@ -423,11 +443,13 @@ private struct AddMediaSourceWizardSheet: View {
         case .source:
             return "下一步"
         case .configure:
-            return "下一步"
+            return selectedKind == .url ? "添加视频" : "下一步"
         case .settings:
             switch selectedKind {
             case .local:
                 return "添加并扫描"
+            case .url:
+                return "添加视频"
             case .network:
                 return "连接并选择目录"
             case .plex:
@@ -445,11 +467,13 @@ private struct AddMediaSourceWizardSheet: View {
         case .source:
             return "chevron.right"
         case .configure:
-            return "chevron.right"
+            return selectedKind == .url ? "plus" : "chevron.right"
         case .settings:
             switch selectedKind {
             case .local:
                 return "folder.badge.plus"
+            case .url:
+                return "plus"
             case .network:
                 return "network"
             case .emby, .jellyfin, .plex:
@@ -466,6 +490,8 @@ private struct AddMediaSourceWizardSheet: View {
             switch selectedKind {
             case .local:
                 return selectedURLs.isEmpty
+            case .url:
+                return appState.normalizedURLSourceString(urlInput) == nil
             case .network:
                 return networkURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .plex:
@@ -485,6 +511,8 @@ private struct AddMediaSourceWizardSheet: View {
             switch selectedKind {
             case .local:
                 return selectedURLs.isEmpty
+            case .url:
+                return appState.normalizedURLSourceString(urlInput) == nil
             case .network:
                 return networkURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .plex:
@@ -515,8 +543,13 @@ private struct AddMediaSourceWizardSheet: View {
                 step = .configure
             }
         case .configure:
-            withAnimation(AppMotion.standard) {
-                step = .settings
+            // URL 视频没有参与策略，直接提交，不进入设置步骤。
+            if selectedKind == .url {
+                submitConfiguredSource()
+            } else {
+                withAnimation(AppMotion.standard) {
+                    step = .settings
+                }
             }
         case .settings:
             submitConfiguredSource()
@@ -525,10 +558,17 @@ private struct AddMediaSourceWizardSheet: View {
 
     private func submitConfiguredSource() {
         switch selectedKind {
+        case .url:
+            let url = urlInput
+            let title = urlTitleInput
+            if appState.addURLVideo(urlString: url, title: title) {
+                dismiss()
+            }
         case .local:
             let urls = selectedURLs
             let type = mediaType
-            let includeMetadata = includeInMetadataFetch
+            // 相册与其他视频不参与元数据拉取。
+            let includeMetadata = (type == .photo || type == .homeVideo) ? false : includeInMetadataFetch
             let includeHealth = includeInHealthCheck
             let preferWrite = preferMetadataWriteToSource
             dismiss()
@@ -604,7 +644,7 @@ private struct AddMediaSourceWizardSheet: View {
             username: networkAnonymous ? nil : networkUsername,
             password: networkAnonymous ? nil : networkPassword,
             mediaType: mediaType,
-            includeMetadata: includeInMetadataFetch,
+            includeMetadata: (mediaType == .photo || mediaType == .homeVideo) ? false : includeInMetadataFetch,
             includeHealth: includeInHealthCheck,
             preferWrite: preferMetadataWriteToSource
         )
@@ -662,6 +702,7 @@ private enum AddMediaSourceWizardStep {
 
 private enum AddMediaSourceKind: String, CaseIterable, Identifiable {
     case local
+    case url
     case network
     case emby
     case jellyfin
@@ -673,7 +714,7 @@ private enum AddMediaSourceKind: String, CaseIterable, Identifiable {
         switch self {
         case .emby, .jellyfin, .plex:
             return true
-        case .local, .network:
+        case .local, .url, .network:
             return false
         }
     }
@@ -682,6 +723,8 @@ private enum AddMediaSourceKind: String, CaseIterable, Identifiable {
         switch self {
         case .local:
             return "本地目录"
+        case .url:
+            return "网络视频地址"
         case .network:
             return "网络设备"
         case .emby:
@@ -697,6 +740,8 @@ private enum AddMediaSourceKind: String, CaseIterable, Identifiable {
         switch self {
         case .local:
             return "本机硬盘、移动硬盘或已挂载目录"
+        case .url:
+            return "粘贴 http/rtsp 等直链视频地址"
         case .network:
             return "SMB、FTP 或 FTPS 挂载后扫描"
         case .emby:
@@ -712,6 +757,8 @@ private enum AddMediaSourceKind: String, CaseIterable, Identifiable {
         switch self {
         case .local:
             return "选择文件夹并指定分类。"
+        case .url:
+            return "粘贴视频直链并命名。"
         case .network:
             return "填写网络地址，挂载后选择实际目录。"
         case .emby:
@@ -727,6 +774,8 @@ private enum AddMediaSourceKind: String, CaseIterable, Identifiable {
         switch self {
         case .local:
             return "externaldrive.badge.plus"
+        case .url:
+            return "link"
         case .network:
             return "network"
         case .emby:
@@ -783,6 +832,7 @@ private struct SourceSettingsSheet: View {
                     sectionTitle("参与策略")
                     SourceBehaviorSettingsPanel(
                         isRemoteMediaServer: source.sourceKind.isRemoteMediaServer,
+                        mediaType: draft.mediaType,
                         includeInMetadataFetch: includeInMetadataFetchBinding,
                         includeInHealthCheck: includeInHealthCheckBinding,
                         preferMetadataWriteToSource: preferMetadataWriteToSourceBinding,
@@ -1009,6 +1059,11 @@ private struct SourceSettingsSheet: View {
         guard !isSaving else { return }
         isSaving = true
         var updated = draft
+        // 相册与其他视频不参与元数据拉取，保存时强制关闭，避免隐藏开关后仍标记为参与。
+        if !source.sourceKind.isRemoteMediaServer,
+           updated.mediaType == .photo || updated.mediaType == .homeVideo {
+            updated.includeInMetadataFetch = false
+        }
         if !updated.includeInMetadataFetch {
             updated.preferMetadataWriteToSource = false
         }
@@ -1045,7 +1100,7 @@ private extension EmbyLibrarySummary {
         case "music": return "音乐"
         case "boxsets": return "合集"
         case "playlists": return "播放列表"
-        case "homevideos": return "家庭录像"
+        case "homevideos": return "其他视频"
         case "photos": return "照片"
         case "livetv": return "电视直播"
         case .some(let value) where !value.isEmpty: return value
@@ -1056,25 +1111,35 @@ private extension EmbyLibrarySummary {
 
 private struct SourceBehaviorSettingsPanel: View {
     let isRemoteMediaServer: Bool
+    /// 本地源的分类；相册（.photo）和其他视频（.homeVideo）不展示元数据拉取相关选项。
+    var mediaType: MediaType = .auto
     @Binding var includeInMetadataFetch: Bool
     @Binding var includeInHealthCheck: Bool
     @Binding var preferMetadataWriteToSource: Bool
     @Binding var remoteTraceSyncMode: RemoteTraceSyncMode
 
+    /// 相册与其他视频不参与元数据拉取，隐藏相关开关。
+    private var showsMetadataParticipation: Bool {
+        if isRemoteMediaServer { return true }
+        return mediaType != .photo && mediaType != .homeVideo
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 10) {
-                Toggle("参与元数据拉取", isOn: Binding(
-                    get: { includeInMetadataFetch },
-                    set: { newValue in
-                        includeInMetadataFetch = newValue
-                        if !newValue {
-                            preferMetadataWriteToSource = false
+                if showsMetadataParticipation {
+                    Toggle("参与元数据拉取", isOn: Binding(
+                        get: { includeInMetadataFetch },
+                        set: { newValue in
+                            includeInMetadataFetch = newValue
+                            if !newValue {
+                                preferMetadataWriteToSource = false
+                            }
                         }
-                    }
-                ))
+                    ))
+                }
                 Toggle("参与健康检查", isOn: $includeInHealthCheck)
-                if !isRemoteMediaServer {
+                if !isRemoteMediaServer && showsMetadataParticipation {
                     Toggle("元数据优先写入源目录", isOn: $preferMetadataWriteToSource)
                         .disabled(!includeInMetadataFetch)
                 }
@@ -1171,6 +1236,9 @@ struct SourceRowView: View {
     @State private var isHovering = false
     @State private var showDeleteConfirmation = false
     @State private var showingSettings = false
+    @State private var showingURLManager = false
+
+    private var isURLSource: Bool { source.sourceKind == .url }
 
     var body: some View {
         let isLockedPrivateSource = source.mediaType == .privateCollection && !appState.privacyUnlocked
@@ -1203,15 +1271,24 @@ struct SourceRowView: View {
                     Text(sourceTitle(isLockedPrivateSource: isLockedPrivateSource))
                         .font(.headline)
 
-                    AppStatusBadge(
-                        title: isReachable ? "可访问" : "不可访问",
-                        systemImage: isReachable ? "checkmark.circle" : "exclamationmark.circle",
-                        tint: isReachable ? AppColors.selectedGlassTint : .orange
-                    )
+                    if isURLSource {
+                        let unhealthy = appState.unhealthyURLItems.count
+                        AppStatusBadge(
+                            title: unhealthy == 0 ? "链接正常" : "\(unhealthy) 个链接失效",
+                            systemImage: unhealthy == 0 ? "checkmark.circle" : "exclamationmark.circle",
+                            tint: unhealthy == 0 ? AppColors.selectedGlassTint : .orange
+                        )
+                    } else {
+                        AppStatusBadge(
+                            title: isReachable ? "可访问" : "不可访问",
+                            systemImage: isReachable ? "checkmark.circle" : "exclamationmark.circle",
+                            tint: isReachable ? AppColors.selectedGlassTint : .orange
+                        )
+                    }
 
                     AppStatusBadge(
                         title: source.sourceKind.displayName,
-                        systemImage: source.sourceKind.isRemoteMediaServer ? "server.rack" : (source.sourceKind == .local ? "internaldrive" : "network")
+                        systemImage: sourceKindBadgeIcon
                     )
                 }
                 if isLockedPrivateSource {
@@ -1220,6 +1297,11 @@ struct SourceRowView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                } else if isURLSource {
+                    Text("\(appState.urlSourceItems.count) 个视频地址 · 在「其他视频」中查看")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 } else {
                     // 路径过长时截断；鼠标悬停在该行时循环滚动完整路径。
                     MarqueeText(text: source.displayPath, font: .caption)
@@ -1230,35 +1312,46 @@ struct SourceRowView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             HStack(spacing: 12) {
-                Button {
-                    showingSettings = true
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .frame(width: 18, height: 18)
-                }
-                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
-                .help("设置")
-
-                if !isReachable, appState.canRemountNetworkSource(source) {
+                if isURLSource {
                     Button {
-                        appState.remountNetworkSource(source)
+                        showingURLManager = true
                     } label: {
-                        Image(systemName: "arrow.triangle.2.circlepath")
+                        Label("管理", systemImage: "slider.horizontal.3")
+                            .frame(height: 18)
+                    }
+                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 10, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
+                    .help("管理 URL 视频地址")
+                } else {
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
                             .frame(width: 18, height: 18)
                     }
                     .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
-                    .help("重新挂载")
-                }
+                    .help("设置")
 
-                Button {
-                    appState.scan(source)
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .frame(width: 18, height: 18)
+                    if !isReachable, appState.canRemountNetworkSource(source) {
+                        Button {
+                            appState.remountNetworkSource(source)
+                        } label: {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .frame(width: 18, height: 18)
+                        }
+                        .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
+                        .help("重新挂载")
+                    }
+
+                    Button {
+                        appState.scan(source)
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
+                    .disabled(appState.isScanning || !isReachable)
+                    .help("扫描")
                 }
-                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
-                .disabled(appState.isScanning || !isReachable)
-                .help("扫描")
 
                 Button(role: .destructive) {
                     showDeleteConfirmation = true
@@ -1306,6 +1399,23 @@ struct SourceRowView: View {
             SourceSettingsSheet(source: source)
                 .environmentObject(appState)
         }
+        .sheet(isPresented: $showingURLManager) {
+            URLSourceManagementSheet()
+                .environmentObject(appState)
+        }
+    }
+
+    private var sourceKindBadgeIcon: String {
+        switch source.sourceKind {
+        case .emby, .jellyfin, .plex:
+            return "server.rack"
+        case .local:
+            return "internaldrive"
+        case .url:
+            return "link"
+        case .smb, .ftp:
+            return "network"
+        }
     }
 
     private var iconName: String {
@@ -1317,6 +1427,8 @@ struct SourceRowView: View {
             return "server.rack"
         case .smb, .ftp:
             return "network"
+        case .url:
+            return "link"
         case .local:
             return "externaldrive.fill"
         }
@@ -1332,4 +1444,253 @@ struct SourceRowView: View {
         return source.name
     }
 
+}
+
+// MARK: - URL 媒体源管理（增删改查）
+
+private struct URLSourceManagementSheet: View {
+    @EnvironmentObject private var appState: AppState
+    @Environment(\.dismiss) private var dismiss
+    @State private var newURL = ""
+    @State private var newTitle = ""
+    @State private var editingItemID: String?
+    @State private var editURL = ""
+    @State private var editTitle = ""
+    @State private var pendingDeleteID: String?
+
+    private var items: [MediaItem] { appState.urlSourceItems }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            AppSheetHeader(
+                title: "URL 媒体源",
+                subtitle: "管理网络视频地址，增删改查会同步到「其他视频」分类。",
+                systemImage: "link"
+            )
+
+            addForm
+
+            if items.isEmpty {
+                EmptyStateView(
+                    title: "还没有 URL 视频",
+                    systemImage: "link.badge.plus",
+                    message: "在上方粘贴 http/rtsp 等直链地址即可添加。"
+                )
+                .frame(minHeight: 180)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        ForEach(items) { item in
+                            row(item)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .frame(maxHeight: 320)
+                .scrollContentBackground(.hidden)
+            }
+
+            AppSheetActionFooter {
+                Button {
+                    appState.refreshURLSourceHealth()
+                } label: {
+                    Label("重新检查链接", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                .disabled(items.isEmpty)
+
+                Button("完成") {
+                    dismiss()
+                }
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+            }
+        }
+        .appSheetChrome(width: AppSheetMetrics.wideWidth, maxHeight: 720)
+        .onAppear {
+            appState.refreshURLSourceHealth()
+        }
+    }
+
+    @ViewBuilder
+    private func healthDot(for item: MediaItem) -> some View {
+        let state = appState.urlItemHealthState(for: item)
+        let tint: Color = {
+            switch state {
+            case .ok: return .green
+            case .unreachable: return .orange
+            case .unparseable: return .yellow
+            case .checking, .unknown: return .secondary
+            }
+        }()
+        Image(systemName: state.systemImage)
+            .font(.caption2)
+            .foregroundStyle(tint)
+            .help(state.displayName)
+            .accessibilityLabel(state.displayName)
+    }
+
+    private var addForm: some View {
+        let addableCount = appState.addableURLCount(in: newURL)
+        let isBatch = addableCount > 1
+        return VStack(alignment: .leading, spacing: 10) {
+            sectionTitle("添加地址")
+            TextField("https://example.com/video.mp4 或 rtsp://…（每行一个可批量添加）", text: $newURL, axis: .vertical)
+                .lineLimit(1...5)
+                .glassFormField()
+            if !isBatch {
+                TextField("名称（可选，留空则取文件名）", text: $newTitle)
+                    .glassFormField()
+            }
+            HStack {
+                if isBatch {
+                    Text("检测到 \(addableCount) 个链接")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    let added: Bool
+                    if isBatch {
+                        added = appState.addURLVideos(fromMultiline: newURL) > 0
+                    } else {
+                        added = appState.addURLVideo(urlString: newURL, title: newTitle)
+                    }
+                    if added {
+                        newURL = ""
+                        newTitle = ""
+                    }
+                } label: {
+                    Label(isBatch ? "批量添加 \(addableCount) 个" : "添加", systemImage: "plus")
+                }
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+                .disabled(addableCount == 0)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .staticSurfaceBackground(cornerRadius: 16)
+    }
+
+    @ViewBuilder
+    private func row(_ item: MediaItem) -> some View {
+        if editingItemID == item.id {
+            VStack(alignment: .leading, spacing: 10) {
+                TextField("视频地址", text: $editURL)
+                    .glassFormField()
+                TextField("名称", text: $editTitle)
+                    .glassFormField()
+                HStack(spacing: 10) {
+                    Spacer(minLength: 0)
+                    Button("取消") {
+                        editingItemID = nil
+                    }
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
+                    Button {
+                        if appState.updateURLVideo(item, urlString: editURL, title: editTitle) {
+                            editingItemID = nil
+                        }
+                    } label: {
+                        Label("保存", systemImage: "checkmark")
+                    }
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+                    .disabled(appState.normalizedURLSourceString(editURL) == nil)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .staticSurfaceBackground(selected: true, cornerRadius: 14)
+        } else {
+            HStack(spacing: 12) {
+                PosterImage(path: item.posterPath, title: item.title, mediaType: .homeVideo, cacheTargetSize: CGSize(width: 128, height: 80))
+                    .frame(width: 64, height: 40)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(.white.opacity(0.18), lineWidth: 0.7)
+                    }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(item.title)
+                            .font(.callout.weight(.semibold))
+                            .lineLimit(1)
+                        healthDot(for: item)
+                    }
+                    Text(item.filePath ?? "")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Menu {
+                    if appState.canCaptureVideoCover(for: item) {
+                        Button {
+                            appState.captureVideoCover(for: item)
+                        } label: {
+                            Label("从视频截取封面", systemImage: "camera.viewfinder")
+                        }
+                    }
+                    Button {
+                        appState.chooseCustomArtwork(for: item, kind: .poster)
+                    } label: {
+                        Label("选择自定义封面…", systemImage: "photo.badge.plus")
+                    }
+                } label: {
+                    Image(systemName: "photo")
+                        .frame(width: 18, height: 18)
+                }
+                .menuIndicator(.hidden)
+                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
+                .fixedSize()
+                .help("封面")
+
+                Button {
+                    editURL = item.filePath ?? ""
+                    editTitle = item.title
+                    editingItemID = item.id
+                } label: {
+                    Image(systemName: "pencil")
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
+                .help("编辑")
+
+                Button(role: .destructive) {
+                    pendingDeleteID = item.id
+                } label: {
+                    Image(systemName: "trash")
+                        .frame(width: 18, height: 18)
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
+                .help("删除")
+                .confirmationDialog(
+                    "删除「\(item.title)」？",
+                    isPresented: Binding(
+                        get: { pendingDeleteID == item.id },
+                        set: { if !$0 { pendingDeleteID = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    Button("删除", role: .destructive) {
+                        appState.removeURLVideos(ids: [item.id])
+                        pendingDeleteID = nil
+                    }
+                    Button("取消", role: .cancel) { pendingDeleteID = nil }
+                } message: {
+                    Text("将从「其他视频」移除该地址；已下载到本机的文件不会被删除。")
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .staticSurfaceBackground(cornerRadius: 14)
+        }
+    }
+
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text)
+            .font(.callout.weight(.semibold))
+    }
 }

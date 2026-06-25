@@ -129,7 +129,7 @@ struct MediaImageViewer: View {
                     .lineLimit(1)
             }
             Spacer()
-            if let current, allowsFavorite, current.item != nil || onToggleFavorite != nil {
+            if let current, allowsFavorite, (current.item != nil || onToggleFavorite != nil) {
                 circleButton(systemImage: current.isFavorite ? "heart.fill" : "heart", tint: current.isFavorite ? .pink : .white) {
                     toggleFavorite(current)
                 }

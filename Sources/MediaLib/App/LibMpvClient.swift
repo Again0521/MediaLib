@@ -21,6 +21,16 @@ private struct MpvOpenGLFBO {
     var internalFormat: Int32
 }
 
+/// 渲染更新回调的上下文载体（见 `LibMpvClient.renderSink` 注释）。
+/// 不持有对 `LibMpvClient` 的引用，故被 C 回调 `passRetained` 不会形成保留环。
+/// `onUpdate` 仅在 MainActor 上读写（回调先 hop 到 MainActor 再读取）。
+private final class RenderUpdateSink {
+    var onUpdate: (() -> Void)?
+    init(onUpdate: (() -> Void)?) {
+        self.onUpdate = onUpdate
+    }
+}
+
 @MainActor
 final class LibMpvClient {
     private enum Format {
@@ -78,7 +88,11 @@ final class LibMpvClient {
     private let renderContextReportSwapFunction: RenderContextReportSwap?
     private let renderContextFreeFunction: RenderContextFree
     private var renderContext: OpaquePointer?
-    private var onRenderUpdate: (() -> Void)?
+    /// 渲染更新回调的上下文载体。mpv 在其内部线程触发回调；为避免「正在回调」与「对象释放」
+    /// 交错导致的 use-after-free，回调上下文持有的是这个独立 sink（而非 `self`）：
+    /// C 侧对 sink 做 `passRetained` +1，sink 不反向引用 `LibMpvClient`（不构成保留环），
+    /// `deinit` 先注销回调、再 `release` 这个 +1，确保任何在途回调期间 sink 始终存活。
+    private let renderSink: RenderUpdateSink
 
     init(
         openGLContext: NSOpenGLContext,
@@ -109,7 +123,7 @@ final class LibMpvClient {
             throw LibMpvError.createFailed
         }
         handle = created
-        self.onRenderUpdate = onRenderUpdate
+        self.renderSink = RenderUpdateSink(onUpdate: onRenderUpdate)
 
         try setOptionString("config", "no")
         try setOptionString("terminal", "no")
@@ -141,7 +155,10 @@ final class LibMpvClient {
 
     deinit {
         if let renderContext {
+            // 先注销回调（注销返回后 mpv 不再发起新回调），再释放 sink 的 +1：
+            // 任何已在途的回调期间 sink 仍被 +1 持有，故不会 use-after-free。
             renderContextSetUpdateCallbackFunction(renderContext, nil, nil)
+            Unmanaged.passUnretained(renderSink).release()
             renderContextFreeFunction(renderContext)
         }
         if let terminateDestroyFunction {
@@ -175,7 +192,7 @@ final class LibMpvClient {
     }
 
     func stopPlayback() {
-        onRenderUpdate = nil
+        renderSink.onUpdate = nil
         try? command(["set", "volume", "0"])
         try? command(["set", "pause", "yes"])
         try? command(["stop"])
@@ -293,10 +310,11 @@ final class LibMpvClient {
             throw LibMpvError.renderContextFailed
         }
         renderContext = context
+        // 传 sink 的 passRetained(+1)；该 +1 在 deinit 注销回调后释放（见 deinit）。
         renderContextSetUpdateCallbackFunction(
             context,
             Self.renderUpdateCallback,
-            Unmanaged.passUnretained(self).toOpaque()
+            Unmanaged.passRetained(renderSink).toOpaque()
         )
     }
 
@@ -338,9 +356,11 @@ final class LibMpvClient {
 
     private static let renderUpdateCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = { context in
         guard let context else { return }
-        let client = Unmanaged<LibMpvClient>.fromOpaque(context).takeUnretainedValue()
+        // 在 mpv 线程仅做指针 +0 取值（sink 由 C 侧 +1 持有，存活有保证），
+        // 真正读取闭包并执行放到 MainActor，与 deinit/stopPlayback 对 sink 的写入串行化。
+        let sink = Unmanaged<RenderUpdateSink>.fromOpaque(context).takeUnretainedValue()
         Task { @MainActor in
-            client.onRenderUpdate?()
+            sink.onUpdate?()
         }
     }
 

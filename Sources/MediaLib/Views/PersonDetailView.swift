@@ -8,8 +8,10 @@ struct PersonDetailView: View {
 
     @State private var person: MediaPerson?
     @State private var persistedLibraryCredits: [MediaPersonLibraryCredit] = []
-    @State private var persistedLibraryItems: [MediaItem] = []
-    @State private var persistedLibraryWorks: [MediaPersonWork] = []
+    @State private var libraryWorkRows: [PersonWorkRow] = []
+    @State private var knownForRows: [PersonWorkRow] = []
+    @State private var filmographyGroups: [PersonFilmographyGroup] = []
+    @State private var filmographyTotalCount = 0
     @State private var showsFullFilmography = false
     @State private var isLoading = false
 
@@ -34,23 +36,23 @@ struct PersonDetailView: View {
                 detailRow(top: 8, bottom: 8) {
                     hero(person)
                 }
-                if !libraryItems.isEmpty {
+                if !libraryWorkRows.isEmpty {
                     detailRow(top: 8, bottom: 8) {
                         mediaSection(
                             title: "库中作品",
-                            subtitle: "\(libraryItems.count) 部 · 已穿透全部来源",
-                            works: libraryWorks
+                            subtitle: "\(libraryWorkRows.count) 部 · 已穿透全部来源",
+                            rows: libraryWorkRows
                         )
                     }
                 }
-                if !person.knownFor.isEmpty {
+                if !knownForRows.isEmpty {
                     detailRow(top: 8, bottom: 8) {
-                        mediaSection(title: "代表作", subtitle: nil, works: person.knownFor)
+                        mediaSection(title: "代表作", subtitle: nil, rows: knownForRows)
                     }
                 }
-                if !person.filmography.isEmpty {
+                if !filmographyGroups.isEmpty {
                     detailRow(top: 8, bottom: 28) {
-                        filmographySection(person.filmography)
+                        filmographySection()
                     }
                 }
             } else if isLoading {
@@ -79,18 +81,28 @@ struct PersonDetailView: View {
         .background(AppPageBackground())
         .frame(minWidth: 820, minHeight: 620)
         .task(id: personID) {
+            resetPresentation()
             isLoading = true
+            if let cached = appState.cachedPersonDetail(personID: personID) {
+                person = cached
+                isLoading = false
+            }
+            await Task.yield()
+            guard !Task.isCancelled else { return }
             let loadedPerson = await appState.personDetail(personID: personID)
+            guard !Task.isCancelled else { return }
+            if let loadedPerson {
+                person = loadedPerson
+                isLoading = false
+            } else if person == nil {
+                isLoading = false
+            }
+            await Task.yield()
+            guard !Task.isCancelled, let visiblePerson = person else { return }
             let credits = appState.libraryCredits(personID: personID)
-            let items = loadedPerson.map {
-                appState.libraryItems(person: $0, directCredits: credits)
-            } ?? credits.map(\.media)
-            person = loadedPerson
+            let items = appState.libraryItems(person: visiblePerson, directCredits: credits)
             persistedLibraryCredits = credits
-            persistedLibraryItems = items
-            persistedLibraryWorks = loadedPerson.map {
-                makeLibraryWorks(items: items, credits: credits, person: $0)
-            } ?? []
+            applyPresentation(person: visiblePerson, items: items, credits: credits)
             showsFullFilmography = false
             isLoading = false
         }
@@ -100,26 +112,45 @@ struct PersonDetailView: View {
         persistedLibraryCredits
     }
 
-    private var libraryItems: [MediaItem] {
-        persistedLibraryItems
+    private func resetPresentation() {
+        person = nil
+        persistedLibraryCredits = []
+        libraryWorkRows = []
+        knownForRows = []
+        filmographyGroups = []
+        filmographyTotalCount = 0
+        showsFullFilmography = false
     }
 
-    private var libraryWorks: [MediaPersonWork] {
-        persistedLibraryWorks
-    }
-
-    private func makeLibraryWorks(items: [MediaItem], credits: [MediaPersonLibraryCredit], person: MediaPerson) -> [MediaPersonWork] {
-        items.map { item in
+    private func applyPresentation(
+        person: MediaPerson,
+        items: [MediaItem],
+        credits: [MediaPersonLibraryCredit]
+    ) {
+        let libraryRows = items.map { item in
             let directRole = credits.first(where: { $0.media.id == item.id })?.credit.role
-            return MediaPersonWork(
-                id: item.externalID ?? item.id,
-                title: item.title,
-                year: item.year,
-                role: directRole?.nilIfEmpty ?? matchedFilmographyRole(for: item, person: person),
-                mediaKind: item.type.rawValue,
-                posterURL: item.posterPath,
-                popularity: item.rating
-            )
+            let work = MediaPersonWork(
+                    id: item.externalID ?? item.id,
+                    title: item.title,
+                    year: item.year,
+                    role: directRole?.nilIfEmpty ?? matchedFilmographyRole(for: item, person: person),
+                    mediaKind: item.type.rawValue,
+                    posterURL: item.posterPath,
+                    popularity: item.rating
+                )
+            return PersonWorkRow(work: work, localItem: item)
+        }
+        libraryWorkRows = libraryRows
+        knownForRows = person.knownFor.map { work in
+            PersonWorkRow(work: work, localItem: localItem(for: work))
+        }
+        filmographyTotalCount = person.filmography.count
+        filmographyGroups = ["电影", "电视"].compactMap { groupName in
+            let values = person.filmography
+                .filter { ($0.mediaKind == "movie" ? "电影" : "电视") == groupName }
+                .map { work in PersonWorkRow(work: work, localItem: localItem(for: work)) }
+            guard !values.isEmpty else { return nil }
+            return PersonFilmographyGroup(title: groupName, rows: values)
         }
     }
 
@@ -131,6 +162,40 @@ struct PersonDetailView: View {
                 year: $0.year
             )?.id == item.id
         }?.role?.nilIfEmpty
+    }
+
+    private func localItem(for work: MediaPersonWork) -> MediaItem? {
+        appState.libraryItem(
+            matchingExternalID: work.id,
+            title: work.title,
+            year: work.year
+        )
+    }
+
+    private func mediaSection(
+        title: String,
+        subtitle: String?,
+        rows: [PersonWorkRow]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            AppSectionHeading(
+                title: title,
+                subtitle: subtitle,
+                systemImage: "film.stack"
+            )
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(alignment: .top, spacing: 14) {
+                    ForEach(Array(rows.prefix(20))) { row in
+                        workCard(row)
+                    }
+                }
+                .padding(.horizontal, 2)
+                .padding(.bottom, 2)
+            }
+            .verticalScrollPassthroughFromNestedHorizontal()
+        }
+        .padding(16)
+        .staticSurfaceBackground(cornerRadius: 18)
     }
 
     private func hero(_ person: MediaPerson) -> some View {
@@ -206,38 +271,13 @@ struct PersonDetailView: View {
         }
     }
 
-    private func mediaSection(
-        title: String,
-        subtitle: String?,
-        works: [MediaPersonWork]
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            AppSectionHeading(
-                title: title,
-                subtitle: subtitle,
-                systemImage: "film.stack"
-            )
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: 14) {
-                    ForEach(Array(works.prefix(20))) { work in
-                        workCard(work)
-                    }
-                }
-                .padding(.horizontal, 2)
-                .padding(.bottom, 2)
-            }
-            .verticalScrollPassthroughFromNestedHorizontal()
-        }
-        .padding(16)
-        .staticSurfaceBackground(cornerRadius: 18)
-    }
-
-    private func workCard(_ work: MediaPersonWork) -> some View {
-        Button {
-            open(work)
+    private func workCard(_ row: PersonWorkRow) -> some View {
+        let work = row.work
+        return Button {
+            open(row)
         } label: {
             VStack(alignment: .leading, spacing: 6) {
-                workPoster(work)
+                workPoster(row)
                     .frame(width: 112, height: 168)
                     .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
                 Text(work.title)
@@ -259,8 +299,9 @@ struct PersonDetailView: View {
     }
 
     @ViewBuilder
-    private func workPoster(_ work: MediaPersonWork) -> some View {
-        if let local = localItem(for: work) {
+    private func workPoster(_ row: PersonWorkRow) -> some View {
+        let work = row.work
+        if let local = row.localItem {
             PosterImage(path: local.posterPath, title: local.title, mediaType: local.type)
                 .aspectRatio(2.0 / 3.0, contentMode: .fill)
         } else if let path = work.posterURL, let url = URL(string: path) {
@@ -285,67 +326,65 @@ struct PersonDetailView: View {
         }
     }
 
-    private func filmographySection(_ works: [MediaPersonWork]) -> some View {
-        let groups = Dictionary(grouping: works) { $0.mediaKind == "movie" ? "电影" : "电视" }
+    private func filmographySection() -> some View {
         let visibleLimitPerGroup = showsFullFilmography ? Int.max : 40
-        let visibleCount = groups.values.reduce(0) { total, values in
-            total + min(values.count, visibleLimitPerGroup)
+        let visibleCount = filmographyGroups.reduce(0) { total, group in
+            total + min(group.rows.count, visibleLimitPerGroup)
         }
         return VStack(alignment: .leading, spacing: 16) {
             AppSectionHeading(
                 title: "完整履历",
-                subtitle: showsFullFilmography || visibleCount >= works.count
-                    ? "\(works.count) 项"
-                    : "先显示 \(visibleCount)/\(works.count) 项",
+                subtitle: showsFullFilmography || visibleCount >= filmographyTotalCount
+                    ? "\(filmographyTotalCount) 项"
+                    : "先显示 \(visibleCount)/\(filmographyTotalCount) 项",
                 systemImage: "list.bullet.rectangle"
             )
-            ForEach(["电影", "电视"], id: \.self) { groupName in
-                if let values = groups[groupName], !values.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(groupName)
-                            .font(.headline)
-                        ForEach(Array(values.prefix(visibleLimitPerGroup))) { work in
-                            Button {
-                                open(work)
-                            } label: {
-                                HStack(spacing: 12) {
-                                    Text(work.year.map(String.init) ?? "—")
-                                        .font(.caption.monospacedDigit())
+            ForEach(filmographyGroups) { group in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(group.title)
+                        .font(.headline)
+                    ForEach(Array(group.rows.prefix(visibleLimitPerGroup))) { row in
+                        Button {
+                            open(row)
+                        } label: {
+                            let work = row.work
+                            HStack(spacing: 12) {
+                                Text(work.year.map(String.init) ?? "—")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 42, alignment: .leading)
+                                Text(work.title)
+                                    .foregroundStyle(.primary)
+                                if let role = work.role, !role.isEmpty {
+                                    Text(role)
+                                        .font(.caption)
                                         .foregroundStyle(.secondary)
-                                        .frame(width: 42, alignment: .leading)
-                                    Text(work.title)
-                                        .foregroundStyle(.primary)
-                                    if let role = work.role, !role.isEmpty {
-                                        Text(role)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                    }
-                                    Spacer()
-                                    if localItem(for: work) != nil {
-                                        Text("在库")
-                                            .font(.caption2.weight(.semibold))
-                                            .foregroundStyle(AppColors.selectedGlassTint)
-                                    }
+                                        .lineLimit(1)
                                 }
-                                .padding(.horizontal, 12)
-                                .frame(minHeight: 36)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        if values.count > visibleLimitPerGroup {
-                            Button {
-                                withAnimation(AppMotion.standard) {
-                                    showsFullFilmography = true
+                                Spacer()
+                                if row.localItem != nil {
+                                    Text("在库")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(AppColors.selectedGlassTint)
                                 }
-                            } label: {
-                                Label("展开全部 \(values.count) 项\(groupName)履历", systemImage: "chevron.down")
-                                    .font(.caption.weight(.semibold))
                             }
-                            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 10, minHeight: 28))
-                            .padding(.top, 2)
+                            .padding(.horizontal, 12)
+                            .frame(minHeight: 36)
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
+                    }
+                    if group.rows.count > visibleLimitPerGroup {
+                        Button {
+                            withAnimation(AppMotion.standard) {
+                                showsFullFilmography = true
+                            }
+                        } label: {
+                            Label("展开全部 \(group.rows.count) 项\(group.title)履历", systemImage: "chevron.down")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 10, minHeight: 28))
+                        .padding(.top, 2)
                     }
                 }
             }
@@ -354,16 +393,9 @@ struct PersonDetailView: View {
         .staticSurfaceBackground(cornerRadius: 18)
     }
 
-    private func localItem(for work: MediaPersonWork) -> MediaItem? {
-        appState.libraryItem(
-            matchingExternalID: work.id,
-            title: work.title,
-            year: work.year
-        )
-    }
-
-    private func open(_ work: MediaPersonWork) {
-        if let local = localItem(for: work) {
+    private func open(_ row: PersonWorkRow) {
+        let work = row.work
+        if let local = row.localItem {
             appState.presentRelatedDetail(local)
             return
         }
@@ -422,6 +454,27 @@ struct PersonDetailView: View {
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
     }
+}
+
+private struct PersonWorkRow: Identifiable {
+    let work: MediaPersonWork
+    let localItem: MediaItem?
+
+    var id: String {
+        [
+            work.id,
+            work.title,
+            work.year.map(String.init) ?? "",
+            localItem?.id ?? ""
+        ].joined(separator: "|")
+    }
+}
+
+private struct PersonFilmographyGroup: Identifiable {
+    let title: String
+    let rows: [PersonWorkRow]
+
+    var id: String { title }
 }
 
 private struct DetailPersonMetadataFlow<Content: View>: View {

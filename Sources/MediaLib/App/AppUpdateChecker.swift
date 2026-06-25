@@ -20,7 +20,7 @@ struct AppUpdateInfo: Identifiable, Equatable {
 enum AppVersion {
     /// 打包版从 Info.plist 读取；swift run 裸二进制兜底用当前发布版本。
     static var current: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.2.2"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.2.4"
     }
 
     /// 从任意文本里提取版本号：抓出第一段「点分数字」，如 v1.1.1 / MediaLIB_V1.1.8 / 标题里的 1.1.11。
@@ -55,6 +55,11 @@ enum AppVersion {
 /// 用官方 Releases API + dmg 资产判定，避免引入第三方更新框架）。
 enum AppUpdateChecker {
     static let repositoryPage = URL(string: "https://github.com/Again0521/MediaLib/releases")!
+    private static let releaseSources: [GitHubReleaseSource] = [
+        .init(owner: "Again0521", repository: "MediaLib"),
+        // 为后续软件更名预备：该仓库当前可能不存在，404 时静默跳过。
+        .init(owner: "Again0521", repository: "LumiNest")
+    ]
     private static let releaseDateFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -69,13 +74,49 @@ enum AppUpdateChecker {
     /// 拉取 releases 列表，从 tag/title/body/assets 中提取版本号，
     /// 并在可安装资产中选出版本号最大的发布。
     static func fetchLatestRelease() async throws -> AppUpdateInfo? {
-        var request = URLRequest(url: URL(string: "https://api.github.com/repos/Again0521/MediaLib/releases?per_page=30")!)
+        var best: (version: String, info: AppUpdateInfo)?
+        var lastError: Error?
+
+        for source in releaseSources {
+            do {
+                guard let candidate = try await fetchLatestRelease(from: source) else { continue }
+                if let current = best {
+                    if AppVersion.isVersion(candidate.version, newerThan: current.version) {
+                        best = (candidate.version, candidate)
+                    } else if candidate.version == current.version,
+                              let currentDate = current.info.publishedAt,
+                              let candidateDate = candidate.publishedAt,
+                              candidateDate > currentDate {
+                        best = (candidate.version, candidate)
+                    }
+                } else {
+                    best = (candidate.version, candidate)
+                }
+            } catch {
+                lastError = error
+            }
+        }
+
+        if let best {
+            return best.info
+        }
+        if let lastError {
+            throw lastError
+        }
+        return nil
+    }
+
+    private static func fetchLatestRelease(from source: GitHubReleaseSource) async throws -> AppUpdateInfo? {
+        var request = URLRequest(url: source.apiURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("MediaLIB/\(AppVersion.current)", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 15
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode) else {
+            if (response as? HTTPURLResponse)?.statusCode == 404 {
+                return nil
+            }
             throw URLError(.badServerResponse)
         }
         let releases = try JSONDecoder().decode([GitHubRelease].self, from: data)
@@ -179,6 +220,15 @@ private struct GitHubRelease: Decodable {
         case prerelease
         case publishedAt = "published_at"
         case assets
+    }
+}
+
+private struct GitHubReleaseSource {
+    let owner: String
+    let repository: String
+
+    var apiURL: URL {
+        URL(string: "https://api.github.com/repos/\(owner)/\(repository)/releases?per_page=30")!
     }
 }
 

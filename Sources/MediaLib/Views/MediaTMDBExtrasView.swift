@@ -11,7 +11,7 @@ struct MediaTMDBExtrasView: View {
     var onOpenArtwork: ([MediaImageViewerEntry], Int) -> Void = { _, _ in }
 
     @State private var isExpanded = true
-    @State private var cachedLibraryRelated: [MediaRelatedTitle] = []
+    @State private var presentation: DetailExtrasPresentation?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -20,8 +20,12 @@ struct MediaTMDBExtrasView: View {
                 detailSections
             }
         }
-        .task(id: item.id) {
-            cachedLibraryRelated = appState.libraryRecommendations(for: item, snapshot: snapshot)
+        .task(id: "\(item.id)-\(snapshot.metadata.fetchedAt.timeIntervalSince1970)-\(snapshot.metadata.fetchVersion)") {
+            presentation = nil
+            await Task.yield()
+            let libraryRelated = appState.libraryRecommendations(for: item, snapshot: snapshot)
+            guard !Task.isCancelled else { return }
+            presentation = buildPresentation(libraryRelated: libraryRelated)
         }
     }
 
@@ -47,7 +51,8 @@ struct MediaTMDBExtrasView: View {
 
     @ViewBuilder
     private var detailSections: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        if let presentation {
+            VStack(alignment: .leading, spacing: 20) {
             if let trailerURL = snapshot.metadata.trailerURL, let url = URL(string: trailerURL) {
                 Button {
                     NSWorkspace.shared.open(url)
@@ -62,31 +67,31 @@ struct MediaTMDBExtrasView: View {
                 ))
             }
 
-            if !crewPeople.isEmpty {
-                peopleSection(title: "主创", systemImage: "person.badge.key", values: crewPeople)
+            if !presentation.crewPeople.isEmpty {
+                peopleSection(title: "主创", systemImage: "person.badge.key", values: presentation.crewPeople)
             }
-            if !castPeople.isEmpty {
-                peopleSection(title: "演员", systemImage: "person.2", values: castPeople)
+            if !presentation.castPeople.isEmpty {
+                peopleSection(title: "演员", systemImage: "person.2", values: presentation.castPeople)
             }
-            if !snapshot.artwork.isEmpty {
+            if !presentation.artwork.isEmpty {
                 sectionCard(title: "艺术照", systemImage: "photo.on.rectangle") {
-                    artworkStrip
+                    artworkStrip(presentation)
                 }
             }
-            if !libraryRelated.isEmpty {
+            if !presentation.libraryRelated.isEmpty {
                 sectionCard(title: "库中相似作品", systemImage: "rectangle.stack.badge.play") {
-                    relatedStrip(libraryRelated)
+                    relatedStrip(presentation.libraryRelated)
                 }
             }
-            if !discoveryRelated.isEmpty {
+            if !presentation.discoveryRelated.isEmpty {
                 sectionCard(title: "更多推荐", systemImage: "sparkles") {
-                    relatedStrip(discoveryRelated)
+                    relatedStrip(presentation.discoveryRelated)
                 }
             }
-            if !relatedLinks.isEmpty {
+            if !presentation.relatedLinks.isEmpty {
                 sectionCard(title: "相关链接", systemImage: "link") {
                     HStack(spacing: 10) {
-                        ForEach(relatedLinks) { link in
+                        ForEach(presentation.relatedLinks) { link in
                             Button {
                                 NSWorkspace.shared.open(link.url)
                             } label: {
@@ -103,27 +108,20 @@ struct MediaTMDBExtrasView: View {
                 }
             }
         }
+        } else {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("正在整理详情元素…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .staticSurfaceBackground(cornerRadius: 14)
+        }
     }
 
     private var peopleByID: [String: MediaPerson] {
         Dictionary(uniqueKeysWithValues: snapshot.people.map { ($0.id, $0) })
-    }
-
-    private var castPeople: [(MediaPerson, MediaCredit)] {
-        people(category: "cast")
-    }
-
-    private var crewPeople: [(MediaPerson, MediaCredit)] {
-        people(category: "crew")
-    }
-
-    private func people(category: String) -> [(MediaPerson, MediaCredit)] {
-        snapshot.credits
-            .filter { $0.category == category }
-            .sorted { $0.order < $1.order }
-            .compactMap { credit in
-                peopleByID[credit.personID].map { ($0, credit) }
-            }
     }
 
     private func peopleSection(
@@ -196,15 +194,11 @@ struct MediaTMDBExtrasView: View {
         }
     }
 
-    private var artworkStrip: some View {
-        let artwork = snapshot.artwork.sorted { $0.order < $1.order }
-        let entries = artwork.map {
-            MediaImageViewerEntry(id: $0.id, title: item.title, remoteURL: $0.fullURL)
-        }
-        return horizontalStrip {
-            ForEach(Array(artwork.enumerated()), id: \.element.id) { index, image in
+    private func artworkStrip(_ presentation: DetailExtrasPresentation) -> some View {
+        horizontalStrip {
+            ForEach(Array(presentation.artwork.enumerated()), id: \.element.id) { index, image in
                 Button {
-                    onOpenArtwork(entries, index)
+                    onOpenArtwork(presentation.artworkEntries, index)
                 } label: {
                     artworkThumbnail(image)
                 }
@@ -260,20 +254,7 @@ struct MediaTMDBExtrasView: View {
         }
     }
 
-    private var libraryRelated: [MediaRelatedTitle] {
-        let directlyRecommendedLibraryIDs = Set(rankedRelated.compactMap(\.localMediaID))
-        return cachedLibraryRelated
-            .filter { related in
-                guard let localMediaID = related.localMediaID else { return false }
-                return !directlyRecommendedLibraryIDs.contains(localMediaID)
-            }
-    }
-
-    private var discoveryRelated: [MediaRelatedTitle] {
-        rankedRelated
-    }
-
-    private func relatedStrip(_ values: [MediaRelatedTitle]) -> some View {
+    private func relatedStrip(_ values: [DetailRelatedDisplay]) -> some View {
         horizontalStrip {
             ForEach(values) { related in
                 relatedCard(related)
@@ -281,12 +262,11 @@ struct MediaTMDBExtrasView: View {
         }
     }
 
-    private func relatedCard(_ related: MediaRelatedTitle) -> some View {
+    private func relatedCard(_ row: DetailRelatedDisplay) -> some View {
+        let related = row.related
         let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         return Button {
-            if let localID = related.localMediaID,
-               let localItem = appState.item(withID: localID),
-               !(appState.isPrivateItem(localItem) && !appState.canDisplayPrivateItems) {
+            if let localItem = row.localItem {
                 appState.presentRelatedDetail(localItem)
             } else if let url = tmdbURL(for: related.externalID) {
                 NSWorkspace.shared.open(url)
@@ -294,7 +274,7 @@ struct MediaTMDBExtrasView: View {
         } label: {
             VStack(alignment: .leading, spacing: 6) {
                 ZStack(alignment: .bottomLeading) {
-                    relatedPoster(related)
+                    relatedPoster(row)
                         .frame(width: 104, height: 156)
                         .clipShape(shape)
                         .overlay {
@@ -332,10 +312,9 @@ struct MediaTMDBExtrasView: View {
     }
 
     @ViewBuilder
-    private func relatedPoster(_ related: MediaRelatedTitle) -> some View {
-        if let localID = related.localMediaID,
-           let localItem = appState.item(withID: localID),
-           !(appState.isPrivateItem(localItem) && !appState.canDisplayPrivateItems) {
+    private func relatedPoster(_ row: DetailRelatedDisplay) -> some View {
+        let related = row.related
+        if let localItem = row.localItem {
             PosterImage(path: localItem.posterPath, title: localItem.title, mediaType: localItem.type)
                 .aspectRatio(2.0 / 3.0, contentMode: .fill)
         } else if let posterURL = related.posterURL, let url = URL(string: posterURL) {
@@ -398,7 +377,7 @@ struct MediaTMDBExtrasView: View {
         )
     }
 
-    private struct RelatedLink: Identifiable {
+    fileprivate struct RelatedLink: Identifiable {
         let id: String
         let title: String
         let systemImage: String
@@ -433,6 +412,56 @@ struct MediaTMDBExtrasView: View {
         return values
     }
 
+    private func buildPresentation(libraryRelated: [MediaRelatedTitle]) -> DetailExtrasPresentation {
+        let peopleByID = peopleByID
+        let cast = people(category: "cast", peopleByID: peopleByID)
+        let crew = people(category: "crew", peopleByID: peopleByID)
+        let artwork = snapshot.artwork.sorted { $0.order < $1.order }
+        let artworkEntries = artwork.map {
+            MediaImageViewerEntry(id: $0.id, title: item.title, remoteURL: $0.fullURL)
+        }
+        let ranked = rankedRelated
+        let directlyRecommendedLibraryIDs = Set(ranked.compactMap(\.localMediaID))
+        let libraryRows = libraryRelated
+            .filter { related in
+                guard let localMediaID = related.localMediaID else { return false }
+                return !directlyRecommendedLibraryIDs.contains(localMediaID)
+            }
+            .map(relatedDisplay)
+        let discoveryRows = ranked.map(relatedDisplay)
+        return DetailExtrasPresentation(
+            castPeople: cast,
+            crewPeople: crew,
+            artwork: artwork,
+            artworkEntries: artworkEntries,
+            libraryRelated: libraryRows,
+            discoveryRelated: discoveryRows,
+            relatedLinks: relatedLinks
+        )
+    }
+
+    private func people(
+        category: String,
+        peopleByID: [String: MediaPerson]
+    ) -> [(MediaPerson, MediaCredit)] {
+        snapshot.credits
+            .filter { $0.category == category }
+            .sorted { $0.order < $1.order }
+            .compactMap { credit in
+                peopleByID[credit.personID].map { ($0, credit) }
+            }
+    }
+
+    private func relatedDisplay(_ related: MediaRelatedTitle) -> DetailRelatedDisplay {
+        var localItem: MediaItem?
+        if let localID = related.localMediaID,
+           let item = appState.item(withID: localID),
+           !(appState.isPrivateItem(item) && !appState.canDisplayPrivateItems) {
+            localItem = item
+        }
+        return DetailRelatedDisplay(related: related, localItem: localItem)
+    }
+
     private func tmdbURL(for externalID: String) -> URL? {
         let parts = externalID.split(separator: ":")
         guard parts.count == 3, parts[0] == "tmdb" else { return nil }
@@ -456,7 +485,7 @@ struct MediaTMDBExtrasView: View {
 
     private func horizontalStrip<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .top, spacing: 14) {
+            LazyHStack(alignment: .top, spacing: 14) {
                 content()
             }
             .padding(.horizontal, 2)
@@ -464,4 +493,21 @@ struct MediaTMDBExtrasView: View {
         }
         .verticalScrollPassthroughFromNestedHorizontal()
     }
+}
+
+private struct DetailExtrasPresentation {
+    let castPeople: [(MediaPerson, MediaCredit)]
+    let crewPeople: [(MediaPerson, MediaCredit)]
+    let artwork: [MediaArtwork]
+    let artworkEntries: [MediaImageViewerEntry]
+    let libraryRelated: [DetailRelatedDisplay]
+    let discoveryRelated: [DetailRelatedDisplay]
+    let relatedLinks: [MediaTMDBExtrasView.RelatedLink]
+}
+
+private struct DetailRelatedDisplay: Identifiable {
+    let related: MediaRelatedTitle
+    let localItem: MediaItem?
+
+    var id: String { related.id }
 }

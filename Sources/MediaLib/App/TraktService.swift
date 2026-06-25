@@ -201,7 +201,7 @@ struct TraktService {
         request.timeoutInterval = 15
         for (key, value) in headers(accessToken: accessToken) { request.setValue(value, forHTTPHeaderField: key) }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         return (data, status)
     }
@@ -213,7 +213,7 @@ struct TraktService {
         request.timeoutInterval = 15
         for (key, value) in headers(accessToken: accessToken) { request.setValue(value, forHTTPHeaderField: key) }
         request.httpBody = bodyData
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard expecting.contains(status) else { throw TraktError.requestFailed(status) }
         return data
@@ -227,7 +227,7 @@ struct TraktService {
         request.httpMethod = "GET"
         request.timeoutInterval = 20
         for (key, value) in headers(accessToken: accessToken) { request.setValue(value, forHTTPHeaderField: key) }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw TraktError.requestFailed(status) }
         return data

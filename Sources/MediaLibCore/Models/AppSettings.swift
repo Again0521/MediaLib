@@ -1017,7 +1017,7 @@ public enum HomeTab: String, Codable, CaseIterable, Identifiable {
         case .anime: return "动漫"
         case .documentaries: return "纪录片"
         case .variety: return "综艺"
-        case .homeVideos: return "家庭录像"
+        case .homeVideos: return "其他视频"
         case .music: return "音乐"
         case .other: return "其他"
         case .favorites: return "喜欢"

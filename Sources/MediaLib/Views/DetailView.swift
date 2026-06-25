@@ -19,8 +19,6 @@ struct DetailView: View {
         self.sourceSystemImage = sourceSystemImage
     }
 
-    private enum ArtworkKind { case poster, backdrop }
-
     @State private var selectedEpisodeID: MediaItem.ID?
     @State private var artworkEntries: [MediaImageViewerEntry] = []
     @State private var artworkIndex: Int?
@@ -176,6 +174,15 @@ struct DetailView: View {
             isLoadingDetailSnapshot = detailSnapshot == nil
             detailSnapshot = await appState.loadDetailSnapshot(for: item) ?? detailSnapshot
             isLoadingDetailSnapshot = false
+        }
+        .task(id: "\(item.id)-episode-artwork-\(episodes.count)-\(appState.libraryRevision)") {
+            let paths = Array(episodes.compactMap(\.posterPath).prefix(180))
+            guard !paths.isEmpty else { return }
+            await Task.yield()
+            await ArtworkImageCache.prewarmImages(
+                paths: paths,
+                targetSize: CGSize(width: 240, height: 136)
+            )
         }
         .onChange(of: item.id) { _ in
             refreshFileStatus()
@@ -358,14 +365,21 @@ struct DetailView: View {
                         VideoManualCollectionMenuItems(items: [item])
                         Divider()
                     }
+                    if appState.canCaptureVideoCover(for: item) {
+                        Button {
+                            appState.captureVideoCover(for: item)
+                        } label: {
+                            Label("从视频截取封面", systemImage: "camera.viewfinder")
+                        }
+                    }
                     Button {
-                        chooseCustomArtwork(kind: .poster)
+                        appState.chooseCustomArtwork(for: item, kind: .poster)
                     } label: {
                         Label("选择自定义封面", systemImage: "photo.badge.plus")
                     }
                     if item.type != .music {
                         Button {
-                            chooseCustomArtwork(kind: .backdrop)
+                            appState.chooseCustomArtwork(for: item, kind: .backdrop)
                         } label: {
                             Label("选择背景图", systemImage: "photo.on.rectangle.angled")
                         }
@@ -622,54 +636,6 @@ struct DetailView: View {
             return "\(provider) 流媒体 · \(item.title)"
         }
         return item.filePath ?? "远程流媒体"
-    }
-
-    private func chooseCustomArtwork(kind: ArtworkKind) {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [
-            UTType.jpeg,
-            UTType.png,
-            UTType.heic,
-            UTType.tiff,
-            UTType(filenameExtension: "webp"),
-            UTType(filenameExtension: "bmp")
-        ].compactMap { $0 }
-        panel.message = kind == .poster ? "选择自定义封面图片" : "选择自定义背景图片"
-        panel.prompt = "选择"
-        panel.canChooseDirectories = false
-        panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let sourceURL = panel.url else { return }
-        importArtwork(from: sourceURL, kind: kind)
-    }
-
-    private func importArtwork(from sourceURL: URL, kind: ArtworkKind) {
-        guard let thumbnailsDir = appState.directories?.thumbnails else {
-            appState.alert = AppAlert(title: "无法导入封面", message: "应用数据目录不可用。")
-            return
-        }
-        let ext = sourceURL.pathExtension.isEmpty ? "jpg" : sourceURL.pathExtension.lowercased()
-        let suffix = kind == .poster ? "custom-poster" : "custom-backdrop"
-        let timestamp = Int(Date().timeIntervalSince1970)
-        let destURL = thumbnailsDir.appendingPathComponent("\(item.id)-\(suffix)-\(timestamp).\(ext)")
-        do {
-            try FileManager.default.createDirectory(at: thumbnailsDir, withIntermediateDirectories: true)
-            // 删除该条目同类型的旧自定义封面文件
-            if let existing = try? FileManager.default.contentsOfDirectory(at: thumbnailsDir, includingPropertiesForKeys: nil) {
-                for old in existing where old.lastPathComponent.hasPrefix("\(item.id)-\(suffix)-") {
-                    try? FileManager.default.removeItem(at: old)
-                }
-            }
-            try FileManager.default.copyItem(at: sourceURL, to: destURL)
-            ArtworkImageCache.invalidateMissing(path: destURL.path)
-            switch kind {
-            case .poster:
-                appState.applyMetadata(MediaMetadataUpdate(posterPath: destURL.path), to: item)
-            case .backdrop:
-                appState.applyMetadata(MediaMetadataUpdate(backdropPath: destURL.path), to: item)
-            }
-        } catch {
-            appState.showError("封面导入失败", error)
-        }
     }
 
     private func refreshFileStatus() {

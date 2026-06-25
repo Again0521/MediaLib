@@ -1,3 +1,4 @@
+import AppKit
 import MediaLibCore
 import SwiftUI
 
@@ -83,6 +84,47 @@ struct VideoItemContextMenuItems: View {
             }
         } label: {
             Label("评级", systemImage: "star")
+        }
+
+        coverManagementMenuItems
+    }
+
+    /// 封面管理：从画面截取、选择自定义封面/背景；URL 来源附带复制链接。
+    @ViewBuilder
+    private var coverManagementMenuItems: some View {
+        if item.type != .episode, item.type != .music, item.filePath != nil {
+            Divider()
+            Menu {
+                if appState.canCaptureVideoCover(for: item) {
+                    Button {
+                        appState.captureVideoCover(for: item)
+                    } label: {
+                        Label("从视频截取封面", systemImage: "camera.viewfinder")
+                    }
+                }
+                Button {
+                    appState.chooseCustomArtwork(for: item, kind: .poster)
+                } label: {
+                    Label("选择自定义封面…", systemImage: "photo.badge.plus")
+                }
+                Button {
+                    appState.chooseCustomArtwork(for: item, kind: .backdrop)
+                } label: {
+                    Label("选择背景图…", systemImage: "photo.on.rectangle.angled")
+                }
+            } label: {
+                Label("封面", systemImage: "photo")
+            }
+
+            if appState.isURLSourceItem(item), let link = item.filePath {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(link, forType: .string)
+                    appState.showFloatingNotice(title: "已复制链接", message: link, kind: .success)
+                } label: {
+                    Label("复制链接", systemImage: "link")
+                }
+            }
         }
     }
 

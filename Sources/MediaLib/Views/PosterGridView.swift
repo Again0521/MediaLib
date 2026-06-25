@@ -185,15 +185,22 @@ struct PosterGridList<Leading: View>: View {
                             .padding(.bottom, AppSpacing.headerToControls)
 
                         LazyVGrid(columns: gridItems, alignment: .leading, spacing: rowSpacing) {
-                            ForEach(items) { item in
+                            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                                 PosterCardView(
+                                    appState: appState,
                                     item: item,
                                     cacheTargetSize: cacheSize,
                                     showsDeletePlaybackHistory: showsDeletePlaybackHistory,
                                     selectionEnabled: selectionEnabled,
                                     detailSourceDestinationID: detailSourceDestinationID,
                                     detailSourceSearchText: detailSourceSearchText,
-                                    currentManualCollectionID: currentManualCollectionID
+                                    currentManualCollectionID: currentManualCollectionID,
+                                    prewarmPosterPaths: index.isMultiple(of: max(columns, 1))
+                                        ? prewarmPosterPaths(around: index, columns: columns)
+                                        : [],
+                                    isSelectionModeActive: appState.isSelectionModeActive,
+                                    isSelected: appState.selectedItemIDs.contains(item.id),
+                                    badgeTexts: PosterCardView.badgeTexts(for: item, appState: appState)
                                 )
                                     .id(item.id)
                             }
@@ -245,6 +252,13 @@ struct PosterGridList<Leading: View>: View {
         let available = max(width - AppSpacing.pageHorizontal * 2, appState.settings.posterMinWidth)
         let minWidth = max(appState.settings.posterMinWidth, 80)
         return max(1, Int((available + interItemSpacing) / (minWidth + interItemSpacing)))
+    }
+
+    private func prewarmPosterPaths(around index: Int, columns: Int) -> [String] {
+        let start = max(index, 0)
+        let end = min(items.count, start + max(columns, 1) * 4)
+        guard start < end else { return [] }
+        return items[start..<end].compactMap(\.posterPath)
     }
 
     private func restoreAnchorIfNeeded(_ anchorID: String?, scrollProxy: ScrollViewProxy) {
@@ -366,7 +380,14 @@ private struct BadgeRow {
 }
 
 struct PosterCardView: View {
-    @EnvironmentObject private var appState: AppState
+    // 不再用 @EnvironmentObject 订阅整个 AppState——否则任意无关 @Published 变更（扫描进度、
+    // 音乐队列、通知横幅…）都会让屏上所有海报卡重算 body。改为：appState 仅作**未被观察**的
+    // 引用，用于动作调用（打开详情/评分/多选）；选择态与徽标等响应式数据由父视图
+    // （PosterGridView，它本就观察 AppState）计算后**按值**传入。
+    // 注意：不叠加 `.equatable()`——本卡片依赖动态 @Environment（滚动时悬停抑制、减弱动效），
+    // 自定义 == 会让这些环境变化被跳过；去掉整体订阅本身已是主要收益，剩余跳过交给
+    // SwiftUI 对值类型视图的内建结构比较。
+    let appState: AppState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
     let item: MediaItem
@@ -376,10 +397,13 @@ struct PosterCardView: View {
     var detailSourceDestinationID: String
     var detailSourceSearchText: String? = nil
     var currentManualCollectionID: String? = nil
+    var prewarmPosterPaths: [String] = []
+    var isSelectionModeActive: Bool = false
+    var isSelected: Bool = false
+    var badgeTexts: [String] = []
     @State private var isHovering = false
 
-    private var isSelectionActive: Bool { selectionEnabled && appState.isSelectionModeActive }
-    private var isSelected: Bool { appState.selectedItemIDs.contains(item.id) }
+    private var isSelectionActive: Bool { selectionEnabled && isSelectionModeActive }
 
     var body: some View {
         // 统一裁剪比例：视频海报 2:3，音乐 1:1。海报以 fill 模式裁剪到固定比例框，
@@ -504,6 +528,10 @@ struct PosterCardView: View {
                 isHovering = false
             }
         }
+        .task(id: prewarmPosterKey) {
+            guard !prewarmPosterPaths.isEmpty else { return }
+            await ArtworkImageCache.prewarmImages(paths: prewarmPosterPaths, targetSize: cacheTargetSize)
+        }
         .contextMenu {
             VideoItemContextMenuItems(
                 item: item,
@@ -511,6 +539,10 @@ struct PosterCardView: View {
                 currentManualCollectionID: currentManualCollectionID
             )
         }
+    }
+
+    private var prewarmPosterKey: String {
+        prewarmPosterPaths.joined(separator: "|")
     }
 
     @ViewBuilder
@@ -546,7 +578,9 @@ struct PosterCardView: View {
         item.type != .music
     }
 
-    private var badgeTexts: [String] {
+    /// 由父视图（观察 AppState）计算后按值传入卡片，避免卡片自身订阅 AppState。
+    /// 含响应式来源（缓存状态/子项）与 item 自身属性。
+    static func badgeTexts(for item: MediaItem, appState: AppState) -> [String] {
         var texts: [String] = []
         switch appState.videoCacheState(for: item) {
         case .complete:

@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import MediaLibCore
 
 /// Last.fm 会话（授权成功后获得，用于后续打卡请求）。
 struct LastfmSession: Equatable {
@@ -154,7 +155,7 @@ struct LastfmScrobbleService {
     }
 
     private func perform(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw LastfmScrobbleError.invalidResponse }
         if let error = try? JSONDecoder().decode(LastfmErrorResponse.self, from: data), error.error != nil {
             throw LastfmScrobbleError.requestFailed(error.message ?? "error \(error.error ?? -1)")

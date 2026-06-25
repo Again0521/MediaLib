@@ -1,4 +1,5 @@
 import Foundation
+import MediaLibCore
 
 /// 艺术家简介（B4）：聚合 Last.fm 文字简介 + Deezer 头像，用于音乐详情页展示。
 struct ArtistInfo: Equatable {
@@ -65,7 +66,7 @@ struct ArtistInfoService {
 
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         let decoded = try JSONDecoder().decode(LastfmArtistResponse.self, from: data)
         guard let artistDTO = decoded.artist else { return nil }
@@ -107,7 +108,7 @@ struct ArtistInfoService {
         guard let url = components?.url else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         let decoded = try JSONDecoder().decode(DeezerArtistSearchResponse.self, from: data)
         guard let first = decoded.data?.first else { return nil }

@@ -403,7 +403,7 @@ struct PlexService {
         if let rangeSize {
             request.setValue("\(rangeSize)", forHTTPHeaderField: "X-Plex-Container-Size")
         }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await HTTPClient.shared.data(for: request)
         try validate(response: response)
         return try PlexXMLTreeParser.parse(data: data)
     }
@@ -413,7 +413,7 @@ struct PlexService {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         addHeaders(to: &request, session: session)
-        let (_, response) = try await URLSession.shared.data(for: request)
+        let (_, response) = try await HTTPClient.shared.data(for: request)
         try validate(response: response)
     }
 
