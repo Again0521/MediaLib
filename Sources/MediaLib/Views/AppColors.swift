@@ -3409,9 +3409,10 @@ private struct TransparentSearchTextField: NSViewRepresentable {
     let placeholder: String
     @Binding var text: String
     @Binding var isFocused: Bool
+    var onSubmit: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text, isFocused: $isFocused)
+        Coordinator(text: $text, isFocused: $isFocused, onSubmit: onSubmit)
     }
 
     func makeNSView(context: Context) -> NSTextField {
@@ -3437,6 +3438,7 @@ private struct TransparentSearchTextField: NSViewRepresentable {
     }
 
     func updateNSView(_ textField: NSTextField, context: Context) {
+        context.coordinator.onSubmit = onSubmit
         if textField.stringValue != text {
             textField.stringValue = text
         }
@@ -3463,10 +3465,12 @@ private struct TransparentSearchTextField: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextFieldDelegate {
         @Binding var text: String
         @Binding var isFocused: Bool
+        var onSubmit: (() -> Void)?
 
-        init(text: Binding<String>, isFocused: Binding<Bool>) {
+        init(text: Binding<String>, isFocused: Binding<Bool>, onSubmit: (() -> Void)?) {
             _text = text
             _isFocused = isFocused
+            self.onSubmit = onSubmit
         }
 
         func controlTextDidBeginEditing(_ obj: Notification) {
@@ -3482,6 +3486,15 @@ private struct TransparentSearchTextField: NSViewRepresentable {
             guard let field = obj.object as? NSTextField else { return }
             clearFieldEditor(from: obj)
             text = field.stringValue
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            guard commandSelector == #selector(NSResponder.insertNewline(_:)) else { return false }
+            if let field = control as? NSTextField {
+                text = field.stringValue
+            }
+            onSubmit?()
+            return true
         }
 
         private func clearFieldEditor(from obj: Notification) {
@@ -3522,6 +3535,7 @@ struct GlassSearchField: View {
     var thickness: Double = AppGlassMetrics.Thickness.headerControl
     var minWidth: CGFloat = 170
     var maxWidth: CGFloat = 260
+    var onSubmit: (() -> Void)? = nil
 
     var body: some View {
         let depth = min(max(thickness, 0.8), 2.0)
@@ -3530,7 +3544,7 @@ struct GlassSearchField: View {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(isFocused ? AppColors.selectedGlassTint.opacity(0.92) : Color.primary.opacity(0.56))
                 .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
-            TransparentSearchTextField(placeholder: placeholder, text: $text, isFocused: $isFocused)
+            TransparentSearchTextField(placeholder: placeholder, text: $text, isFocused: $isFocused, onSubmit: onSubmit)
                 .frame(height: 20)
             if !text.isEmpty {
                 Button {
@@ -3560,7 +3574,8 @@ struct GlassSearchField: View {
     private var adaptiveSearchWidth: CGFloat {
         let displayText = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? placeholder : text
         let font = NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-        let measured = (displayText as NSString).size(withAttributes: [.font: font]).width + 86
+        let measuredText = String(displayText.prefix(120))
+        let measured = (measuredText as NSString).size(withAttributes: [.font: font]).width + 86
         return min(max(ceil(measured), minWidth), maxWidth)
     }
 }

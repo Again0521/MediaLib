@@ -101,6 +101,7 @@ struct HomeView: View {
     let onOpenHealthCenter: () -> Void
     let onOpenSources: () -> Void
     @State private var searchText: String
+    @State private var committedSearchText: String
     @State private var visibleHomeItems: [MediaItem] = []
     @State private var visibleHomeItemsKey = ""
     @State private var isPreparingHomeItems = false
@@ -113,6 +114,7 @@ struct HomeView: View {
     @State private var overviewVerticalReturnReady: Bool
     @State private var overviewHorizontalReturnReady: Bool
     @State private var homeReturnFallbackTask: Task<Void, Never>?
+    @State private var homeInlineReturnRestoreTask: Task<Void, Never>?
     @AppStorage("MediaLib.home.selectedTab") private var selectedTabRaw = HomeTab.overview.rawValue
 
     init(
@@ -121,7 +123,9 @@ struct HomeView: View {
         onOpenHealthCenter: @escaping () -> Void = {},
         onOpenSources: @escaping () -> Void = {}
     ) {
-        _searchText = State(initialValue: initialSearchText)
+        let normalizedInitialSearch = initialSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        _searchText = State(initialValue: normalizedInitialSearch)
+        _committedSearchText = State(initialValue: normalizedInitialSearch)
         _inlineReturnContentReady = State(initialValue: initialReturnAnchorID == nil)
         _overviewVerticalReturnReady = State(initialValue: initialReturnAnchorID == nil)
         _overviewHorizontalReturnReady = State(initialValue: initialReturnAnchorID == nil)
@@ -138,7 +142,8 @@ struct HomeView: View {
         let tab = currentTab
         let gridItems = displayedHomeItems(for: tab)
         // 首页搜索框现在即"搜索全部媒体"：有输入时显示跨影音的全局结果（替代海报型分区路径）。
-        let isSearching = !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let activeSearchText = committedSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isSearching = !activeSearchText.isEmpty
 
         Group {
             if !isSearching, !appState.sources.isEmpty, isPosterTab(tab), !gridItems.isEmpty {
@@ -175,7 +180,7 @@ struct HomeView: View {
                             if appState.sources.isEmpty {
                                 EmptyLibraryView(onOpenSources: onOpenSources)
                             } else if isSearching {
-                                GlobalSearchView(query: searchText) { item in
+                                GlobalSearchView(query: activeSearchText) { item in
                                     if item.type == .music {
                                         appState.play(item)
                                     } else {
@@ -183,7 +188,7 @@ struct HomeView: View {
                                             item,
                                             from: SidebarDestination.home.id,
                                             anchorID: item.id,
-                                            searchText: searchText
+                                            searchText: activeSearchText
                                         )
                                     }
                                 }
@@ -287,6 +292,8 @@ struct HomeView: View {
         .onDisappear {
             homeContentRefreshTask?.cancel()
             homeSearchRefreshTask?.cancel()
+            homeReturnFallbackTask?.cancel()
+            homeInlineReturnRestoreTask?.cancel()
         }
     }
 
@@ -316,7 +323,13 @@ struct HomeView: View {
                 }
                 .disabled(homePlaybackTraceItems.isEmpty)
             }
-            GlassSearchField(placeholder: appState.localized("搜索全部媒体"), text: $searchText, minWidth: 178, maxWidth: 236)
+            GlassSearchField(
+                placeholder: appState.localized("搜索全部媒体"),
+                text: $searchText,
+                minWidth: 178,
+                maxWidth: 236,
+                onSubmit: commitHomeSearch
+            )
             Button {
                 appState.scanSources(for: currentTab)
             } label: {
@@ -458,7 +471,7 @@ struct HomeView: View {
     private func homeItemsKey(for tab: HomeTab) -> String {
         [
             tab.rawValue,
-            searchApplies(to: tab) ? searchText.trimmingCharacters(in: .whitespacesAndNewlines) : "",
+            searchApplies(to: tab) ? committedSearchText.trimmingCharacters(in: .whitespacesAndNewlines) : "",
             "\(appState.libraryRevision)",
             "\(appState.favoriteRevision)",
             "\(appState.watchlistRevision)",
@@ -542,7 +555,7 @@ struct HomeView: View {
         let input = HomeContentSnapshotInput(
             items: baseHomeItems(for: tab),
             filter: contentFilter(for: tab),
-            searchText: searchText,
+            searchText: committedSearchText,
             appliesSearch: searchApplies(to: tab),
             limit: itemLimit(for: tab),
             watchedThreshold: appState.settings.watchedThreshold
@@ -565,15 +578,24 @@ struct HomeView: View {
     private func scheduleHomeSearchRefresh() {
         homeSearchRefreshTask?.cancel()
         let targetTab = currentTab
+        let pendingSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         homeSearchRefreshTask = Task { @MainActor in
             do {
-                try await Task.sleep(nanoseconds: 120_000_000)
+                try await Task.sleep(nanoseconds: 180_000_000)
             } catch {
                 return
             }
             guard currentTab == targetTab else { return }
+            committedSearchText = pendingSearchText
             refreshHomeItems(for: targetTab, deferred: true)
         }
+    }
+
+    private func commitHomeSearch() {
+        homeSearchRefreshTask?.cancel()
+        let normalizedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        committedSearchText = normalizedSearchText
+        refreshHomeItems(for: currentTab, deferred: true)
     }
 
     private var homePlaybackTraceItems: [MediaItem] {
@@ -1127,6 +1149,7 @@ struct HomeView: View {
     private func finishHomeReturnRestorationIfReady() {
         guard overviewVerticalReturnReady, overviewHorizontalReturnReady else { return }
         homeReturnFallbackTask?.cancel()
+        homeInlineReturnRestoreTask?.cancel()
         var transaction = Transaction()
         transaction.disablesAnimations = true
         transaction.animation = nil
@@ -1190,17 +1213,51 @@ struct HomeView: View {
         scrollProxy: ScrollViewProxy
     ) {
         if isSearching {
-            guard let anchorID, restoredOverviewAnchorID != anchorID else { return }
-            restoredOverviewAnchorID = anchorID
-            Task { @MainActor in
-                await Task.yield()
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                transaction.animation = nil
-                withTransaction(transaction) {
-                    scrollProxy.scrollTo(anchorID, anchor: .center)
+            guard let anchorID else {
+                completeHomeReturnRestoration()
+                return
+            }
+            if restoredOverviewAnchorID == anchorID {
+                if !inlineReturnContentReady {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    transaction.animation = nil
+                    withTransaction(transaction) {
+                        inlineReturnContentReady = true
+                    }
                 }
-                await Task.yield()
+                return
+            }
+            restoredOverviewAnchorID = anchorID
+
+            // 搜索结果按分类异步增量出现。返回时如果先等待锚点恢复再显示页面，
+            // 锚点尚未生成就会造成空白页；因此先显示内容，再在后续几帧尽力滚回来源条目。
+            homeReturnFallbackTask?.cancel()
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            transaction.animation = nil
+            withTransaction(transaction) {
+                inlineReturnContentReady = true
+            }
+            homeInlineReturnRestoreTask?.cancel()
+            homeInlineReturnRestoreTask = Task { @MainActor in
+                let delays: [UInt64] = [0, 90_000_000, 220_000_000, 480_000_000, 760_000_000]
+                for delay in delays {
+                    guard !Task.isCancelled else { return }
+                    if delay > 0 {
+                        try? await Task.sleep(nanoseconds: delay)
+                    } else {
+                        await Task.yield()
+                    }
+                    guard !Task.isCancelled else { return }
+                    guard activeReturnContext?.anchorID == anchorID else { return }
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    transaction.animation = nil
+                    withTransaction(transaction) {
+                        scrollProxy.scrollTo(anchorID, anchor: .center)
+                    }
+                }
                 completeHomeReturnRestoration()
             }
         } else {

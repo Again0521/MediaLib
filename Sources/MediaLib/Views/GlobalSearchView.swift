@@ -7,87 +7,146 @@ struct GlobalSearchView: View {
     let query: String
     /// 点击结果：视频→打开详情，音乐→播放（由 ContentView 决定）。
     let onSelect: (MediaItem) -> Void
+    @State private var groups: [Group] = []
+    @State private var isSearching = false
+    @State private var completedQuery = ""
 
-    private struct Group: Identifiable {
+    private struct Group: Identifiable, Sendable {
         let id: String
         let title: String
         let systemImage: String
         let items: [MediaItem]
     }
 
+    private struct SearchCandidate: Sendable {
+        let item: MediaItem
+        let fields: [String?]
+    }
+
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// 单条记忆化搜索结果：原先每次 body 求值都对全库做拼音匹配过滤（后台扫描频繁发布状态时尤其浪费）。
-    /// 结果只取决于 (query, 库内容, 隐私可见性)，故以此为键单条缓存；命中即返回，不改变任何匹配逻辑或展示。
-    private enum ResultsCache {
-        struct Key: Equatable {
-            let query: String
-            let revision: Int
-            let privacyVisible: Bool
-        }
-        static var cachedKey: Key?
-        static var cachedValue: [Group] = []
+    private var searchTaskID: String {
+        [
+            trimmedQuery,
+            "\(appState.libraryRevision)",
+            "\(appState.mediaSearchRevision)",
+            "\(appState.canDisplayPrivateItems)"
+        ].joined(separator: "|")
     }
 
-    private var groups: [Group] {
+    nonisolated private static let groupOrder: [(MediaType, String, String)] = [
+        (.movie, "电影", "film"),
+        (.tvShow, "电视剧", "tv"),
+        (.anime, "动漫", "sparkles.tv"),
+        (.documentary, "纪录片", "books.vertical"),
+        (.variety, "综艺", "music.mic"),
+        (.music, "音乐", "music.note"),
+        (.other, "其他", "tray"),
+        (.privateCollection, "保险库", "lock.rectangle.stack")
+    ]
+
+    private func rebuildGroups() async {
         let q = trimmedQuery
-        guard !q.isEmpty else { return [] }
-        let privacyVisible = appState.privacyPINConfigured && appState.privacyUnlocked
-        let key = ResultsCache.Key(query: q, revision: appState.libraryRevision, privacyVisible: privacyVisible)
-        if let cachedKey = ResultsCache.cachedKey, cachedKey == key {
-            return ResultsCache.cachedValue
+        guard !q.isEmpty else {
+            groups = []
+            completedQuery = ""
+            isSearching = false
+            return
         }
-        let result = buildGroups(query: q, privacyVisible: privacyVisible)
-        ResultsCache.cachedKey = key
-        ResultsCache.cachedValue = result
-        return result
+
+        isSearching = true
+        completedQuery = q
+        groups = []
+
+        let canDisplayPrivateItems = appState.canDisplayPrivateItems
+        let candidates = appState.items.compactMap { item -> SearchCandidate? in
+            guard item.type != .episode else { return nil }
+            if appState.isPrivateItem(item) && !canDisplayPrivateItems { return nil }
+            return SearchCandidate(
+                item: item,
+                fields: appState.mediaSearchFields(for: item)
+            )
+        }
+
+        let groupedCandidates = Dictionary(grouping: candidates, by: { $0.item.type })
+        var completedGroups: [String: Group] = [:]
+        await withTaskGroup(of: Group?.self) { taskGroup in
+            for (type, _, _) in Self.groupOrder {
+                guard let candidates = groupedCandidates[type], !candidates.isEmpty else { continue }
+                taskGroup.addTask(priority: .userInitiated) {
+                    Self.buildGroup(type: type, query: q, candidates: candidates)
+                }
+            }
+
+            for await group in taskGroup {
+                guard !Task.isCancelled, q == trimmedQuery else {
+                    taskGroup.cancelAll()
+                    return
+                }
+                guard let group else { continue }
+                completedGroups[group.id] = group
+                groups = Self.groupOrder.compactMap { type, _, _ in
+                    completedGroups[type.rawValue]
+                }
+            }
+        }
+
+        guard !Task.isCancelled, q == trimmedQuery else { return }
+        isSearching = false
     }
 
-    private func buildGroups(query q: String, privacyVisible: Bool) -> [Group] {
-        let matched = appState.items.filter { item in
-            guard item.type != .episode else { return false }
-            if appState.isPrivateItem(item) && !privacyVisible { return false }
-            return appState.matchesMediaSearch(query: q, item: item)
+    nonisolated private static func buildGroups(query q: String, candidates: [SearchCandidate]) -> [Group] {
+        return groupOrder.compactMap { type, title, image in
+            buildGroup(type: type, title: title, systemImage: image, query: q, candidates: candidates)
         }
+    }
 
-        let order: [(MediaType, String, String)] = [
-            (.movie, "电影", "film"),
-            (.tvShow, "电视剧", "tv"),
-            (.anime, "动漫", "sparkles.tv"),
-            (.documentary, "纪录片", "books.vertical"),
-            (.variety, "综艺", "music.mic"),
-            (.music, "音乐", "music.note"),
-            (.other, "其他", "tray"),
-            (.privateCollection, "保险库", "lock.rectangle.stack")
-        ]
-        return order.compactMap { type, title, image in
-            let items = matched.filter { $0.type == type }
-            guard !items.isEmpty else { return nil }
-            let sorted = items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
-            return Group(id: type.rawValue, title: title, systemImage: image, items: sorted)
+    nonisolated private static func buildGroup(type: MediaType, query q: String, candidates: [SearchCandidate]) -> Group? {
+        guard let metadata = groupOrder.first(where: { $0.0 == type }) else { return nil }
+        return buildGroup(type: type, title: metadata.1, systemImage: metadata.2, query: q, candidates: candidates)
+    }
+
+    nonisolated private static func buildGroup(
+        type: MediaType,
+        title: String,
+        systemImage: String,
+        query q: String,
+        candidates: [SearchCandidate]
+    ) -> Group? {
+        let items = candidates.compactMap { candidate -> MediaItem? in
+            guard candidate.item.type == type else { return nil }
+            return PinyinSearchMatcher.matches(query: q, in: candidate.fields) ? candidate.item : nil
         }
+        guard !items.isEmpty else { return nil }
+        let sorted = items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        return Group(id: type.rawValue, title: title, systemImage: systemImage, items: sorted)
     }
 
     // 内容型组件（无自身页头/滚动/背景），便于嵌入首页搜索框下方。
     var body: some View {
-        let groups = groups
         let total = groups.reduce(0) { $0 + $1.items.count }
         VStack(alignment: .leading, spacing: 16) {
             AppSectionHeading(
-                title: total == 0 ? "未找到“\(trimmedQuery)”" : "搜索“\(trimmedQuery)”",
+                title: isSearching ? "正在搜索“\(completedQuery.isEmpty ? trimmedQuery : completedQuery)”" : (total == 0 ? "未找到“\(trimmedQuery)”" : "搜索“\(trimmedQuery)”"),
                 subtitle: total == 0
                     ? "可尝试标题、演员、角色、题材、简介、制作方、年份或剧集名称。"
                     : "已穿透匹配作品资料、演职人员和子集标题，并按媒体类型分组。",
                 systemImage: "magnifyingglass",
-                badgeText: total == 0 ? nil : "\(total) 个结果"
+                badgeText: isSearching ? nil : (total == 0 ? nil : "\(total) 个结果")
             )
             .padding(14)
             .staticSurfaceBackground(cornerRadius: 16, thickness: 0.94)
             .repeatedCardChrome(false, cornerRadius: 16)
 
-            if total == 0 {
+            if total == 0, isSearching {
+                SearchProgressStatusCard(
+                    title: "正在匹配媒体资料",
+                    subtitle: "按电影、剧集、音乐等分类并发搜索，命中后会立即显示。",
+                    systemImage: "magnifyingglass"
+                )
+            } else if total == 0 {
                 EmptyStateView(
                     title: "无匹配结果",
                     systemImage: "magnifyingglass",
@@ -98,9 +157,19 @@ struct GlobalSearchView: View {
                 ForEach(groups) { group in
                     groupSection(group)
                 }
+                if isSearching {
+                    SearchProgressStatusCard(
+                        title: "继续穿透其他分类",
+                        subtitle: "已显示先命中的结果，其余分类和更多字段仍在增量匹配。",
+                        systemImage: "magnifyingglass"
+                    )
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: searchTaskID) {
+            await rebuildGroups()
+        }
     }
 
     private func groupSection(_ group: Group) -> some View {

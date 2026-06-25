@@ -2,6 +2,14 @@ import AVFoundation
 import Foundation
 import MediaLibCore
 
+// TimedLyricLine 及其定位/时序分析已下沉到 MediaLibCore（跨端预备）。解析仍依赖本文件的 LyricSourceParser
+// （TTML/YRC/AVFoundation，留在 GUI），故 parse(_:) 作为 GUI extension 留此，行为与原 TimedLyricLine.parse 一致。
+extension TimedLyricLine {
+    static func parse(_ text: String) -> [TimedLyricLine] {
+        LyricSourceParser.parse(text)
+    }
+}
+
 enum LyricSourceParser {
     static func parse(_ text: String) -> [TimedLyricLine] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -242,98 +250,6 @@ enum LyricSourceParser {
     }
 }
 
-struct LyricScriptProfile {
-    let hanCount: Int
-    let hiraganaCount: Int
-    let katakanaCount: Int
-    let hangulCount: Int
-    let latinCount: Int
-
-    init(text: String) {
-        var hanCount = 0
-        var hiraganaCount = 0
-        var katakanaCount = 0
-        var hangulCount = 0
-        var latinCount = 0
-
-        for scalar in text.unicodeScalars {
-            let value = scalar.value
-            if scalar.properties.isIdeographic || Self.isCJKUnifiedIdeograph(value) {
-                hanCount += 1
-            } else if Self.isHiragana(value) {
-                hiraganaCount += 1
-            } else if Self.isKatakana(value) {
-                katakanaCount += 1
-            } else if Self.isHangul(value) {
-                hangulCount += 1
-            } else if Self.isLatin(value) {
-                latinCount += 1
-            }
-        }
-
-        self.hanCount = hanCount
-        self.hiraganaCount = hiraganaCount
-        self.katakanaCount = katakanaCount
-        self.hangulCount = hangulCount
-        self.latinCount = latinCount
-    }
-
-    private var kanaCount: Int { hiraganaCount + katakanaCount }
-    private var cjkCount: Int { hanCount + kanaCount + hangulCount }
-
-    private var isLikelyJapanese: Bool {
-        kanaCount > 0 && cjkCount >= 2
-    }
-
-    private var isLikelyChineseTranslation: Bool {
-        hanCount >= 2 && kanaCount == 0 && hangulCount == 0
-    }
-
-    var isLikelyJapaneseOriginalLine: Bool {
-        isLikelyJapanese
-    }
-
-    var isLikelyChineseTranslationLine: Bool {
-        isLikelyChineseTranslation
-    }
-
-    func isJapaneseChineseTranslationPair(with other: LyricScriptProfile) -> Bool {
-        (isLikelyJapanese && other.isLikelyChineseTranslation) ||
-        (other.isLikelyJapanese && isLikelyChineseTranslation)
-    }
-
-    private static func isCJKUnifiedIdeograph(_ value: UInt32) -> Bool {
-        (0x4E00...0x9FFF).contains(value) ||
-        (0x3400...0x4DBF).contains(value) ||
-        (0x20000...0x2A6DF).contains(value) ||
-        (0x2A700...0x2B73F).contains(value) ||
-        (0x2B740...0x2B81F).contains(value) ||
-        (0x2B820...0x2CEAF).contains(value) ||
-        (0xF900...0xFAFF).contains(value)
-    }
-
-    private static func isHiragana(_ value: UInt32) -> Bool {
-        (0x3040...0x309F).contains(value)
-    }
-
-    private static func isKatakana(_ value: UInt32) -> Bool {
-        (0x30A0...0x30FF).contains(value) ||
-        (0x31F0...0x31FF).contains(value) ||
-        (0xFF66...0xFF9D).contains(value)
-    }
-
-    private static func isHangul(_ value: UInt32) -> Bool {
-        (0xAC00...0xD7AF).contains(value) ||
-        (0x1100...0x11FF).contains(value) ||
-        (0x3130...0x318F).contains(value)
-    }
-
-    private static func isLatin(_ value: UInt32) -> Bool {
-        (0x0041...0x005A).contains(value) ||
-        (0x0061...0x007A).contains(value) ||
-        (0x00C0...0x024F).contains(value)
-    }
-}
 
 private final class TTMLLyricParser: NSObject, XMLParserDelegate {
     private struct DraftLine {

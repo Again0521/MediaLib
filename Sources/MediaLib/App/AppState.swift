@@ -68,6 +68,40 @@ private struct PendingFloatingNotice: Sendable {
     var duration: TimeInterval
 }
 
+private actor ScanIncrementalLibraryPublisher {
+    private let minimumInterval: TimeInterval
+    private let minimumItemCount: Int
+    private let publish: @Sendable () async -> Void
+    private var pendingIDs = Set<String>()
+    private var lastPublishedAt = Date.distantPast
+
+    init(
+        minimumInterval: TimeInterval = 1.2,
+        minimumItemCount: Int = 18,
+        publish: @escaping @Sendable () async -> Void
+    ) {
+        self.minimumInterval = minimumInterval
+        self.minimumItemCount = minimumItemCount
+        self.publish = publish
+    }
+
+    func record(_ ids: Set<String>) async {
+        pendingIDs.formUnion(ids)
+        let shouldPublish = pendingIDs.count >= minimumItemCount ||
+            Date().timeIntervalSince(lastPublishedAt) >= minimumInterval
+        if shouldPublish {
+            await flush()
+        }
+    }
+
+    func flush() async {
+        guard !pendingIDs.isEmpty else { return }
+        pendingIDs.removeAll()
+        lastPublishedAt = Date()
+        await publish()
+    }
+}
+
 private struct ArtworkWarmupProgressRecord: Codable, Sendable {
     var sourceID: String
     var completedURLs: [String]
@@ -492,8 +526,8 @@ final class AppState: ObservableObject {
     private let syncConflictRepository: SyncConflictRepository?
     private let remoteConnectorAccountRepository: RemoteConnectorAccountRepository?
     private let videoOfflineCacheStore: VideoOfflineCacheStore?
-    private let settingsStore = AppSettingsStore()
-    private let logger: LoggingService?
+    let settingsStore = AppSettingsStore()   // internal：AppState+MusicTheme 等 extension 跨文件访问
+    let logger: LoggingService?   // internal：供 AppState+Lastfm 等领域 extension 跨文件访问
     private let externalPlayerService = ExternalPlayerService()
     private let privacyLockService = PrivacyLockService()
     private let remoteCredentialStore = RemoteCredentialStore()
@@ -574,11 +608,11 @@ final class AppState: ObservableObject {
     private var embyPlaySessionIDs: [String: String] = [:]
     private var playbackClearRevisionByItemID: [String: Date] = [:]
     /// B2 Scrobbling：当前待结算的听歌候选（开始播放即记录，达到时长门槛后 track.scrobble）。
-    private var pendingScrobble: (item: MediaItem, startedAt: Date, duration: Double)?
+    var pendingScrobble: (item: MediaItem, startedAt: Date, duration: Double)?   // internal：Last.fm extension 跨文件访问
     /// Last.fm 授权流程中临时持有的 request token（用户在浏览器授权后用它换 session）。
-    private var lastfmPendingAuthToken: String?
+    var lastfmPendingAuthToken: String?   // internal：Last.fm extension 跨文件访问
     /// 配色等高频设置变更的防抖落盘任务。
-    private var settingsPersistTask: Task<Void, Never>?
+    var settingsPersistTask: Task<Void, Never>?   // internal：AppState+MusicTheme extension 跨文件访问
     /// 正在进行 Last.fm 授权/连接操作。
     @Published var isLastfmAuthorizing = false
 
@@ -2796,6 +2830,42 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func reloadMediaItemsDuringScan(runID: UUID) {
+        guard scanRunID == runID, isScanning else { return }
+        do {
+            let reloadStart = Date()
+            ArtworkImageCache.invalidateMissingPaths()
+            let fetchedItems = try mediaRepository?.fetchAll() ?? []
+            items = fetchedItems
+            let detailCandidateIDs = fetchedItems.compactMap { item -> String? in
+                guard item.parentID == nil,
+                      item.type != .music,
+                      item.type != .photo,
+                      item.type != .homeVideo,
+                      item.type != .privateCollection else { return nil }
+                return item.id
+            }
+            detailMetadataGapsByMediaID = try mediaDetailRepository?
+                .detailCompleteness(mediaIDs: detailCandidateIDs) ?? [:]
+            detailSearchTermsByMediaID = try mediaDetailRepository?.searchTermsByMediaID() ?? [:]
+            mediaExternalIDIndex = try mediaDetailRepository?.externalMediaIDIndex() ?? [:]
+            mediaIDsByPersonID = try mediaDetailRepository?.mediaIDsByPersonID() ?? [:]
+            mediaSearchRevision += 1
+            rebuildDerivedItemCaches()
+            if didRestoreMusicQueue {
+                reconcileMusicQueueWithLibrary()
+            }
+            if let selectedItem, let refreshed = items.first(where: { $0.id == selectedItem.id }) {
+                self.selectedItem = refreshed
+            }
+            libraryRevision += 1
+            posterRevision += 1
+            logPerformance("scan.incrementalReload: \(Self.milliseconds(since: reloadStart))ms items=\(items.count) revision=\(libraryRevision)")
+        } catch {
+            logger?.log("扫描增量刷新媒体库失败：\(error.localizedDescription)", level: .warning)
+        }
+    }
+
     private func rebuildDerivedItemCaches() {
         // Pass 1：建立父子索引，并从保险库根节点向下传播私密标记。
         // 保险库可能是“集合 -> 剧集 -> 单集”的多层结构，只看直接 parent 会漏掉更深的后代。
@@ -3599,9 +3669,17 @@ final class AppState: ObservableObject {
             alert = AppAlert(title: "Plex 已连接", message: "\(hostName) 的媒体库已同步到 Plex 目录。")
         } catch {
             if sourceSaved {
-                try? remoteConnectorAccountRepository?.delete(sourceID: sourceID)
+                do {
+                    try remoteConnectorAccountRepository?.delete(sourceID: sourceID)
+                } catch {
+                    logger?.log("连接失败回滚：删除远程连接器账户失败(\(sourceID))：\(error.localizedDescription)", level: .warning)
+                }
                 remoteCredentialStore.delete(sourceID: sourceID)
-                try? sourceRepository?.delete(id: sourceID)
+                do {
+                    try sourceRepository?.delete(id: sourceID)
+                } catch {
+                    logger?.log("连接失败回滚：删除来源失败(\(sourceID))：\(error.localizedDescription)", level: .warning)
+                }
             }
             finishBackgroundTask(id: taskID, errors: [error.localizedDescription])
             showError("Plex 连接失败", error)
@@ -3705,9 +3783,17 @@ final class AppState: ObservableObject {
             alert = AppAlert(title: "\(provider.displayName) 已连接", message: "\(hostName) 的媒体库已同步到 \(provider.mediaSourceDisplayName) 目录。")
         } catch {
             if sourceSaved {
-                try? remoteConnectorAccountRepository?.delete(sourceID: sourceID)
+                do {
+                    try remoteConnectorAccountRepository?.delete(sourceID: sourceID)
+                } catch {
+                    logger?.log("连接失败回滚：删除远程连接器账户失败(\(sourceID))：\(error.localizedDescription)", level: .warning)
+                }
                 remoteCredentialStore.delete(sourceID: sourceID)
-                try? sourceRepository?.delete(id: sourceID)
+                do {
+                    try sourceRepository?.delete(id: sourceID)
+                } catch {
+                    logger?.log("连接失败回滚：删除来源失败(\(sourceID))：\(error.localizedDescription)", level: .warning)
+                }
             }
             finishBackgroundTask(id: taskID, errors: [error.localizedDescription])
             if !presentEmbyRestrictionIfNeeded(error, serverHost: hostName) {
@@ -5306,6 +5392,11 @@ final class AppState: ObservableObject {
                     mediaRepository: mediaRepository,
                     logger: logger
                 )
+                let incrementalPublisher = ScanIncrementalLibraryPublisher {
+                    await MainActor.run {
+                        self.reloadMediaItemsDuringScan(runID: runID)
+                    }
+                }
                 let summary = await scanner.scan(source: source, settings: settings) { [weak self] progress in
                     guard progressThrottler.shouldPublish(progress) else { return }
                     Task { @MainActor in
@@ -5313,7 +5404,12 @@ final class AppState: ObservableObject {
                         self?.scanProgress = progress
                         self?.updateBackgroundTask(id: taskID, with: progress)
                     }
+                } onImportedIDs: { ids in
+                    Task {
+                        await incrementalPublisher.record(ids)
+                    }
                 }
+                await incrementalPublisher.flush()
                 allErrors.append(contentsOf: summary.errors)
                 await MainActor.run {
                     guard self.scanRunID == runID else { return }
@@ -5390,6 +5486,11 @@ final class AppState: ObservableObject {
                     mediaRepository: mediaRepository,
                     logger: logger
                 )
+                let incrementalPublisher = ScanIncrementalLibraryPublisher {
+                    await MainActor.run {
+                        self.reloadMediaItemsDuringScan(runID: runID)
+                    }
+                }
                 let summary = await scanner.scanChanges(
                     source: source,
                     changedPaths: Array(paths),
@@ -5401,7 +5502,12 @@ final class AppState: ObservableObject {
                         self?.scanProgress = progress
                         self?.updateBackgroundTask(id: taskID, with: progress)
                     }
+                } onImportedIDs: { ids in
+                    Task {
+                        await incrementalPublisher.record(ids)
+                    }
                 }
+                await incrementalPublisher.flush()
                 allErrors.append(contentsOf: summary.errors)
                 await MainActor.run {
                     guard self.scanRunID == runID else { return }
@@ -6104,7 +6210,11 @@ final class AppState: ObservableObject {
     private func cachedPlayableItem(for item: MediaItem) -> MediaItem? {
         guard let store = videoOfflineCacheStore else { return nil }
         if let entry = store.entry(for: item.id) {
-            try? store.markAccessed(itemID: item.id)
+            do {
+                try store.markAccessed(itemID: item.id)
+            } catch {
+                logger?.log("视频缓存访问标记失败(\(item.id))：\(error.localizedDescription)", level: .warning)
+            }
             updateVideoCacheStorageSummary()
             return VideoOfflineCacheStore.itemWithCache(item, entry: entry)
         }
@@ -7615,137 +7725,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    // MARK: - Last.fm 听歌打卡（B2）
-
-    private var lastfmService: LastfmScrobbleService? {
-        let key = settings.lastfmAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let secret = settings.lastfmSharedSecret?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !key.isEmpty, !secret.isEmpty else { return nil }
-        return LastfmScrobbleService(apiKey: key, sharedSecret: secret)
-    }
-
-    var isLastfmConnected: Bool {
-        !(settings.lastfmSessionKey?.isEmpty ?? true)
-    }
-
-    /// 新曲目开始：先结算上一首，再对当前曲目发送 updateNowPlaying 并登记候选。
-    private func scrobbleMusicStart(_ item: MediaItem) {
-        finalizeScrobble()
-        guard settings.lastfmScrobblingEnabled,
-              let sessionKey = settings.lastfmSessionKey, !sessionKey.isEmpty,
-              let service = lastfmService,
-              let artist = item.artist, !artist.isEmpty else {
-            pendingScrobble = nil
-            return
-        }
-        let duration = item.duration ?? Double((item.runtime ?? 0) * 60)
-        pendingScrobble = (item: item, startedAt: Date(), duration: duration)
-
-        let track = item.title
-        let album = item.album
-        let durationSeconds = duration > 0 ? Int(duration) : nil
-        Task { [weak self] in
-            do {
-                try await service.updateNowPlaying(
-                    artist: artist, track: track, album: album,
-                    durationSeconds: durationSeconds, sessionKey: sessionKey
-                )
-            } catch {
-                self?.logger?.log("Last.fm updateNowPlaying 失败：\(error.localizedDescription)", level: .warning)
-            }
-        }
-    }
-
-    /// 结算待打卡曲目：满足时长门槛（>30s 且播放过半或满 4 分钟）才提交 track.scrobble。
-    func finalizeScrobble() {
-        guard let candidate = pendingScrobble else { return }
-        pendingScrobble = nil
-        guard settings.lastfmScrobblingEnabled,
-              let sessionKey = settings.lastfmSessionKey, !sessionKey.isEmpty,
-              let service = lastfmService,
-              let artist = candidate.item.artist, !artist.isEmpty else { return }
-
-        let duration = candidate.duration
-        // 时长未知时按播放满 30s 估计；已知时按官方门槛：过半或满 4 分钟。
-        let elapsed = min(Date().timeIntervalSince(candidate.startedAt), duration > 0 ? duration : .greatestFiniteMagnitude)
-        let threshold: Double = duration > 0 ? min(duration / 2, 240) : 30
-        guard duration <= 0 || duration > 30, elapsed >= threshold else { return }
-
-        let timestamp = Int(candidate.startedAt.timeIntervalSince1970)
-        let track = candidate.item.title
-        let album = candidate.item.album
-        let durationSeconds = duration > 0 ? Int(duration) : nil
-        Task { [weak self] in
-            do {
-                try await service.scrobble(
-                    artist: artist, track: track, album: album,
-                    timestamp: timestamp, durationSeconds: durationSeconds, sessionKey: sessionKey
-                )
-                self?.logger?.log("Last.fm 已打卡：\(artist) - \(track)")
-            } catch {
-                self?.logger?.log("Last.fm scrobble 失败：\(error.localizedDescription)", level: .warning)
-            }
-        }
-    }
-
-    /// 设置页：第一步——获取 token 并打开浏览器授权页。
-    func beginLastfmAuthorization() {
-        guard let service = lastfmService else {
-            alert = AppAlert(title: "缺少凭据", message: "请先填写 Last.fm API Key 与 Shared Secret。")
-            return
-        }
-        guard !isLastfmAuthorizing else { return }
-        isLastfmAuthorizing = true
-        Task { [weak self] in
-            guard let self else { return }
-            defer { self.isLastfmAuthorizing = false }
-            do {
-                let token = try await service.fetchToken()
-                self.lastfmPendingAuthToken = token
-                if let url = service.authorizationURL(token: token) {
-                    NSWorkspace.shared.open(url)
-                }
-                self.alert = AppAlert(
-                    title: "请在浏览器中授权",
-                    message: "已打开 Last.fm 授权页。点击“允许访问”后，回到这里点击「完成连接」。"
-                )
-            } catch {
-                self.showError("Last.fm 授权失败", error)
-            }
-        }
-    }
-
-    /// 设置页：第二步——用户授权后用 token 换 session key 并保存。
-    func completeLastfmAuthorization() {
-        guard let service = lastfmService else { return }
-        guard let token = lastfmPendingAuthToken else {
-            alert = AppAlert(title: "尚未开始授权", message: "请先点击「授权」并在浏览器中确认。")
-            return
-        }
-        guard !isLastfmAuthorizing else { return }
-        isLastfmAuthorizing = true
-        Task { [weak self] in
-            guard let self else { return }
-            defer { self.isLastfmAuthorizing = false }
-            do {
-                let session = try await service.fetchSession(token: token)
-                self.settings.lastfmSessionKey = session.sessionKey
-                self.settings.lastfmUsername = session.username
-                self.lastfmPendingAuthToken = nil
-                self.saveSettings()
-                self.alert = AppAlert(title: "Last.fm 已连接", message: "已连接账号 \(session.username)，开始播放音乐即可自动打卡。")
-            } catch {
-                self.showError("Last.fm 连接失败", error)
-            }
-        }
-    }
-
-    func disconnectLastfm() {
-        settings.lastfmSessionKey = nil
-        settings.lastfmUsername = nil
-        lastfmPendingAuthToken = nil
-        saveSettings()
-    }
 
     // MARK: - Trakt 同步（Phase 4）
 
@@ -7876,7 +7855,11 @@ final class AppState: ObservableObject {
     private func deleteTraktAccountRecord() {
         guard let remoteConnectorAccountRepository else { return }
         for account in remoteConnectorAccounts where account.provider == .trakt {
-            try? remoteConnectorAccountRepository.delete(id: account.id)
+            do {
+                try remoteConnectorAccountRepository.delete(id: account.id)
+            } catch {
+                logger?.log("删除 Trakt 账户记录失败(\(account.id))：\(error.localizedDescription)", level: .warning)
+            }
         }
         remoteConnectorAccounts.removeAll { $0.provider == .trakt }
     }
@@ -8231,7 +8214,11 @@ final class AppState: ObservableObject {
             } catch {
                 await MainActor.run {
                     guard let self else { return }
-                    try? mediaRepository.setFavorite(id: item.id, favorite: currentFavorite)
+                    do {
+                        try mediaRepository.setFavorite(id: item.id, favorite: currentFavorite)
+                    } catch {
+                        self.logger?.log("喜欢状态回滚写入失败(\(item.id))：\(error.localizedDescription)", level: .warning)
+                    }
                     self.updateFavoriteInMemory(id: item.id, favorite: currentFavorite)
                     let title = Self.isEmbyItem(item) ? "远程收藏同步失败" : "喜欢状态更新失败"
                     let message = self.isPrivateItem(item) ? "状态已回滚，请解锁后重试。" : "\(item.cardTitle)：\(error.localizedDescription)"
@@ -8266,8 +8253,18 @@ final class AppState: ObservableObject {
             kind: favorite ? .success : .info
         )
         if let mediaRepository {
-            Task(priority: .utility) { [mediaRepository] in
-                for id in ids { try? mediaRepository.setFavorite(id: id, favorite: favorite) }
+            Task(priority: .utility) { [mediaRepository, logger] in
+                var failedCount = 0
+                for id in ids {
+                    do {
+                        try mediaRepository.setFavorite(id: id, favorite: favorite)
+                    } catch {
+                        failedCount += 1
+                    }
+                }
+                if failedCount > 0 {
+                    logger?.log("批量喜欢状态写入失败 \(failedCount)/\(ids.count) 项", level: .warning)
+                }
             }
         }
     }
@@ -8391,7 +8388,11 @@ final class AppState: ObservableObject {
             } catch {
                 await MainActor.run {
                     guard let self else { return }
-                    try? mediaRepository.setWatchlist(id: item.id, watchlist: currentWatchlist)
+                    do {
+                        try mediaRepository.setWatchlist(id: item.id, watchlist: currentWatchlist)
+                    } catch {
+                        self.logger?.log("待看状态回滚写入失败(\(item.id))：\(error.localizedDescription)", level: .warning)
+                    }
                     self.updateWatchlistInMemory(id: item.id, watchlist: currentWatchlist)
                     let message = self.isPrivateItem(item) ? "状态已回滚，请解锁后重试。" : "\(item.cardTitle)：\(error.localizedDescription)"
                     self.deliverTaskNotice(
@@ -9373,7 +9374,11 @@ final class AppState: ObservableObject {
             }
             do {
                 if source(for: item)?.preferMetadataWriteToSource == true {
-                    try? writeVideoMetadataSidecarIfPossible(item: item, update: update)
+                    do {
+                        try writeVideoMetadataSidecarIfPossible(item: item, update: update)
+                    } catch {
+                        logger?.log("写入视频元数据 sidecar 失败(\(item.id))：\(error.localizedDescription)", level: .warning)
+                    }
                 }
                 try updateMetadata(id: item.id, metadata: update, source: "metadata-supplement")
                 updated += 1
@@ -9607,7 +9612,11 @@ final class AppState: ObservableObject {
         let outputURL = mediaURL
             .deletingLastPathComponent()
             .appendingPathComponent("\(mediaURL.deletingPathExtension().lastPathComponent).lrc")
-        try? text.write(to: outputURL, atomically: true, encoding: .utf8)
+        do {
+            try text.write(to: outputURL, atomically: true, encoding: .utf8)
+        } catch {
+            logger?.log("写入歌词 .lrc 失败(\(outputURL.lastPathComponent))：\(error.localizedDescription)", level: .warning)
+        }
     }
 
     func saveSettings() {
@@ -10207,72 +10216,4 @@ extension AppState {
         AppColors.activeTheme = AppThemeResolver.resolve(for: settings)
     }
 
-    // MARK: - 音乐主题参数文件（MusicThemeConfig）
-
-    /// 从配置文件重新加载音乐主题参数并即时应用（无需重启）。
-    func reloadMusicThemeConfig() {
-        MusicThemeConfigStore.reload()
-        musicThemeRevision &+= 1
-    }
-
-    /// 一键恢复默认：删除/重写默认模板并复位参数，即时应用。
-    func resetMusicThemeConfig() {
-        MusicThemeConfigStore.resetToDefaults()
-        musicThemeRevision &+= 1
-    }
-
-    /// 在访达中定位主题参数文件（不存在则先写一份默认模板），供用户直接编辑。
-    func revealMusicThemeConfigFile() {
-        guard let url = MusicThemeConfigStore.fileURL else { return }
-        if !FileManager.default.fileExists(atPath: url.path) {
-            try? MusicThemeConfigStore.writeTemplate(MusicThemeConfig())
-        }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
-    }
-
-    private func publishThemePaletteChange() {
-        applyThemePalette()
-        themeRevision &+= 1
-        for window in NSApp.windows {
-            window.contentView?.needsDisplay = true
-            window.toolbar?.validateVisibleItems()
-        }
-    }
-
-    /// 设置页：切换配色预设。
-    func setThemePreset(_ preset: AppThemePreset) {
-        settings.themePreset = preset
-        if preset.isCustom {
-            // 进入自定义时，用所选/默认种子填充空缺，避免一打开就空白。
-            let seed = preset.seedHex
-            if settings.themeBaseHex == nil { settings.themeBaseHex = seed.base }
-            if settings.themeHighlightHex == nil { settings.themeHighlightHex = seed.highlight }
-            if settings.themeLightHex == nil { settings.themeLightHex = seed.light }
-        }
-        publishThemePaletteChange()
-        persistSettingsDebounced()
-    }
-
-    /// 设置页：更新自定义配色的某个锚点颜色（十六进制，不含 #）。
-    /// ColorPicker 拖动时会高频触发，因此这里只做轻量的内存换色 + 防抖落盘，
-    /// 不走 `saveSettings`（其会同步写盘、遍历所有窗口刷新外观并重配扫描/TMDB 定时器，高频调用会卡顿）。
-    func setCustomThemeColor(base: String? = nil, highlight: String? = nil, light: String? = nil) {
-        if let base { settings.themeBaseHex = base }
-        if let highlight { settings.themeHighlightHex = highlight }
-        if let light { settings.themeLightHex = light }
-        settings.themePreset = .custom
-        publishThemePaletteChange()
-        persistSettingsDebounced()
-    }
-
-    /// 防抖落盘：高频设置变更（如配色拖动）只在停止操作约 0.4s 后写一次磁盘。
-    /// 触发时落盘「当前最新」的 settings（而非排程时的快照），避免期间其它设置变更被旧快照覆盖丢失。
-    private func persistSettingsDebounced() {
-        settingsPersistTask?.cancel()
-        settingsPersistTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            guard !Task.isCancelled, let self else { return }
-            self.settingsStore.save(self.settings)
-        }
-    }
 }

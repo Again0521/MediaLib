@@ -52,7 +52,8 @@ public final class MediaScanner {
     public func scan(
         source: MediaSource,
         settings: AppSettings,
-        progress: @escaping (ScanProgress) -> Void
+        progress: @escaping (ScanProgress) -> Void,
+        onImportedIDs: @escaping (Set<String>) -> Void = { _ in }
     ) async -> ScanSummary {
         guard FileAccessService.isReachableDirectory(source.path) else {
             let message = inaccessibleSourceMessage(source, incremental: false)
@@ -82,6 +83,7 @@ public final class MediaScanner {
                 let ids = try await importFile(fileURL, fileSize: fileSize, source: source, settings: settings)
                 importedIDs.formUnion(ids)
                 imported += 1
+                onImportedIDs(ids)
             } catch {
                 let message = source.mediaType == .privateCollection
                     ? "隐私媒体源中有文件扫描失败。"
@@ -111,7 +113,8 @@ public final class MediaScanner {
         source: MediaSource,
         changedPaths: [String],
         settings: AppSettings,
-        progress: @escaping (ScanProgress) -> Void
+        progress: @escaping (ScanProgress) -> Void,
+        onImportedIDs: @escaping (Set<String>) -> Void = { _ in }
     ) async -> ScanSummary {
         guard FileAccessService.isReachableDirectory(source.path) else {
             let message = inaccessibleSourceMessage(source, incremental: true)
@@ -193,8 +196,9 @@ public final class MediaScanner {
                     progress(ScanProgress(sourceID: source.id, status: "running", totalFiles: totalWork, processedFiles: processed, currentPath: source.mediaType == .privateCollection ? nil : fileURL.path, errorMessage: errors.first))
                     continue
                 }
-                _ = try await importFile(fileURL, fileSize: fileSize, source: source, settings: settings)
+                let ids = try await importFile(fileURL, fileSize: fileSize, source: source, settings: settings)
                 imported += 1
+                onImportedIDs(ids)
             } catch {
                 let message = source.mediaType == .privateCollection
                     ? "隐私媒体源中有文件增量更新失败。"

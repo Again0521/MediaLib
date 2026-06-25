@@ -2966,7 +2966,7 @@ private struct ShelfDockQueueButton: View {
         .help("播放列表")
         .accessibilityLabel("播放列表")
         .popover(isPresented: $showQueue, arrowEdge: .top) {
-            ShelfQueuePopover(currentItem: currentItem, palette: palette)
+            MusicQueuePopover(currentItem: currentItem, palette: palette)
         }
     }
 }
@@ -3018,6 +3018,12 @@ private struct ShelfQueuePopover: View {
                             Button { appState.play(row.track) } label: {
                                 Label("播放", systemImage: "play.fill")
                             }
+                            Button {
+                                appState.playNextInMusicQueue(row.track)
+                            } label: {
+                                Label("下一曲播放", systemImage: "text.line.first.and.arrowtriangle.forward")
+                            }
+                            .disabled(row.id == currentItem.id)
                             Button {
                                 appState.removeFromMusicQueue(row.track)
                             } label: {

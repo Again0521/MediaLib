@@ -49,7 +49,7 @@ private enum LibrarySnapshotCache {
 
 private struct LibrarySnapshotBuildInput: Sendable {
     let items: [MediaItem]
-    let searchFieldsByItemID: [String: [String]]
+    let searchFieldsByItemID: [String: [String?]]
     let searchText: String
     let sortMode: LibrarySortMode
     let sortOrder: LibrarySortOrder
@@ -62,6 +62,14 @@ private struct LibrarySnapshotBuildInput: Sendable {
 
 private enum LibrarySnapshotBuilder {
     static func visibleItems(from input: LibrarySnapshotBuildInput) -> [MediaItem] {
+        sortedItems(
+            filteredItems(from: input),
+            sortMode: input.sortMode,
+            sortOrder: input.sortOrder
+        )
+    }
+
+    static func filteredItems(from input: LibrarySnapshotBuildInput) -> [MediaItem] {
         let query = input.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let searched: [MediaItem]
         if query.isEmpty {
@@ -70,7 +78,7 @@ private enum LibrarySnapshotBuilder {
             searched = input.items.filter {
                 PinyinSearchMatcher.matches(
                     query: query,
-                    in: (input.searchFieldsByItemID[$0.id] ?? []).map(Optional.some)
+                    in: input.searchFieldsByItemID[$0.id] ?? []
                 )
             }
         }
@@ -97,17 +105,23 @@ private enum LibrarySnapshotBuilder {
             }
         }
 
-        let cacheScoped = input.cachedOnly
+        return input.cachedOnly
             ? genreScoped.filter { input.cachedScopeIDs.contains($0.id) }
             : genreScoped
+    }
 
-        if input.sortMode == .collectionOrder {
-            return input.sortOrder == .primary ? cacheScoped : Array(cacheScoped.reversed())
+    static func sortedItems(
+        _ items: [MediaItem],
+        sortMode: LibrarySortMode,
+        sortOrder: LibrarySortOrder
+    ) -> [MediaItem] {
+        if sortMode == .collectionOrder {
+            return sortOrder == .primary ? items : Array(items.reversed())
         }
 
-        return cacheScoped.sorted { lhs, rhs in
+        return items.sorted { lhs, rhs in
             let primary: Bool
-            switch input.sortMode {
+            switch sortMode {
             case .collectionOrder:
                 primary = false
             case .recentlyUpdated:
@@ -127,9 +141,9 @@ private enum LibrarySnapshotBuilder {
             case .rating:
                 primary = (lhs.userRating ?? 0) > (rhs.userRating ?? 0)
             }
-            if primary { return input.sortOrder == .primary }
+            if primary { return sortOrder == .primary }
             let reversePrimary: Bool
-            switch input.sortMode {
+            switch sortMode {
             case .collectionOrder:
                 reversePrimary = false
             case .recentlyUpdated:
@@ -149,9 +163,24 @@ private enum LibrarySnapshotBuilder {
             case .rating:
                 reversePrimary = (lhs.userRating ?? 0) < (rhs.userRating ?? 0)
             }
-            if reversePrimary { return input.sortOrder == .reverse }
+            if reversePrimary { return sortOrder == .reverse }
             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
         }
+    }
+}
+
+private extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0, !isEmpty else { return [] }
+        var result: [[Element]] = []
+        result.reserveCapacity((count + size - 1) / size)
+        var index = startIndex
+        while index < endIndex {
+            let next = self.index(index, offsetBy: size, limitedBy: endIndex) ?? endIndex
+            result.append(Array(self[index..<next]))
+            index = next
+        }
+        return result
     }
 }
 
@@ -176,6 +205,7 @@ struct LibraryView: View {
     @EnvironmentObject private var appState: AppState
     let destination: SidebarDestination
     @State private var searchText: String
+    @State private var committedSearchText: String
     @State private var sortMode: LibrarySortMode = .recentlyUpdated
     @State private var sortOrder: LibrarySortOrder = .primary
     @State private var watchFilter: LibraryWatchFilter = .all
@@ -187,6 +217,7 @@ struct LibraryView: View {
     @State private var isPreparingVisibleItems = false
     @State private var contentRefreshTask: Task<Void, Never>?
     @State private var searchRefreshTask: Task<Void, Never>?
+    @State private var returnVisibilityFallbackTask: Task<Void, Never>?
     @State private var smartCollectionEditor: VideoSmartCollectionEditorRequest?
     @State private var manualCollectionEditor: VideoManualCollectionEditorRequest?
     @State private var showBatchDeleteConfirm = false
@@ -197,8 +228,10 @@ struct LibraryView: View {
         initialSearchText: String = "",
         initialReturnAnchorID: String? = nil
     ) {
+        let normalizedInitialSearch = initialSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         self.destination = destination
-        _searchText = State(initialValue: initialSearchText)
+        _searchText = State(initialValue: normalizedInitialSearch)
+        _committedSearchText = State(initialValue: normalizedInitialSearch)
         _returnContentReady = State(initialValue: initialReturnAnchorID == nil)
     }
 
@@ -208,7 +241,15 @@ struct LibraryView: View {
         Group {
             if (isPreparingVisibleItems || visibleItemsAreOutOfDate) && displayedItems.isEmpty {
                 staticPage {
-                    AppLoadingView(title: "正在载入\(title)", systemImage: destination.systemImage, rowCount: 4)
+                    if isLibrarySearchActive {
+                        SearchProgressStatusCard(
+                            title: "正在搜索\(title)",
+                            subtitle: "正在穿透标题、演职人员、题材、简介和子集标题，命中后会先显示。",
+                            systemImage: "magnifyingglass"
+                        )
+                    } else {
+                        AppLoadingView(title: "正在载入\(title)", systemImage: destination.systemImage, rowCount: 4)
+                    }
                 }
             } else if displayedItems.isEmpty {
                 staticPage {
@@ -228,13 +269,20 @@ struct LibraryView: View {
                     selectionEnabled: true,
                     restoreAnchorID: activeReturnContext?.anchorID,
                     detailSourceDestinationID: destination.id,
-                    detailSourceSearchText: searchText,
+                    detailSourceSearchText: committedSearchText,
                     currentManualCollectionID: currentManualCollection?.id,
                     onDidRestoreAnchor: completeReturnRestoration
                 ) {
                     VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
                         libraryHeader
                         libraryControls
+                        if isLibrarySearchActive && isPreparingVisibleItems {
+                            SearchProgressStatusCard(
+                                title: "继续搜索当前目录",
+                                subtitle: "已显示先命中的结果，其余条目还在后台增量匹配和排序。",
+                                systemImage: "magnifyingglass"
+                            )
+                        }
                     }
                 }
                 .opacity(returnContentReady ? 1 : 0)
@@ -257,6 +305,8 @@ struct LibraryView: View {
             presentContextTipsIfNeeded()
             if activeReturnContext == nil {
                 returnContentReady = true
+            } else {
+                scheduleReturnVisibilityFallback()
             }
         }
         .onChange(of: searchText) { _ in
@@ -321,6 +371,7 @@ struct LibraryView: View {
         .onDisappear {
             contentRefreshTask?.cancel()
             searchRefreshTask?.cancel()
+            returnVisibilityFallbackTask?.cancel()
             appState.exitSelectionMode()
         }
         .sheet(item: $smartCollectionEditor) { request in
@@ -414,7 +465,13 @@ struct LibraryView: View {
             }
         }
 
-        GlassSearchField(placeholder: "搜索\(title)", text: $searchText, minWidth: 158, maxWidth: 226)
+        GlassSearchField(
+            placeholder: "搜索\(title)",
+            text: $searchText,
+            minWidth: 158,
+            maxWidth: 226,
+            onSubmit: commitSearch
+        )
         Button {
             appState.scanSources(for: destination)
         } label: {
@@ -576,7 +633,12 @@ struct LibraryView: View {
         return appState.detailReturnContext
     }
 
+    private var isLibrarySearchActive: Bool {
+        !committedSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private func completeReturnRestoration() {
+        returnVisibilityFallbackTask?.cancel()
         guard let context = activeReturnContext else {
             returnContentReady = true
             return
@@ -588,6 +650,26 @@ struct LibraryView: View {
             returnContentReady = true
         }
         appState.consumeDetailReturnContext(destinationID: destination.id, anchorID: context.anchorID)
+    }
+
+    /// 目录页与 EMBY/Plex 等远程分区会先增量产出结果；如果返回锚点因为过滤、
+    /// 远程同步或搜索穿透时序暂时不可见，页面不能一直停在透明态。
+    private func scheduleReturnVisibilityFallback() {
+        returnVisibilityFallbackTask?.cancel()
+        let expectedDestinationID = destination.id
+        let expectedAnchorID = activeReturnContext?.anchorID
+        returnVisibilityFallbackTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 650_000_000)
+            guard !Task.isCancelled else { return }
+            guard activeReturnContext?.destinationID == expectedDestinationID,
+                  activeReturnContext?.anchorID == expectedAnchorID else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            transaction.animation = nil
+            withTransaction(transaction) {
+                returnContentReady = true
+            }
+        }
     }
 
     private var scrollTopButtonBottomPadding: CGFloat {
@@ -617,7 +699,7 @@ struct LibraryView: View {
     private func snapshotKey(for targetDestination: SidebarDestination) -> LibrarySnapshotCache.Key {
         LibrarySnapshotCache.Key(
             destinationID: targetDestination.id,
-            searchText: searchText.trimmingCharacters(in: .whitespacesAndNewlines),
+            searchText: committedSearchText.trimmingCharacters(in: .whitespacesAndNewlines),
             sortMode: sortMode,
             sortOrder: sortOrder,
             watchFilter: watchFilter,
@@ -667,7 +749,7 @@ struct LibraryView: View {
             items: baseItems,
             searchFieldsByItemID: Dictionary(
                 uniqueKeysWithValues: baseItems.map {
-                    ($0.id, appState.mediaSearchFields(for: $0).compactMap { $0 })
+                    ($0.id, appState.mediaSearchFields(for: $0))
                 }
             ),
             searchText: key.searchText,
@@ -679,6 +761,10 @@ struct LibraryView: View {
             cachedScopeIDs: cachedScopeIDs,
             watchedThreshold: key.watchedThreshold
         )
+        if !key.searchText.isEmpty, baseItems.count > 180 {
+            await computeVisibleItemsIncrementally(input: input, targetDestination: targetDestination, key: key)
+            return
+        }
         let sorted = await Task.detached(priority: .userInitiated) {
             LibrarySnapshotBuilder.visibleItems(from: input)
         }.value
@@ -694,14 +780,78 @@ struct LibraryView: View {
     private func scheduleSearchRefresh() {
         searchRefreshTask?.cancel()
         let targetDestination = destination
+        let pendingSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         searchRefreshTask = Task { @MainActor in
             do {
-                try await Task.sleep(nanoseconds: 120_000_000)
+                try await Task.sleep(nanoseconds: 180_000_000)
             } catch {
                 return
             }
+            committedSearchText = pendingSearchText
             refreshVisibleItems(for: targetDestination, deferred: true)
         }
+    }
+
+    private func commitSearch() {
+        searchRefreshTask?.cancel()
+        committedSearchText = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        refreshVisibleItems(for: destination, deferred: true)
+    }
+
+    private func computeVisibleItemsIncrementally(
+        input: LibrarySnapshotBuildInput,
+        targetDestination: SidebarDestination,
+        key: LibrarySnapshotCache.Key
+    ) async {
+        var accumulated: [MediaItem] = []
+        let chunkSize = 140
+        let chunks = input.items.chunked(into: chunkSize)
+        for chunk in chunks {
+            guard !Task.isCancelled, key == snapshotKey(for: targetDestination) else { return }
+            let chunkInput = LibrarySnapshotBuildInput(
+                items: chunk,
+                searchFieldsByItemID: input.searchFieldsByItemID,
+                searchText: input.searchText,
+                sortMode: input.sortMode,
+                sortOrder: input.sortOrder,
+                watchFilter: input.watchFilter,
+                genreFilter: input.genreFilter,
+                cachedOnly: input.cachedOnly,
+                cachedScopeIDs: input.cachedScopeIDs,
+                watchedThreshold: input.watchedThreshold
+            )
+            let partial = await Task.detached(priority: .userInitiated) {
+                LibrarySnapshotBuilder.filteredItems(from: chunkInput)
+            }.value
+            guard !Task.isCancelled, key == snapshotKey(for: targetDestination) else { return }
+            if !partial.isEmpty {
+                accumulated.append(contentsOf: partial)
+                let sortedPartial = await Task.detached(priority: .userInitiated) {
+                    LibrarySnapshotBuilder.sortedItems(
+                        accumulated,
+                        sortMode: input.sortMode,
+                        sortOrder: input.sortOrder
+                    )
+                }.value
+                guard !Task.isCancelled, key == snapshotKey(for: targetDestination) else { return }
+                visibleItems = sortedPartial
+                visibleItemsDestinationID = targetDestination.id
+            }
+            await Task.yield()
+        }
+
+        let finalItems = await Task.detached(priority: .userInitiated) {
+            LibrarySnapshotBuilder.sortedItems(
+                accumulated,
+                sortMode: input.sortMode,
+                sortOrder: input.sortOrder
+            )
+        }.value
+        guard !Task.isCancelled, key == snapshotKey(for: targetDestination) else { return }
+        visibleItems = finalItems
+        visibleItemsDestinationID = targetDestination.id
+        isPreparingVisibleItems = false
+        LibrarySnapshotCache.store(finalItems, for: key)
     }
 
     private var playbackTraceItems: [MediaItem] {
