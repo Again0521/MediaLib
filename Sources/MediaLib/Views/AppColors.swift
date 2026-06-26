@@ -1776,60 +1776,21 @@ private struct LiquidGlassButtonStyleBody: View {
         let pressed = configuration.isPressed
         let active = isEnabled && (isHovering || pressed || isFocused)
 
-        configuration.label
+        // 用中间 let 把整条 body 修饰链拆成两段，缩短单个表达式的类型检查长度
+        // （避免「unable to type-check in reasonable time」，CI 旧编译器复现）。
+        let labelBase = configuration.label
             .font(.callout.weight(.semibold))
             .lineLimit(1)
             .foregroundStyle(prominent ? Color.white.opacity(0.96) : Color.primary.opacity(active ? 0.88 : 0.78))
             .padding(.horizontal, horizontalPadding)
             .frame(minHeight: minHeight)
             .background {
-                ZStack {
-                    if prominent {
-                        shape.fill(
-                            LinearGradient(
-                                colors: AppColors.accentButtonColors,
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                    } else {
-                        // 非强调按钮：暖白半透明底，避免按钮底部露出冷蓝直角色块。
-                        shape.fill(
-                            reduceTransparency
-                                ? AppColors.elevatedSurface
-                                : AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.40 : 0.66)
-                        )
-                    }
-                    if !prominent {
-                        shape.fill(
-                            LinearGradient(
-                                colors: [
-                                .white.opacity((colorScheme == .dark ? 0.22 : 0.46) * depth),
-                                AppColors.solarLightTint.opacity((colorScheme == .dark ? 0.070 : 0.105) * depth),
-                                AppColors.cardAquaWash.opacity(colorScheme == .dark ? 0.12 : 0.14),
-                                AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.46 : 0.56)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                    }
-                    if pressed {
-                        shape.fill(
-                            prominent
-                                ? Color.black.opacity(colorScheme == .dark ? 0.20 : 0.16)
-                                : AppColors.selectedGlassTint.opacity(colorScheme == .dark ? 0.18 : 0.12)
-                        )
-                    } else if isHovering, isEnabled {
-                        shape.fill(
-                            prominent
-                                ? Color.white.opacity(colorScheme == .dark ? 0.090 : 0.12)
-                                : AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.16 : 0.12)
-                        )
-                    }
-                }
-                .clipShape(shape)
+                // 背景层抽到独立 @ViewBuilder helper，把 ZStack 内大量条件填充与内联三元的
+                // 类型检查与主修饰链解耦。
+                buttonBackgroundLayer(shape: shape, depth: depth, pressed: pressed)
             }
+
+        return labelBase
             .overlay(alignment: .topLeading) {
                 if prominent {
                     EmptyView()
@@ -1847,33 +1808,11 @@ private struct LiquidGlassButtonStyleBody: View {
                 }
             }
             .overlay {
+                // 描边渐变改用 helper 函数计算（显式 Double 常量），避免内联嵌套三元让编译器类型检查超时。
                 if prominent {
-                    shape.strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(colorScheme == .dark ? (active ? 0.42 : 0.32) : (active ? 0.58 : 0.46)),
-                                Color.white.opacity(colorScheme == .dark ? 0.14 : 0.22),
-                                Color.black.opacity(colorScheme == .dark ? 0.18 : 0.13)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.9
-                    )
+                    shape.strokeBorder(prominentStrokeGradient(active: active), lineWidth: 0.9)
                 } else {
-                    shape.strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity((colorScheme == .dark ? (active ? 0.48 : 0.36) : (active ? 0.62 : 0.50)) * depth),
-                                AppColors.solarLightTint.opacity((colorScheme == .dark ? (active ? 0.18 : 0.12) : (active ? 0.30 : 0.22)) * depth),
-                                AppColors.solarEdgeTint.opacity((colorScheme == .dark ? (active ? 0.20 : 0.12) : (active ? 0.28 : 0.18)) * depth),
-                                Color.black.opacity((colorScheme == .dark ? (active ? 0.16 : 0.12) : (active ? 0.070 : 0.045)) * depth)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
+                    shape.strokeBorder(regularStrokeGradient(active: active, depth: depth), lineWidth: 1)
                 }
             }
             .clipShape(shape)
@@ -1905,6 +1844,98 @@ private struct LiquidGlassButtonStyleBody: View {
             .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
             .animation(reduceMotion ? nil : AppMotion.fast, value: pressed)
             .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
+    }
+
+    @ViewBuilder
+    private func buttonBackgroundLayer(shape: RoundedRectangle, depth: Double, pressed: Bool) -> some View {
+        ZStack {
+            if prominent {
+                shape.fill(
+                    LinearGradient(
+                        colors: AppColors.accentButtonColors,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            } else {
+                // 非强调按钮：暖白半透明底，避免按钮底部露出冷蓝直角色块。
+                shape.fill(
+                    reduceTransparency
+                        ? AppColors.elevatedSurface
+                        : AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.40 : 0.66)
+                )
+            }
+            if !prominent {
+                shape.fill(regularBackgroundFillGradient(depth: depth))
+            }
+            if pressed {
+                shape.fill(
+                    prominent
+                        ? Color.black.opacity(colorScheme == .dark ? 0.20 : 0.16)
+                        : AppColors.selectedGlassTint.opacity(colorScheme == .dark ? 0.18 : 0.12)
+                )
+            } else if isHovering, isEnabled {
+                shape.fill(
+                    prominent
+                        ? Color.white.opacity(colorScheme == .dark ? 0.090 : 0.12)
+                        : AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.16 : 0.12)
+                )
+            }
+        }
+        .clipShape(shape)
+    }
+
+    private func regularBackgroundFillGradient(depth: Double) -> LinearGradient {
+        let isDark = colorScheme == .dark
+        let c0: Double = (isDark ? 0.22 : 0.46) * depth
+        let c1: Double = (isDark ? 0.070 : 0.105) * depth
+        let c2: Double = isDark ? 0.12 : 0.14
+        let c3: Double = isDark ? 0.46 : 0.56
+        return LinearGradient(
+            colors: [
+                .white.opacity(c0),
+                AppColors.solarLightTint.opacity(c1),
+                AppColors.cardAquaWash.opacity(c2),
+                AppColors.cleanFieldFill.opacity(c3)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    // 描边渐变在普通函数里以显式 Double 常量计算，避免在 ViewBuilder 内联嵌套三元导致类型检查超时。
+    private func prominentStrokeGradient(active: Bool) -> LinearGradient {
+        let isDark = colorScheme == .dark
+        let c0: Double = isDark ? (active ? 0.42 : 0.32) : (active ? 0.58 : 0.46)
+        let c1: Double = isDark ? 0.14 : 0.22
+        let c2: Double = isDark ? 0.18 : 0.13
+        return LinearGradient(
+            colors: [
+                Color.white.opacity(c0),
+                Color.white.opacity(c1),
+                Color.black.opacity(c2)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private func regularStrokeGradient(active: Bool, depth: Double) -> LinearGradient {
+        let isDark = colorScheme == .dark
+        let c0: Double = (isDark ? (active ? 0.48 : 0.36) : (active ? 0.62 : 0.50)) * depth
+        let c1: Double = (isDark ? (active ? 0.18 : 0.12) : (active ? 0.30 : 0.22)) * depth
+        let c2: Double = (isDark ? (active ? 0.20 : 0.12) : (active ? 0.28 : 0.18)) * depth
+        let c3: Double = (isDark ? (active ? 0.16 : 0.12) : (active ? 0.070 : 0.045)) * depth
+        return LinearGradient(
+            colors: [
+                Color.white.opacity(c0),
+                AppColors.solarLightTint.opacity(c1),
+                AppColors.solarEdgeTint.opacity(c2),
+                Color.black.opacity(c3)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
     }
 }
 
@@ -2228,7 +2259,8 @@ struct GlassCapsuleControl<Content: View>: View {
 
     var body: some View {
         let active = isEnabled && (isSelected || isHovering)
-        content
+        // 用中间 let 拆分整条 body 修饰链，缩短单表达式类型检查长度（避免 CI 旧编译器超时）。
+        let capsuleBase = content
             .font(font)
             .lineLimit(1)
             .foregroundStyle(isSelected ? tint : Color.primary.opacity(isEnabled ? (isHovering ? 0.86 : 0.70) : 0.42))
@@ -2236,30 +2268,13 @@ struct GlassCapsuleControl<Content: View>: View {
             .frame(height: height)
             // 在更深底色上，未选中胶囊白色填充稍加浓，视觉区分度提高。
             .background(
-                Capsule()
-                    .fill(
-                        reduceTransparency
-                            ? AppColors.elevatedSurface
-                            : (isSelected
-                                ? Color.white.opacity(colorScheme == .dark ? 0.30 : 0.76)
-                                : Color.white.opacity(colorScheme == .dark ? (isHovering ? 0.24 : 0.17) : (isHovering ? 0.70 : 0.58)))
-                    )
+                Capsule().fill(capsuleFillColor)
             )
+
+        return capsuleBase
             .overlay {
                 Capsule()
-                    .stroke(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 1.0, green: 0.99, blue: 0.95).opacity(colorScheme == .dark ? (active ? 0.42 : 0.32) : (active ? 0.96 : 0.82)),
-                                AppColors.solarLightTint.opacity(colorScheme == .dark ? (active ? 0.18 : 0.12) : (active ? 0.32 : 0.24)),
-                                isSelected ? tint.opacity(colorScheme == .dark ? 0.24 : 0.30) : AppColors.solarEdgeTint.opacity(colorScheme == .dark ? (isHovering ? 0.22 : 0.14) : (isHovering ? 0.30 : 0.18)),
-                                Color.black.opacity(colorScheme == .dark ? (active ? 0.14 : 0.10) : (active ? 0.055 : 0.036))
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
+                    .stroke(capsuleStrokeGradient(active: active), lineWidth: 1)
             }
             .shadow(color: tint.opacity(isSelected ? (colorScheme == .dark ? 0.08 : 0.06) : (isHovering ? (colorScheme == .dark ? 0.045 : 0.030) : 0)), radius: isHovering ? 9 : 8, y: 2)
             .modifier(CapsulePointerEdgeModifier(enabled: enablePointerEdge, cornerRadius: height / 2, tint: tint, isSelected: isSelected || isHovering))
@@ -2269,6 +2284,36 @@ struct GlassCapsuleControl<Content: View>: View {
             }
             .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
             .animation(reduceMotion ? nil : AppMotion.fast, value: isSelected)
+    }
+
+    // 胶囊底色以显式分支计算，避免内联嵌套三元让类型检查超时。
+    private var capsuleFillColor: Color {
+        if reduceTransparency { return AppColors.elevatedSurface }
+        let isDark = colorScheme == .dark
+        if isSelected { return Color.white.opacity(isDark ? 0.30 : 0.76) }
+        let o: Double = isDark ? (isHovering ? 0.24 : 0.17) : (isHovering ? 0.70 : 0.58)
+        return Color.white.opacity(o)
+    }
+
+    // 胶囊描边渐变以显式 Double / Color 常量计算，避免内联嵌套三元让类型检查超时。
+    private func capsuleStrokeGradient(active: Bool) -> LinearGradient {
+        let isDark = colorScheme == .dark
+        let c0: Double = isDark ? (active ? 0.42 : 0.32) : (active ? 0.96 : 0.82)
+        let c1: Double = isDark ? (active ? 0.18 : 0.12) : (active ? 0.32 : 0.24)
+        let c3: Double = isDark ? (active ? 0.14 : 0.10) : (active ? 0.055 : 0.036)
+        let edge: Color = isSelected
+            ? tint.opacity(isDark ? 0.24 : 0.30)
+            : AppColors.solarEdgeTint.opacity(isDark ? (isHovering ? 0.22 : 0.14) : (isHovering ? 0.30 : 0.18))
+        return LinearGradient(
+            colors: [
+                Color(red: 1.0, green: 0.99, blue: 0.95).opacity(c0),
+                AppColors.solarLightTint.opacity(c1),
+                edge,
+                Color.black.opacity(c3)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
     }
 }
 

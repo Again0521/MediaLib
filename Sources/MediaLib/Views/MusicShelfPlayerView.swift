@@ -1695,7 +1695,9 @@ private struct ShelfWaterLightField: View {
         let startY = baselineY - plateSize * (ShelfDesignSystem.Light.bloomRise + 0.52)
         let endY = baselineY + plateSize * 0.72
         let height = max(endY - startY, plateSize)
-        let sway = time.map { CGFloat(sin($0 * 2 * .pi / 18.0)) * plateSize * 0.018 } ?? 0
+        // 拆出显式类型，避免 CGFloat/Double 经 optional map 混合让类型检查超时。
+        let swayPhase: Double = time.map { sin($0 * 2 * .pi / 18.0) } ?? 0
+        let sway: CGFloat = CGFloat(swayPhase) * plateSize * 0.018
 
         var rayContext = context
         rayContext.opacity = 0.78
@@ -1745,7 +1747,8 @@ private struct ShelfWaterLightField: View {
     private func drawWaterShimmer(in context: inout GraphicsContext, size: CGSize, time: TimeInterval?) {
         let width = size.width
         let y = baselineY + plateSize * 0.62
-        let phase = time.map { CGFloat(sin($0 * 2 * .pi / 22.0)) * 0.6 } ?? -0.6
+        let phaseValue: Double = time.map { sin($0 * 2 * .pi / 22.0) * 0.6 } ?? -0.6
+        let phase: CGFloat = CGFloat(phaseValue)
         let center = CGPoint(x: width / 2 + phase * width * 0.34, y: y)
         let gradient = Gradient(stops: [
             .init(color: Color.white.opacity(0.056), location: 0.0),
@@ -1788,8 +1791,9 @@ private struct ShelfWaterLightField: View {
     }
 
     private func drawMoonlight(in context: inout GraphicsContext, time: TimeInterval?) {
-        let breath = time.map { (sin($0 * 2 * .pi / 7.2) + 1) * 0.5 } ?? 0
-        let width = plateSize * (reduceMotion ? 0.30 : 0.25 + CGFloat(breath) * 0.11)
+        let breath: Double = time.map { (sin($0 * 2 * .pi / 7.2) + 1) * 0.5 } ?? 0
+        let widthFactor: CGFloat = reduceMotion ? 0.30 : 0.25 + CGFloat(breath) * 0.11
+        let width = plateSize * widthFactor
         let height = plateSize * 1.3
         let opacity = reduceMotion ? 0.5 : 0.52 + breath * 0.33
         let topY = baselineY + plateSize * 0.5

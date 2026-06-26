@@ -5411,43 +5411,45 @@ private struct MusicMiniPlayerGlassSurface: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        // 把动态不透明度与渐变预先算成显式类型的常量，避免编译器对整条 body 视图链
+        // 「unable to type-check in reasonable time」（CI 旧编译器复现）。数值与原逻辑完全一致。
+        let isDark = colorScheme == .dark
+        let baseFillOpacity: Double = isDark ? 0.18 : 0.54
+        let backgroundFillOpacity: Double = isDark ? 0.08 : 0.12
+        let sheenGradient = LinearGradient(
+            colors: [
+                .white.opacity(isDark ? 0.28 : 0.66),
+                palette.primary.color.opacity(isDark ? 0.038 : 0.030),
+                AppColors.solarLightTint.opacity(isDark ? 0.070 : 0.105),
+                .white.opacity(isDark ? 0.08 : 0.30)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        let strokeGradient = LinearGradient(
+            colors: [
+                .white.opacity(isDark ? 0.36 : 0.82),
+                AppColors.solarLightTint.opacity(isDark ? 0.10 : 0.16),
+                palette.accent.color.opacity(isDark ? 0.10 : 0.075),
+                .white.opacity(isDark ? 0.10 : 0.28)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
 
-        AppKitVisualEffectBackground(material: .popover, blendingMode: .withinWindow)
+        return AppKitVisualEffectBackground(material: .popover, blendingMode: .withinWindow)
             .clipShape(shape)
             .overlay {
-                shape.fill(Color.white.opacity(colorScheme == .dark ? 0.18 : 0.54))
+                shape.fill(Color.white.opacity(baseFillOpacity))
             }
             .background(
-                shape.fill(Color.white.opacity(colorScheme == .dark ? 0.08 : 0.12))
+                shape.fill(Color.white.opacity(backgroundFillOpacity))
             )
             .overlay {
-                shape.fill(
-                    LinearGradient(
-                        colors: [
-                            .white.opacity(colorScheme == .dark ? 0.28 : 0.66),
-                            palette.primary.color.opacity(colorScheme == .dark ? 0.038 : 0.030),
-                            AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.070 : 0.105),
-                            .white.opacity(colorScheme == .dark ? 0.08 : 0.30)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+                shape.fill(sheenGradient)
             }
             .overlay {
-                shape.strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            .white.opacity(colorScheme == .dark ? 0.36 : 0.82),
-                            AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.10 : 0.16),
-                            palette.accent.color.opacity(colorScheme == .dark ? 0.10 : 0.075),
-                            .white.opacity(colorScheme == .dark ? 0.10 : 0.28)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
+                shape.strokeBorder(strokeGradient, lineWidth: 1)
             }
             .overlay {
                 LyricsCardEffectLayerView(

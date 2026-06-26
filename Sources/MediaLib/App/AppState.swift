@@ -8694,11 +8694,15 @@ final class AppState: ObservableObject {
     }
 
     func toggleFavorite(_ item: MediaItem) {
-        let currentFavorite =
-        items.first(where: { $0.id == item.id })?.favorite ??
-        activePlayerItem.flatMap { $0.id == item.id ? $0.favorite : nil } ??
-        selectedItem.flatMap { $0.id == item.id ? $0.favorite : nil } ??
-        item.favorite
+        // 展开成 if-let，避免 `??` + flatMap 深链让编译器类型检查超时（行为不变：items→active→selected→item）。
+        var currentFavorite = item.favorite
+        if let match = items.first(where: { $0.id == item.id }) {
+            currentFavorite = match.favorite
+        } else if let active = activePlayerItem, active.id == item.id {
+            currentFavorite = active.favorite
+        } else if let selected = selectedItem, selected.id == item.id {
+            currentFavorite = selected.favorite
+        }
         let nextFavorite = !currentFavorite
 
         updateFavoriteInMemory(id: item.id, favorite: nextFavorite)
@@ -8868,11 +8872,15 @@ final class AppState: ObservableObject {
 
     func toggleWatchlist(_ item: MediaItem) {
         guard item.type != .music else { return }
-        let currentWatchlist =
-        items.first(where: { $0.id == item.id })?.watchlist ??
-        activePlayerItem.flatMap { $0.id == item.id ? $0.watchlist : nil } ??
-        selectedItem.flatMap { $0.id == item.id ? $0.watchlist : nil } ??
-        item.watchlist
+        // 展开成 if-let，避免 `??` + flatMap 深链让编译器类型检查超时（行为不变：items→active→selected→item）。
+        var currentWatchlist = item.watchlist
+        if let match = items.first(where: { $0.id == item.id }) {
+            currentWatchlist = match.watchlist
+        } else if let active = activePlayerItem, active.id == item.id {
+            currentWatchlist = active.watchlist
+        } else if let selected = selectedItem, selected.id == item.id {
+            currentWatchlist = selected.watchlist
+        }
         let nextWatchlist = !currentWatchlist
         updateWatchlistInMemory(id: item.id, watchlist: nextWatchlist)
         showMediaStateNotice(
@@ -8956,11 +8964,12 @@ final class AppState: ObservableObject {
     }
 
     private func currentSnapshot(for item: MediaItem) -> MediaItem {
-        items.first(where: { $0.id == item.id }) ??
-        activePlayerItem.flatMap { $0.id == item.id ? $0 : nil } ??
-        selectedItem.flatMap { $0.id == item.id ? $0 : nil } ??
-        quickPreviewItem.flatMap { $0.id == item.id ? $0 : nil } ??
-        item
+        // 展开成早返回，避免 `??` + flatMap 深链让编译器类型检查超时（行为不变）。
+        if let match = items.first(where: { $0.id == item.id }) { return match }
+        if let active = activePlayerItem, active.id == item.id { return active }
+        if let selected = selectedItem, selected.id == item.id { return selected }
+        if let preview = quickPreviewItem, preview.id == item.id { return preview }
+        return item
     }
 
     private func shouldClearWatchlistWhenMarkedWatched(_ item: MediaItem, watched: Bool) -> Bool {
@@ -9591,11 +9600,12 @@ final class AppState: ObservableObject {
     }
 
     private func displayedItem(id: String, fallback: MediaItem? = nil) -> MediaItem? {
-        items.first { $0.id == id } ??
-            activePlayerItem.flatMap { $0.id == id ? $0 : nil } ??
-            selectedItem.flatMap { $0.id == id ? $0 : nil } ??
-            quickPreviewItem.flatMap { $0.id == id ? $0 : nil } ??
-            fallback
+        // 展开成早返回，避免 `??` + flatMap 闭包深链让编译器类型检查超时（CI 旧编译器复现）。
+        if let item = items.first(where: { $0.id == id }) { return item }
+        if let active = activePlayerItem, active.id == id { return active }
+        if let selected = selectedItem, selected.id == id { return selected }
+        if let preview = quickPreviewItem, preview.id == id { return preview }
+        return fallback
     }
 
     private func syncConflictDisplayTitle(_ conflict: SyncConflict) -> String {
