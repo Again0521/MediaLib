@@ -515,7 +515,10 @@ final class AppState: ObservableObject {
     @Published var musicShuffleEnabled = false
     // 随机播放的洗牌袋 + 历史已抽到 MusicShuffleNavigator（纯逻辑、可单测）。
     private let musicShuffleNavigator = MusicShuffleNavigator()
-    @Published var musicPlaylists: [MusicPlaylist] = []
+    // 音乐歌单（普通 + 智能）已抽到 MusicPlaylistStore；保留同名转发访问器使外部 API/视图零改。
+    let musicPlaylistStore: MusicPlaylistStore
+    private var musicPlaylistForwarding: AnyCancellable?
+    var musicPlaylists: [MusicPlaylist] { musicPlaylistStore.playlists }
     @Published var videoSmartCollections: [VideoSmartCollection] = []
     @Published var videoManualCollections: [VideoManualCollection] = []
     @Published var videoOfflineSubscriptions: [VideoOfflineSubscription] = []
@@ -532,7 +535,7 @@ final class AppState: ObservableObject {
     private var mediaSearchFieldsCache: [String: [String?]] = [:]
     @Published var videoManualCollectionCreationRequest: VideoManualCollectionCreationRequest?
     @Published var videoOfflineSubscriptionLimitRequest: VideoOfflineSubscriptionLimitRequest?
-    @Published var musicSmartPlaylists: [MusicSmartPlaylist] = []
+    var musicSmartPlaylists: [MusicSmartPlaylist] { musicPlaylistStore.smartPlaylists }
     @Published var playbackCommandRequest: PlaybackCommandRequest?
     @Published var isFetchingMusicMetadata = false
     @Published var isSupplementingMetadata = false
@@ -561,12 +564,11 @@ final class AppState: ObservableObject {
     private let database: DatabaseManager?
     private let sourceRepository: SourceRepository?
     private let mediaRepository: MediaRepository?
-    private let musicPlaylistRepository: MusicPlaylistRepository?
+    // musicPlaylistRepository / musicSmartPlaylistRepository 已移入 MusicPlaylistStore 持有。
     private let musicQueueRepository: MusicQueueRepository?
     private let videoSmartCollectionRepository: VideoSmartCollectionRepository?
     private let videoManualCollectionRepository: VideoManualCollectionRepository?
     private let videoOfflineSubscriptionRepository: VideoOfflineSubscriptionRepository?
-    private let musicSmartPlaylistRepository: MusicSmartPlaylistRepository?
     private let playbackMarkerRepository: PlaybackMarkerRepository?
     private let metadataCorrectionRepository: MetadataCorrectionRepository?
     private let mediaDetailRepository: MediaDetailRepository?
@@ -752,12 +754,14 @@ final class AppState: ObservableObject {
             self.database = database
             self.sourceRepository = SourceRepository(database: database)
             self.mediaRepository = MediaRepository(database: database)
-            self.musicPlaylistRepository = MusicPlaylistRepository(database: database)
             self.musicQueueRepository = MusicQueueRepository(database: database)
             self.videoSmartCollectionRepository = VideoSmartCollectionRepository(database: database)
             self.videoManualCollectionRepository = VideoManualCollectionRepository(database: database)
             self.videoOfflineSubscriptionRepository = VideoOfflineSubscriptionRepository(database: database)
-            self.musicSmartPlaylistRepository = MusicSmartPlaylistRepository(database: database)
+            self.musicPlaylistStore = MusicPlaylistStore(
+                repository: MusicPlaylistRepository(database: database),
+                smartRepository: MusicSmartPlaylistRepository(database: database)
+            )
             self.playbackMarkerRepository = PlaybackMarkerRepository(database: database)
             self.metadataCorrectionRepository = MetadataCorrectionRepository(database: database)
             self.mediaDetailRepository = MediaDetailRepository(database: database)
@@ -790,12 +794,11 @@ final class AppState: ObservableObject {
             self.database = nil
             self.sourceRepository = nil
             self.mediaRepository = nil
-            self.musicPlaylistRepository = nil
             self.musicQueueRepository = nil
             self.videoSmartCollectionRepository = nil
             self.videoManualCollectionRepository = nil
             self.videoOfflineSubscriptionRepository = nil
-            self.musicSmartPlaylistRepository = nil
+            self.musicPlaylistStore = MusicPlaylistStore(repository: nil, smartRepository: nil)
             self.playbackMarkerRepository = nil
             self.metadataCorrectionRepository = nil
             self.mediaDetailRepository = nil
@@ -807,6 +810,11 @@ final class AppState: ObservableObject {
         // 选择态变化转发到 AppState 自身的 objectWillChange，使既有 @EnvironmentObject 视图照常刷新
         // （等价于此前 isSelectionModeActive/selectedItemIDs 作为 AppState @Published 的行为）。
         selectionForwarding = selection.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        // 歌单数据变化同样转发到 AppState，使既有 @EnvironmentObject 视图照常刷新
+        //（等价于此前 musicPlaylists/musicSmartPlaylists 作为 AppState @Published 的行为）。
+        musicPlaylistForwarding = musicPlaylistStore.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
         configureNetworkPathMonitoring()
@@ -1406,33 +1414,25 @@ final class AppState: ObservableObject {
     // MARK: - 音乐智能歌单
 
     func musicSmartPlaylist(id: String) -> MusicSmartPlaylist? {
-        musicSmartPlaylists.first { $0.id == id }
+        musicPlaylistStore.smartPlaylist(id: id)
     }
 
     @discardableResult
     func saveMusicSmartPlaylist(_ playlist: MusicSmartPlaylist, notify: Bool = true) -> MusicSmartPlaylist? {
-        guard let musicSmartPlaylistRepository else { return nil }
-        let isNew = !musicSmartPlaylists.contains { $0.id == playlist.id }
         do {
-            let saved = try musicSmartPlaylistRepository.save(playlist)
-            if let index = musicSmartPlaylists.firstIndex(where: { $0.id == saved.id }) {
-                musicSmartPlaylists[index] = saved
-            } else {
-                musicSmartPlaylists.insert(saved, at: 0)
-            }
-            musicSmartPlaylists.sort { $0.updatedAt > $1.updatedAt }
+            guard let result = try musicPlaylistStore.saveSmart(playlist) else { return nil }
             libraryRevision += 1
             if notify {
-                let title = isNew ? "智能歌单已创建" : "智能歌单已保存"
+                let title = result.isNew ? "智能歌单已创建" : "智能歌单已保存"
                 deliverTaskNotice(
                     title: title,
-                    message: saved.name,
+                    message: result.saved.name,
                     kind: .success,
                     systemTitle: title,
-                    systemBody: "\(saved.name) 已保存。"
+                    systemBody: "\(result.saved.name) 已保存。"
                 )
             }
-            return saved
+            return result.saved
         } catch {
             deliverTaskNotice(
                 title: "智能歌单保存失败",
@@ -1446,11 +1446,10 @@ final class AppState: ObservableObject {
     }
 
     func deleteMusicSmartPlaylist(_ playlist: MusicSmartPlaylist) {
-        guard let musicSmartPlaylistRepository else { return }
         do {
-            try musicSmartPlaylistRepository.delete(id: playlist.id)
-            musicSmartPlaylists.removeAll { $0.id == playlist.id }
-            libraryRevision += 1
+            if try musicPlaylistStore.deleteSmart(id: playlist.id) {
+                libraryRevision += 1
+            }
         } catch {
             showError("智能歌单删除失败", error)
         }
@@ -1579,14 +1578,8 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func createMusicPlaylist(name: String, tracks: [MediaItem] = []) -> MusicPlaylist? {
-        guard let musicPlaylistRepository else { return nil }
         do {
-            let playlist = try musicPlaylistRepository.create(
-                name: name,
-                itemIDs: uniqueMusicTracks(tracks).map(\.id)
-            )
-            upsertMusicPlaylistInMemory(playlist)
-            return playlist
+            return try musicPlaylistStore.create(name: name, itemIDs: uniqueMusicTracks(tracks).map(\.id))
         } catch {
             showError("创建歌单失败", error)
             return nil
@@ -1658,90 +1651,54 @@ final class AppState: ObservableObject {
     }
 
     func addMusicTracks(_ tracks: [MediaItem], to playlist: MusicPlaylist) {
-        guard let musicPlaylistRepository else { return }
         do {
-            guard let updated = try musicPlaylistRepository.add(
-                itemIDs: uniqueMusicTracks(tracks).map(\.id),
-                toPlaylistID: playlist.id
-            ) else { return }
-            upsertMusicPlaylistInMemory(updated)
+            try musicPlaylistStore.addTracks(itemIDs: uniqueMusicTracks(tracks).map(\.id), toPlaylistID: playlist.id)
         } catch {
             showError("添加到歌单失败", error)
         }
     }
 
     func renameMusicPlaylist(_ playlist: MusicPlaylist, name: String) {
-        guard let musicPlaylistRepository else { return }
         do {
-            guard let updated = try musicPlaylistRepository.rename(id: playlist.id, name: name) else { return }
-            upsertMusicPlaylistInMemory(updated)
+            try musicPlaylistStore.rename(id: playlist.id, name: name)
         } catch {
             showError("重命名歌单失败", error)
         }
     }
 
     func deleteMusicPlaylist(_ playlist: MusicPlaylist) {
-        guard let musicPlaylistRepository else { return }
         do {
-            try musicPlaylistRepository.delete(id: playlist.id)
-            musicPlaylists.removeAll { $0.id == playlist.id }
+            try musicPlaylistStore.delete(id: playlist.id)
         } catch {
             showError("删除歌单失败", error)
         }
     }
 
     func removeMusicTracks(_ tracks: [MediaItem], from playlist: MusicPlaylist) {
-        guard let musicPlaylistRepository else { return }
         do {
-            guard let updated = try musicPlaylistRepository.remove(
-                itemIDs: uniqueMusicTracks(tracks).map(\.id),
-                fromPlaylistID: playlist.id
-            ) else { return }
-            upsertMusicPlaylistInMemory(updated)
+            try musicPlaylistStore.removeTracks(itemIDs: uniqueMusicTracks(tracks).map(\.id), fromPlaylistID: playlist.id)
         } catch {
             showError("移出歌单失败", error)
         }
     }
 
     func moveMusicPlaylistItems(in playlist: MusicPlaylist, fromOffsets: IndexSet, toOffset: Int) {
-        guard let musicPlaylistRepository,
-              let current = musicPlaylists.first(where: { $0.id == playlist.id }) else { return }
-        var itemIDs = current.itemIDs
-        itemIDs.move(fromOffsets: fromOffsets, toOffset: toOffset)
         do {
-            guard let updated = try musicPlaylistRepository.replaceItems(itemIDs, inPlaylistID: playlist.id) else { return }
-            upsertMusicPlaylistInMemory(updated)
+            try musicPlaylistStore.moveItems(inPlaylistID: playlist.id, fromOffsets: fromOffsets, toOffset: toOffset)
         } catch {
             showError("调整歌单顺序失败", error)
         }
     }
 
     func replaceMusicPlaylistItems(in playlist: MusicPlaylist, with tracks: [MediaItem]) {
-        guard let musicPlaylistRepository else { return }
         do {
-            guard let updated = try musicPlaylistRepository.replaceItems(
-                uniqueMusicTracks(tracks).map(\.id),
-                inPlaylistID: playlist.id
-            ) else { return }
-            upsertMusicPlaylistInMemory(updated)
+            try musicPlaylistStore.replaceItems(uniqueMusicTracks(tracks).map(\.id), inPlaylistID: playlist.id)
         } catch {
             showError("保存歌单顺序失败", error)
         }
     }
 
-    private func upsertMusicPlaylistInMemory(_ playlist: MusicPlaylist) {
-        if let index = musicPlaylists.firstIndex(where: { $0.id == playlist.id }) {
-            musicPlaylists[index] = playlist
-        } else {
-            musicPlaylists.insert(playlist, at: 0)
-        }
-        musicPlaylists.sort { lhs, rhs in
-            if lhs.updatedAt != rhs.updatedAt {
-                return lhs.updatedAt > rhs.updatedAt
-            }
-            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-        }
-    }
+    // upsertMusicPlaylistInMemory 已随歌单 CRUD 一并移入 MusicPlaylistStore。
 
     func embyItems(for section: EmbyLibrarySection) -> [MediaItem] {
         switch section {
@@ -2841,11 +2798,11 @@ final class AppState: ObservableObject {
             let fetchStart = Date()
             sources = try sourceRepository?.fetchAll() ?? []
             let fetchedItems = try mediaRepository?.fetchAll() ?? []
-            musicPlaylists = try musicPlaylistRepository?.fetchAll() ?? []
+            try musicPlaylistStore.reloadPlaylists()
             videoSmartCollections = try videoSmartCollectionRepository?.fetchAll() ?? []
             videoManualCollections = try videoManualCollectionRepository?.fetchAll() ?? []
             videoOfflineSubscriptions = try videoOfflineSubscriptionRepository?.fetchAll() ?? []
-            musicSmartPlaylists = try musicSmartPlaylistRepository?.fetchAll() ?? []
+            try musicPlaylistStore.reloadSmartPlaylists()
             metadataCorrectionCountsByMediaID = try metadataCorrectionRepository?.activeCountsByMediaID() ?? [:]
             metadataCorrectionRecordCount = try metadataCorrectionRepository?.activeRecordCount() ?? 0
             metadataCorrectionBatches = try metadataCorrectionRepository?.fetchActiveBatches(limit: 120) ?? []
