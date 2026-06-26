@@ -246,6 +246,15 @@ public final class MediaRepository {
         }
     }
 
+    /// `deleteItems(ids:)` 的异步、不阻塞主线程版本：在数据库队列上以单个事务执行全部分块删除。
+    /// 供批量删除（合并重复项 / 清理失效索引）从 @MainActor 调用而不卡住主线程。
+    public func deleteItemsAsync(ids: [String]) async throws {
+        guard !ids.isEmpty else { return }
+        try await database.transactionAsync {
+            try self.deleteItems(ids: ids)
+        }
+    }
+
     public func search(_ query: String) throws -> [MediaItem] {
         let token = Self.escapedLikeContainsPattern(for: query)
         return try database.query(

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import MediaLibCore
 import Network
@@ -494,9 +495,13 @@ final class AppState: ObservableObject {
     @Published private(set) var floatingNotices: [AppFloatingNotice] = []
     /// 受限远程媒体服务器提示（白名单拒绝）；非 nil 时弹出专用面板。
     @Published var embyRestrictionNotice: EmbyRestrictionNotice?
-    /// C2 批量操作：海报墙多选模式开关与已选条目 ID 集合。
-    @Published var isSelectionModeActive = false
-    @Published var selectedItemIDs: Set<String> = []
+    /// C2 批量操作：海报墙多选状态已抽到 SelectionStore（R1-ARCH-001 试水）。
+    /// AppState 持有该 Store 并转发其 objectWillChange（见 init），下面的计算访问器
+    /// 保持 `appState.isSelectionModeActive` / `appState.selectedItemIDs` 旧 API 不变（视图零改）。
+    let selection = SelectionStore()
+    private var selectionForwarding: AnyCancellable?
+    var isSelectionModeActive: Bool { selection.isSelectionModeActive }
+    var selectedItemIDs: Set<String> { selection.selectedItemIDs }
     /// 配色切换计数：每次切换预设 +1，驱动整窗"加载过场"覆盖层在下层刷新界面，避免逐控件慢慢变色。
     @Published var themeRevision = 0
     /// 音乐主题参数（MusicThemeConfig）刷新计数：用户「重新加载 / 恢复默认」后 +1，
@@ -508,13 +513,8 @@ final class AppState: ObservableObject {
     @Published var musicQueue: [MediaItem] = []
     @Published var musicRepeatMode: MusicRepeatMode = .sequential
     @Published var musicShuffleEnabled = false
-    // 随机播放洗牌袋：一次性乱序序列（每首播完才轮空，整袋放完再重洗），替代旧的无状态
-    // randomElement()（会重复、且整队列未放完就反复抽同一首）。`musicShuffleBagKey` 记录
-    // 洗牌袋是基于哪份队列构建的（队列 ID 列表），队列变化时自动重建。
-    private var musicShuffleBag: [String] = []
-    private var musicShuffleBagKey: [String] = []
-    // 随机播放历史栈：记录已随机播放过的曲目 ID，使「上一首」能真正回到上一次随机播放的曲目。
-    private var musicShuffleHistory: [String] = []
+    // 随机播放的洗牌袋 + 历史已抽到 MusicShuffleNavigator（纯逻辑、可单测）。
+    private let musicShuffleNavigator = MusicShuffleNavigator()
     @Published var musicPlaylists: [MusicPlaylist] = []
     @Published var videoSmartCollections: [VideoSmartCollection] = []
     @Published var videoManualCollections: [VideoManualCollection] = []
@@ -803,6 +803,11 @@ final class AppState: ObservableObject {
             self.remoteConnectorAccountRepository = nil
             self.videoOfflineCacheStore = nil
             self.startupError = error.localizedDescription
+        }
+        // 选择态变化转发到 AppState 自身的 objectWillChange，使既有 @EnvironmentObject 视图照常刷新
+        // （等价于此前 isSelectionModeActive/selectedItemIDs 作为 AppState @Published 的行为）。
+        selectionForwarding = selection.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
         }
         configureNetworkPathMonitoring()
         appDidBecomeActiveObserver = NotificationCenter.default.addObserver(
@@ -3496,12 +3501,17 @@ final class AppState: ObservableObject {
             alert = AppAlert(title: "没有可清理条目", message: "离线媒体源中的条目不会被清理。请先重新挂载或确认媒体源状态。")
             return
         }
-        do {
-            try mediaRepository?.deleteItems(ids: ids)
-            reload()
-            alert = AppAlert(title: "索引已清理", message: "已从 MediaLIB 内部索引移除 \(ids.count) 个失效条目，用户媒体文件没有被修改。")
-        } catch {
-            showError("失效索引清理失败", error)
+        guard let mediaRepository else { return }
+        // 批量删除移出主线程（deleteItemsAsync 在 DB 队列上单事务执行），避免上千行删除时卡住 UI；
+        // 删除完成后回到主线程刷新与提示（AppState 为 @MainActor，await 后自动回到主线程）。
+        Task {
+            do {
+                try await mediaRepository.deleteItemsAsync(ids: ids)
+                reload()
+                alert = AppAlert(title: "索引已清理", message: "已从 MediaLIB 内部索引移除 \(ids.count) 个失效条目，用户媒体文件没有被修改。")
+            } catch {
+                showError("失效索引清理失败", error)
+            }
         }
     }
 
@@ -3513,15 +3523,22 @@ final class AppState: ObservableObject {
         for item in removeItems {
             ids.append(contentsOf: children(for: item).map(\.id))
         }
-        do {
-            try mediaRepository?.deleteItems(ids: Array(Set(ids)))
-            reload()
-            alert = AppAlert(
-                title: "已合并重复项",
-                message: "已保留「\(keptItem.title)」，从索引移除其余 \(removeItems.count) 项（用户媒体文件未改动；若重新扫描仍存在的文件可能再次出现）。"
-            )
-        } catch {
-            showError("合并重复项失败", error)
+        let uniqueIDs = Array(Set(ids))
+        let removedCount = removeItems.count
+        let keptTitle = keptItem.title
+        guard let mediaRepository else { return }
+        // 同上：批量删除移出主线程，完成后回主线程刷新与提示。
+        Task {
+            do {
+                try await mediaRepository.deleteItemsAsync(ids: uniqueIDs)
+                reload()
+                alert = AppAlert(
+                    title: "已合并重复项",
+                    message: "已保留「\(keptTitle)」，从索引移除其余 \(removedCount) 项（用户媒体文件未改动；若重新扫描仍存在的文件可能再次出现）。"
+                )
+            } catch {
+                showError("合并重复项失败", error)
+            }
         }
     }
 
@@ -7707,7 +7724,7 @@ final class AppState: ObservableObject {
     func toggleMusicShuffle() {
         musicShuffleEnabled.toggle()
         // 每次切换都重置洗牌袋与历史：开启时从干净的一轮开始，关闭时不残留陈旧状态。
-        resetShuffleState()
+        musicShuffleNavigator.reset()
         scheduleMusicQueuePersistence()
     }
 
@@ -8000,8 +8017,8 @@ final class AppState: ObservableObject {
             }
             if musicShuffleEnabled {
                 if normalizedDirection > 0 {
-                    return nextShuffleItem(current: item, queue: sequence)
-                } else if let previous = previousShuffleItem(current: item, queue: sequence) {
+                    return musicShuffleNavigator.next(current: item, queue: sequence)
+                } else if let previous = musicShuffleNavigator.previous(current: item, queue: sequence) {
                     return previous
                 }
                 // 随机模式下若无历史可回溯，落回下方顺序逻辑（保持原「上一首」兜底行为）。
@@ -8028,74 +8045,7 @@ final class AppState: ObservableObject {
         return sequence[targetIndex]
     }
 
-    // MARK: - 随机播放洗牌袋
-
-    /// 返回随机模式下的下一首：从一次性洗牌袋取下一个未播曲目；整袋放完后重洗（循环不停，
-    /// 与旧行为一致但保证「整轮不重复」）。当前曲目入历史栈，供「上一首」回溯。
-    private func nextShuffleItem(current item: MediaItem, queue: [MediaItem]) -> MediaItem? {
-        let queueIDs = queue.map(\.id)
-        guard !queueIDs.isEmpty else { return nil }
-        rebuildShuffleBagIfNeeded(queueIDs: queueIDs)
-
-        // 把当前曲目压入历史（去抖：避免连续相同），并确保它不会立刻又从袋里被抽到。
-        if musicShuffleHistory.last != item.id {
-            musicShuffleHistory.append(item.id)
-        }
-        musicShuffleBag.removeAll { $0 == item.id }
-
-        if musicShuffleBag.isEmpty {
-            // 整袋放完 → 重洗（排除当前曲目，避免与刚播的同一首相邻）。
-            musicShuffleBag = Self.shuffledBag(from: queueIDs, excluding: item.id)
-            musicShuffleBagKey = queueIDs
-        }
-        guard let nextID = musicShuffleBag.first else {
-            // 队列只有当前一首：无其他可选，返回自身（与旧 `?? item` 兜底一致）。
-            return queue.first { $0.id == item.id } ?? item
-        }
-        musicShuffleBag.removeFirst()
-        return queue.first { $0.id == nextID } ?? item
-    }
-
-    /// 返回随机模式下的上一首：从历史栈回退到上一次随机播放过的曲目；无历史则返回 nil
-    /// （调用方落回顺序兜底）。被回退的曲目放回袋首，使其仍会在本轮被播到。
-    private func previousShuffleItem(current item: MediaItem, queue: [MediaItem]) -> MediaItem? {
-        // 丢弃栈顶等于当前曲目的记录（指向自身的占位）。
-        while musicShuffleHistory.last == item.id {
-            musicShuffleHistory.removeLast()
-        }
-        guard let previousID = musicShuffleHistory.popLast(),
-              let previous = queue.first(where: { $0.id == previousID }) else {
-            return nil
-        }
-        // 当前曲目放回袋首，避免回退后它被本轮跳过。
-        if !musicShuffleBag.contains(item.id), queue.contains(where: { $0.id == item.id }) {
-            musicShuffleBag.insert(item.id, at: 0)
-        }
-        return previous
-    }
-
-    private func rebuildShuffleBagIfNeeded(queueIDs: [String]) {
-        guard musicShuffleBagKey != queueIDs || musicShuffleBag.isEmpty else { return }
-        musicShuffleBag = Self.shuffledBag(from: queueIDs, excluding: nil)
-        musicShuffleBagKey = queueIDs
-        // 队列结构变化时，历史中已不在队列里的曲目失去意义；保留仍存在的，按原顺序过滤。
-        let present = Set(queueIDs)
-        musicShuffleHistory.removeAll { !present.contains($0) }
-    }
-
-    private func resetShuffleState() {
-        musicShuffleBag = []
-        musicShuffleBagKey = []
-        musicShuffleHistory = []
-    }
-
-    private static func shuffledBag(from queueIDs: [String], excluding excluded: String?) -> [String] {
-        var bag = queueIDs
-        if let excluded {
-            bag.removeAll { $0 == excluded }
-        }
-        return bag.shuffled()
-    }
+    // 随机播放洗牌袋 / 历史逻辑已抽到 MusicShuffleNavigator（见 adjacentItem 的 music 分支调用）。
 
     func openExternally(_ item: MediaItem) {
         let playableItem = cachedPlayableItem(for: item) ?? item
@@ -9094,40 +9044,19 @@ final class AppState: ObservableObject {
 
     // MARK: - 批量选择操作（C2）
 
-    /// 进入/退出多选模式；退出时清空已选。
-    func toggleSelectionMode() {
-        isSelectionModeActive.toggle()
-        if !isSelectionModeActive {
-            selectedItemIDs.removeAll()
-        }
-    }
+    // 以下选择态方法委托给 SelectionStore；保留方法名与签名以兼容既有调用方。
+    func toggleSelectionMode() { selection.toggleMode() }
 
-    func exitSelectionMode() {
-        guard isSelectionModeActive || !selectedItemIDs.isEmpty else { return }
-        isSelectionModeActive = false
-        selectedItemIDs.removeAll()
-    }
+    func exitSelectionMode() { selection.exit() }
 
-    func toggleItemSelection(_ id: String) {
-        if selectedItemIDs.contains(id) {
-            selectedItemIDs.remove(id)
-        } else {
-            selectedItemIDs.insert(id)
-        }
-    }
+    func toggleItemSelection(_ id: String) { selection.toggleItem(id) }
 
     /// 在当前可见集合范围内全选 / 取消全选。
-    func setSelection(_ ids: [String], selected: Bool) {
-        if selected {
-            selectedItemIDs.formUnion(ids)
-        } else {
-            selectedItemIDs.subtract(ids)
-        }
-    }
+    func setSelection(_ ids: [String], selected: Bool) { selection.setSelection(ids, selected: selected) }
 
     /// 由 ID 集合还原为有序条目（按传入顺序），仅取库内存在的条目。
     func resolveSelectedItems(orderedBy ordered: [MediaItem]) -> [MediaItem] {
-        ordered.filter { selectedItemIDs.contains($0.id) }
+        selection.resolveSelected(orderedBy: ordered)
     }
 
     private var currentSelectionItems: [MediaItem] {

@@ -80,6 +80,30 @@ public final class DatabaseManager {
         }
     }
 
+    /// `transaction(_:)` 的异步版本：在数据库串行队列上以 `queue.async` 执行（**不阻塞调用方线程**，
+    /// 因此从 @MainActor 调用时不会卡住主线程），并以 BEGIN IMMEDIATE/COMMIT 包裹保证原子性。
+    /// 适用于大批量写（如批量删除上千行），避免 `queue.sync` 在主线程上长时间阻塞。
+    /// block 在队列线程上运行，其内部调用 execute/query 会检测到 isOnQueue 而直接执行，不会死锁。
+    public func transactionAsync<T>(_ block: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            queue.async {
+                do {
+                    try self.unsafeExecute("BEGIN IMMEDIATE TRANSACTION")
+                    do {
+                        let result = try block()
+                        try self.unsafeExecute("COMMIT")
+                        continuation.resume(returning: result)
+                    } catch {
+                        try? self.unsafeExecute("ROLLBACK")
+                        continuation.resume(throwing: error)
+                    }
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     public func schemaVersion() throws -> Int {
         try query("PRAGMA user_version") { row in
             row.int(0) ?? 0
