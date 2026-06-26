@@ -522,9 +522,12 @@ final class AppState: ObservableObject {
     @Published var videoSmartCollections: [VideoSmartCollection] = []
     @Published var videoManualCollections: [VideoManualCollection] = []
     @Published var videoOfflineSubscriptions: [VideoOfflineSubscription] = []
-    @Published private(set) var metadataCorrectionCountsByMediaID: [String: Int] = [:]
-    @Published private(set) var metadataCorrectionRecordCount = 0
-    @Published private(set) var metadataCorrectionBatches: [MetadataCorrectionBatchSummary] = []
+    // 元数据校正账本已抽到 MetadataCorrectionStore；保留同名转发访问器使外部 API/视图零改。
+    let metadataCorrectionStore: MetadataCorrectionStore
+    private var metadataCorrectionForwarding: AnyCancellable?
+    var metadataCorrectionCountsByMediaID: [String: Int] { metadataCorrectionStore.countsByMediaID }
+    var metadataCorrectionRecordCount: Int { metadataCorrectionStore.recordCount }
+    var metadataCorrectionBatches: [MetadataCorrectionBatchSummary] { metadataCorrectionStore.batches }
     // 同步冲突待处理列表已抽到 SyncConflictStore；保留同名转发访问器使外部 API/视图零改。
     let syncConflictStore: SyncConflictStore
     private var syncConflictForwarding: AnyCancellable?
@@ -573,7 +576,7 @@ final class AppState: ObservableObject {
     private let videoManualCollectionRepository: VideoManualCollectionRepository?
     private let videoOfflineSubscriptionRepository: VideoOfflineSubscriptionRepository?
     private let playbackMarkerRepository: PlaybackMarkerRepository?
-    private let metadataCorrectionRepository: MetadataCorrectionRepository?
+    // metadataCorrectionRepository 已移入 MetadataCorrectionStore 持有。
     private let mediaDetailRepository: MediaDetailRepository?
     // syncConflictRepository 已移入 SyncConflictStore 持有。
     private let remoteConnectorAccountRepository: RemoteConnectorAccountRepository?
@@ -620,8 +623,9 @@ final class AppState: ObservableObject {
     private var cachedTopLevelItems: [MediaItem] = []
     private var cachedPrivateTopLevelItems: [MediaItem] = []
     private var cachedItemsByID: [String: MediaItem] = [:]
-    private var cachedMusicTracks: [MediaItem] = []
-    private var cachedMusicTracksByID: [String: MediaItem] = [:]
+    // 注：以下两个缓存放宽为 internal，供拆分到独立文件的 AppState extension（如歌单）读取。
+    var cachedMusicTracks: [MediaItem] = []
+    var cachedMusicTracksByID: [String: MediaItem] = [:]
     private var cachedEmbyTopLevelItems: [MediaItem] = []
     private var cachedAlbumItems: [MediaItem] = []
     private var cachedHomeVideoItems: [MediaItem] = []
@@ -766,7 +770,7 @@ final class AppState: ObservableObject {
                 smartRepository: MusicSmartPlaylistRepository(database: database)
             )
             self.playbackMarkerRepository = PlaybackMarkerRepository(database: database)
-            self.metadataCorrectionRepository = MetadataCorrectionRepository(database: database)
+            self.metadataCorrectionStore = MetadataCorrectionStore(repository: MetadataCorrectionRepository(database: database))
             self.mediaDetailRepository = MediaDetailRepository(database: database)
             self.syncConflictStore = SyncConflictStore(repository: SyncConflictRepository(database: database))
             self.remoteConnectorAccountRepository = RemoteConnectorAccountRepository(database: database)
@@ -803,7 +807,7 @@ final class AppState: ObservableObject {
             self.videoOfflineSubscriptionRepository = nil
             self.musicPlaylistStore = MusicPlaylistStore(repository: nil, smartRepository: nil)
             self.playbackMarkerRepository = nil
-            self.metadataCorrectionRepository = nil
+            self.metadataCorrectionStore = MetadataCorrectionStore(repository: nil)
             self.mediaDetailRepository = nil
             self.syncConflictStore = SyncConflictStore(repository: nil)
             self.remoteConnectorAccountRepository = nil
@@ -826,6 +830,10 @@ final class AppState: ObservableObject {
         }
         // 同步冲突列表/计数变化转发到 AppState，使设置页徽标/冲突列表照常刷新。
         syncConflictForwarding = syncConflictStore.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        // 元数据校正计数/批次变化转发到 AppState，使设置页徽标/撤销列表照常刷新。
+        metadataCorrectionForwarding = metadataCorrectionStore.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
         configureNetworkPathMonitoring()
@@ -1423,89 +1431,8 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - 音乐智能歌单
-
-    func musicSmartPlaylist(id: String) -> MusicSmartPlaylist? {
-        musicPlaylistStore.smartPlaylist(id: id)
-    }
-
-    @discardableResult
-    func saveMusicSmartPlaylist(_ playlist: MusicSmartPlaylist, notify: Bool = true) -> MusicSmartPlaylist? {
-        do {
-            guard let result = try musicPlaylistStore.saveSmart(playlist) else { return nil }
-            libraryRevision += 1
-            if notify {
-                let title = result.isNew ? "智能歌单已创建" : "智能歌单已保存"
-                deliverTaskNotice(
-                    title: title,
-                    message: result.saved.name,
-                    kind: .success,
-                    systemTitle: title,
-                    systemBody: "\(result.saved.name) 已保存。"
-                )
-            }
-            return result.saved
-        } catch {
-            deliverTaskNotice(
-                title: "智能歌单保存失败",
-                message: error.localizedDescription,
-                kind: .error,
-                systemTitle: "智能歌单保存失败",
-                systemBody: error.localizedDescription
-            )
-            return nil
-        }
-    }
-
-    func deleteMusicSmartPlaylist(_ playlist: MusicSmartPlaylist) {
-        do {
-            if try musicPlaylistStore.deleteSmart(id: playlist.id) {
-                libraryRevision += 1
-            }
-        } catch {
-            showError("智能歌单删除失败", error)
-        }
-    }
-
-    /// 按规则实时求值：从全部音乐里筛选 → 排序 → 截断数量。曲目随库状态自动更新。
-    func musicTracks(inSmart playlist: MusicSmartPlaylist) -> [MediaItem] {
-        var tracks = musicTracks
-
-        switch playlist.filter {
-        case .any:
-            break
-        case .favorites:
-            tracks = tracks.filter(\.favorite)
-        case .recentlyPlayed:
-            tracks = tracks.filter { $0.lastPlayedAt != nil }
-        case .neverPlayed:
-            tracks = tracks.filter { ($0.playCount ?? 0) == 0 }
-        }
-
-        if playlist.recency != .anytime {
-            let cutoff = Date().addingTimeInterval(-Double(playlist.recency.rawValue) * 86_400)
-            tracks = tracks.filter { $0.createdAt >= cutoff }
-        }
-
-        switch playlist.sort {
-        case .dateAddedDesc:
-            tracks.sort { $0.createdAt > $1.createdAt }
-        case .playCountDesc:
-            tracks.sort { ($0.playCount ?? 0) > ($1.playCount ?? 0) }
-        case .lastPlayedDesc:
-            tracks.sort { ($0.lastPlayedAt ?? .distantPast) > ($1.lastPlayedAt ?? .distantPast) }
-        case .titleAsc:
-            tracks.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-        case .artistAsc:
-            tracks.sort { ($0.artist ?? "").localizedCaseInsensitiveCompare($1.artist ?? "") == .orderedAscending }
-        case .yearDesc:
-            tracks.sort { ($0.year ?? 0) > ($1.year ?? 0) }
-        }
-
-        if playlist.limit != .unlimited {
-            tracks = Array(tracks.prefix(playlist.limit.rawValue))
-        }
-        return tracks
-    }
+    // musicSmartPlaylist / saveMusicSmartPlaylist / deleteMusicSmartPlaylist / musicTracks(inSmart:)
+    // 已拆到 AppState+MusicPlaylist.swift（缩小本超大文件）。
 
     private var visibleVideoSmartCollectionItems: [MediaItem] {
         cachedHomeVideoItems
@@ -1583,133 +1510,15 @@ final class AppState: ObservableObject {
         }
     }
 
-    func musicTracks(in playlist: MusicPlaylist) -> [MediaItem] {
-        playlist.itemIDs.compactMap { cachedMusicTracksByID[$0] }
+    /// 自增库版本号。供拆分到独立文件的 AppState extension 调用，保留 libraryRevision 的 private(set) 封装。
+    func bumpLibraryRevision() {
+        libraryRevision += 1
     }
 
-    @discardableResult
-    func createMusicPlaylist(name: String, tracks: [MediaItem] = []) -> MusicPlaylist? {
-        do {
-            return try musicPlaylistStore.create(name: name, itemIDs: uniqueMusicTracks(tracks).map(\.id))
-        } catch {
-            showError("创建歌单失败", error)
-            return nil
-        }
-    }
-
-    // MARK: - 歌单 M3U 导入 / 导出
-
-    /// 生成 M3U 文本（含 #EXTINF 时长与"艺人 - 标题"）。
-    func musicPlaylistM3UContent(_ playlist: MusicPlaylist) -> String {
-        var lines = ["#EXTM3U"]
-        for track in musicTracks(in: playlist) {
-            guard let path = track.filePath, !path.isEmpty else { continue }
-            let seconds = Int((track.duration ?? 0).rounded())
-            let artist = track.artist?.trimmingCharacters(in: .whitespaces) ?? ""
-            let info = artist.isEmpty ? track.title : "\(artist) - \(track.title)"
-            lines.append("#EXTINF:\(seconds),\(info)")
-            lines.append(path)
-        }
-        return lines.joined(separator: "\n") + "\n"
-    }
-
-    /// 从 M3U 文件导入：按文件路径（绝对/相对）匹配库内曲目，匹配不到再按文件名兜底，创建新歌单。返回匹配数量。
-    @discardableResult
-    func importMusicPlaylist(fromM3U url: URL, name: String) -> Int {
-        let content: String
-        if let utf8 = try? String(contentsOf: url, encoding: .utf8) {
-            content = utf8
-        } else if let latin = try? String(contentsOf: url, encoding: .isoLatin1) {
-            content = latin
-        } else {
-            alert = AppAlert(title: "导入失败", message: "无法读取该 M3U 文件。")
-            return 0
-        }
-
-        let baseDir = url.deletingLastPathComponent()
-        let rawPaths: [String] = content
-            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
-            .map { line in
-                if line.hasPrefix("/") || line.contains("://") { return line }
-                return baseDir.appendingPathComponent(line).standardizedFileURL.path
-            }
-
-        let byPath = Dictionary(cachedMusicTracks.compactMap { track in
-            track.filePath.map { ($0, track) }
-        }, uniquingKeysWith: { first, _ in first })
-        let byFilename = Dictionary(cachedMusicTracks.compactMap { track -> (String, MediaItem)? in
-            guard let path = track.filePath else { return nil }
-            return (URL(fileURLWithPath: path).lastPathComponent, track)
-        }, uniquingKeysWith: { first, _ in first })
-
-        var matched: [MediaItem] = []
-        var seenIDs = Set<String>()
-        for path in rawPaths {
-            let track = byPath[path] ?? byFilename[URL(fileURLWithPath: path).lastPathComponent]
-            if let track, seenIDs.insert(track.id).inserted {
-                matched.append(track)
-            }
-        }
-
-        guard !matched.isEmpty else {
-            alert = AppAlert(title: "未匹配到歌曲", message: "M3U 里的文件都不在当前音乐库中。请先扫描包含这些文件的音乐媒体源。")
-            return 0
-        }
-        _ = createMusicPlaylist(name: name, tracks: matched)
-        return matched.count
-    }
-
-    func addMusicTracks(_ tracks: [MediaItem], to playlist: MusicPlaylist) {
-        do {
-            try musicPlaylistStore.addTracks(itemIDs: uniqueMusicTracks(tracks).map(\.id), toPlaylistID: playlist.id)
-        } catch {
-            showError("添加到歌单失败", error)
-        }
-    }
-
-    func renameMusicPlaylist(_ playlist: MusicPlaylist, name: String) {
-        do {
-            try musicPlaylistStore.rename(id: playlist.id, name: name)
-        } catch {
-            showError("重命名歌单失败", error)
-        }
-    }
-
-    func deleteMusicPlaylist(_ playlist: MusicPlaylist) {
-        do {
-            try musicPlaylistStore.delete(id: playlist.id)
-        } catch {
-            showError("删除歌单失败", error)
-        }
-    }
-
-    func removeMusicTracks(_ tracks: [MediaItem], from playlist: MusicPlaylist) {
-        do {
-            try musicPlaylistStore.removeTracks(itemIDs: uniqueMusicTracks(tracks).map(\.id), fromPlaylistID: playlist.id)
-        } catch {
-            showError("移出歌单失败", error)
-        }
-    }
-
-    func moveMusicPlaylistItems(in playlist: MusicPlaylist, fromOffsets: IndexSet, toOffset: Int) {
-        do {
-            try musicPlaylistStore.moveItems(inPlaylistID: playlist.id, fromOffsets: fromOffsets, toOffset: toOffset)
-        } catch {
-            showError("调整歌单顺序失败", error)
-        }
-    }
-
-    func replaceMusicPlaylistItems(in playlist: MusicPlaylist, with tracks: [MediaItem]) {
-        do {
-            try musicPlaylistStore.replaceItems(uniqueMusicTracks(tracks).map(\.id), inPlaylistID: playlist.id)
-        } catch {
-            showError("保存歌单顺序失败", error)
-        }
-    }
-
-    // upsertMusicPlaylistInMemory 已随歌单 CRUD 一并移入 MusicPlaylistStore。
+    // 普通歌单 CRUD + M3U 导入导出（musicTracks(in:) / createMusicPlaylist / musicPlaylistM3UContent /
+    // importMusicPlaylist / addMusicTracks / renameMusicPlaylist / deleteMusicPlaylist / removeMusicTracks /
+    // moveMusicPlaylistItems / replaceMusicPlaylistItems）已拆到 AppState+MusicPlaylist.swift。
+    // upsertMusicPlaylistInMemory 早已随歌单 CRUD 移入 MusicPlaylistStore。
 
     func embyItems(for section: EmbyLibrarySection) -> [MediaItem] {
         switch section {
@@ -2814,9 +2623,7 @@ final class AppState: ObservableObject {
             videoManualCollections = try videoManualCollectionRepository?.fetchAll() ?? []
             videoOfflineSubscriptions = try videoOfflineSubscriptionRepository?.fetchAll() ?? []
             try musicPlaylistStore.reloadSmartPlaylists()
-            metadataCorrectionCountsByMediaID = try metadataCorrectionRepository?.activeCountsByMediaID() ?? [:]
-            metadataCorrectionRecordCount = try metadataCorrectionRepository?.activeRecordCount() ?? 0
-            metadataCorrectionBatches = try metadataCorrectionRepository?.fetchActiveBatches(limit: 120) ?? []
+            try metadataCorrectionStore.reload()
             try syncConflictStore.reload()
             remoteConnectorAccounts = try remoteConnectorAccountRepository?.fetchAll() ?? []
             items = fetchedItems
@@ -6139,7 +5946,7 @@ final class AppState: ObservableObject {
         presentNextFloatingNoticeIfNeeded()
     }
 
-    private func deliverTaskNotice(
+    func deliverTaskNotice(
         title: String,
         message: String?,
         kind: AppFloatingNoticeKind,
@@ -7523,100 +7330,8 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - 电台（B5）
-
-    /// 以某首歌为种子开始电台：从本地曲库按「同艺人 > 同风格 > 其它」加权采样，生成一条连续播放队列。
-    /// 同艺人=艺人电台，配合风格权重即得相似度电台。
-    func startRadio(seed: MediaItem) {
-        guard seed.type == .music else { return }
-        let pool = musicTracks
-        let radio = buildRadioQueue(seed: seed, pool: pool, limit: 60)
-        guard radio.count > 1 else {
-            alert = AppAlert(title: "曲库太小", message: "可播放的本地歌曲不足，无法生成电台。")
-            return
-        }
-        replaceMusicQueueAndPlay(radio, startingAt: seed)
-    }
-
-    /// 以某个风格为主题开始电台：随机选一首该风格歌曲作种子。
-    func startGenreRadio(_ genre: String) {
-        let target = genre.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !target.isEmpty else { return }
-        let matches = musicTracks.filter { Self.genreSet($0).contains(target) }
-        guard let seed = matches.randomElement() else {
-            alert = AppAlert(title: "暂无该风格歌曲", message: "本地曲库中没有标记为「\(genre)」的歌曲。")
-            return
-        }
-        startRadio(seed: seed)
-    }
-
-    /// 以某位艺人为主题开始电台：随机选一首该艺人歌曲作种子。
-    func startArtistRadio(artistName: String) {
-        let target = artistName.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !target.isEmpty else { return }
-        let matches = musicTracks.filter {
-            ($0.artist?.trimmingCharacters(in: .whitespaces).lowercased() == target) && $0.filePath != nil
-        }
-        guard let seed = matches.randomElement() else {
-            alert = AppAlert(title: "暂无该艺人歌曲", message: "本地曲库中没有「\(artistName)」的可播放歌曲。")
-            return
-        }
-        startRadio(seed: seed)
-    }
-
-    /// 本地曲库中是否有该艺人的可播放歌曲（用于决定是否展示艺人电台入口）。
-    func hasPlayableTracks(forArtist artistName: String) -> Bool {
-        let target = artistName.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !target.isEmpty else { return false }
-        return musicTracks.contains {
-            ($0.artist?.trimmingCharacters(in: .whitespaces).lowercased() == target) && $0.filePath != nil
-        }
-    }
-
-    private static func genreSet(_ item: MediaItem) -> Set<String> {
-        guard let genre = item.genre else { return [] }
-        return Set(
-            genre.components(separatedBy: ", ")
-                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-                .filter { !$0.isEmpty }
-        )
-    }
-
-    /// 加权无放回采样：同艺人 +6、同风格 +3、基础 1，从种子相关度高到低自然铺开，同权重内随机。
-    private func buildRadioQueue(seed: MediaItem, pool: [MediaItem], limit: Int) -> [MediaItem] {
-        let seedGenres = Self.genreSet(seed)
-        let seedArtist = seed.artist?.trimmingCharacters(in: .whitespaces).lowercased()
-        var weighted: [(item: MediaItem, weight: Double)] = pool.compactMap { track in
-            guard track.id != seed.id, track.filePath != nil else { return nil }
-            var weight = 1.0
-            if let seedArtist, !seedArtist.isEmpty,
-               let artist = track.artist?.trimmingCharacters(in: .whitespaces).lowercased(),
-               artist == seedArtist {
-                weight += 6
-            }
-            if !seedGenres.isEmpty, !seedGenres.isDisjoint(with: Self.genreSet(track)) {
-                weight += 3
-            }
-            return (track, weight)
-        }
-
-        var result: [MediaItem] = [seed]
-        var generator = SystemRandomNumberGenerator()
-        while result.count < limit, !weighted.isEmpty {
-            let total = weighted.reduce(0.0) { $0 + $1.weight }
-            var threshold = Double.random(in: 0..<total, using: &generator)
-            var pickIndex = weighted.count - 1
-            for (index, entry) in weighted.enumerated() {
-                threshold -= entry.weight
-                if threshold < 0 {
-                    pickIndex = index
-                    break
-                }
-            }
-            result.append(weighted[pickIndex].item)
-            weighted.remove(at: pickIndex)
-        }
-        return result
-    }
+    // startRadio / startGenreRadio / startArtistRadio / hasPlayableTracks / genreSet / buildRadioQueue
+    // 已拆到 AppState+Radio.swift（缩小本超大文件）。
 
     func clearMusicQueue(keepingCurrent: Bool = true) {
         if keepingCurrent, let active = activePlayerItem, active.type == .music {
@@ -7911,7 +7626,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func uniqueMusicTracks(_ tracks: [MediaItem]) -> [MediaItem] {
+    func uniqueMusicTracks(_ tracks: [MediaItem]) -> [MediaItem] {
         var seen = Set<String>()
         var result: [MediaItem] = []
         for track in tracks where track.type == .music && track.filePath != nil {
@@ -9209,7 +8924,7 @@ final class AppState: ObservableObject {
     }
 
     func canUndoLatestMetadataCorrection(for item: MediaItem) -> Bool {
-        (metadataCorrectionCountsByMediaID[item.id] ?? 0) > 0
+        metadataCorrectionStore.correctionCount(forMediaID: item.id) > 0
     }
 
     func displayTitleForMediaID(_ mediaID: String?) -> String {
@@ -9230,9 +8945,9 @@ final class AppState: ObservableObject {
     }
 
     func undoLatestMetadataCorrection(for item: MediaItem) {
-        guard let database, let mediaRepository, let metadataCorrectionRepository else { return }
+        guard let database, let mediaRepository, metadataCorrectionStore.isAvailable else { return }
         do {
-            let records = try metadataCorrectionRepository.latestUndoableBatch(mediaID: item.id)
+            let records = try metadataCorrectionStore.latestUndoableBatch(mediaID: item.id)
             guard let batchID = records.first?.batchID, !records.isEmpty else {
                 showFloatingNotice(title: "没有可撤销的元数据修正", message: item.title, kind: .info)
                 return
@@ -9240,7 +8955,7 @@ final class AppState: ObservableObject {
             let values = Dictionary(uniqueKeysWithValues: records.map { ($0.field, $0.oldValue) })
             try database.transaction {
                 try mediaRepository.restoreMetadataValues(id: item.id, values: values)
-                try metadataCorrectionRepository.markBatchUndone(batchID: batchID)
+                try metadataCorrectionStore.persistBatchUndone(batchID: batchID)
             }
             reload()
             showFloatingNotice(title: "已撤销元数据修正", message: item.title, kind: .success)
@@ -9250,9 +8965,9 @@ final class AppState: ObservableObject {
     }
 
     func undoMetadataCorrectionBatch(_ batch: MetadataCorrectionBatchSummary) {
-        guard let database, let mediaRepository, let metadataCorrectionRepository else { return }
+        guard let database, let mediaRepository, metadataCorrectionStore.isAvailable else { return }
         do {
-            let records = try metadataCorrectionRepository.records(batchID: batch.batchID, mediaID: batch.mediaID)
+            let records = try metadataCorrectionStore.records(batchID: batch.batchID, mediaID: batch.mediaID)
             guard !records.isEmpty else {
                 showFloatingNotice(title: "没有可撤销的元数据修正", message: displayTitleForMediaID(batch.mediaID), kind: .info)
                 return
@@ -9260,7 +8975,7 @@ final class AppState: ObservableObject {
             let values = Dictionary(uniqueKeysWithValues: records.map { ($0.field, $0.oldValue) })
             try database.transaction {
                 try mediaRepository.restoreMetadataValues(id: batch.mediaID, values: values)
-                try metadataCorrectionRepository.markBatchUndone(batchID: batch.batchID)
+                try metadataCorrectionStore.persistBatchUndone(batchID: batch.batchID)
             }
             reload()
             showFloatingNotice(title: "已撤销元数据修正", message: displayTitleForMediaID(batch.mediaID), kind: .success)
@@ -9571,9 +9286,8 @@ final class AppState: ObservableObject {
         guard let mediaRepository else { return [] }
         let changes = try mediaRepository.updateMetadata(id: id, metadata: metadata)
         if !changes.isEmpty {
-            try metadataCorrectionRepository?.record(mediaID: id, changes: changes, source: source)
-            metadataCorrectionCountsByMediaID[id] = (metadataCorrectionCountsByMediaID[id] ?? 0) + changes.count
-            metadataCorrectionRecordCount += changes.count
+            try metadataCorrectionStore.persistRecord(mediaID: id, changes: changes, source: source)
+            metadataCorrectionStore.noteRecorded(mediaID: id, changeCount: changes.count)
         }
         return changes
     }

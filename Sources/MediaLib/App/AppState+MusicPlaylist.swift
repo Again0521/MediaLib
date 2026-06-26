@@ -1,0 +1,222 @@
+import Foundation
+import MediaLibCore
+
+// 音乐歌单（智能 + 普通 + M3U 导入导出）相关方法从 AppState.swift 拆到本文件，直接缩小那个超大文件
+// （R1-ARCH-001 头号债务＝超大文件）。这些方法是「视图可调的编排层」：数据 CRUD 已在
+// MusicPlaylistStore，本扩展只保留依赖实时音乐库缓存的查询与副作用（提示/错误/库版本号）。
+// 纯文件搬运，方法体逐字不变（仅 `libraryRevision += 1` 改为等价的 `bumpLibraryRevision()`，
+// 以保留 libraryRevision 的 private(set) 封装）。
+extension AppState {
+    // MARK: - 音乐智能歌单
+
+    func musicSmartPlaylist(id: String) -> MusicSmartPlaylist? {
+        musicPlaylistStore.smartPlaylist(id: id)
+    }
+
+    @discardableResult
+    func saveMusicSmartPlaylist(_ playlist: MusicSmartPlaylist, notify: Bool = true) -> MusicSmartPlaylist? {
+        do {
+            guard let result = try musicPlaylistStore.saveSmart(playlist) else { return nil }
+            bumpLibraryRevision()
+            if notify {
+                let title = result.isNew ? "智能歌单已创建" : "智能歌单已保存"
+                deliverTaskNotice(
+                    title: title,
+                    message: result.saved.name,
+                    kind: .success,
+                    systemTitle: title,
+                    systemBody: "\(result.saved.name) 已保存。"
+                )
+            }
+            return result.saved
+        } catch {
+            deliverTaskNotice(
+                title: "智能歌单保存失败",
+                message: error.localizedDescription,
+                kind: .error,
+                systemTitle: "智能歌单保存失败",
+                systemBody: error.localizedDescription
+            )
+            return nil
+        }
+    }
+
+    func deleteMusicSmartPlaylist(_ playlist: MusicSmartPlaylist) {
+        do {
+            if try musicPlaylistStore.deleteSmart(id: playlist.id) {
+                bumpLibraryRevision()
+            }
+        } catch {
+            showError("智能歌单删除失败", error)
+        }
+    }
+
+    /// 按规则实时求值：从全部音乐里筛选 → 排序 → 截断数量。曲目随库状态自动更新。
+    func musicTracks(inSmart playlist: MusicSmartPlaylist) -> [MediaItem] {
+        var tracks = musicTracks
+
+        switch playlist.filter {
+        case .any:
+            break
+        case .favorites:
+            tracks = tracks.filter(\.favorite)
+        case .recentlyPlayed:
+            tracks = tracks.filter { $0.lastPlayedAt != nil }
+        case .neverPlayed:
+            tracks = tracks.filter { ($0.playCount ?? 0) == 0 }
+        }
+
+        if playlist.recency != .anytime {
+            let cutoff = Date().addingTimeInterval(-Double(playlist.recency.rawValue) * 86_400)
+            tracks = tracks.filter { $0.createdAt >= cutoff }
+        }
+
+        switch playlist.sort {
+        case .dateAddedDesc:
+            tracks.sort { $0.createdAt > $1.createdAt }
+        case .playCountDesc:
+            tracks.sort { ($0.playCount ?? 0) > ($1.playCount ?? 0) }
+        case .lastPlayedDesc:
+            tracks.sort { ($0.lastPlayedAt ?? .distantPast) > ($1.lastPlayedAt ?? .distantPast) }
+        case .titleAsc:
+            tracks.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        case .artistAsc:
+            tracks.sort { ($0.artist ?? "").localizedCaseInsensitiveCompare($1.artist ?? "") == .orderedAscending }
+        case .yearDesc:
+            tracks.sort { ($0.year ?? 0) > ($1.year ?? 0) }
+        }
+
+        if playlist.limit != .unlimited {
+            tracks = Array(tracks.prefix(playlist.limit.rawValue))
+        }
+        return tracks
+    }
+
+    // MARK: - 普通歌单
+
+    func musicTracks(in playlist: MusicPlaylist) -> [MediaItem] {
+        playlist.itemIDs.compactMap { cachedMusicTracksByID[$0] }
+    }
+
+    @discardableResult
+    func createMusicPlaylist(name: String, tracks: [MediaItem] = []) -> MusicPlaylist? {
+        do {
+            return try musicPlaylistStore.create(name: name, itemIDs: uniqueMusicTracks(tracks).map(\.id))
+        } catch {
+            showError("创建歌单失败", error)
+            return nil
+        }
+    }
+
+    // MARK: - 歌单 M3U 导入 / 导出
+
+    /// 生成 M3U 文本（含 #EXTINF 时长与"艺人 - 标题"）。
+    func musicPlaylistM3UContent(_ playlist: MusicPlaylist) -> String {
+        var lines = ["#EXTM3U"]
+        for track in musicTracks(in: playlist) {
+            guard let path = track.filePath, !path.isEmpty else { continue }
+            let seconds = Int((track.duration ?? 0).rounded())
+            let artist = track.artist?.trimmingCharacters(in: .whitespaces) ?? ""
+            let info = artist.isEmpty ? track.title : "\(artist) - \(track.title)"
+            lines.append("#EXTINF:\(seconds),\(info)")
+            lines.append(path)
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// 从 M3U 文件导入：按文件路径（绝对/相对）匹配库内曲目，匹配不到再按文件名兜底，创建新歌单。返回匹配数量。
+    @discardableResult
+    func importMusicPlaylist(fromM3U url: URL, name: String) -> Int {
+        let content: String
+        if let utf8 = try? String(contentsOf: url, encoding: .utf8) {
+            content = utf8
+        } else if let latin = try? String(contentsOf: url, encoding: .isoLatin1) {
+            content = latin
+        } else {
+            alert = AppAlert(title: "导入失败", message: "无法读取该 M3U 文件。")
+            return 0
+        }
+
+        let baseDir = url.deletingLastPathComponent()
+        let rawPaths: [String] = content
+            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
+            .map { line in
+                if line.hasPrefix("/") || line.contains("://") { return line }
+                return baseDir.appendingPathComponent(line).standardizedFileURL.path
+            }
+
+        let byPath = Dictionary(cachedMusicTracks.compactMap { track in
+            track.filePath.map { ($0, track) }
+        }, uniquingKeysWith: { first, _ in first })
+        let byFilename = Dictionary(cachedMusicTracks.compactMap { track -> (String, MediaItem)? in
+            guard let path = track.filePath else { return nil }
+            return (URL(fileURLWithPath: path).lastPathComponent, track)
+        }, uniquingKeysWith: { first, _ in first })
+
+        var matched: [MediaItem] = []
+        var seenIDs = Set<String>()
+        for path in rawPaths {
+            let track = byPath[path] ?? byFilename[URL(fileURLWithPath: path).lastPathComponent]
+            if let track, seenIDs.insert(track.id).inserted {
+                matched.append(track)
+            }
+        }
+
+        guard !matched.isEmpty else {
+            alert = AppAlert(title: "未匹配到歌曲", message: "M3U 里的文件都不在当前音乐库中。请先扫描包含这些文件的音乐媒体源。")
+            return 0
+        }
+        _ = createMusicPlaylist(name: name, tracks: matched)
+        return matched.count
+    }
+
+    func addMusicTracks(_ tracks: [MediaItem], to playlist: MusicPlaylist) {
+        do {
+            try musicPlaylistStore.addTracks(itemIDs: uniqueMusicTracks(tracks).map(\.id), toPlaylistID: playlist.id)
+        } catch {
+            showError("添加到歌单失败", error)
+        }
+    }
+
+    func renameMusicPlaylist(_ playlist: MusicPlaylist, name: String) {
+        do {
+            try musicPlaylistStore.rename(id: playlist.id, name: name)
+        } catch {
+            showError("重命名歌单失败", error)
+        }
+    }
+
+    func deleteMusicPlaylist(_ playlist: MusicPlaylist) {
+        do {
+            try musicPlaylistStore.delete(id: playlist.id)
+        } catch {
+            showError("删除歌单失败", error)
+        }
+    }
+
+    func removeMusicTracks(_ tracks: [MediaItem], from playlist: MusicPlaylist) {
+        do {
+            try musicPlaylistStore.removeTracks(itemIDs: uniqueMusicTracks(tracks).map(\.id), fromPlaylistID: playlist.id)
+        } catch {
+            showError("移出歌单失败", error)
+        }
+    }
+
+    func moveMusicPlaylistItems(in playlist: MusicPlaylist, fromOffsets: IndexSet, toOffset: Int) {
+        do {
+            try musicPlaylistStore.moveItems(inPlaylistID: playlist.id, fromOffsets: fromOffsets, toOffset: toOffset)
+        } catch {
+            showError("调整歌单顺序失败", error)
+        }
+    }
+
+    func replaceMusicPlaylistItems(in playlist: MusicPlaylist, with tracks: [MediaItem]) {
+        do {
+            try musicPlaylistStore.replaceItems(uniqueMusicTracks(tracks).map(\.id), inPlaylistID: playlist.id)
+        } catch {
+            showError("保存歌单顺序失败", error)
+        }
+    }
+}
