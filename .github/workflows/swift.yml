@@ -5,18 +5,71 @@ name: Swift
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main, master]
   pull_request:
-    branches: [ "main" ]
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: swift-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-
-    runs-on: macos-latest
+    name: Build
+    runs-on: macos-14
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: swift build -v
-    - name: Run tests
-      run: swift test -v
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Locate Swift package
+        id: package
+        run: |
+          set -euo pipefail
+
+          echo "Repository root: ${GITHUB_WORKSPACE}"
+          package_file="$(
+            find "${GITHUB_WORKSPACE}" \
+              -path '*/.git' -prune -o \
+              -path '*/.build' -prune -o \
+              -path '*/.swiftpm' -prune -o \
+              -name Package.swift -type f -print |
+            sort |
+            head -n 1
+          )"
+
+          if [[ -z "${package_file}" ]]; then
+            echo "::error::Could not find Package.swift after checkout."
+            echo "Top-level files:"
+            find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f | sort | sed "s#${GITHUB_WORKSPACE}/##"
+            exit 1
+          fi
+
+          package_dir="$(dirname "${package_file}")"
+          echo "Found Package.swift at: ${package_file}"
+          echo "PACKAGE_DIR=${package_dir}" >> "${GITHUB_ENV}"
+          echo "package-dir=${package_dir}" >> "${GITHUB_OUTPUT}"
+
+      - name: Toolchain version
+        run: |
+          xcode-select -p
+          xcodebuild -version
+          swift --version
+
+      - name: Describe package
+        run: swift package describe --package-path "${PACKAGE_DIR}" --type text
+
+      - name: Build
+        run: swift build --package-path "${PACKAGE_DIR}" -v
+
+      - name: Run tests
+        run: swift test --package-path "${PACKAGE_DIR}" -v
+
+      - name: MediaLIB checks
+        run: swift run --package-path "${PACKAGE_DIR}" MediaLibChecks
+
