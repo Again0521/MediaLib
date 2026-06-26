@@ -341,9 +341,7 @@ private struct VideoCacheJob {
     var worker: Task<Void, Never>?
 }
 
-private struct TraktImportReport {
-    var conflictCount: Int
-}
+// TraktImportReport 已随 Trakt 同步移到 AppState+TraktSync.swift。
 
 private struct SyncConflictRemoteMutation {
     enum Value {
@@ -467,7 +465,8 @@ final class AppState: ObservableObject {
     /// 可用的新版本（驱动更新提示弹窗）。
     @Published var availableUpdate: AppUpdateInfo?
     @Published var isCheckingForUpdates = false
-    private var updateCheckTask: Task<Void, Never>?
+    // internal（非 private）：供拆到 AppState+Updates.swift 的更新检查方法读写。
+    var updateCheckTask: Task<Void, Never>?
     /// 第三次启动时弹出的赞赏邀请。
     @Published var showingSponsorPrompt = false
     @Published var quickPreviewItem: MediaItem?
@@ -533,7 +532,8 @@ final class AppState: ObservableObject {
     private var syncConflictForwarding: AnyCancellable?
     var pendingSyncConflictCount: Int { syncConflictStore.pendingCount }
     var pendingSyncConflicts: [SyncConflict] { syncConflictStore.pendingConflicts }
-    @Published private(set) var remoteConnectorAccounts: [RemoteConnectorAccount] = []
+    // internal-set（非 private(set)）：供拆到 AppState+TraktSync.swift 的方法写入。
+    @Published var remoteConnectorAccounts: [RemoteConnectorAccount] = []
     @Published private(set) var detailMetadataGapsByMediaID: [String: Set<String>] = [:]
     @Published private(set) var detailSearchTermsByMediaID: [String: [String]] = [:]
     @Published private(set) var mediaSearchRevision = 0
@@ -562,14 +562,16 @@ final class AppState: ObservableObject {
     @Published private(set) var videoOfflineSubscriptionWiFiAvailable = false
     // 播放歌名含「アゲイン」的歌曲时触发一次轻量樱花动效，仅限本次启动首次播放。
     @Published var sakuraEasterEggActive = false
-    private var sakuraEasterEggShownThisLaunch = false
-    private var sakuraEasterEggTask: Task<Void, Never>?
+    // internal（非 private）：供拆到 AppState+ExternalPlayback.swift 的彩蛋触发方法读写。
+    var sakuraEasterEggShownThisLaunch = false
+    var sakuraEasterEggTask: Task<Void, Never>?
     // 只在本次进程内记住队列弹层上次停留位置，避免跨启动恢复到旧队列偏移。
     var musicQueueScrollAnchorID: String?
     let directories: AppDirectories?
     private let database: DatabaseManager?
     private let sourceRepository: SourceRepository?
-    private let mediaRepository: MediaRepository?
+    // internal：供 AppState+BatchSelection 等 extension 跨文件访问。
+    let mediaRepository: MediaRepository?
     // musicPlaylistRepository / musicSmartPlaylistRepository 已移入 MusicPlaylistStore 持有。
     private let musicQueueRepository: MusicQueueRepository?
     private let videoSmartCollectionRepository: VideoSmartCollectionRepository?
@@ -579,7 +581,8 @@ final class AppState: ObservableObject {
     // metadataCorrectionRepository 已移入 MetadataCorrectionStore 持有。
     private let mediaDetailRepository: MediaDetailRepository?
     // syncConflictRepository 已移入 SyncConflictStore 持有。
-    private let remoteConnectorAccountRepository: RemoteConnectorAccountRepository?
+    // internal（非 private）：供拆到 AppState+TraktSync.swift 的方法使用。
+    let remoteConnectorAccountRepository: RemoteConnectorAccountRepository?
     private let videoOfflineCacheStore: VideoOfflineCacheStore?
     let settingsStore = AppSettingsStore()   // internal：AppState+MusicTheme 等 extension 跨文件访问
     let logger: LoggingService?   // internal：供 AppState+Lastfm 等领域 extension 跨文件访问
@@ -632,7 +635,8 @@ final class AppState: ObservableObject {
     private var cachedHomeOfflineVideoItems: [MediaItem] = []
     private var cachedEmbyLibrarySummaries: [EmbyLibrarySummary] = []
     private var cachedChildrenByParentID: [String: [MediaItem]] = [:]
-    private var cachedPrivateItemIDs: Set<String> = []
+    // internal（非 private）：供拆到 AppState+TraktSync.swift 的方法读取。
+    var cachedPrivateItemIDs: Set<String> = []
     private var cachedNextUpItems: [MediaItem] = []
     private var cachedContinueWatchingItems: [MediaItem] = []
     private var cachedWatchingItems: [MediaItem] = []
@@ -2402,7 +2406,7 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func userRatingNoticeSuffix(_ rating: Double?) -> String {
+    func userRatingNoticeSuffix(_ rating: Double?) -> String {
         guard let rating, rating.isFinite, rating > 0 else { return "已清除星级" }
         let rounded = (rating * 10).rounded() / 10
         if rounded.rounded() == rounded {
@@ -7387,176 +7391,9 @@ final class AppState: ObservableObject {
         scheduleMusicQueuePersistence()
     }
 
-    func presentBuiltInPlayer(_ item: MediaItem, preserveSelection: Bool = false) {
-        if !preserveSelection {
-            selectedItem = nil
-        }
-        quickPreviewItem = nil
-        guard item.type != .music else {
-            activePlayerItem = item
-            triggerSakuraEasterEggIfNeeded(for: item)
-            return
-        }
-        videoQueue = videoQueueItems(startingAt: item)
-        activePlayerItem = item
-    }
-
-    /// 检查 GitHub Releases 是否有新版本。手动检查总是反馈结果；
-    /// 静默检查（每日首启）尊重「跳过该版本 / 永不提醒」，失败不打扰用户且不消耗当天成功检查。
-    func checkForUpdates(manual: Bool) {
-        if isCheckingForUpdates {
-            if manual {
-                alert = AppAlert(
-                    title: localized("正在检查更新"),
-                    message: localized("MediaLIB 正在后台确认最新版本，请稍等。")
-                )
-            }
-            return
-        }
-        isCheckingForUpdates = true
-        updateCheckTask?.cancel()
-        updateCheckTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer {
-                self.isCheckingForUpdates = false
-                self.updateCheckTask = nil
-            }
-            do {
-                guard let info = try await AppUpdateChecker.fetchLatestRelease(),
-                      AppVersion.isVersion(info.version, newerThan: AppVersion.current) else {
-                self.markUpdateCheckSucceeded()
-                if manual {
-                    self.alert = AppAlert(
-                        title: self.localized("已是最新版本"),
-                        message: "\(self.localized("当前版本")) \(AppVersion.current)。"
-                    )
-                }
-                return
-            }
-                self.markUpdateCheckSucceeded()
-                if !manual {
-                    guard !self.settings.updateRemindersDisabled,
-                          self.settings.updateSkippedVersion != info.tagName else { return }
-                }
-                self.availableUpdate = info
-        } catch {
-            if manual {
-                self.alert = AppAlert(title: self.localized("检查更新失败"), message: error.localizedDescription)
-            }
-        }
-    }
-    }
-
-    private func markUpdateCheckSucceeded() {
-        UserDefaults.standard.set(Date(), forKey: "MediaLib.update.lastSuccessfulCheck")
-    }
-
-    /// 每天第一次启动时静默检查一次更新；失败时保留重试机会，但用短间隔节流避免反复打 GitHub。
-    func checkForUpdatesDailyIfNeeded() {
-        guard !settings.updateRemindersDisabled else { return }
-        let defaults = UserDefaults.standard
-        let now = Date()
-        if let lastAttempt = defaults.object(forKey: "MediaLib.update.lastBackgroundAttempt") as? Date,
-           now.timeIntervalSince(lastAttempt) < 4 * 60 * 60 {
-            return
-        }
-        if let lastSuccess = defaults.object(forKey: "MediaLib.update.lastSuccessfulCheck") as? Date,
-           Calendar.current.isDate(lastSuccess, inSameDayAs: now) {
-            return
-        }
-        defaults.set(now, forKey: "MediaLib.update.lastBackgroundAttempt")
-        checkForUpdates(manual: false)
-    }
-
-    /// 记录启动次数；恰好第三次启动时邀请用户赞赏（只弹一次）。
-    func registerLaunchAndMaybeInvite() {
-        let countKey = "MediaLib.launchCount"
-        let invitedKey = "MediaLib.sponsorInvited"
-        let count = UserDefaults.standard.integer(forKey: countKey) + 1
-        UserDefaults.standard.set(count, forKey: countKey)
-        guard count == 3, !UserDefaults.standard.bool(forKey: invitedKey) else { return }
-        UserDefaults.standard.set(true, forKey: invitedKey)
-        showingSponsorPrompt = true
-    }
-
-    /// 从访达双击/「打开方式」进入的本地媒体文件：在库内则播放库内条目
-    /// （保留进度、剧集队列等），否则构造临时条目直接播放，不写入媒体库。
-    func playExternalFiles(_ urls: [URL]) {
-        guard let url = urls.first(where: \.isFileURL) else { return }
-        let path = url.path
-        if let existing = items.first(where: { $0.filePath == path }) {
-            play(existing)
-            return
-        }
-        let ext = url.pathExtension.lowercased()
-        let isMusic = SystemDefaultPlayerRegistrar.musicExtensions.contains(ext)
-        let item = MediaItem(
-            id: "external-file:\(path)",
-            type: isMusic ? .music : .other,
-            title: url.deletingPathExtension().lastPathComponent,
-            filePath: path
-        )
-        if isMusic {
-            musicQueue = [item]
-        }
-        presentBuiltInPlayer(item)
-    }
-
-    /// 直接播放网络串流地址（不入库）：构造临时 MediaItem 交给内置播放器，
-    /// mpv 原生支持 http(s)/rtsp/rtmp 等协议；进度按未知 id 落库为 no-op，不污染媒体库。
-    func playNetworkStream(_ urlString: String) {
-        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: trimmed),
-              let scheme = url.scheme?.lowercased(),
-              ["http", "https", "rtsp", "rtmp", "rtp", "mms", "srt", "udp", "ftp"].contains(scheme) else {
-            alert = AppAlert(title: "无法播放", message: "请输入合法的串流地址（http / https / rtsp / rtmp 等）。")
-            return
-        }
-        let title: String = {
-            let name = url.lastPathComponent
-            if !name.isEmpty, name != "/" {
-                return name.removingPercentEncoding ?? name
-            }
-            return url.host ?? trimmed
-        }()
-        let item = MediaItem(
-            id: "url-stream:\(trimmed)",
-            type: .other,
-            title: title,
-            filePath: trimmed
-        )
-        showingNetworkStreamPrompt = false
-        presentBuiltInPlayer(item)
-    }
-
-    /// 构建剧集播放队列：当前集 + 同系列中排在它之后的剧集（沿用剧集页的排序）。
-    private func videoQueueItems(startingAt item: MediaItem) -> [MediaItem] {
-        guard let parentID = item.parentID,
-              let parent = items.first(where: { $0.id == parentID }) else {
-            return [item]
-        }
-        let siblings = children(for: parent).filter { $0.filePath != nil }
-        guard let index = siblings.firstIndex(where: { $0.id == item.id }) else {
-            return [item]
-        }
-        return Array(siblings[index...])
-    }
-
-    /// #14 当播放的歌曲歌名包含「アゲイン」时，触发樱花纷飞特效（持续 5 秒），
-    /// 每次启动软件只在首次播放该类歌曲时出现一次。
-    private func triggerSakuraEasterEggIfNeeded(for item: MediaItem) {
-        guard !sakuraEasterEggShownThisLaunch else { return }
-        guard item.type == .music else { return }
-        let matches = item.title.contains("アゲイン") || (item.originalTitle?.contains("アゲイン") ?? false)
-        guard matches else { return }
-        sakuraEasterEggShownThisLaunch = true
-        sakuraEasterEggActive = true
-        sakuraEasterEggTask?.cancel()
-        sakuraEasterEggTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            self.sakuraEasterEggActive = false
-        }
-    }
+    // 播放入口已拆到 AppState+ExternalPlayback.swift（presentBuiltInPlayer / playExternalFiles /
+    // playNetworkStream / videoQueueItems / triggerSakuraEasterEggIfNeeded）。
+    // 更新检查/启动邀请见 AppState+Updates.swift。
 
     private func prepareMusicQueue(for item: MediaItem) {
         guard item.type == .music else { return }
@@ -7862,339 +7699,12 @@ final class AppState: ObservableObject {
 
     @Published var isTraktConnecting = false
     @Published var isImportingTraktState = false
-    private var traktPollTask: Task<Void, Never>?
+    // internal（非 private）：供拆到 AppState+TraktSync.swift 的方法读写。
+    var traktPollTask: Task<Void, Never>?
 
-    private var traktService: TraktService? {
-        let id = settings.traktClientID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let secret = settings.traktClientSecret?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !id.isEmpty, !secret.isEmpty else { return nil }
-        return TraktService(clientID: id, clientSecret: secret)
-    }
-
-    var isTraktConnected: Bool {
-        !(settings.traktAccessToken?.isEmpty ?? true)
-    }
-
-    /// 设备码授权：请求 code → 打开浏览器 → 提示验证码 → 轮询直至授权或超时。
-    func beginTraktConnect() {
-        guard let service = traktService else {
-            alert = AppAlert(title: "缺少凭据", message: "请先填写 Trakt Client ID 与 Client Secret。")
-            return
-        }
-        guard !isTraktConnecting else { return }
-        isTraktConnecting = true
-        traktPollTask?.cancel()
-        traktPollTask = Task { [weak self] in
-            guard let self else { return }
-            defer { self.isTraktConnecting = false }
-            do {
-                let device = try await service.requestDeviceCode()
-                if let url = URL(string: device.verificationURL) { NSWorkspace.shared.open(url) }
-                self.alert = AppAlert(
-                    title: "在 Trakt 输入验证码",
-                    message: "已打开 \(device.verificationURL)\n请输入验证码：\(device.userCode)\n授权后将自动完成连接。"
-                )
-                let deadline = Date().addingTimeInterval(Double(device.expiresIn))
-                let interval = UInt64(max(device.interval, 1)) * 1_000_000_000
-                while Date() < deadline {
-                    try? await Task.sleep(nanoseconds: interval)
-                    if Task.isCancelled { return }
-                    do {
-                        let tokens = try await service.pollOnce(deviceCode: device.deviceCode)
-                        self.settings.traktAccessToken = tokens.accessToken
-                        self.settings.traktRefreshToken = tokens.refreshToken
-                        self.settings.traktSyncEnabled = true
-                        self.saveSettings()
-                        _ = self.traktAccountRecord(syncEnabled: true)
-                        self.alert = AppAlert(title: "Trakt 已连接", message: "之后标记已看 / 想看会自动同步到 Trakt。")
-                        return
-                    } catch TraktError.authorizationPending {
-                        continue
-                    } catch TraktError.authorizationExpired {
-                        self.alert = AppAlert(title: "授权超时", message: "验证码已过期，请重新连接。")
-                        return
-                    } catch TraktError.authorizationDenied {
-                        self.alert = AppAlert(title: "已取消", message: "你拒绝了 Trakt 授权。")
-                        return
-                    } catch {
-                        self.alert = AppAlert(title: "连接失败", message: error.localizedDescription)
-                        return
-                    }
-                }
-                self.alert = AppAlert(title: "授权超时", message: "未在有效期内完成授权，请重新连接。")
-            } catch {
-                self.showError("Trakt 连接失败", error)
-            }
-        }
-    }
-
-    func disconnectTrakt() {
-        traktPollTask?.cancel()
-        settings.traktAccessToken = nil
-        settings.traktRefreshToken = nil
-        settings.traktSyncEnabled = false
-        saveSettings()
-        deleteTraktAccountRecord()
-    }
-
-    func setTraktSyncEnabled(_ enabled: Bool) {
-        settings.traktSyncEnabled = enabled
-        saveSettings()
-        if isTraktConnected {
-            _ = traktAccountRecord(syncEnabled: enabled)
-        }
-    }
-
-    @discardableResult
-    private func traktAccountRecord(syncEnabled: Bool? = nil, lastSyncedAt: Date? = nil) -> RemoteConnectorAccount? {
-        guard let remoteConnectorAccountRepository else { return nil }
-        let existing = remoteConnectorAccounts.first { $0.provider == .trakt }
-        let now = Date()
-        var account = existing ?? RemoteConnectorAccount(
-            provider: .trakt,
-            accountLabel: "Trakt",
-            serverURL: "https://trakt.tv",
-            username: nil,
-            sourceID: nil,
-            connectionMode: .syncOnly,
-            syncEnabled: settings.traktSyncEnabled,
-            capabilitiesJSON: #"{"historySync":true,"watchlistSync":true,"bidirectionalImport":true}"#,
-            privacyNote: "Trakt token 仅保存在本机设置中；同步只处理已匹配 TMDB 的公开视频。"
-        )
-        account.connectionMode = .syncOnly
-        account.serverURL = "https://trakt.tv"
-        account.syncEnabled = syncEnabled ?? settings.traktSyncEnabled
-        account.capabilitiesJSON = #"{"historySync":true,"watchlistSync":true,"bidirectionalImport":true}"#
-        account.privacyNote = "Trakt token 仅保存在本机设置中；同步只处理已匹配 TMDB 的公开视频。"
-        if let lastSyncedAt {
-            account.lastSyncedAt = lastSyncedAt
-        }
-        account.updatedAt = now
-        do {
-            let saved = try remoteConnectorAccountRepository.save(account)
-            if let index = remoteConnectorAccounts.firstIndex(where: { $0.id == saved.id }) {
-                remoteConnectorAccounts[index] = saved
-            } else {
-                remoteConnectorAccounts.append(saved)
-            }
-            return saved
-        } catch {
-            logger?.log("Trakt 连接器账号保存失败：\(error.localizedDescription)", level: .warning)
-            return existing
-        }
-    }
-
-    private func deleteTraktAccountRecord() {
-        guard let remoteConnectorAccountRepository else { return }
-        for account in remoteConnectorAccounts where account.provider == .trakt {
-            do {
-                try remoteConnectorAccountRepository.delete(id: account.id)
-            } catch {
-                logger?.log("删除 Trakt 账户记录失败(\(account.id))：\(error.localizedDescription)", level: .warning)
-            }
-        }
-        remoteConnectorAccounts.removeAll { $0.provider == .trakt }
-    }
-
-    private func withValidTraktToken<T>(_ operation: (TraktService, String) async throws -> T) async throws -> T {
-        guard let service = traktService, let token = settings.traktAccessToken, !token.isEmpty else {
-            throw TraktError.notConnected
-        }
-        do {
-            return try await operation(service, token)
-        } catch TraktError.requestFailed(401) {
-            guard let refresh = settings.traktRefreshToken, !refresh.isEmpty else { throw TraktError.notConnected }
-            let tokens = try await service.refreshTokens(refresh)
-            settings.traktAccessToken = tokens.accessToken
-            settings.traktRefreshToken = tokens.refreshToken
-            saveSettings()
-            return try await operation(service, tokens.accessToken)
-        }
-    }
-
-    /// 带令牌的 Trakt 操作；遇 401 自动刷新令牌后重试一次。
-    private func runTrakt(_ operation: (TraktService, String) async throws -> Void) async {
-        do {
-            try await withValidTraktToken(operation)
-        } catch {
-            logger?.log("Trakt 同步失败：\(error.localizedDescription)", level: .warning)
-        }
-    }
-
-    private static func tmdbNumericID(_ externalID: String?, kind: String) -> Int? {
-        let prefix = "tmdb:\(kind):"
-        guard let externalID, externalID.hasPrefix(prefix) else { return nil }
-        return Int(externalID.dropFirst(prefix.count))
-    }
-
-    private func traktHistoryRef(for item: MediaItem) -> TraktMediaRef? {
-        switch item.type {
-        case .movie:
-            return Self.tmdbNumericID(item.externalID, kind: "movie").map { .movie(tmdbID: $0) }
-        case .episode:
-            guard let season = item.seasonNumber, let episode = item.episodeNumber,
-                  let parentID = item.parentID,
-                  let parent = items.first(where: { $0.id == parentID }),
-                  let showID = Self.tmdbNumericID(parent.externalID, kind: "tv") else { return nil }
-            return .episode(showTmdbID: showID, season: season, episode: episode)
-        default:
-            return nil
-        }
-    }
-
-    private func traktWatchlistRef(for item: MediaItem) -> TraktMediaRef? {
-        switch item.type {
-        case .movie:
-            return Self.tmdbNumericID(item.externalID, kind: "movie").map { .movie(tmdbID: $0) }
-        case .tvShow:
-            return Self.tmdbNumericID(item.externalID, kind: "tv").map { .show(tmdbID: $0) }
-        default:
-            return nil
-        }
-    }
-
-    /// 标记已看 / 取消已看后推送到 Trakt 历史。
-    func syncTraktHistory(_ items: [MediaItem], watched: Bool) {
-        guard settings.traktSyncEnabled, isTraktConnected else { return }
-        let refs = items
-            .filter { $0.type != .privateCollection && !cachedPrivateItemIDs.contains($0.id) }
-            .compactMap { traktHistoryRef(for: $0) }
-        guard !refs.isEmpty else { return }
-        Task { [weak self] in
-            await self?.runTrakt { service, token in
-                if watched {
-                    try await service.addToHistory(refs, accessToken: token)
-                } else {
-                    try await service.removeFromHistory(refs, accessToken: token)
-                }
-            }
-        }
-    }
-
-    /// 加入 / 移出想看后推送到 Trakt 想看清单。
-    func syncTraktWatchlist(_ item: MediaItem, add: Bool) {
-        guard item.type != .privateCollection, !cachedPrivateItemIDs.contains(item.id) else { return }
-        guard settings.traktSyncEnabled, isTraktConnected,
-              let ref = traktWatchlistRef(for: item) else { return }
-        Task { [weak self] in
-            await self?.runTrakt { service, token in
-                if add {
-                    try await service.addToWatchlist([ref], accessToken: token)
-                } else {
-                    try await service.removeFromWatchlist([ref], accessToken: token)
-                }
-            }
-        }
-    }
-
-    func importTraktState() {
-        guard settings.traktSyncEnabled, isTraktConnected else {
-            alert = AppAlert(title: "Trakt 未启用", message: "请先连接 Trakt 并开启同步。")
-            return
-        }
-        guard !isImportingTraktState else { return }
-        isImportingTraktState = true
-        Task { [weak self] in
-            guard let self else { return }
-            defer { self.isImportingTraktState = false }
-            do {
-                let state = try await self.withValidTraktToken { service, token in
-                    try await service.fetchRemoteState(accessToken: token)
-                }
-                let report = try self.recordTraktImportConflicts(remoteState: state)
-                let now = Date()
-                _ = self.traktAccountRecord(syncEnabled: self.settings.traktSyncEnabled, lastSyncedAt: now)
-                self.remoteConnectorAccounts = try self.remoteConnectorAccountRepository?.fetchAll() ?? self.remoteConnectorAccounts
-                try self.syncConflictStore.refreshFromRepository()
-                let message = report.conflictCount == 0
-                    ? "没有发现需要处理的本地/远端状态差异。"
-                    : "已生成 \(report.conflictCount) 条待处理同步冲突，可在“连接器与同步 > 同步冲突”中处理。"
-                self.deliverTaskNotice(
-                    title: "Trakt 导入完成",
-                    message: message,
-                    kind: .success,
-                    systemTitle: "Trakt 导入完成",
-                    systemBody: message
-                )
-            } catch {
-                self.deliverTaskNotice(
-                    title: "Trakt 导入失败",
-                    message: error.localizedDescription,
-                    kind: .error,
-                    systemTitle: "Trakt 导入失败",
-                    systemBody: error.localizedDescription
-                )
-            }
-        }
-    }
-
-    private func recordTraktImportConflicts(remoteState: TraktRemoteState) throws -> TraktImportReport {
-        guard syncConflictStore.isAvailable else { return TraktImportReport(conflictCount: 0) }
-        let accountID = traktAccountRecord(syncEnabled: settings.traktSyncEnabled)?.id
-        let remoteUpdatedAt = Date()
-        var conflictCount = 0
-
-        func saveConflict(item: MediaItem, fieldName: String, local: Bool, remote: Bool) throws {
-            guard local != remote else { return }
-            let conflict = SyncConflict(
-                id: StableID.make(prefix: "sync-conflict", value: "trakt-\(item.id)-\(fieldName)"),
-                mediaID: item.id,
-                provider: .trakt,
-                accountID: accountID,
-                fieldName: fieldName,
-                localValue: local ? "true" : "false",
-                remoteValue: remote ? "true" : "false",
-                localUpdatedAt: item.updatedAt,
-                remoteUpdatedAt: remoteUpdatedAt
-            )
-            _ = try syncConflictStore.save(conflict)
-            conflictCount += 1
-        }
-
-        for item in items {
-            guard !cachedPrivateItemIDs.contains(item.id), item.type != .privateCollection else { continue }
-            switch item.type {
-            case .movie:
-                guard let tmdbID = Self.tmdbNumericID(item.externalID, kind: "movie") else { continue }
-                try saveConflict(
-                    item: item,
-                    fieldName: "watched",
-                    local: item.watched,
-                    remote: remoteState.watchedMovies.contains(tmdbID)
-                )
-                try saveConflict(
-                    item: item,
-                    fieldName: "watchlist",
-                    local: item.watchlist,
-                    remote: remoteState.watchlistMovies.contains(tmdbID)
-                )
-            case .tvShow:
-                guard let tmdbID = Self.tmdbNumericID(item.externalID, kind: "tv") else { continue }
-                try saveConflict(
-                    item: item,
-                    fieldName: "watchlist",
-                    local: item.watchlist,
-                    remote: remoteState.watchlistShows.contains(tmdbID)
-                )
-            case .episode:
-                guard let ref = traktHistoryRef(for: item),
-                      case let .episode(showTmdbID, season, episode) = ref else { continue }
-                let remoteWatched = remoteState.watchedEpisodes.contains(
-                    TraktEpisodeKey(showTmdbID: showTmdbID, season: season, episode: episode)
-                )
-                try saveConflict(
-                    item: item,
-                    fieldName: "watched",
-                    local: item.watched,
-                    remote: remoteWatched
-                )
-            default:
-                continue
-            }
-        }
-
-        return TraktImportReport(conflictCount: conflictCount)
-    }
+    // Trakt 同步方法（traktService / isTraktConnected / beginTraktConnect / disconnectTrakt /
+    // setTraktSyncEnabled / syncTraktHistory / syncTraktWatchlist / importTraktState 等）已拆到
+    // AppState+TraktSync.swift（缩小本超大文件）。stored 属性仍在上方。
 
     private func updateMusicPlayCountsInMemory(ids: [String], reset: Bool, bumpRevision: Bool = true) {
         let targetIDs = Set(ids)
@@ -8546,7 +8056,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func updateWatchlistInMemory(id: String, watchlist: Bool) {
+    func updateWatchlistInMemory(id: String, watchlist: Bool) {
         func updated(_ item: MediaItem) -> MediaItem {
             guard item.id == id else { return item }
             var copy = item
@@ -8683,102 +8193,9 @@ final class AppState: ObservableObject {
     // MARK: - 批量选择操作（C2）
 
     // 以下选择态方法委托给 SelectionStore；保留方法名与签名以兼容既有调用方。
-    func toggleSelectionMode() { selection.toggleMode() }
-
-    func exitSelectionMode() { selection.exit() }
-
-    func toggleItemSelection(_ id: String) { selection.toggleItem(id) }
-
-    /// 在当前可见集合范围内全选 / 取消全选。
-    func setSelection(_ ids: [String], selected: Bool) { selection.setSelection(ids, selected: selected) }
-
-    /// 由 ID 集合还原为有序条目（按传入顺序），仅取库内存在的条目。
-    func resolveSelectedItems(orderedBy ordered: [MediaItem]) -> [MediaItem] {
-        selection.resolveSelected(orderedBy: ordered)
-    }
-
-    private var currentSelectionItems: [MediaItem] {
-        items.filter { selectedItemIDs.contains($0.id) }
-    }
-
-    func batchMarkWatched(watched: Bool) {
-        let targets = currentSelectionItems.filter { $0.type != .music }
-        guard !targets.isEmpty else { return }
-        markAllWatched(targets, watched: watched)
-    }
-
-    func batchSetWatchlist(_ watchlist: Bool) {
-        let targets = currentSelectionItems.filter { $0.type != .music }
-        guard !targets.isEmpty else { return }
-        guard let mediaRepository else { return }
-        var hadError = false
-        for item in targets {
-            updateWatchlistInMemory(id: item.id, watchlist: watchlist)
-            do {
-                try mediaRepository.setWatchlist(id: item.id, watchlist: watchlist)
-            } catch {
-                hadError = true
-                logger?.log("批量更新想看状态失败：\(error.localizedDescription)", level: .warning)
-            }
-            // 与单条 toggleWatchlist 保持一致：批量改动也推送到 Trakt 想看清单。
-            syncTraktWatchlist(item, add: watchlist)
-        }
-        if hadError {
-            alert = AppAlert(title: "部分更新失败", message: "有条目的想看状态未能更新。")
-        } else {
-            showFloatingNotice(
-                title: watchlist ? "已加入想看" : "已从想看移除",
-                message: "\(targets.count) 个内容",
-                kind: watchlist ? .success : .info,
-                duration: 3.2
-            )
-        }
-    }
-
-    func batchUpdateRating(_ rating: Double?) {
-        let targets = currentSelectionItems
-        guard !targets.isEmpty else { return }
-        guard let mediaRepository else { return }
-        var hadError = false
-        for item in targets {
-            updateRatingInMemory(id: item.id, rating: rating)
-            do {
-                try mediaRepository.updateRating(id: item.id, rating: rating)
-            } catch {
-                hadError = true
-                logger?.log("批量更新评级失败：\(error.localizedDescription)", level: .warning)
-            }
-        }
-        if hadError {
-            alert = AppAlert(title: "部分更新失败", message: "有条目的评级未能更新。")
-        } else {
-            showFloatingNotice(
-                title: rating == nil ? "已清除评级" : "评级已更新",
-                message: "\(targets.count) 个内容 · \(userRatingNoticeSuffix(rating))",
-                kind: .success,
-                duration: 3.2
-            )
-        }
-    }
-
-    func batchClearPlaybackHistory() {
-        let targets = currentSelectionItems.filter { $0.hasPlaybackTrace }
-        guard !targets.isEmpty else { return }
-        clearPlaybackHistory(targets)
-    }
-
-    /// 将已选条目从内部索引移除（不删除磁盘文件）。本地来源在下次扫描时可能重新入库。
-    func batchRemoveFromLibrary() {
-        let ids = Array(selectedItemIDs)
-        guard !ids.isEmpty, let mediaRepository else { return }
-        do {
-            try mediaRepository.deleteItems(ids: ids)
-            reload()
-            exitSelectionMode()
-        } catch {
-            showError("批量移除失败", error)
-        }
-    }
+    // 选择态委托 + 批量动作（toggleSelectionMode / setSelection / batchMarkWatched /
+    // batchSetWatchlist / batchUpdateRating / batchClearPlaybackHistory / batchRemoveFromLibrary 等）
+    // 已拆到 AppState+BatchSelection.swift（缩小本超大文件）。
 
     func reclassify(_ item: MediaItem, as type: MediaType) {
         do {
@@ -8814,7 +8231,7 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func updateRatingInMemory(id: String, rating: Double?) {
+    func updateRatingInMemory(id: String, rating: Double?) {
         func updated(_ item: MediaItem) -> MediaItem {
             guard item.id == id else { return item }
             var copy = item
