@@ -7526,8 +7526,12 @@ final class MpvPlayerController: ObservableObject {
         self.currentTime = clampedTime
         lyricTime = clampedTime
         audioSpectrumBands = AudioSpectrumAnalyzer.silenceBands.enumerated().map { index, _ in
-            let phase = Double(index) * 0.62 + clampedTime * 0.42
-            return CGFloat(0.24 + 0.58 * (0.5 + 0.5 * sin(phase)))
+            // 拆成显式 Double 中间量：避免部分 Swift 编译器对这条嵌套表达式
+            // 「unable to type-check in reasonable time」而构建失败（CI 旧 SDK 上复现）。
+            let phase: Double = Double(index) * 0.62 + clampedTime * 0.42
+            let normalized: Double = 0.5 + 0.5 * sin(phase)
+            let scaled: Double = 0.24 + 0.58 * normalized
+            return CGFloat(scaled)
         }
     }
 #endif
