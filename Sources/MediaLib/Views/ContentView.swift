@@ -335,7 +335,14 @@ struct ContentView: View {
     @AppStorage("MediaLib.sidebar.selection") private var storedSelectionID = "home"
     @AppStorage("MediaLib.music.albumGlowPerformanceNoticeShown") private var albumGlowPerformanceNoticeShown = false
 
+    // body 拆成「根布局 + 4 段连续修饰符」分别由独立函数装配：修饰符顺序逐字保持不变（仅
+    // 切成连续片段，SwiftUI 语义不变），但让每段在各自函数里独立类型检查，避免整个 body 作为
+    // 单一巨型表达式触发旧编译器「unable to type-check in reasonable time」。
     var body: some View {
+        bodyWithLifecycle(bodyWithSheetsB(bodyWithSheetsA(bodyWithLayers(rootLayout))))
+    }
+
+    private var rootLayout: some View {
         GeometryReader { geometry in
             ZStack(alignment: .bottom) {
                 if musicBackgroundRootSuspended {
@@ -388,6 +395,12 @@ struct ContentView: View {
             }
             .frame(width: geometry.size.width, height: geometry.size.height, alignment: .bottom)
         }
+    }
+
+    /// 第 1 段：背景层 + 覆盖层（页面背景、布局监视、迷你播放器滚动监视、全屏播放器、樱花彩蛋、
+    /// 浮窗通知、视频播放器宿主）。顺序与原 body 完全一致。
+    private func bodyWithLayers<V: View>(_ content: V) -> some View {
+        content
         .background {
             AppPageBackground(includeDirectionalLight: false)
         }
@@ -462,6 +475,11 @@ struct ContentView: View {
             VideoPlayerWindowPresenter(item: videoPlayerBinding)
                 .frame(width: 0, height: 0)
         }
+    }
+
+    /// 第 2 段：前半组 sheet（快速预览、网络串流、应用更新、赞赏、视频智能/手动集合）。
+    private func bodyWithSheetsA<V: View>(_ content: V) -> some View {
+        content
         .sheet(item: $appState.quickPreviewItem) { item in
             QuickPreviewView(item: item)
                 .environmentObject(appState)
@@ -533,6 +551,11 @@ struct ContentView: View {
                 }
             )
         }
+    }
+
+    /// 第 3 段：后半组 sheet（离线订阅上限、Emby 改名、音乐智能歌单、Emby 限制提示、引导）。
+    private func bodyWithSheetsB<V: View>(_ content: V) -> some View {
+        content
         .sheet(item: $appState.videoOfflineSubscriptionLimitRequest) { request in
             VideoOfflineSubscriptionLimitSheet(
                 request: request,
@@ -593,6 +616,11 @@ struct ContentView: View {
             }
             .interactiveDismissDisabled()
         }
+    }
+
+    /// 第 4 段：生命周期与剩余背景/覆盖（onAppear/onChange、标题栏 chrome、配色切换遮罩等）。
+    private func bodyWithLifecycle<V: View>(_ content: V) -> some View {
+        content
         .onAppear {
             if !appState.settings.hasCompletedOnboarding {
                 showOnboarding = true

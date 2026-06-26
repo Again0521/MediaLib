@@ -640,9 +640,9 @@ final class AppState: ObservableObject {
     private var cachedVideoSeriesStatesByID: [String: VideoSeriesCacheState] = [:]
     private var cachedOfflineSources: [MediaSource] = []
     private var cachedOfflineSourceIDs: Set<String> = []
-    private var cachedURLItemHealthByID: [String: URLItemHealthState] = [:]
-    private var urlHealthTask: Task<Void, Never>?
-    private var urlHealthRefreshID = UUID()
+    // URL 链接健康探测已抽到 URLSourceHealthMonitor（探测调度 + 结果存储，可注入 prober 单测）。
+    let urlHealthMonitor = URLSourceHealthMonitor()
+    private var urlHealthForwarding: AnyCancellable?
     private var cachedHomeStats = HomeStatsSnapshot()
     private var mediaExternalIDIndex: [String: String] = [:]
     private var mediaIDsByPersonID: [String: Set<String>] = [:]
@@ -815,6 +815,10 @@ final class AppState: ObservableObject {
         // 歌单数据变化同样转发到 AppState，使既有 @EnvironmentObject 视图照常刷新
         //（等价于此前 musicPlaylists/musicSmartPlaylists 作为 AppState @Published 的行为）。
         musicPlaylistForwarding = musicPlaylistStore.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        // URL 链接健康结果变化转发到 AppState，使健康徽标/失效列表照常刷新。
+        urlHealthForwarding = urlHealthMonitor.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
         configureNetworkPathMonitoring()
@@ -3789,13 +3793,13 @@ final class AppState: ObservableObject {
     // MARK: - URL 链接健康（可达性 / 可解析）
 
     func urlItemHealthState(for item: MediaItem) -> URLItemHealthState {
-        cachedURLItemHealthByID[item.id] ?? .unknown
+        urlHealthMonitor.state(for: item.id)
     }
 
     /// URL 媒体源下被判定为失效（无法访问或无法解析）的链接。
     var unhealthyURLItems: [MediaItem] {
         guard urlMediaSource?.includeInHealthCheck ?? false else { return [] }
-        return urlSourceItems.filter { cachedURLItemHealthByID[$0.id]?.isUnhealthy == true }
+        return urlSourceItems.filter { urlHealthMonitor.healthByID[$0.id]?.isUnhealthy == true }
     }
 
     /// URL 媒体源整体是否健康（无失效链接）。
@@ -3805,12 +3809,11 @@ final class AppState: ObservableObject {
 
     /// 探测 URL 媒体源所有 http(s) 链接的可达性与可解析性。
     func refreshURLSourceHealth() {
-        urlHealthTask?.cancel()
         guard urlMediaSource?.includeInHealthCheck ?? false else {
-            cachedURLItemHealthByID = [:]
+            urlHealthMonitor.reset()
             return
         }
-        let probeItems = urlSourceItems.compactMap { item -> (String, URL)? in
+        let probeItems = urlSourceItems.compactMap { item -> (id: String, url: URL)? in
             guard let filePath = item.filePath,
                   let url = URL(string: filePath),
                   let scheme = url.scheme?.lowercased(),
@@ -3819,64 +3822,13 @@ final class AppState: ObservableObject {
             }
             return (item.id, url)
         }
-        // 清掉已删除条目的旧结果。
         let liveIDs = Set(urlSourceItems.map(\.id))
-        cachedURLItemHealthByID = cachedURLItemHealthByID.filter { liveIDs.contains($0.key) }
-        guard !probeItems.isEmpty else { return }
-        let refreshID = UUID()
-        urlHealthRefreshID = refreshID
-        for (id, _) in probeItems {
-            cachedURLItemHealthByID[id] = .checking
-        }
-        urlHealthTask = Task { [weak self, probeItems, refreshID] in
-            var results: [String: URLItemHealthState] = [:]
-            await withTaskGroup(of: (String, URLItemHealthState).self) { group in
-                for (id, url) in probeItems {
-                    group.addTask {
-                        (id, await Self.probeURLHealth(url))
-                    }
-                }
-                for await pair in group {
-                    results[pair.0] = pair.1
-                }
-            }
-            await MainActor.run {
-                guard let self, self.urlHealthRefreshID == refreshID else { return }
-                for (id, state) in results {
-                    self.cachedURLItemHealthByID[id] = state
-                }
-                self.libraryRevision += 1
-            }
+        urlHealthMonitor.refresh(probeItems: probeItems, liveIDs: liveIDs) { [weak self] in
+            self?.libraryRevision += 1
         }
     }
 
-    private static func probeURLHealth(_ url: URL) async -> URLItemHealthState {
-        let session = URLSession.shared
-        var head = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 12)
-        head.httpMethod = "HEAD"
-        if let response = try? await session.data(for: head).1 {
-            return classifyURLResponse(response)
-        }
-        // 部分服务器拒绝 HEAD，改用 1KB 范围 GET 兜底。
-        var ranged = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 12)
-        ranged.httpMethod = "GET"
-        ranged.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
-        if let response = try? await session.data(for: ranged).1 {
-            return classifyURLResponse(response)
-        }
-        return .unreachable
-    }
-
-    private static func classifyURLResponse(_ response: URLResponse) -> URLItemHealthState {
-        guard let http = response as? HTTPURLResponse else { return .ok }
-        if http.statusCode >= 400 { return .unreachable }
-        let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
-        // 直链一般是 video/* 或八位字节流 / m3u8；返回网页通常 text/html，多半不是可播放视频。
-        if contentType.contains("text/html") || contentType.contains("application/xhtml") {
-            return .unparseable
-        }
-        return .ok
-    }
+    // probeURLHealth / classifyURLResponse 已随健康探测一并移入 URLSourceHealthMonitor。
 
     // MARK: - 视频封面截取与自定义
 
