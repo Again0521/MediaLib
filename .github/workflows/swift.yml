@@ -1,8 +1,10 @@
-# This workflow will build a Swift project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-swift
+name: CI
 
-name: Swift
-
+# 在 push / PR 时跑构建 + 单测 + 集成自检（R4-TEST-001）。
+# 需要把项目纳入 git 并推送到 GitHub Actions 才会触发；本地不运行。
+#
+# 注意：本项目用较新的 Swift / macOS SDK 构建（本地 Swift 6.x）。CI 选用最新可用的
+# runner 镜像 + 最新稳定 Xcode，尽量贴近本地 SDK，避免「本地能编、旧 SDK 编不过」。
 on:
   push:
     branches: [main, master]
@@ -10,66 +12,33 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
-concurrency:
-  group: swift-${{ github.ref }}
+concurrency: 
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build
-    runs-on: macos-14
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: bash
-
+  build-test:
+    name: Build · Test · Checks
+    runs-on: macos-latest
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Locate Swift package
-        id: package
-        run: |
-          set -euo pipefail
-
-          echo "Repository root: ${GITHUB_WORKSPACE}"
-          package_file="$(
-            find "${GITHUB_WORKSPACE}" \
-              -path '*/.git' -prune -o \
-              -path '*/.build' -prune -o \
-              -path '*/.swiftpm' -prune -o \
-              -name Package.swift -type f -print |
-            sort |
-            head -n 1
-          )"
-
-          if [[ -z "${package_file}" ]]; then
-            echo "::error::Could not find Package.swift after checkout."
-            echo "Top-level files:"
-            find "${GITHUB_WORKSPACE}" -maxdepth 2 -type f | sort | sed "s#${GITHUB_WORKSPACE}/##"
-            exit 1
-          fi
-
-          package_dir="$(dirname "${package_file}")"
-          echo "Found Package.swift at: ${package_file}"
-          echo "PACKAGE_DIR=${package_dir}" >> "${GITHUB_ENV}"
-          echo "package-dir=${package_dir}" >> "${GITHUB_OUTPUT}"
+      # 选用 runner 上最新稳定的 Xcode（其 SDK 较新，减少 API 可用性差异导致的编译失败）。
+      - name: Select latest stable Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
 
       - name: Toolchain version
-        run: |
-          xcode-select -p
-          xcodebuild -version
-          swift --version
+        run: swift --version && xcodebuild -version
 
-      - name: Describe package
-        run: swift package describe --package-path "${PACKAGE_DIR}" --type text
+      - name: Build (debug)
+        run: swift build
 
-      - name: Build
-        run: swift build --package-path "${PACKAGE_DIR}" -v
+      - name: Unit tests
+        run: swift test
 
-      - name: Run tests
-        run: swift test --package-path "${PACKAGE_DIR}" -v
-
-      - name: MediaLIB checks
-        run: swift run --package-path "${PACKAGE_DIR}" MediaLibChecks
-
+      - name: Integration self-check (MediaLibChecks)
+        run: swift run MediaLibChecks
