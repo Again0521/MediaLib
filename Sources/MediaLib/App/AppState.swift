@@ -525,8 +525,11 @@ final class AppState: ObservableObject {
     @Published private(set) var metadataCorrectionCountsByMediaID: [String: Int] = [:]
     @Published private(set) var metadataCorrectionRecordCount = 0
     @Published private(set) var metadataCorrectionBatches: [MetadataCorrectionBatchSummary] = []
-    @Published private(set) var pendingSyncConflictCount = 0
-    @Published private(set) var pendingSyncConflicts: [SyncConflict] = []
+    // 同步冲突待处理列表已抽到 SyncConflictStore；保留同名转发访问器使外部 API/视图零改。
+    let syncConflictStore: SyncConflictStore
+    private var syncConflictForwarding: AnyCancellable?
+    var pendingSyncConflictCount: Int { syncConflictStore.pendingCount }
+    var pendingSyncConflicts: [SyncConflict] { syncConflictStore.pendingConflicts }
     @Published private(set) var remoteConnectorAccounts: [RemoteConnectorAccount] = []
     @Published private(set) var detailMetadataGapsByMediaID: [String: Set<String>] = [:]
     @Published private(set) var detailSearchTermsByMediaID: [String: [String]] = [:]
@@ -572,7 +575,7 @@ final class AppState: ObservableObject {
     private let playbackMarkerRepository: PlaybackMarkerRepository?
     private let metadataCorrectionRepository: MetadataCorrectionRepository?
     private let mediaDetailRepository: MediaDetailRepository?
-    private let syncConflictRepository: SyncConflictRepository?
+    // syncConflictRepository 已移入 SyncConflictStore 持有。
     private let remoteConnectorAccountRepository: RemoteConnectorAccountRepository?
     private let videoOfflineCacheStore: VideoOfflineCacheStore?
     let settingsStore = AppSettingsStore()   // internal：AppState+MusicTheme 等 extension 跨文件访问
@@ -765,7 +768,7 @@ final class AppState: ObservableObject {
             self.playbackMarkerRepository = PlaybackMarkerRepository(database: database)
             self.metadataCorrectionRepository = MetadataCorrectionRepository(database: database)
             self.mediaDetailRepository = MediaDetailRepository(database: database)
-            self.syncConflictRepository = SyncConflictRepository(database: database)
+            self.syncConflictStore = SyncConflictStore(repository: SyncConflictRepository(database: database))
             self.remoteConnectorAccountRepository = RemoteConnectorAccountRepository(database: database)
             do {
                 self.videoOfflineCacheStore = try VideoOfflineCacheStore(
@@ -802,7 +805,7 @@ final class AppState: ObservableObject {
             self.playbackMarkerRepository = nil
             self.metadataCorrectionRepository = nil
             self.mediaDetailRepository = nil
-            self.syncConflictRepository = nil
+            self.syncConflictStore = SyncConflictStore(repository: nil)
             self.remoteConnectorAccountRepository = nil
             self.videoOfflineCacheStore = nil
             self.startupError = error.localizedDescription
@@ -819,6 +822,10 @@ final class AppState: ObservableObject {
         }
         // URL 链接健康结果变化转发到 AppState，使健康徽标/失效列表照常刷新。
         urlHealthForwarding = urlHealthMonitor.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        // 同步冲突列表/计数变化转发到 AppState，使设置页徽标/冲突列表照常刷新。
+        syncConflictForwarding = syncConflictStore.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
         configureNetworkPathMonitoring()
@@ -2810,8 +2817,7 @@ final class AppState: ObservableObject {
             metadataCorrectionCountsByMediaID = try metadataCorrectionRepository?.activeCountsByMediaID() ?? [:]
             metadataCorrectionRecordCount = try metadataCorrectionRepository?.activeRecordCount() ?? 0
             metadataCorrectionBatches = try metadataCorrectionRepository?.fetchActiveBatches(limit: 120) ?? []
-            pendingSyncConflictCount = try syncConflictRepository?.pendingCount() ?? 0
-            pendingSyncConflicts = try syncConflictRepository?.fetchPending(limit: 120) ?? []
+            try syncConflictStore.reload()
             remoteConnectorAccounts = try remoteConnectorAccountRepository?.fetchAll() ?? []
             items = fetchedItems
             let detailCandidateIDs = fetchedItems.compactMap { item -> String? in
@@ -8384,8 +8390,7 @@ final class AppState: ObservableObject {
                 let now = Date()
                 _ = self.traktAccountRecord(syncEnabled: self.settings.traktSyncEnabled, lastSyncedAt: now)
                 self.remoteConnectorAccounts = try self.remoteConnectorAccountRepository?.fetchAll() ?? self.remoteConnectorAccounts
-                self.pendingSyncConflictCount = try self.syncConflictRepository?.pendingCount() ?? self.pendingSyncConflictCount
-                self.pendingSyncConflicts = try self.syncConflictRepository?.fetchPending(limit: 120) ?? self.pendingSyncConflicts
+                try self.syncConflictStore.refreshFromRepository()
                 let message = report.conflictCount == 0
                     ? "没有发现需要处理的本地/远端状态差异。"
                     : "已生成 \(report.conflictCount) 条待处理同步冲突，可在“连接器与同步 > 同步冲突”中处理。"
@@ -8409,7 +8414,7 @@ final class AppState: ObservableObject {
     }
 
     private func recordTraktImportConflicts(remoteState: TraktRemoteState) throws -> TraktImportReport {
-        guard let syncConflictRepository else { return TraktImportReport(conflictCount: 0) }
+        guard syncConflictStore.isAvailable else { return TraktImportReport(conflictCount: 0) }
         let accountID = traktAccountRecord(syncEnabled: settings.traktSyncEnabled)?.id
         let remoteUpdatedAt = Date()
         var conflictCount = 0
@@ -8427,7 +8432,7 @@ final class AppState: ObservableObject {
                 localUpdatedAt: item.updatedAt,
                 remoteUpdatedAt: remoteUpdatedAt
             )
-            _ = try syncConflictRepository.save(conflict)
+            _ = try syncConflictStore.save(conflict)
             conflictCount += 1
         }
 
@@ -9265,7 +9270,7 @@ final class AppState: ObservableObject {
     }
 
     func resolveSyncConflict(_ conflict: SyncConflict, resolution: SyncConflictResolution) {
-        guard let syncConflictRepository else { return }
+        guard syncConflictStore.isAvailable else { return }
         if conflict.provider == .trakt, resolution == .useLocal {
             resolveTraktSyncConflictUsingLocal(conflict)
             return
@@ -9295,14 +9300,13 @@ final class AppState: ObservableObject {
                     case .userRating(let rating):
                         try mediaRepository.updateRating(id: mutation.item.id, rating: rating)
                     }
-                    try syncConflictRepository.resolve(id: conflict.id, resolution: resolution)
+                    try syncConflictStore.persistResolution(id: conflict.id, resolution: resolution)
                 }
                 applyRemoteMutationInMemory(mutation)
             } else {
-                try syncConflictRepository.resolve(id: conflict.id, resolution: resolution)
+                try syncConflictStore.persistResolution(id: conflict.id, resolution: resolution)
             }
-            pendingSyncConflicts.removeAll { $0.id == conflict.id }
-            pendingSyncConflictCount = max(0, pendingSyncConflictCount - 1)
+            syncConflictStore.forgetPending(id: conflict.id)
             showFloatingNotice(
                 title: resolution == .useRemote ? "已采用远端状态" : "已记录冲突处理",
                 message: syncConflictResolutionNotice(conflict, resolution: resolution),
@@ -9314,18 +9318,17 @@ final class AppState: ObservableObject {
     }
 
     private func resolveTraktSyncConflictUsingLocal(_ conflict: SyncConflict) {
-        guard let syncConflictRepository else { return }
+        guard syncConflictStore.isAvailable else { return }
         Task { [weak self] in
             guard let self else { return }
             do {
                 let mutation = try self.localMutation(for: conflict)
                 try await self.pushLocalMutationToTrakt(mutation)
-                try syncConflictRepository.resolve(id: conflict.id, resolution: .useLocal)
+                try self.syncConflictStore.persistResolution(id: conflict.id, resolution: .useLocal)
                 let now = Date()
                 _ = self.traktAccountRecord(syncEnabled: self.settings.traktSyncEnabled, lastSyncedAt: now)
                 self.remoteConnectorAccounts = try self.remoteConnectorAccountRepository?.fetchAll() ?? self.remoteConnectorAccounts
-                self.pendingSyncConflicts.removeAll { $0.id == conflict.id }
-                self.pendingSyncConflictCount = max(0, self.pendingSyncConflictCount - 1)
+                self.syncConflictStore.forgetPending(id: conflict.id)
                 let message = self.syncConflictResolutionNotice(conflict, resolution: .useLocal)
                 self.deliverTaskNotice(
                     title: "已保留本地并同步 Trakt",
@@ -9497,11 +9500,10 @@ final class AppState: ObservableObject {
     }
 
     func ignoreSyncConflict(_ conflict: SyncConflict) {
-        guard let syncConflictRepository else { return }
+        guard syncConflictStore.isAvailable else { return }
         do {
-            try syncConflictRepository.ignore(id: conflict.id)
-            pendingSyncConflicts.removeAll { $0.id == conflict.id }
-            pendingSyncConflictCount = max(0, pendingSyncConflictCount - 1)
+            try syncConflictStore.persistIgnore(id: conflict.id)
+            syncConflictStore.forgetPending(id: conflict.id)
             showFloatingNotice(title: "已忽略同步冲突", message: syncConflictDisplayTitle(conflict), kind: .info)
         } catch {
             showError("忽略同步冲突失败", error)
