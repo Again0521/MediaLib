@@ -112,6 +112,27 @@ enum AppCardMetrics {
     static let emptyStateTextWidth: CGFloat = 520
 }
 
+/// 焕彩 Aurora 专用刻度：Hero 焦点卡、多色统计磁贴、区块标题彩条与入场节奏。
+///
+/// 这些刻度供首页与全局焕彩组件统一读取，避免在各处散落近似但不一致的尺寸。
+/// `touchTargetMin` 为 iOS / iPadOS 移植预备：新交互组件的命中区不得低于该值。
+enum AppAuroraMetrics {
+    static let heroCornerRadius: CGFloat = AppRadius.hero        // 24
+    static let heroMinHeight: CGFloat = 240
+    static let heroContentPadding: CGFloat = 28
+    static let statTileCornerRadius: CGFloat = 18
+    static let statTileIconChipSize: CGFloat = 44
+    static let statTileMinWidth: CGFloat = 150
+    static let sectionAccentBarWidth: CGFloat = 4
+    static let sectionAccentBarHeight: CGFloat = 20
+    static let sectionAccentBarCornerRadius: CGFloat = 2
+    /// 区块 / 列表逐项入场的单步延时（秒）。建议对前若干项生效后封顶，避免长列表整体延迟。
+    static let blockStaggerStep: Double = 0.04
+    static let blockStaggerMaxItems: Int = 8
+    /// iOS / iPadOS 触控命中区下限（pt）。
+    static let touchTargetMin: CGFloat = 44
+}
+
 enum AppDesignStandard {
     /// 普通页面使用大标题 PageHeader；弹窗使用 AppSheetHeader，避免 sheet 像完整页面一样过重。
     static let pageHeaderTitleSize: CGFloat = 32

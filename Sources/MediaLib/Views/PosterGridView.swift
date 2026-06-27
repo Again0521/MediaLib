@@ -160,6 +160,7 @@ struct PosterGridList<Leading: View>: View {
 
     private let interItemSpacing: CGFloat = 20
     private let rowSpacing: CGFloat = 30
+    private let prewarmRowsAhead = 10
 
     var body: some View {
         GeometryReader { proxy in
@@ -256,7 +257,7 @@ struct PosterGridList<Leading: View>: View {
 
     private func prewarmPosterPaths(around index: Int, columns: Int) -> [String] {
         let start = max(index, 0)
-        let end = min(items.count, start + max(columns, 1) * 4)
+        let end = min(items.count, start + max(columns, 1) * prewarmRowsAhead)
         guard start < end else { return [] }
         return items[start..<end].compactMap(\.posterPath)
     }
@@ -687,12 +688,20 @@ struct PosterImage: View {
     let title: String
     let mediaType: MediaType?
     let cacheTargetSize: CGSize?
+    let contentMode: ContentMode
 
-    init(path: String?, title: String, mediaType: MediaType? = nil, cacheTargetSize: CGSize? = nil) {
+    init(
+        path: String?,
+        title: String,
+        mediaType: MediaType? = nil,
+        cacheTargetSize: CGSize? = nil,
+        contentMode: ContentMode = .fill
+    ) {
         self.path = path
         self.title = title
         self.mediaType = mediaType
         self.cacheTargetSize = cacheTargetSize
+        self.contentMode = contentMode
     }
 
     var body: some View {
@@ -717,9 +726,9 @@ struct PosterImage: View {
     @ViewBuilder
     private func posterContent(targetSize: CGSize) -> some View {
         if let remoteURL = remoteURL {
-            RemotePosterImage(url: remoteURL, title: title, targetSize: targetSize, placeholder: AnyView(placeholder))
+            RemotePosterImage(url: remoteURL, title: title, targetSize: targetSize, contentMode: contentMode, placeholder: AnyView(placeholder))
         } else {
-            LocalPosterImage(path: path, title: title, targetSize: targetSize, placeholder: AnyView(placeholder))
+            LocalPosterImage(path: path, title: title, targetSize: targetSize, contentMode: contentMode, placeholder: AnyView(placeholder))
         }
     }
 
@@ -772,6 +781,7 @@ private struct RemotePosterImage: View {
     let url: URL
     let title: String
     let targetSize: CGSize
+    let contentMode: ContentMode
     let placeholder: AnyView
     @State private var image: NSImage?
 
@@ -780,11 +790,7 @@ private struct RemotePosterImage: View {
         let displayImage = image ?? ArtworkImageCache.cachedImage(path: url.absoluteString, targetSize: targetSize)
         Group {
             if let displayImage {
-                Image(nsImage: displayImage)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
+                posterImage(displayImage)
             } else {
                 placeholder
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -806,6 +812,29 @@ private struct RemotePosterImage: View {
             image = nil
         }
         .accessibilityLabel(title)
+    }
+
+    @ViewBuilder
+    private func posterImage(_ displayImage: NSImage) -> some View {
+        ZStack {
+            if contentMode == .fit {
+                AppColors.cleanPanelFill
+            }
+            Group {
+                if contentMode == .fit {
+                    Image(nsImage: displayImage)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    Image(nsImage: displayImage)
+                        .resizable()
+                        .scaledToFill()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
     }
 
     private var cacheKey: String {
@@ -902,6 +931,7 @@ private struct LocalPosterImage: View {
     let path: String?
     let title: String
     let targetSize: CGSize
+    let contentMode: ContentMode
     let placeholder: AnyView
     @State private var image: NSImage?
 
@@ -910,11 +940,7 @@ private struct LocalPosterImage: View {
         let displayImage = image ?? ArtworkImageCache.cachedImage(path: path, targetSize: targetSize)
         Group {
             if let displayImage {
-                Image(nsImage: displayImage)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipped()
+                posterImage(displayImage)
             } else {
                 placeholder
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -939,6 +965,29 @@ private struct LocalPosterImage: View {
         .onDisappear {
             image = nil
         }
+    }
+
+    @ViewBuilder
+    private func posterImage(_ displayImage: NSImage) -> some View {
+        ZStack {
+            if contentMode == .fit {
+                AppColors.cleanPanelFill
+            }
+            Group {
+                if contentMode == .fit {
+                    Image(nsImage: displayImage)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    Image(nsImage: displayImage)
+                        .resizable()
+                        .scaledToFill()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
     }
 
     private var cacheKey: String {

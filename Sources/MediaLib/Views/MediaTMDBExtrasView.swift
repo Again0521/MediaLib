@@ -1,6 +1,31 @@
 import MediaLibCore
 import SwiftUI
 
+private enum DetailExtrasLayout {
+    static let personCardWidth: CGFloat = 88
+    static let portraitThumbWidth: CGFloat = 104
+    static let wideThumbWidth: CGFloat = 220
+    static let relatedCardWidth: CGFloat = 108
+    static let posterAspectRatio: CGFloat = 2.0 / 3.0
+    static let stripVerticalPadding: CGFloat = 4
+    static let personStripHeight: CGFloat = 150
+    static let relatedStripHeight: CGFloat = 206
+
+    static func artworkAspectRatio(_ rawValue: Double) -> CGFloat {
+        let value = CGFloat(rawValue)
+        guard value.isFinite, value > 0 else { return posterAspectRatio }
+        return min(max(value, 0.56), 2.25)
+    }
+
+    static func artworkStripHeight(for values: [MediaArtwork]) -> CGFloat {
+        let maxArtworkHeight = values.reduce(CGFloat.zero) { result, image in
+            let width = image.aspectRatio >= 1 ? wideThumbWidth : portraitThumbWidth
+            return max(result, width / artworkAspectRatio(image.aspectRatio))
+        }
+        return maxArtworkHeight + stripVerticalPadding * 2
+    }
+}
+
 struct MediaTMDBExtrasView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
@@ -53,61 +78,61 @@ struct MediaTMDBExtrasView: View {
     private var detailSections: some View {
         if let presentation {
             VStack(alignment: .leading, spacing: 20) {
-            if let trailerURL = snapshot.metadata.trailerURL, let url = URL(string: trailerURL) {
-                Button {
-                    NSWorkspace.shared.open(url)
-                } label: {
-                    Label("观看预告片", systemImage: "play.rectangle.fill")
+                if let trailerURL = snapshot.metadata.trailerURL, let url = URL(string: trailerURL) {
+                    Button {
+                        NSWorkspace.shared.open(url)
+                    } label: {
+                        Label("观看预告片", systemImage: "play.rectangle.fill")
+                    }
+                    .buttonStyle(LiquidGlassButtonStyle(
+                        cornerRadius: 12,
+                        horizontalPadding: 14,
+                        minHeight: 34,
+                        prominent: true
+                    ))
                 }
-                .buttonStyle(LiquidGlassButtonStyle(
-                    cornerRadius: 12,
-                    horizontalPadding: 14,
-                    minHeight: 34,
-                    prominent: true
-                ))
-            }
 
-            if !presentation.crewPeople.isEmpty {
-                peopleSection(title: "主创", systemImage: "person.badge.key", values: presentation.crewPeople)
-            }
-            if !presentation.castPeople.isEmpty {
-                peopleSection(title: "演员", systemImage: "person.2", values: presentation.castPeople)
-            }
-            if !presentation.artwork.isEmpty {
-                sectionCard(title: "艺术照", systemImage: "photo.on.rectangle") {
-                    artworkStrip(presentation)
+                if !presentation.crewPeople.isEmpty {
+                    peopleSection(title: "主创", systemImage: "person.badge.key", values: presentation.crewPeople)
                 }
-            }
-            if !presentation.libraryRelated.isEmpty {
-                sectionCard(title: "库中相似作品", systemImage: "rectangle.stack.badge.play") {
-                    relatedStrip(presentation.libraryRelated)
+                if !presentation.castPeople.isEmpty {
+                    peopleSection(title: "演员", systemImage: "person.2", values: presentation.castPeople)
                 }
-            }
-            if !presentation.discoveryRelated.isEmpty {
-                sectionCard(title: "更多推荐", systemImage: "sparkles") {
-                    relatedStrip(presentation.discoveryRelated)
+                if !presentation.artwork.isEmpty {
+                    sectionCard(title: "艺术照", systemImage: "photo.on.rectangle") {
+                        artworkStrip(presentation)
+                    }
                 }
-            }
-            if !presentation.relatedLinks.isEmpty {
-                sectionCard(title: "相关链接", systemImage: "link") {
-                    HStack(spacing: 10) {
-                        ForEach(presentation.relatedLinks) { link in
-                            Button {
-                                NSWorkspace.shared.open(link.url)
-                            } label: {
-                                Label(link.title, systemImage: link.systemImage)
+                if !presentation.libraryRelated.isEmpty {
+                    sectionCard(title: "库中相似作品", systemImage: "rectangle.stack.badge.play") {
+                        relatedStrip(presentation.libraryRelated)
+                    }
+                }
+                if !presentation.discoveryRelated.isEmpty {
+                    sectionCard(title: "更多推荐", systemImage: "sparkles") {
+                        relatedStrip(presentation.discoveryRelated)
+                    }
+                }
+                if !presentation.relatedLinks.isEmpty {
+                    sectionCard(title: "相关链接", systemImage: "link") {
+                        HStack(spacing: 10) {
+                            ForEach(presentation.relatedLinks) { link in
+                                Button {
+                                    NSWorkspace.shared.open(link.url)
+                                } label: {
+                                    Label(link.title, systemImage: link.systemImage)
+                                }
+                                .buttonStyle(LiquidGlassButtonStyle(
+                                    cornerRadius: 11,
+                                    horizontalPadding: 13,
+                                    minHeight: 32
+                                ))
                             }
-                            .buttonStyle(LiquidGlassButtonStyle(
-                                cornerRadius: 11,
-                                horizontalPadding: 13,
-                                minHeight: 32
-                            ))
+                            Spacer(minLength: 0)
                         }
-                        Spacer(minLength: 0)
                     }
                 }
             }
-        }
         } else {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
@@ -130,7 +155,7 @@ struct MediaTMDBExtrasView: View {
         values: [(MediaPerson, MediaCredit)]
     ) -> some View {
         sectionCard(title: title, systemImage: systemImage) {
-            horizontalStrip {
+            horizontalStrip(height: DetailExtrasLayout.personStripHeight) {
                 ForEach(values, id: \.1.id) { person, credit in
                     personCard(person, credit: credit)
                 }
@@ -147,13 +172,15 @@ struct MediaTMDBExtrasView: View {
                 Text(person.name)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.primary)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(credit.role)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(width: 88)
+            .frame(width: DetailExtrasLayout.personCardWidth)
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
@@ -195,7 +222,7 @@ struct MediaTMDBExtrasView: View {
     }
 
     private func artworkStrip(_ presentation: DetailExtrasPresentation) -> some View {
-        horizontalStrip {
+        horizontalStrip(height: DetailExtrasLayout.artworkStripHeight(for: presentation.artwork)) {
             ForEach(Array(presentation.artwork.enumerated()), id: \.element.id) { index, image in
                 Button {
                     onOpenArtwork(presentation.artworkEntries, index)
@@ -209,20 +236,18 @@ struct MediaTMDBExtrasView: View {
     }
 
     private func artworkThumbnail(_ image: MediaArtwork) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         let isWide = image.aspectRatio >= 1
-        return AsyncImage(url: URL(string: image.thumbURL)) { phase in
-            switch phase {
-            case .success(let value):
-                value.resizable().scaledToFill()
-            default:
-                artworkPlaceholder
+        let width = isWide ? DetailExtrasLayout.wideThumbWidth : DetailExtrasLayout.portraitThumbWidth
+        let aspectRatio = DetailExtrasLayout.artworkAspectRatio(image.aspectRatio)
+        return thumbnailShell(width: width, aspectRatio: aspectRatio, cornerRadius: 10) {
+            AsyncImage(url: URL(string: image.thumbURL)) { phase in
+                switch phase {
+                case .success(let value):
+                    value.resizable().scaledToFit()
+                default:
+                    artworkPlaceholder
+                }
             }
-        }
-        .frame(width: isWide ? 220 : 104, height: isWide ? 124 : 156)
-        .clipShape(shape)
-        .overlay {
-            shape.strokeBorder(.white.opacity(colorScheme == .dark ? 0.12 : 0.32), lineWidth: 0.8)
         }
         .overlay(alignment: .bottomLeading) {
             Text(image.kind == "poster" ? "海报" : "剧照")
@@ -232,6 +257,26 @@ struct MediaTMDBExtrasView: View {
                 .background(.black.opacity(0.48), in: Capsule())
                 .foregroundStyle(.white)
                 .padding(6)
+        }
+    }
+
+    private func thumbnailShell<Content: View>(
+        width: CGFloat,
+        aspectRatio: CGFloat,
+        cornerRadius: CGFloat,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return ZStack {
+            AppColors.cleanPanelFill
+            content()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .aspectRatio(aspectRatio, contentMode: .fit)
+        .frame(width: width)
+        .clipShape(shape)
+        .overlay {
+            shape.strokeBorder(.white.opacity(colorScheme == .dark ? 0.12 : 0.32), lineWidth: 0.8)
         }
     }
 
@@ -255,7 +300,7 @@ struct MediaTMDBExtrasView: View {
     }
 
     private func relatedStrip(_ values: [DetailRelatedDisplay]) -> some View {
-        horizontalStrip {
+        horizontalStrip(height: DetailExtrasLayout.relatedStripHeight) {
             ForEach(values) { related in
                 relatedCard(related)
             }
@@ -264,7 +309,6 @@ struct MediaTMDBExtrasView: View {
 
     private func relatedCard(_ row: DetailRelatedDisplay) -> some View {
         let related = row.related
-        let shape = RoundedRectangle(cornerRadius: 10, style: .continuous)
         return Button {
             if let localItem = row.localItem {
                 appState.presentRelatedDetail(localItem)
@@ -274,15 +318,13 @@ struct MediaTMDBExtrasView: View {
         } label: {
             VStack(alignment: .leading, spacing: 6) {
                 ZStack(alignment: .bottomLeading) {
-                    relatedPoster(row)
-                        .frame(width: 104, height: 156)
-                        .clipShape(shape)
-                        .overlay {
-                            shape.strokeBorder(
-                                .white.opacity(colorScheme == .dark ? 0.12 : 0.32),
-                                lineWidth: 0.8
-                            )
-                        }
+                    thumbnailShell(
+                        width: DetailExtrasLayout.portraitThumbWidth,
+                        aspectRatio: DetailExtrasLayout.posterAspectRatio,
+                        cornerRadius: 10
+                    ) {
+                        relatedPoster(row)
+                    }
                     Text(related.localMediaID == nil ? "发现" : "在库")
                         .font(.system(size: 9, weight: .semibold))
                         .padding(.horizontal, 6)
@@ -299,13 +341,15 @@ struct MediaTMDBExtrasView: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 if let year = related.year {
                     Text(String(year))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .frame(width: 104)
+            .frame(width: DetailExtrasLayout.relatedCardWidth, alignment: .leading)
         }
         .buttonStyle(.plain)
         .help(related.localMediaID == nil ? "在 TMDB 查看\(related.title)" : "打开\(related.title)")
@@ -315,13 +359,12 @@ struct MediaTMDBExtrasView: View {
     private func relatedPoster(_ row: DetailRelatedDisplay) -> some View {
         let related = row.related
         if let localItem = row.localItem {
-            PosterImage(path: localItem.posterPath, title: localItem.title, mediaType: localItem.type)
-                .aspectRatio(2.0 / 3.0, contentMode: .fill)
+            PosterImage(path: localItem.posterPath, title: localItem.title, mediaType: localItem.type, contentMode: .fit)
         } else if let posterURL = related.posterURL, let url = URL(string: posterURL) {
             AsyncImage(url: url) { phase in
                 switch phase {
                 case .success(let image):
-                    image.resizable().scaledToFill()
+                    image.resizable().scaledToFit()
                 default:
                     relatedPlaceholder
                 }
@@ -483,14 +526,19 @@ struct MediaTMDBExtrasView: View {
         .staticSurfaceBackground(cornerRadius: 18)
     }
 
-    private func horizontalStrip<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+    private func horizontalStrip<Content: View>(
+        height: CGFloat,
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(alignment: .top, spacing: 14) {
                 content()
             }
             .padding(.horizontal, 2)
-            .padding(.bottom, 2)
+            .padding(.vertical, DetailExtrasLayout.stripVerticalPadding)
+            .frame(height: height, alignment: .top)
         }
+        .frame(height: height)
         .verticalScrollPassthroughFromNestedHorizontal()
     }
 }

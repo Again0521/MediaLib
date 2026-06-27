@@ -1,6 +1,14 @@
 import MediaLibCore
 import SwiftUI
 
+private enum PersonDetailLayout {
+    static let workCardWidth: CGFloat = 112
+    static let workPosterAspectRatio: CGFloat = 2.0 / 3.0
+    static let workPosterCornerRadius: CGFloat = 11
+    static let stripVerticalPadding: CGFloat = 4
+    static let workStripHeight: CGFloat = 234
+}
+
 struct PersonDetailView: View {
     @EnvironmentObject private var appState: AppState
 
@@ -190,8 +198,10 @@ struct PersonDetailView: View {
                     }
                 }
                 .padding(.horizontal, 2)
-                .padding(.bottom, 2)
+                .padding(.vertical, PersonDetailLayout.stripVerticalPadding)
+                .frame(height: PersonDetailLayout.workStripHeight, alignment: .top)
             }
+            .frame(height: PersonDetailLayout.workStripHeight)
             .verticalScrollPassthroughFromNestedHorizontal()
         }
         .padding(16)
@@ -278,12 +288,19 @@ struct PersonDetailView: View {
         } label: {
             VStack(alignment: .leading, spacing: 6) {
                 workPoster(row)
-                    .frame(width: 112, height: 168)
-                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .aspectRatio(PersonDetailLayout.workPosterAspectRatio, contentMode: .fit)
+                    .frame(width: PersonDetailLayout.workCardWidth)
+                    .background(AppColors.cleanPanelFill)
+                    .clipShape(RoundedRectangle(cornerRadius: PersonDetailLayout.workPosterCornerRadius, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: PersonDetailLayout.workPosterCornerRadius, style: .continuous)
+                            .strokeBorder(.white.opacity(0.28), lineWidth: 0.8)
+                    }
                 Text(work.title)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.primary)
                     .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let detail = [work.year.map(String.init), work.role]
                     .compactMap({ $0?.nilIfEmpty }).joined(separator: " · ").nilIfEmpty {
                     Text(detail)
@@ -292,7 +309,7 @@ struct PersonDetailView: View {
                         .lineLimit(1)
                 }
             }
-            .frame(width: 112, alignment: .leading)
+            .frame(width: PersonDetailLayout.workCardWidth, alignment: .leading)
         }
         .buttonStyle(.plain)
         .help("打开\(work.title)")
@@ -302,13 +319,12 @@ struct PersonDetailView: View {
     private func workPoster(_ row: PersonWorkRow) -> some View {
         let work = row.work
         if let local = row.localItem {
-            PosterImage(path: local.posterPath, title: local.title, mediaType: local.type)
-                .aspectRatio(2.0 / 3.0, contentMode: .fill)
+            PosterImage(path: local.posterPath, title: local.title, mediaType: local.type, contentMode: .fit)
         } else if let path = work.posterURL, let url = URL(string: path) {
             AsyncImage(url: url) { phase in
                 switch phase {
                 case .success(let image):
-                    image.resizable().scaledToFill()
+                    image.resizable().scaledToFit()
                 default:
                     workPlaceholder
                 }

@@ -4258,29 +4258,51 @@ final class AppState: ObservableObject {
         let task = Task { [weak self] in
             guard let self else { return }
             var completed = completedURLStrings
+            var failed = 0
             for url in remainingURLs {
                 guard !Task.isCancelled else { return }
-                _ = await ArtworkImageCache.prewarmRemoteImage(
+                let succeeded = await ArtworkImageCache.prewarmRemoteImage(
                     url: url,
                     targetSize: ArtworkImageCache.posterGridTargetSize
                 )
-                completed.insert(url.absoluteString)
+                if succeeded {
+                    completed.insert(url.absoluteString)
+                    self.persistArtworkWarmupProgress(
+                        sourceID: source.id,
+                        completedURLs: completed,
+                        totalCount: totalCount
+                    )
+                } else {
+                    failed += 1
+                }
+                let processed = completed.count + failed
+                if processed == totalCount || processed % 6 == 0 {
+                    self.updateBackgroundTask(
+                        id: taskID,
+                        progress: Double(processed) / Double(max(totalCount, 1)),
+                        detail: failed > 0
+                            ? "已缓存 \(completed.count)/\(totalCount) 张封面，\(failed) 张稍后重试"
+                            : "已缓存 \(completed.count)/\(totalCount) 张封面"
+                    )
+                }
+            }
+            self.embyArtworkWarmupTasks[source.id] = nil
+            if failed == 0 {
+                self.clearArtworkWarmupProgress(sourceID: source.id)
+                self.finishBackgroundTask(id: taskID, errors: [])
+            } else {
                 self.persistArtworkWarmupProgress(
                     sourceID: source.id,
                     completedURLs: completed,
                     totalCount: totalCount
                 )
-                if completed.count == totalCount || completed.count % 6 == 0 {
-                    self.updateBackgroundTask(
-                        id: taskID,
-                        progress: Double(completed.count) / Double(max(totalCount, 1)),
-                        detail: "已缓存 \(completed.count)/\(totalCount) 张封面"
-                    )
-                }
+                self.updateBackgroundTask(
+                    id: taskID,
+                    progress: 1,
+                    detail: "已缓存 \(completed.count)/\(totalCount) 张封面，\(failed) 张将在下次刷新时继续补"
+                )
+                self.finishBackgroundTask(id: taskID, errors: [])
             }
-            self.embyArtworkWarmupTasks[source.id] = nil
-            self.clearArtworkWarmupProgress(sourceID: source.id)
-            self.finishBackgroundTask(id: taskID, errors: [])
         }
         embyArtworkWarmupTasks[source.id] = task
     }

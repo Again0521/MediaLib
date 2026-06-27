@@ -1328,36 +1328,57 @@ struct HomeStatsView: View {
 
     var body: some View {
         let stats = appState.homeStats
+        let tiles = statTiles(stats)
+        let columns = Array(
+            repeating: GridItem(.flexible(minimum: 150), spacing: 12),
+            count: max(1, min(tiles.count, 4))
+        )
 
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
-            if stats.movieCount > 0 {
-                StatTile(title: appState.localized("影片"), value: "\(stats.movieCount)", systemImage: "film")
-            }
-            if stats.seriesCount > 0 {
-                StatTile(title: appState.localized("系列"), value: "\(stats.seriesCount)", systemImage: "rectangle.stack")
-            }
-            if stats.episodeCount > 0 {
-                StatTile(title: appState.localized("剧集"), value: "\(stats.episodeCount)", systemImage: "play.square.stack")
-            }
-            if stats.unwatchedCount > 0 {
-                StatTile(title: appState.localized("未观看"), value: "\(stats.unwatchedCount)", systemImage: "eye")
-            }
-            if stats.favoriteCount > 0 {
-                StatTile(title: appState.localized("喜欢"), value: "\(stats.favoriteCount)", systemImage: "heart")
-            }
-            if stats.watchedMovieCount > 0 {
-                StatTile(title: appState.localized("已看影片"), value: "\(stats.watchedMovieCount)", systemImage: "checkmark.circle")
-            }
-            if stats.watchedEpisodeCount > 0 {
-                StatTile(title: appState.localized("已看剧集"), value: "\(stats.watchedEpisodeCount)", systemImage: "checkmark.seal")
-            }
-            if stats.totalWatchedMinutes >= 60 {
-                let hours = stats.totalWatchedMinutes / 60
-                let label = hours >= 10000 ? "\(hours / 1000)K+" : (hours >= 1000 ? "\(hours / 100 * 100)+" : "\(hours)")
-                StatTile(title: appState.localized("已看时长(h)"), value: label, systemImage: "clock.badge.checkmark")
+        LazyVGrid(columns: columns, spacing: 12) {
+            ForEach(tiles) { tile in
+                StatTile(title: tile.title, value: tile.value, systemImage: tile.systemImage)
             }
         }
     }
+
+    private func statTiles(_ stats: HomeStatsSnapshot) -> [HomeStatTileModel] {
+        var values: [HomeStatTileModel] = []
+        if stats.movieCount > 0 {
+            values.append(HomeStatTileModel(title: appState.localized("影片"), value: "\(stats.movieCount)", systemImage: "film"))
+        }
+        if stats.seriesCount > 0 {
+            values.append(HomeStatTileModel(title: appState.localized("系列"), value: "\(stats.seriesCount)", systemImage: "rectangle.stack"))
+        }
+        if stats.episodeCount > 0 {
+            values.append(HomeStatTileModel(title: appState.localized("剧集"), value: "\(stats.episodeCount)", systemImage: "play.square.stack"))
+        }
+        if stats.unwatchedCount > 0 {
+            values.append(HomeStatTileModel(title: appState.localized("未观看"), value: "\(stats.unwatchedCount)", systemImage: "eye"))
+        }
+        if stats.favoriteCount > 0 {
+            values.append(HomeStatTileModel(title: appState.localized("喜欢"), value: "\(stats.favoriteCount)", systemImage: "heart"))
+        }
+        if stats.watchedMovieCount > 0 {
+            values.append(HomeStatTileModel(title: appState.localized("已看影片"), value: "\(stats.watchedMovieCount)", systemImage: "checkmark.circle"))
+        }
+        if stats.watchedEpisodeCount > 0 {
+            values.append(HomeStatTileModel(title: appState.localized("已看剧集"), value: "\(stats.watchedEpisodeCount)", systemImage: "checkmark.seal"))
+        }
+        if stats.totalWatchedMinutes >= 60 {
+            let hours = stats.totalWatchedMinutes / 60
+            let label = hours >= 10000 ? "\(hours / 1000)K+" : (hours >= 1000 ? "\(hours / 100 * 100)+" : "\(hours)")
+            values.append(HomeStatTileModel(title: appState.localized("已看时长(h)"), value: label, systemImage: "clock.badge.checkmark"))
+        }
+        return values
+    }
+}
+
+private struct HomeStatTileModel: Identifiable {
+    let title: String
+    let value: String
+    let systemImage: String
+
+    var id: String { "\(title)-\(systemImage)" }
 }
 
 struct HomeOverviewBoard: View {
@@ -1425,25 +1446,34 @@ struct HomeOverviewBoard: View {
                     .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
             } else {
                 ScrollViewReader { proxy in
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        LazyHStack(spacing: 12) {
-                            ForEach(items) { item in
-                                HomeOverviewPosterCard(
-                                    item: item,
-                                    metadata: metadata(item),
-                                    showsDeletePlaybackHistory: showsDeletePlaybackHistory,
-                                    onSelect: { onSelect(item) }
-                                )
-                                .id(item.id)
+                    GeometryReader { geometry in
+                        let cardWidth = HomeOverviewStripLayout.cardWidth(
+                            availableWidth: geometry.size.width,
+                            itemCount: items.count
+                        )
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            LazyHStack(spacing: HomeOverviewStripLayout.cardSpacing) {
+                                ForEach(items) { item in
+                                    HomeOverviewPosterCard(
+                                        item: item,
+                                        metadata: metadata(item),
+                                        showsDeletePlaybackHistory: showsDeletePlaybackHistory,
+                                        cardWidth: cardWidth,
+                                        onSelect: { onSelect(item) }
+                                    )
+                                    .id(item.id)
+                                }
                             }
+                            .frame(minWidth: geometry.size.width, alignment: .leading)
+                            .padding(.vertical, 2)
                         }
-                        .padding(.vertical, 2)
+                        // 横向海报条吞掉落在卡片上的纵向滚动，放行给外层首页竖向滚动。
+                        .verticalScrollPassthroughFromNestedHorizontal()
+                        .horizontalMouseDragScroll(enabled: !layoutTransitionActive) { dragging in
+                            isDraggingStrip = dragging
+                        }
                     }
-                    // 横向海报条吞掉落在卡片上的纵向滚动，放行给外层首页竖向滚动。
-                    .verticalScrollPassthroughFromNestedHorizontal()
-                    .horizontalMouseDragScroll(enabled: !layoutTransitionActive) { dragging in
-                        isDraggingStrip = dragging
-                    }
+                    .frame(height: HomeOverviewStripLayout.stripHeight)
                     .onHover { hovering in
                         isHoveringStrip = layoutTransitionActive ? false : hovering
                     }
@@ -1506,6 +1536,20 @@ struct HomeOverviewBoard: View {
     }
 }
 
+private enum HomeOverviewStripLayout {
+    static let cardSpacing: CGFloat = 12
+    static let cardMinWidth: CGFloat = 112
+    static let stripHeight: CGFloat = 214
+
+    static func cardWidth(availableWidth: CGFloat, itemCount: Int) -> CGFloat {
+        guard availableWidth > 0, itemCount > 0 else { return cardMinWidth }
+        let visibleCapacity = max(1, Int((availableWidth + cardSpacing) / (cardMinWidth + cardSpacing)))
+        let visibleCount = max(1, min(itemCount, visibleCapacity))
+        let spacingWidth = CGFloat(visibleCount - 1) * cardSpacing
+        return max(cardMinWidth, floor((availableWidth - spacingWidth) / CGFloat(visibleCount)))
+    }
+}
+
 private struct HomeOverviewPosterCard: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
@@ -1513,6 +1557,7 @@ private struct HomeOverviewPosterCard: View {
     let item: MediaItem
     let metadata: String
     var showsDeletePlaybackHistory = false
+    let cardWidth: CGFloat
     let onSelect: () -> Void
     @State private var isHovering = false
 
@@ -1551,14 +1596,15 @@ private struct HomeOverviewPosterCard: View {
                     .font(.callout.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                    .frame(width: 96, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Text(metadata)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                    .frame(width: 96, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(8)
+            .frame(width: cardWidth, alignment: .leading)
             .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             .staticSurfaceBackground(cornerRadius: 16, thickness: active ? 1.08 : 0.92)
             .repeatedCardChrome(active, cornerRadius: 16)

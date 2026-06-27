@@ -40,6 +40,32 @@ enum AppColors {
     static var warning: Color { Color(nsColor: resolved.warning) }
     static var error: Color { Color(nsColor: resolved.error) }
 
+    // —— 焕彩 Aurora 派生（缓存读取）——
+    // 集中用于 Hero / 区块标题 / 统计磁贴 / 状态 / 空态 / 主 CTA；全部由当前主题高亮锚点派生，
+    // 换主题整套跟随。普通内容卡片底、列表行、设置分组、海报封面区不使用这些多色，保持克制。
+    // 公开 API 一律返回 SwiftUI 类型（Color / LinearGradient），便于后续 iOS / iPadOS 移植复用。
+    static var auroraGradient: LinearGradient { resolved.auroraGradient }
+    static var auroraTextGradient: LinearGradient { resolved.auroraTextGradient }
+    static var auroraSoftWash: [Color] { resolved.auroraSoftWash }
+    static var accentFamily: [Color] { resolved.accentFamily }
+    static var heroSurface: Color { Color(nsColor: resolved.heroSurface) }
+    static var heroOnColor: Color { Color(nsColor: resolved.heroOnColor) }
+
+    /// 按稳定 seed（条目索引）从焕彩多色家族取一色：同一 seed 每次同色，相邻 seed 色相错开。
+    static func accentFamilyColor(forSeed seed: Int) -> Color {
+        let family = resolved.accentFamily
+        guard !family.isEmpty else { return accent }
+        let idx = ((seed % family.count) + family.count) % family.count
+        return family[idx]
+    }
+
+    /// 字符串 seed 版（条目 ID / 区块标识），内部走稳定散列后映射到多色家族。
+    static func accentFamilyColor(forKey key: String) -> Color {
+        var hash = 5381
+        for scalar in key.unicodeScalars { hash = (hash &* 33) &+ Int(scalar.value) }
+        return accentFamilyColor(forSeed: abs(hash))
+    }
+
     // 与主题无关的中性描边：保留固定取值。
     static var subtleBorder: Color {
         Color(nsColor: dynamic(
@@ -85,6 +111,18 @@ enum AppColors {
         let iconColors: [Color]
         /// 强调按钮（prominent）填充用的三段主题色（由高亮锚点按明度派生，自上而下加深）。
         let accentButtonColors: [Color]
+        /// 焕彩 Aurora：Hero / 强调用极光渐变（由高亮锚点和谐色相旋转派生）。
+        let auroraGradient: LinearGradient
+        /// 焕彩 Aurora：强调字渐变（已按浅/深外观调整对比度）。
+        let auroraTextGradient: LinearGradient
+        /// 焕彩 Aurora：页面底极薄氛围柔斑（低透明度，默认很弱）。
+        let auroraSoftWash: [Color]
+        /// 焕彩 Aurora：和谐多色家族（统计磁贴 / 图标芯片 / 区块标识用，约 ±90° 内旋转、降饱和限亮度）。
+        let accentFamily: [Color]
+        /// 焕彩 Aurora：Hero 影院级深面。
+        let heroSurface: NSColor
+        /// 焕彩 Aurora：Hero 深面上的高对比前景色。
+        let heroOnColor: NSColor
 
         init(theme: ResolvedAppTheme) {
             // 系统色预设保持 Apple 式中性底：页面大面积区域低饱和，强调色主要出现在选中态、按钮和局部边缘光。
@@ -163,6 +201,64 @@ enum AppColors {
                 Color(nsColor: h.appThemeSaturated(by: 1.03).appThemeAdjustingBrightness(by: 0.86)),
                 Color(nsColor: h.appThemeSaturated(by: 1.04).appThemeAdjustingBrightness(by: 0.72))
             ]
+
+            // —— 焕彩 Aurora 派生 ——
+            // 目标是「焕彩」（生动、不再单一工具化）而非「炫彩」：多色由高亮锚点做和谐色相旋转
+            // （约 ±90° 内）派生，统一降饱和、限亮度，比旧版更有生气又不发展成全彩虹；
+            // 深色模式整体提亮以贴合深底。每个停靠点都是随外观切换的动态色。
+            func auroraColor(
+                rotation: CGFloat,
+                satL: CGFloat, briL: CGFloat,
+                satD: CGFloat, briD: CGFloat,
+                alpha: CGFloat = 1
+            ) -> Color {
+                Color(nsColor: AppColors.dynamic(
+                    light: theme.highlightLight
+                        .appThemeHueRotated(by: rotation)
+                        .appThemeSaturated(by: satL)
+                        .appThemeAdjustingBrightness(by: briL)
+                        .appThemeWithAlpha(alpha),
+                    dark: theme.highlightDark
+                        .appThemeHueRotated(by: rotation)
+                        .appThemeSaturated(by: satD)
+                        .appThemeAdjustingBrightness(by: briD)
+                        .appThemeWithAlpha(alpha)))
+            }
+
+            // 和谐多色家族（统计磁贴 / 图标芯片 / 区块标识用）。6 色覆盖约 ±90°，相邻可分辨但不刺眼。
+            let familyRotations: [CGFloat] = [-0.10, -0.04, 0.03, 0.10, 0.17, 0.24]
+            accentFamily = familyRotations.map {
+                auroraColor(rotation: $0, satL: 0.96, briL: 0.99, satD: 1.02, briD: 1.12)
+            }
+            // Hero / 强调极光渐变（少量停靠点的柔色）。
+            auroraGradient = LinearGradient(
+                colors: [
+                    auroraColor(rotation: -0.05, satL: 0.94, briL: 1.04, satD: 1.00, briD: 1.06),
+                    auroraColor(rotation: 0.06, satL: 0.98, briL: 0.98, satD: 1.04, briD: 1.00),
+                    auroraColor(rotation: 0.16, satL: 0.96, briL: 0.93, satD: 1.02, briD: 0.96)
+                ],
+                startPoint: .topLeading, endPoint: .bottomTrailing)
+            // 强调字渐变：浅色下压暗保证浅底上的可读性，深色下提亮。
+            auroraTextGradient = LinearGradient(
+                colors: [
+                    auroraColor(rotation: -0.04, satL: 1.00, briL: 0.84, satD: 1.00, briD: 1.12),
+                    auroraColor(rotation: 0.07, satL: 1.04, briL: 0.80, satD: 1.04, briD: 1.08),
+                    auroraColor(rotation: 0.17, satL: 1.02, briL: 0.78, satD: 1.02, briD: 1.04)
+                ],
+                startPoint: .leading, endPoint: .trailing)
+            // 页面底极薄氛围柔斑（默认很弱，由 AppPageBackground 决定是否启用）。
+            auroraSoftWash = [
+                auroraColor(rotation: -0.05, satL: 0.90, briL: 1.05, satD: 1.00, briD: 1.00, alpha: 0.10),
+                auroraColor(rotation: 0.08, satL: 0.95, briL: 1.00, satD: 1.00, briD: 0.98, alpha: 0.10),
+                auroraColor(rotation: 0.18, satL: 0.92, briL: 0.96, satD: 1.00, briD: 0.95, alpha: 0.09)
+            ]
+            // Hero 影院级深面（两种外观都偏深，作为聚焦元素）+ 其上的高对比前景色。
+            heroSurface = AppColors.dynamic(
+                light: theme.baseDark.appThemeBlended(toward: theme.highlightLight, fraction: 0.10).appThemeAdjustingBrightness(by: 0.66),
+                dark:  theme.baseDark.appThemeBlended(toward: theme.highlightDark, fraction: 0.12).appThemeAdjustingBrightness(by: 0.52))
+            heroOnColor = AppColors.dynamic(
+                light: NSColor(calibratedWhite: 0.98, alpha: 1),
+                dark:  NSColor(calibratedWhite: 0.96, alpha: 1))
         }
     }
 
@@ -215,6 +311,15 @@ enum AppMotion {
     static let notice = Animation.spring(response: 0.42, dampingFraction: 0.78, blendDuration: 0.04)
     static let sidebar = Animation.spring(response: 0.46, dampingFraction: 0.82)
     static let sidebarSelection = Animation.easeOut(duration: 0.001)
+
+    // —— 焕彩 Aurora 新增（普通页面用，均需在调用处尊重 Reduce Motion）——
+    // 统计数字递增：Reduce Motion 时调用处直接取终值、不使用本动画。
+    static let countUp = Animation.easeOut(duration: 0.9)
+    // Hero 背景柔动：极慢、低幅；仅在 full 性能档且非 Reduce Motion 时启用，窗口不可见 / 应用后台时暂停。
+    static let heroAmbient = Animation.easeInOut(duration: 6.0)
+    // 区块入场：配合 AppAuroraMetrics.blockStaggerStep 做逐项 delay。
+    static let blockStagger = Animation.spring(response: 0.42, dampingFraction: 0.86)
+
     // #4 音乐展开/收起是重点：把弹簧调得更紧凑（response 0.56→0.46），缩短重合成阶段的时长，
     // 在不改变“弹性展开”观感的前提下，让动画期间需要绘制的总帧数更少、掉帧更不明显。
     static let musicPlayer = Animation.spring(response: 0.40, dampingFraction: 0.90, blendDuration: 0.0)
@@ -3859,7 +3964,7 @@ private enum PosterPerformanceTelemetry {
         }
         didLogConfiguration = true
         lock.unlock()
-        logger.info("Poster cache configured: shared 300x450 point bucket, 256 MiB decoded memory cache")
+        logger.info("Poster cache configured: shared 300x450 point bucket, 512 MiB decoded memory cache")
     }
 
     static func recordMemoryLookup(hit: Bool) {
@@ -3942,8 +4047,8 @@ enum ArtworkImageCache {
         PosterPerformanceTelemetry.noteConfiguration()
         // 提高缓存上限，减少滚动时封面被驱逐后重新解码导致的掉帧与闪烁。
         // Emby 等大体量库（数百~上千海报）滚动时尤其依赖更大的常驻缓存避免反复驱逐→闪烁。
-        cache.countLimit = 1200
-        cache.totalCostLimit = 256 * 1024 * 1024
+        cache.countLimit = 1800
+        cache.totalCostLimit = 512 * 1024 * 1024
     }
 
     static func cachedImage(path: String?, targetSize: CGSize? = nil) -> NSImage? {
@@ -4083,10 +4188,14 @@ enum ArtworkImageCache {
         return nil
     }
 
-    static func remoteImageAsync(url: URL, targetSize: CGSize? = nil) async -> NSImage? {
+    static func remoteImageAsync(
+        url: URL,
+        targetSize: CGSize? = nil,
+        bypassMissingCache: Bool = false
+    ) async -> NSImage? {
         configureIfNeeded()
         let path = url.absoluteString
-        if cachedMissingPath(path) {
+        if !bypassMissingCache, cachedMissingPath(path) {
             return nil
         }
 
@@ -4122,7 +4231,7 @@ enum ArtworkImageCache {
 
     @discardableResult
     static func prewarmRemoteImage(url: URL, targetSize: CGSize? = nil) async -> Bool {
-        await remoteImageAsync(url: url, targetSize: targetSize) != nil
+        await remoteImageAsync(url: url, targetSize: targetSize, bypassMissingCache: true) != nil
     }
 
     static func prewarmImages(paths: [String], targetSize: CGSize? = nil) async {
@@ -4130,7 +4239,7 @@ enum ArtworkImageCache {
         guard !uniquePaths.isEmpty else { return }
         await withTaskGroup(of: Void.self) { group in
             var iterator = uniquePaths.makeIterator()
-            let parallelism = min(6, uniquePaths.count)
+            let parallelism = min(8, uniquePaths.count)
 
             func enqueueNext() {
                 guard let path = iterator.next() else { return }
@@ -4138,7 +4247,7 @@ enum ArtworkImageCache {
                     guard !Task.isCancelled else { return }
                     guard ArtworkImageCache.cachedImage(path: path, targetSize: targetSize) == nil else { return }
                     if let remoteURL = ArtworkImageCache.remoteURL(from: path) {
-                        _ = await ArtworkImageCache.remoteImageAsync(url: remoteURL, targetSize: targetSize)
+                        _ = await ArtworkImageCache.prewarmRemoteImage(url: remoteURL, targetSize: targetSize)
                     } else {
                         _ = await ArtworkImageCache.localImageAsync(path: path, targetSize: targetSize)
                     }
@@ -4267,6 +4376,7 @@ enum ArtworkImageCache {
         }
         guard let decoded else { return nil }
         cache.setObject(decoded, forKey: key, cost: decoded.pixelCost)
+        invalidateMissing(path: path)
         storeAspectRatio(normalizedAspectRatio(for: decoded), path: path)
         return decoded
     }
