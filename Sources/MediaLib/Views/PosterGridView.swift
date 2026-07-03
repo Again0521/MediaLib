@@ -411,106 +411,88 @@ struct PosterCardView: View {
         // 使同一网格内所有海报高度一致，消除上下间距不齐的问题。
         let cropRatio: CGFloat = item.type == .music ? 1 : (2.0 / 3.0)
         let hoverActive = isHovering && !suppressHoverDuringScroll
-        let coverRadius = AppCardMetrics.posterCoverCornerRadius
         let resolvedBadgeTexts = badgeTexts
 
-        VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .bottomLeading) {
-                Color.clear
-                    .aspectRatio(cropRatio, contentMode: .fit)
-                    .overlay {
-                        PosterImage(path: item.posterPath, title: item.cardTitle, mediaType: item.type, cacheTargetSize: cacheTargetSize)
-                    }
-                    .clipShape(RoundedRectangle(cornerRadius: coverRadius, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: coverRadius, style: .continuous)
-                            .strokeBorder(.white.opacity(hoverActive ? 0.54 : 0.24), lineWidth: hoverActive ? 1.1 : 0.7)
-                    }
-                    .overlay {
-                        LinearGradient(
-                            colors: [
-                                .white.opacity(hoverActive ? 0.18 : 0.075),
-                                .clear,
-                                AppColors.pointerLightTint.opacity(hoverActive ? 0.10 : 0.028)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: coverRadius, style: .continuous))
-                        .transition(.opacity)
-                    }
+        ZStack(alignment: .bottomLeading) {
+            Color.clear
+                .aspectRatio(cropRatio, contentMode: .fit)
+                .overlay {
+                    PosterImage(
+                        path: item.posterPath,
+                        title: item.cardTitle,
+                        mediaType: item.type,
+                        cacheTargetSize: cacheTargetSize,
+                        contentMode: .fill
+                    )
+                }
 
-                if !resolvedBadgeTexts.isEmpty {
-                    PosterBadgeFlowLayout(horizontalSpacing: 5, verticalSpacing: 4) {
-                        ForEach(resolvedBadgeTexts, id: \.self) { text in
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.12), .black.opacity(0.78)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(item.cardTitle)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                // 类型·年份元信息行删除：年份等信息已由海报上的徽标展示，避免重复。
+                if item.playProgress > 0, item.playProgress < 0.98 {
+                    progressBar
+                }
+                if hoverActive && !resolvedBadgeTexts.isEmpty {
+                    HStack(spacing: 5) {
+                        ForEach(resolvedBadgeTexts.prefix(3), id: \.self) { text in
                             badge(text)
                         }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                }
-
-                if hoverActive && !isSelectionActive {
-                    VStack(alignment: .leading, spacing: 7) {
-                        RatingStars(value: item.userRating, onRate: { rating in
-                            appState.updateRating(item, rating: rating)
-                        })
-                        if let artistAlbum = item.artistAlbumLine {
-                            Text(artistAlbum)
-                                .font(.caption2.weight(.medium))
-                                .lineLimit(2)
-                        }
-                    }
-                    .padding(8)
-                    .foregroundStyle(.white)
-                    .background(.black.opacity(0.58), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .padding(8)
                     .transition(.opacity)
-                    .onTapGesture {}
                 }
             }
-            .overlay(alignment: .topTrailing) {
-                if isSelectionActive {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 22, weight: .semibold))
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white, isSelected ? AppColors.selectedGlassTint : .black.opacity(0.35))
-                        .background(Circle().fill(.black.opacity(0.28)).blur(radius: 2))
-                        .padding(8)
-                        .transition(.scale.combined(with: .opacity))
-                }
-            }
-            .overlay {
-                if isSelectionActive && isSelected {
-                    RoundedRectangle(cornerRadius: coverRadius, style: .continuous)
-                        .strokeBorder(AppColors.selectedGlassTint, lineWidth: 2.5)
-                }
-            }
-            .pointerInspectTilt(enabled: usesInspectHover && !isSelectionActive, cornerRadius: coverRadius)
-            // 悬停放大只围绕封面底边做视觉扩展：文字区保持同一基线，不再被封面中心缩放带着“顶开/下压”。
-            .scaleEffect(hoverActive && !reduceMotion ? 1.018 : 1, anchor: .bottom)
-            .shadow(
-                color: hoverActive ? AppColors.pointerLightTint.opacity(0.16) : .clear,
-                radius: hoverActive ? 11 : 0,
-                y: hoverActive ? 4 : 0
-            )
-            .contentShape(Rectangle())
-            .onTapGesture {
-                handlePrimaryTap()
-            }
-
-            posterTitle(hoverActive: hoverActive)
-                .frame(height: 20, alignment: .topLeading)
-                .animation(nil, value: hoverActive)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    handlePrimaryTap()
-                }
+            .padding(12)
         }
-        .padding(10)
-        .staticSurfaceBackground(cornerRadius: AppCardMetrics.repeatedCornerRadius)
-        .repeatedCardChrome(hoverActive)
-        .repeatedSurfaceHover(hoverActive, cornerRadius: AppCardMetrics.repeatedCornerRadius, tint: AppColors.pointerLightTint, intensity: usesInspectHover ? 0.95 : 0.72)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(.white.opacity(hoverActive ? 0.38 : 0.18), lineWidth: hoverActive ? 1.1 : 0.7)
+        }
+        .overlay(alignment: .topTrailing) {
+            if isSelectionActive {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 22, weight: .semibold))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, isSelected ? AppColors.selectedGlassTint : .black.opacity(0.35))
+                    .background(Circle().fill(.black.opacity(0.28)).blur(radius: 2))
+                    .padding(8)
+                    .transition(.scale.combined(with: .opacity))
+            } else if let rating = item.rating, rating > 0 {
+                Text("★ \(String(format: "%.1f", rating))")
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(HomeVividTokens.color("FFCE4A"))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.42), in: Capsule())
+                    .padding(9)
+            }
+        }
+        .overlay {
+            if isSelectionActive && isSelected {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(AppColors.selectedGlassTint, lineWidth: 2.5)
+            }
+        }
+        .pointerInspectTilt(enabled: usesInspectHover && !isSelectionActive, cornerRadius: 18)
+        .scaleEffect(hoverActive && !reduceMotion ? 1.018 : 1, anchor: .bottom)
+        .shadow(
+            color: hoverActive ? Color.black.opacity(HomeVividTokens.hoverShadowOpacity) : .clear,
+            radius: hoverActive ? HomeVividTokens.hoverShadowRadius : 0,
+            y: hoverActive ? HomeVividTokens.hoverShadowY : 0
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .onTapGesture {
+            handlePrimaryTap()
+        }
         // #1 只修 bug、不动悬停效果：封面 3D 检视(pointerInspectTilt)+放大保持原样。
         // 原 bug＝悬停时封面 3D 投影/放大溢出本格，被相邻卡片（ForEach 中靠后者默认画在上层）裁切，
         // 看着像“以右边为原点放大”且把相邻/底部卡片撑歪，窗口拉大海报变小时尤甚。
@@ -544,6 +526,31 @@ struct PosterCardView: View {
 
     private var prewarmPosterKey: String {
         prewarmPosterPaths.joined(separator: "|")
+    }
+
+    private var posterMetadataLine: String {
+        if item.type == .music {
+            return item.artistAlbumLine ?? "音乐"
+        }
+        var parts = [item.type.displayName]
+        if let year = item.year {
+            parts.append(String(year))
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    private var progressBar: some View {
+        Capsule()
+            .fill(.white.opacity(0.30))
+            .frame(height: 4)
+            .overlay(alignment: .leading) {
+                GeometryReader { geo in
+                    Capsule()
+                        .fill(.white)
+                        .frame(width: max(3, geo.size.width * CGFloat(min(max(item.playProgress, 0), 1))))
+                }
+            }
+            .padding(.top, 2)
     }
 
     @ViewBuilder
@@ -603,10 +610,44 @@ struct PosterCardView: View {
         if item.type != .music, let year = item.year {
             texts.append(String(year))
         }
-        if let resolution = item.resolution {
-            texts.append(resolution)
+        if let resolutionLabel = displayResolutionLabel(for: item.resolution) {
+            texts.append(resolutionLabel)
         }
         return texts
+    }
+
+    private static func displayResolutionLabel(for resolution: String?) -> String? {
+        guard let resolution else { return nil }
+        let normalized = resolution.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+
+        let lowercased = normalized.lowercased()
+        if lowercased.contains("8k") { return "8K" }
+        if lowercased.contains("4k") { return "4K" }
+        if lowercased.contains("2k") { return "2K" }
+        if lowercased.contains("1080") { return "1080P" }
+        if lowercased.contains("720") { return "720P" }
+        if lowercased.contains("480") { return "480P" }
+
+        let parts = lowercased
+            .replacingOccurrences(of: "×", with: "x")
+            .replacingOccurrences(of: "*", with: "x")
+            .split(separator: "x")
+            .compactMap { Int($0.filter(\.isNumber)) }
+        guard parts.count >= 2 else { return normalized.uppercased() }
+
+        let shortEdge = min(parts[0], parts[1])
+        let standards: [(height: Int, label: String)] = [
+            (4320, "8K"),
+            (2160, "4K"),
+            (1440, "2K"),
+            (1080, "1080P"),
+            (720, "720P"),
+            (480, "480P")
+        ]
+        return standards.min { lhs, rhs in
+            abs(lhs.height - shortEdge) < abs(rhs.height - shortEdge)
+        }?.label
     }
 
     private func badge(_ text: String) -> some View {
@@ -749,29 +790,11 @@ struct PosterImage: View {
     }
 
     private var placeholder: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(AppColors.accentGradient)
-            // 占位图叠在实色渐变上，白色半透明覆盖层即可得到等效的磨砂观感，避免额外 material 通道。
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(.white.opacity(0.52))
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(.white.opacity(0.28), lineWidth: 1)
-            VStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(.white.opacity(0.26))
-                        .frame(width: 58, height: 42)
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(AppColors.accentGradient)
-                }
-                Text(title)
-                    .font(.caption.weight(.medium))
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(Color.primary.opacity(0.72))
-                    .lineLimit(3)
-                    .padding(.horizontal, 8)
+        Group {
+            if mediaType == .photo {
+                GeneratedPhotoPlaceholderView(title: title)
+            } else {
+                GeneratedPosterPlaceholderView(title: title, mediaType: mediaType)
             }
         }
     }
@@ -844,82 +867,34 @@ private struct RemotePosterImage: View {
 
 private struct MusicDefaultArtworkView: View {
     let title: String
-    private static let equalizerBarFactors: [CGFloat] = [0.38, 0.62, 0.48, 0.72, 0.44]
 
     var body: some View {
         GeometryReader { proxy in
             let side = min(proxy.size.width, proxy.size.height)
             let cornerRadius = max(side * 0.12, 8)
-            let artworkColors = AppColors.themedIconColors
-            let primaryTone = artworkColors.first ?? AppColors.selectedGlassTint
-            let secondaryTone = artworkColors.dropFirst().first ?? AppColors.solarEdgeTint
-            let tertiaryTone = artworkColors.dropFirst(2).first ?? AppColors.solarLightTint
+            let swatch = MediaPlaceholderPalette.posterSwatch(for: title, mediaType: .music)
+            let glyph = MediaPlaceholderPalette.displayGlyph(for: title, fallback: "音")
 
-            ZStack {
+            ZStack(alignment: .bottomLeading) {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(
                         LinearGradient(
-                            colors: [
-                                primaryTone.opacity(0.95),
-                                secondaryTone.opacity(0.90),
-                                tertiaryTone.opacity(0.84)
-                            ],
+                            colors: [swatch.base, swatch.depth],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
                     )
-
-                Circle()
-                    .fill(.white.opacity(0.22))
-                    .frame(width: side * 0.72, height: side * 0.72)
-                    .offset(x: -side * 0.34, y: -side * 0.34)
-
-                Circle()
-                    .fill(AppColors.solarLightTint.opacity(0.24))
-                    .frame(width: side * 0.58, height: side * 0.58)
-                    .offset(x: side * 0.34, y: side * 0.34)
-
-                RoundedRectangle(cornerRadius: cornerRadius * 0.78, style: .continuous)
-                    // 实色图形上的白色半透明覆盖能模拟轻磨砂，同时避免为每个占位卡片创建 material。
-                    .fill(.white.opacity(0.28))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius * 0.78, style: .continuous)
-                            .fill(.white.opacity(0.14))
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius * 0.78, style: .continuous)
-                            .stroke(.white.opacity(0.46), lineWidth: max(side * 0.012, 0.8))
-                    }
-                    .padding(side * 0.18)
-
-                VStack(spacing: side * 0.07) {
-                    Image(systemName: "music.note")
-                        .font(.system(size: side * 0.30, weight: .semibold))
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [primaryTone, secondaryTone],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-
-                    HStack(spacing: max(side * 0.025, 2)) {
-                        ForEach(Self.equalizerBarFactors.indices, id: \.self) { index in
-                            Capsule()
-                                .fill((index == 3 ? primaryTone : secondaryTone).opacity(0.72))
-                                .frame(width: max(side * 0.025, 2), height: side * Self.equalizerBarFactors[index] * 0.22)
-                        }
-                    }
-
-                    if side > 120 {
-                        Text(title)
-                            .font(.system(size: side * 0.055, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.94))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                            .padding(.horizontal, side * 0.12)
-                    }
-                }
+                RadialGradient(
+                    colors: [.white.opacity(0.25), .clear],
+                    center: UnitPoint(x: 0.25, y: 0.14),
+                    startRadius: 2,
+                    endRadius: side * 0.82
+                )
+                Text(glyph)
+                    .font(.system(size: max(28, side * 0.34), weight: .black))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .padding(.leading, side * 0.095)
+                    .padding(.bottom, side * 0.085)
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
         }

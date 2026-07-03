@@ -1576,6 +1576,8 @@ public struct AppSettings: Codable, Hashable {
     public var notifyOnTaskCompletion: Bool
     /// 是否已完成首次启动引导（完成或跳过后置 true，不再弹出）。
     public var hasCompletedOnboarding: Bool
+    /// 用户在仪表盘中永久忽略的健康检查项。
+    public var ignoredHealthIssueIDs: Set<String>
     /// Trakt 同步：应用凭据、授权令牌与开关。
     public var traktClientID: String?
     public var traktClientSecret: String?
@@ -1694,6 +1696,7 @@ public struct AppSettings: Codable, Hashable {
         lastfmUsername: String? = nil,
         notifyOnTaskCompletion: Bool = false,
         hasCompletedOnboarding: Bool = false,
+        ignoredHealthIssueIDs: Set<String> = [],
         traktClientID: String? = nil,
         traktClientSecret: String? = nil,
         traktAccessToken: String? = nil,
@@ -1810,6 +1813,7 @@ public struct AppSettings: Codable, Hashable {
         self.lastfmUsername = lastfmUsername
         self.notifyOnTaskCompletion = notifyOnTaskCompletion
         self.hasCompletedOnboarding = hasCompletedOnboarding
+        self.ignoredHealthIssueIDs = ignoredHealthIssueIDs
         self.traktClientID = traktClientID
         self.traktClientSecret = traktClientSecret
         self.traktAccessToken = traktAccessToken
@@ -1928,6 +1932,7 @@ public struct AppSettings: Codable, Hashable {
         case lastfmUsername
         case notifyOnTaskCompletion
         case hasCompletedOnboarding
+        case ignoredHealthIssueIDs
         case traktClientID
         case traktClientSecret
         case traktAccessToken
@@ -2060,6 +2065,7 @@ public struct AppSettings: Codable, Hashable {
             lastfmUsername: try container.decodeIfPresent(String.self, forKey: .lastfmUsername) ?? defaults.lastfmUsername,
             notifyOnTaskCompletion: try container.decodeIfPresent(Bool.self, forKey: .notifyOnTaskCompletion) ?? defaults.notifyOnTaskCompletion,
             hasCompletedOnboarding: try container.decodeIfPresent(Bool.self, forKey: .hasCompletedOnboarding) ?? defaults.hasCompletedOnboarding,
+            ignoredHealthIssueIDs: try container.decodeIfPresent(Set<String>.self, forKey: .ignoredHealthIssueIDs) ?? defaults.ignoredHealthIssueIDs,
             traktClientID: try container.decodeIfPresent(String.self, forKey: .traktClientID) ?? defaults.traktClientID,
             traktClientSecret: try container.decodeIfPresent(String.self, forKey: .traktClientSecret) ?? defaults.traktClientSecret,
             traktAccessToken: try container.decodeIfPresent(String.self, forKey: .traktAccessToken) ?? defaults.traktAccessToken,

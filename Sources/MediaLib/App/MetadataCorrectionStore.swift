@@ -34,6 +34,16 @@ final class MetadataCorrectionStore: ObservableObject {
         batches = try repository?.fetchActiveBatches(limit: 120) ?? []
     }
 
+    func replaceLoaded(
+        countsByMediaID: [String: Int],
+        recordCount: Int,
+        batches: [MetadataCorrectionBatchSummary]
+    ) {
+        self.countsByMediaID = countsByMediaID
+        self.recordCount = recordCount
+        self.batches = batches
+    }
+
     func correctionCount(forMediaID id: String) -> Int {
         countsByMediaID[id] ?? 0
     }

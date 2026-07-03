@@ -128,6 +128,17 @@ public final class MediaRepository {
         try database.query(selectSQL + " ORDER BY title COLLATE NOCASE ASC", map: map(row:))
     }
 
+    public func fetchMusic() throws -> [MediaItem] {
+        try database.query(
+            selectSQL + """
+             WHERE type = ?
+             ORDER BY album COLLATE NOCASE ASC, track_number ASC, title COLLATE NOCASE ASC
+            """,
+            bindings: [.text(MediaType.music.rawValue)],
+            map: map(row:)
+        )
+    }
+
     public func fetch(id: String) throws -> MediaItem? {
         try database.query(
             selectSQL + " WHERE id = ? LIMIT 1",

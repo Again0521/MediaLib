@@ -122,6 +122,7 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
         applicationSupportDirectory: URL,
         defaultCacheDirectory: URL,
         customCacheDirectoryPath: String?,
+        pruneOnInit: Bool = true,
         fileManager: FileManager = .default
     ) throws {
         self.manifestURL = applicationSupportDirectory.appendingPathComponent("VideoCacheManifest.json")
@@ -130,8 +131,10 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
         self.customCacheRootDirectory = Self.validCustomCacheRoot(from: customCacheDirectoryPath, fileManager: fileManager)
         try fileManager.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true)
         self.entries = try Self.readManifest(from: manifestURL, fileManager: fileManager)
-        self.entries = pruneMissingFilesLocked(self.entries)
-        try saveLocked(self.entries)
+        if pruneOnInit {
+            self.entries = pruneMissingFilesLocked(self.entries)
+            try saveLocked(self.entries)
+        }
     }
 
     func allEntries() -> [String: VideoCacheEntry] {

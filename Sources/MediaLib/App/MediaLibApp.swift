@@ -56,6 +56,8 @@ final class MediaLibAppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        LiveTitleIconDebugTool.scheduleWindowCaptureIfRequested()
+        VividIconGridDebugTool.runAndExitIfRequested()
     }
 
     static func makeTitlebarSeamless(_ window: NSWindow) {
@@ -100,6 +102,13 @@ struct MediaLibApp: App {
     @NSApplicationDelegateAdaptor(MediaLibAppDelegate.self) private var appDelegate
     @StateObject private var appState = AppState()
 
+    init() {
+        LiveTitleIconDebugTool.prepareInitialSelectionIfRequested()
+#if DEBUG
+        TitleIconDebugTool.runAndExitIfRequested()
+#endif
+    }
+
     var body: some Scene {
         WindowGroup {
             rootView
@@ -110,6 +119,7 @@ struct MediaLibApp: App {
                 // 改为在 MainWindowToolbarVisibilityGuard 里用 AppKit 的 contentMinSize 固定最小尺寸。
                 .onAppear {
                     appState.applyAppearance()
+                    LiveTitleIconDebugTool.scheduleWindowCaptureIfRequested()
                     SystemMediaCommandCenter.shared.configure(appState: appState)
                     appDelegate.onOpenFiles = { [weak appState] urls in
                         appState?.playExternalFiles(urls)

@@ -10,6 +10,7 @@ enum BackgroundTaskKind: String, Codable, Sendable {
     case metadataSupplement
     case keyframeStoryboard
     case markerAnalysis
+    case musicIndex
 
     var title: String {
         switch self {
@@ -22,6 +23,7 @@ enum BackgroundTaskKind: String, Codable, Sendable {
         case .metadataSupplement: return "元数据补充"
         case .keyframeStoryboard: return "章节图"
         case .markerAnalysis: return "片头片尾检测"
+        case .musicIndex: return "音乐索引"
         }
     }
 
@@ -36,6 +38,7 @@ enum BackgroundTaskKind: String, Codable, Sendable {
         case .metadataSupplement: return "tag"
         case .keyframeStoryboard: return "film"
         case .markerAnalysis: return "wand.and.stars"
+        case .musicIndex: return "music.note.list"
         }
     }
 }

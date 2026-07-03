@@ -248,14 +248,14 @@ struct LibraryView: View {
                             systemImage: "magnifyingglass"
                         )
                     } else {
-                        AppLoadingView(title: "正在载入\(title)", systemImage: destination.systemImage, rowCount: 4)
+                        AppLoadingView(title: "正在载入\(title)", systemImage: headerSystemImage, rowCount: 4)
                     }
                 }
             } else if displayedItems.isEmpty {
                 staticPage {
                     EmptyStateView(
                         title: "暂无\(title)",
-                        systemImage: destination.systemImage,
+                        systemImage: headerSystemImage,
                         message: "接入媒体源并完成扫描后，内容会自动归入此页。"
                     )
                     .frame(maxWidth: .infinity, minHeight: 420)
@@ -420,7 +420,7 @@ struct LibraryView: View {
             PageHeader(
                 title: title,
                 subtitle: "浏览、筛选和管理当前内容 · \(currentItems.count) 项",
-                systemImage: destination.systemImage
+                systemImage: headerSystemImage
             ) {
                 libraryHeaderActions
             }
@@ -519,43 +519,56 @@ struct LibraryView: View {
     private func batchActionBar(for displayedItems: [MediaItem]) -> some View {
         let selectedCount = appState.selectedItemIDs.count
         let allSelected = !displayedItems.isEmpty && displayedItems.allSatisfy { appState.selectedItemIDs.contains($0.id) }
-        HStack(spacing: 12) {
+        AppAdaptiveControlBar(cornerRadius: 16, thickness: 1.04) {
             Button {
                 withAnimation(AppMotion.fast) {
                     appState.setSelection(displayedItems.map(\.id), selected: !allSelected)
                 }
             } label: {
-                Label(allSelected ? "取消全选" : "全选", systemImage: allSelected ? "circle" : "checkmark.circle")
+                GlassCapsuleControl(isSelected: allSelected, height: 30, horizontalPadding: 12, enablePointerEdge: false) {
+                    Label(allSelected ? "取消全选" : "全选", systemImage: allSelected ? "circle" : "checkmark.circle")
+                }
             }
-            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 10, minHeight: 30, thickness: 0.94))
+            .buttonStyle(.plain)
 
             Text("已选 \(selectedCount)")
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
                 .frame(minWidth: 56, alignment: .leading)
+        } trailing: {
+            HStack(spacing: 8) {
+                Group {
+                    Button { appState.batchMarkWatched(watched: true) } label: {
+                        GlassCapsuleControl(isSelected: false, height: 30, horizontalPadding: 11, enablePointerEdge: false) {
+                            Label("已看", systemImage: "eye.fill")
+                        }
+                    }
+                    Button { appState.batchMarkWatched(watched: false) } label: {
+                        GlassCapsuleControl(isSelected: false, height: 30, horizontalPadding: 11, enablePointerEdge: false) {
+                            Label("未看", systemImage: "eye.slash")
+                        }
+                    }
+                    Button { appState.batchSetWatchlist(true) } label: {
+                        GlassCapsuleControl(isSelected: false, height: 30, horizontalPadding: 11, enablePointerEdge: false) {
+                            Label("想看", systemImage: "bookmark.fill")
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
 
-            Divider().frame(height: 20)
-
-            Group {
-                Button { appState.batchMarkWatched(watched: true) } label: {
-                    Label("已看", systemImage: "eye.fill")
-                }
-                Button { appState.batchMarkWatched(watched: false) } label: {
-                    Label("未看", systemImage: "eye.slash")
-                }
-                Button { appState.batchSetWatchlist(true) } label: {
-                    Label("想看", systemImage: "bookmark.fill")
-                }
                 Menu {
                     VideoManualCollectionMenuItems(
                         items: appState.resolveSelectedItems(orderedBy: displayedItems),
                         currentCollectionID: currentManualCollection?.id
                     )
                 } label: {
-                    Label("集合", systemImage: "rectangle.stack.badge.plus")
+                    GlassCapsuleControl(isSelected: false, height: 30, horizontalPadding: 11, enablePointerEdge: false) {
+                        Label("集合", systemImage: "rectangle.stack.badge.plus")
+                    }
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+
                 Menu {
                     ForEach((1...5).reversed(), id: \.self) { star in
                         Button("\(star) 星") { appState.batchUpdateRating(Double(star)) }
@@ -563,28 +576,29 @@ struct LibraryView: View {
                     Divider()
                     Button("清除评级") { appState.batchUpdateRating(nil) }
                 } label: {
-                    Label("评级", systemImage: "star.fill")
+                    GlassCapsuleControl(isSelected: false, height: 30, horizontalPadding: 11, enablePointerEdge: false) {
+                        Label("评级", systemImage: "star.fill")
+                    }
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
 
                 Button(role: .destructive) { appState.batchClearPlaybackHistory() } label: {
-                    Label("清除记录", systemImage: "clock.badge.xmark")
-                        .foregroundStyle(.red)
+                    GlassCapsuleControl(isSelected: false, height: 30, horizontalPadding: 11, tint: .red, enablePointerEdge: false) {
+                        Label("清除记录", systemImage: "clock.badge.xmark")
+                    }
                 }
                 Button(role: .destructive) { showBatchDeleteConfirm = true } label: {
-                    Label("移出库", systemImage: "trash")
-                        .foregroundStyle(.red)
+                    GlassCapsuleControl(isSelected: false, height: 30, horizontalPadding: 11, tint: .red, enablePointerEdge: false) {
+                        Label("移出库", systemImage: "trash")
+                    }
                 }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 10, minHeight: 30, thickness: 0.94))
             .disabled(selectedCount == 0)
         }
         .font(.callout)
         .labelStyle(.titleAndIcon)
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .liquidGlass(cornerRadius: 16)
         .confirmationDialog(
             "移出所选 \(selectedCount) 个条目？",
             isPresented: $showBatchDeleteConfirm,
@@ -625,6 +639,45 @@ struct LibraryView: View {
         default:
             return destination.title
         }
+    }
+
+    private var headerSystemImage: String {
+        switch destination {
+        case .embyLibrary:
+            return remoteLibraryHeaderSystemImage(title: title)
+        default:
+            return destination.systemImage
+        }
+    }
+
+    private func remoteLibraryHeaderSystemImage(title: String) -> String {
+        let normalized = title.lowercased()
+        if containsAny(normalized, ["电视剧", "电视", "剧集", "番剧", "tv", "series", "show"]) {
+            return "tv.library"
+        }
+        if containsAny(normalized, ["录像", "录影", "家庭视频", "home video", "home videos"]) {
+            return "recording.library"
+        }
+        if containsAny(normalized, ["专辑", "album"]) {
+            return "music.album"
+        }
+        if containsAny(normalized, ["最近", "recent"]) {
+            return "music.recent"
+        }
+        if containsAny(normalized, ["音乐", "歌曲", "music", "song"]) {
+            return "emby.music"
+        }
+        if containsAny(normalized, ["照片", "相片", "图片", "相册", "photo", "image"]) {
+            return "photo"
+        }
+        if currentItems.prefix(18).contains(where: { $0.type == .music }) {
+            return "emby.music"
+        }
+        return "emby.videos"
+    }
+
+    private func containsAny(_ value: String, _ needles: [String]) -> Bool {
+        needles.contains { value.contains($0) }
     }
 
     private var activeReturnContext: DetailReturnContext? {

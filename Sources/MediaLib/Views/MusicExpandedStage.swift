@@ -17,6 +17,7 @@ struct MusicExpandedStage: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let context: MusicPlaybackContext
     let variant: MusicExpandedVariant
+    let transitionNamespace: Namespace.ID?
     @State private var wujieControlsBottom: CGFloat = 0
 
     // 名称别名：让搬运来的 body/面板代码对业务数据的引用保持原样，零改动、降低搬运风险。
@@ -264,7 +265,8 @@ struct MusicExpandedStage: View {
                 palette: albumPalette,
                 posterSize: posterSize,
                 glowReach: glowReach,
-                coverGlowEnabled: context.coverGlowEnabled
+                coverGlowEnabled: context.coverGlowEnabled,
+                transitionNamespace: transitionNamespace
             )
             .frame(width: posterSize, height: posterSize)
 

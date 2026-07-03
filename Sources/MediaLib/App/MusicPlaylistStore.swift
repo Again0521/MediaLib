@@ -35,6 +35,11 @@ final class MusicPlaylistStore: ObservableObject {
         smartPlaylists = try smartRepository?.fetchAll() ?? []
     }
 
+    func replaceLoaded(playlists: [MusicPlaylist], smartPlaylists: [MusicSmartPlaylist]) {
+        self.playlists = playlists
+        self.smartPlaylists = smartPlaylists
+    }
+
     // MARK: - 智能歌单
 
     func smartPlaylist(id: String) -> MusicSmartPlaylist? {

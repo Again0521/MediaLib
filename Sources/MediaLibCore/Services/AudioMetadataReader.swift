@@ -5,6 +5,7 @@ public struct AudioMetadata: Sendable {
     public var title: String?
     public var artist: String?
     public var album: String?
+    public var genre: String?
     public var trackNumber: Int?
     public var year: Int?
     public var duration: Double?
@@ -66,6 +67,11 @@ public final class AudioMetadataReader {
             keySubstrings: ["album", "©alb"],
             in: allMetadata
         )
+        let genre = await stringValue(
+            identifiers: [],
+            keySubstrings: ["genre", "tcon", "©gen", "gnre"],
+            in: allMetadata
+        )
         let lyrics = await stringValue(
             identifiers: [],
             keySubstrings: ["lyrics", "lyric", "unsynchronized", "synchronized"],
@@ -94,6 +100,7 @@ public final class AudioMetadataReader {
             title: title,
             artist: artist,
             album: album,
+            genre: genre,
             trackNumber: trackNumber,
             year: year,
             duration: duration.map { CMTimeGetSeconds($0) }.flatMap { $0.isFinite ? $0 : nil },
@@ -103,7 +110,7 @@ public final class AudioMetadataReader {
             loudnessAlbumGainDB: loudnessAlbumGainDB,
             loudnessTrackPeak: loudnessTrackPeak,
             loudnessAlbumPeak: loudnessAlbumPeak,
-            hasEmbeddedMetadata: [title, artist, album, artworkPath, lyrics].contains { $0?.isEmpty == false } ||
+            hasEmbeddedMetadata: [title, artist, album, genre, artworkPath, lyrics].contains { $0?.isEmpty == false } ||
                 trackNumber != nil ||
                 year != nil ||
                 loudnessTrackGainDB != nil ||

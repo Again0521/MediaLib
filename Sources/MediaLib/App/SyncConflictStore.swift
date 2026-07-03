@@ -34,6 +34,11 @@ final class SyncConflictStore: ObservableObject {
         pendingConflicts = try repository?.fetchPending(limit: 120) ?? []
     }
 
+    func replaceLoaded(pendingCount: Int, pendingConflicts: [SyncConflict]) {
+        self.pendingCount = pendingCount
+        self.pendingConflicts = pendingConflicts
+    }
+
     /// Trakt 导入后刷新：repository 缺失时保持原值（与原 `?? self.pendingX` 一致）。
     func refreshFromRepository() throws {
         guard let repository else { return }

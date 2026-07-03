@@ -5,32 +5,38 @@ enum AppSpacing {
     static let pageVertical: CGFloat = 28
     static let pageHeaderHorizontal: CGFloat = 4
     static let pageHeaderVertical: CGFloat = 6
-    static let pageHeaderIconToText: CGFloat = 16
+    static let pageHeaderIconToText: CGFloat = 8
+    static let pageHeaderIconSafeSlot: CGFloat = 62
+    static let pageHeaderIconSafeHeight: CGFloat = 68
+    /// 右侧操作区按副标题底边而不是图标安全槽底边对齐；仅在页头存在副标题时使用。
+    static let pageHeaderActionSubtitleBottomLift: CGFloat = 17
     static let pageHeaderActionGap: CGFloat = 10
     static let card: CGFloat = 14
     static let settingsSectionHeaderToCard: CGFloat = 12
     static let settingsSectionContentLeading: CGFloat = 50
     static let settingsSectionOuterLeading: CGFloat = 28
-    static let controlGroupHorizontal: CGFloat = 24
-    static let controlGroupVertical: CGFloat = 11
+    static let controlGroupHorizontal: CGFloat = 26
+    static let controlGroupVertical: CGFloat = 14
     static let sheetHorizontal: CGFloat = 24
     static let sheetVertical: CGFloat = 24
     static let sheetContent: CGFloat = 18
     static let sheetFooter: CGFloat = 10
-    static let toolbarHorizontal: CGFloat = 10
-    static let toolbarVertical: CGFloat = 9
+    static let toolbarHorizontal: CGFloat = 22
+    static let toolbarVertical: CGFloat = 14
     /// 统一所有页面：大标题栏与其下方条形卡片（筛选/排序控件栏）之间的间距。
     static let headerToControls: CGFloat = 16
 }
 
 enum AppRadius {
+    // 控件/控制栏/卡片半径以 `MediaLIB 系统页面.html` 歌曲页实测为准：
+    // 控制栏与筛选卡 16、通用卡片 16、控件 12，统一“卡边”几何语言。
     static let control: CGFloat = 12
     static let controlGroup: CGFloat = 16
-    static let card: CGFloat = 18
+    static let card: CGFloat = 16
     static let panel: CGFloat = 22
     static let hero: CGFloat = 24
     static let sheet: CGFloat = 22
-    static let toolbar: CGFloat = 18
+    static let toolbar: CGFloat = 16
     static let informationNote: CGFloat = 10
 }
 
@@ -93,9 +99,10 @@ enum AppControlMetrics {
     static let minMenuWidth: CGFloat = 92
     static let maxMenuWidth: CGFloat = 360
     static let minTouchHeight: CGFloat = 30
-    static let defaultButtonHeight: CGFloat = 34
-    static let headerButtonHeight: CGFloat = 36
-    static let searchFieldHeight: CGFloat = 36
+    static let defaultButtonHeight: CGFloat = 38
+    static let prominentButtonHeight: CGFloat = 41
+    static let headerButtonHeight: CGFloat = 41
+    static let searchFieldHeight: CGFloat = 41
     static let settingsRowHeight: CGFloat = 36
     /// 统一的禁用态不透明度：所有自定义控件在 isEnabled == false 时整控件降到此值，
     /// 让禁用态在按钮 / 图标 / 页头 / 输入外壳之间观感一致（启用态不受影响）。
@@ -103,7 +110,7 @@ enum AppControlMetrics {
 }
 
 enum AppCardMetrics {
-    static let repeatedCornerRadius: CGFloat = 18
+    static let repeatedCornerRadius: CGFloat = 16
     static let posterCoverCornerRadius: CGFloat = 12
     static let compactArtworkCornerRadius: CGFloat = 9
     static let repeatedContentPadding: CGFloat = 14
@@ -112,9 +119,9 @@ enum AppCardMetrics {
     static let emptyStateTextWidth: CGFloat = 520
 }
 
-/// 焕彩 Aurora 专用刻度：Hero 焦点卡、多色统计磁贴、区块标题彩条与入场节奏。
+/// 活力色彩专用刻度：Hero 焦点卡、多色统计磁贴、区块标题彩条与入场节奏。
 ///
-/// 这些刻度供首页与全局焕彩组件统一读取，避免在各处散落近似但不一致的尺寸。
+/// 这些刻度供首页与全局语义色彩组件统一读取，避免在各处散落近似但不一致的尺寸。
 /// `touchTargetMin` 为 iOS / iPadOS 移植预备：新交互组件的命中区不得低于该值。
 enum AppAuroraMetrics {
     static let heroCornerRadius: CGFloat = AppRadius.hero        // 24
@@ -123,9 +130,19 @@ enum AppAuroraMetrics {
     static let statTileCornerRadius: CGFloat = 18
     static let statTileIconChipSize: CGFloat = 44
     static let statTileMinWidth: CGFloat = 150
-    static let sectionAccentBarWidth: CGFloat = 4
+    static let sectionAccentBarWidth: CGFloat = 5
     static let sectionAccentBarHeight: CGFloat = 20
     static let sectionAccentBarCornerRadius: CGFloat = 2
+    /// 轮播左右切换箭头：精致小玻璃钮（hover 显示）。
+    static let carouselArrowSize: CGFloat = 28
+    static let carouselArrowIcon: CGFloat = 11
+    /// 推荐行：竖版/方形海报卡的最小宽度，决定窗口缩放时单行能放下的张数。
+    static let recommendPortraitMinWidth: CGFloat = 132
+    static let recommendSquareMinWidth: CGFloat = 138
+    static let recommendRowSpacing: CGFloat = 14
+    static let recommendMaxCount: Int = 8
+    /// 相册墙缩略图边长。
+    static let albumWallThumbSide: CGFloat = 92
     /// 区块 / 列表逐项入场的单步延时（秒）。建议对前若干项生效后封顶，避免长列表整体延迟。
     static let blockStaggerStep: Double = 0.04
     static let blockStaggerMaxItems: Int = 8
@@ -135,7 +152,7 @@ enum AppAuroraMetrics {
 
 enum AppDesignStandard {
     /// 普通页面使用大标题 PageHeader；弹窗使用 AppSheetHeader，避免 sheet 像完整页面一样过重。
-    static let pageHeaderTitleSize: CGFloat = 32
+    static let pageHeaderTitleSize: CGFloat = 30
     static let pageHeaderSubtitleMaxWidth: CGFloat = 680
     static let pageHeaderMinimumTitleWidth: CGFloat = 220
     static let pageHeaderActionsIdealWidth: CGFloat = 360

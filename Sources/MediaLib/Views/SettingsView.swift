@@ -20,38 +20,45 @@ struct SettingsView: View {
     @State private var autoStartMusicMetadataConsole = false
 
     var body: some View {
-        // 设置分组使用原生 List 虚拟化，每个分组作为一行，保留 860pt 居中最大宽度与 24pt 间距。
-        List {
-            settingsRow(topPadding: 30) { SettingsHeader() }
-            settingsRow { homeSettings }
-            settingsRow { appearanceSettings }
-            settingsRow { videoPlaybackSettings }
-            settingsRow { musicPlaybackSettings }
-            settingsRow { scanSettings }
-            settingsRow { metadataSettings }
-            settingsRow { subtitleSettings }
-            settingsRow { thumbnailSettings }
-            settingsRow { connectorStateSettings }
-            settingsRow { traktSettings }
-            settingsRow { privacySettings }
-            settingsRow { advancedSettings }
-            settingsRow { aboutSettings }
-            Color.clear
-                .frame(height: 18)
-                .listRowInsets(EdgeInsets())
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsHeader()
+                .padding(.horizontal, AppSpacing.pageHorizontal)
+                .padding(.top, AppSpacing.pageVertical)
+                .padding(.bottom, AppSpacing.headerToControls)
+
+            // 设置分组继续使用原生 List 虚拟化；标题区移出 List，避免 List 行内边距和
+            // 普通页面的 pageContainer 链路不一致，造成标题位置偏移。
+            List {
+                settingsRow(topPadding: 0) { appearanceSettings }
+                settingsRow { videoPlaybackSettings }
+                settingsRow { musicPlaybackSettings }
+                settingsRow { scanSettings }
+                settingsRow { metadataSettings }
+                settingsRow { subtitleSettings }
+                settingsRow { thumbnailSettings }
+                settingsRow { connectorStateSettings }
+                settingsRow { traktSettings }
+                settingsRow { privacySettings }
+                settingsRow { advancedSettings }
+                settingsRow { aboutSettings }
+                Color.clear
+                    .frame(height: 18)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 0)
+            .suppressHoverEffectsDuringScroll()
+            .glassPerformanceMode(.balanced)
+            .preferStaticGlassSurfaces(true)
+            .suppressListHighlight()
+            .transaction { transaction in
+                transaction.animation = nil
+            }
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .environment(\.defaultMinListRowHeight, 0)
-        .suppressHoverEffectsDuringScroll()
-        .glassPerformanceMode(.balanced)
-        .preferStaticGlassSurfaces(true)
-        .suppressListHighlight()
-        .transaction { transaction in
-            transaction.animation = nil
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(AppPageBackground())
         .navigationTitle(appState.localized("设置"))
         .sheet(isPresented: $showingMusicTagSheet) {
@@ -285,11 +292,11 @@ struct SettingsView: View {
                 SettingsRow(title: "主题参数自定义", systemImage: "slider.horizontal.3") {
                     HStack(spacing: 8) {
                         Button("打开配置文件") { appState.revealMusicThemeConfigFile() }
-                            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
+                            .settingsActionButton(width: nil)
                         Button("重新加载") { appState.reloadMusicThemeConfig() }
-                            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
+                            .settingsActionButton(width: nil)
                         Button("恢复默认") { appState.resetMusicThemeConfig() }
-                            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
+                            .settingsActionButton(width: nil)
                     }
                 }
                 SettingsDescription(text: "高级：编辑 ~/Library/Application Support/MediaLib/Themes/music-theme.json 可微调三套主题（琉璃 / 无界 / 湖光）的玻璃浓度、发光、圆角、字号、间距等数值。改完点「重新加载」即时生效，无需重启；「恢复默认」清空全部自定义。极端数值可能影响观感或性能，随时可「恢复默认」还原。")
@@ -318,7 +325,12 @@ struct SettingsView: View {
 
                 if appState.settings.musicTransitionMode == .softFade {
                     SettingsRow(title: "淡入时长", systemImage: "waveform.path") {
-                        Slider(value: binding(\.musicSoftFadeDuration), in: 0.3...2, step: 0.1)
+                        AppValueSlider(
+                            value: binding(\.musicSoftFadeDuration),
+                            bounds: 0.3...2,
+                            step: 0.1,
+                            accessibilityLabel: "淡入时长"
+                        )
                         Text(String(format: "%.1f 秒", appState.settings.musicSoftFadeDuration))
                             .foregroundStyle(.secondary)
                             .frame(width: 58, alignment: .trailing)
@@ -371,7 +383,7 @@ struct SettingsView: View {
                     appState.setTaskCompletionNotifications(value)
                 }))
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(AppSwitchToggleStyle())
             }
 
             SettingsDescription(text: "扫描或同步完成时，如果你不在 MediaLIB 里，会通过通知中心提醒你（首次开启会请求通知权限）。")
@@ -401,12 +413,7 @@ struct SettingsView: View {
                             }
                         }
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(
-                        cornerRadius: 10,
-                        horizontalPadding: 12,
-                        minHeight: AppControlMetrics.defaultButtonHeight,
-                        prominent: !systemPhotoLibrary.isAuthorized
-                    ))
+                    .settingsActionButton(width: nil, prominent: !systemPhotoLibrary.isAuthorized)
                 }
             }
 
@@ -431,7 +438,12 @@ struct SettingsView: View {
                 .disabled(appState.settings.artworkFallbackMode != .videoFrame)
 
             SettingsRow(title: "截图位置", systemImage: "timeline.selection") {
-                Slider(value: binding(\.thumbnailCaptureRatio), in: 0.05...0.3, step: 0.05)
+                AppValueSlider(
+                    value: binding(\.thumbnailCaptureRatio),
+                    bounds: 0.05...0.3,
+                    step: 0.05,
+                    accessibilityLabel: "截图位置"
+                )
                 Text("\(Int(appState.settings.thumbnailCaptureRatio * 100))%")
                     .foregroundStyle(.secondary)
                     .frame(width: 44, alignment: .trailing)
@@ -565,7 +577,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsDescription(text: "网易云音乐、QQ 音乐和 Deezer 可直接使用；Last.fm 需要 API Key。可在音乐元数据工作台或歌曲详情中补全信息。")
+            SettingsDescription(text: "网易云音乐、QQ 音乐和 Deezer 可直接使用；MusicBrainz 会带回公开 genres/tags，iTunes 会带回 primary genre；Last.fm 需要 API Key，可额外拉取曲目 top tags。可在音乐元数据工作台或歌曲详情中补全信息。")
 
             SettingsRow(title: "音乐匹配宽容度", systemImage: "scope") {
                 Picker("音乐匹配宽容度", selection: binding(\.musicMetadataMatchTolerance)) {
@@ -623,7 +635,7 @@ struct SettingsView: View {
                 appState.saveSettings()
             }))
             .labelsHidden()
-            .toggleStyle(.switch)
+            .toggleStyle(AppSwitchToggleStyle())
         }
 
         if appState.settings.lastfmScrobblingEnabled {
@@ -715,7 +727,7 @@ struct SettingsView: View {
     }
 
     private var appearanceSettings: some View {
-        SettingsSection(title: "外观与布局", subtitle: "调整主题、配色和海报尺寸。", systemImage: "paintbrush.pointed") {
+        SettingsSection(title: "外观与布局", subtitle: "调整界面语言、主题和海报尺寸。", systemImage: "paintbrush.pointed") {
             SettingsRow(title: "界面语言", systemImage: "globe") {
                 Picker("界面语言", selection: Binding(get: {
                     appState.settings.appLanguage
@@ -747,41 +759,24 @@ struct SettingsView: View {
                 .settingsMenuControl(selectedTitle: appState.localized(appState.settings.theme.displayName))
             }
 
-            SettingsRow(title: "配色", systemImage: "paintpalette") {
-                Text(appState.localized(appState.settings.themePreset.displayName))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-
-            ThemePaletteSwatchGrid()
-
-            if appState.settings.themePreset.isCustom {
-                SettingsRow(title: "底色 / 卡片", systemImage: "rectangle.fill") {
-                    ColorPicker("", selection: customThemeBinding(\.themeBaseHex, fallback: "F6F8FC", apply: { appState.setCustomThemeColor(base: $0) }), supportsOpacity: false)
-                        .labelsHidden()
-                }
-                SettingsRow(title: "高亮色", systemImage: "sparkle") {
-                    ColorPicker("", selection: customThemeBinding(\.themeHighlightHex, fallback: "2F7DE1", apply: { appState.setCustomThemeColor(highlight: $0) }), supportsOpacity: false)
-                        .labelsHidden()
-                }
-                SettingsRow(title: "左上角光线", systemImage: "sun.max") {
-                    ColorPicker("", selection: customThemeBinding(\.themeLightHex, fallback: "F1F7FF", apply: { appState.setCustomThemeColor(light: $0) }), supportsOpacity: false)
-                        .labelsHidden()
-                }
-            }
-
-            SettingsDescription(text: "七套配色会同时调整页面底色、玻璃卡片、边缘光和高亮反馈。点选即可即时预览；选择「自定义」还能分别调整三种锚点颜色。")
-
             SettingsRow(title: "海报最小宽度", systemImage: "rectangle.compress.vertical") {
-                Slider(value: binding(\.posterMinWidth), in: 130...220, step: 10)
+                AppValueSlider(
+                    value: binding(\.posterMinWidth),
+                    bounds: 130...220,
+                    step: 10,
+                    accessibilityLabel: "海报最小宽度"
+                )
                 Text("\(Int(appState.settings.posterMinWidth))")
                     .foregroundStyle(.secondary)
                     .frame(width: 40, alignment: .trailing)
             }
             SettingsRow(title: "海报最大宽度", systemImage: "rectangle.expand.vertical") {
-                Slider(value: binding(\.posterMaxWidth), in: 180...300, step: 10)
+                AppValueSlider(
+                    value: binding(\.posterMaxWidth),
+                    bounds: 180...300,
+                    step: 10,
+                    accessibilityLabel: "海报最大宽度"
+                )
                 Text("\(Int(appState.settings.posterMaxWidth))")
                     .foregroundStyle(.secondary)
                     .frame(width: 40, alignment: .trailing)
@@ -851,7 +846,7 @@ struct SettingsView: View {
                         appState.setTraktSyncEnabled(value)
                     }))
                     .labelsHidden()
-                    .toggleStyle(.switch)
+                    .toggleStyle(AppSwitchToggleStyle())
                 }
 
                 SettingsRow(title: "从 Trakt 导入", systemImage: "tray.and.arrow.down") {
@@ -904,6 +899,19 @@ struct SettingsView: View {
     private var advancedSettings: some View {
         SettingsSection(title: "数据、存储与诊断", subtitle: "管理备份、存储位置、清理和性能记录。", systemImage: "externaldrive") {
             SettingsToggleRow(title: "性能记录", systemImage: "gauge.with.dots.needle.67percent", isOn: binding(\.debugLoggingEnabled))
+            SettingsRow(title: "已忽略健康项", systemImage: "eye.slash") {
+                Text("\(appState.settings.ignoredHealthIssueIDs.count) 项")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(appState.settings.ignoredHealthIssueIDs.isEmpty ? .secondary : AppColors.selectedGlassTint)
+                Button {
+                    appState.clearIgnoredHealthIssues()
+                } label: {
+                    Label("恢复显示", systemImage: "arrow.uturn.backward")
+                }
+                .settingsActionButton(width: 122, prominent: !appState.settings.ignoredHealthIssueIDs.isEmpty)
+                .disabled(appState.settings.ignoredHealthIssueIDs.isEmpty)
+            }
+            SettingsDescription(text: "在仪表盘中点「忽略」的健康检查会永久隐藏；恢复后会重新参与统计和展示。")
             if let directories = appState.directories {
                 SettingsRow(title: "数据库版本", systemImage: "number.square") {
                     Text("Schema v\(appState.databaseSchemaVersion)")
@@ -1251,8 +1259,9 @@ struct SettingsSection<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.settingsSectionHeaderToCard) {
-            HStack(spacing: 12) {
-                PlayfulSymbolIcon(systemImage: systemImage, size: 38)
+            HStack(spacing: 14) {
+                SettingsBlueSectionIcon(systemImage: systemImage)
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(appState.localized(title))
@@ -1275,25 +1284,30 @@ struct SettingsSection<Content: View>: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .staticSurfaceBackground(cornerRadius: AppRadius.card)
-            .overlay(alignment: .topLeading) {
-                LinearGradient(
-                    colors: [
-                        .white.opacity(colorScheme == .dark ? 0.34 : 0.70),
-                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.12 : 0.22),
-                        .clear
-                    ],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .frame(height: 0.8)
-                .padding(.horizontal, AppRadius.card * 0.72)
-                .padding(.top, 1.5)
-                .allowsHitTesting(false)
-            }
+            .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 0.94)
             .padding(.leading, AppSpacing.settingsSectionContentLeading)
         }
         .padding(.leading, AppSpacing.settingsSectionOuterLeading)
+    }
+}
+
+private struct SettingsBlueSectionIcon: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let systemImage: String
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(AppColors.refIconChipBg.opacity(colorScheme == .dark ? 0.58 : 1))
+            .overlay {
+                AppGlyph(systemImage: systemImage, size: 24, lineWidth: 2.35)
+                    .foregroundStyle(AppColors.refIconGlyph)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(AppColors.refIconGlyph.opacity(colorScheme == .dark ? 0.18 : 0.14), lineWidth: 0.8)
+            }
+            .shadow(color: AppColors.referenceBlue.opacity(colorScheme == .dark ? 0.08 : 0.10), radius: 8, x: 0, y: 4)
+        .frame(width: 54, height: 54)
     }
 }
 
@@ -1304,9 +1318,8 @@ struct SettingsSubsectionHeader: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(AppColors.selectedGlassTint.opacity(0.78))
+            AppGlyph(systemImage: systemImage, size: 14, lineWidth: 2)
+                .foregroundStyle(AppColors.refSubtle)
                 .frame(width: 14)
 
             Text(appState.localized(title))
@@ -1369,6 +1382,7 @@ struct HomeTabSettingsGrid: View {
 
 private struct HomeTabSettingsTile: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let tab: HomeTab
     let isEnabled: Bool
@@ -1377,23 +1391,56 @@ private struct HomeTabSettingsTile: View {
 
     var body: some View {
         let active = isEnabled || isHovering
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
         Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: tab.systemImage)
-                    .frame(width: 18)
+            HStack(spacing: 10) {
+                AppGlyph(systemImage: tab.systemImage, size: 19, lineWidth: 2.1)
+                    .foregroundStyle(AppColors.textPrimary.opacity(active ? 0.96 : 0.84))
+                    .frame(width: 22, height: 22)
+
                 Text(appState.localized(tab.displayName))
                     .lineLimit(1)
+                    .foregroundStyle(AppColors.textPrimary)
+
                 Spacer()
-                Image(systemName: isEnabled ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(isEnabled ? AppColors.selectedGlassTint.opacity(0.92) : Color.secondary)
+
+                ZStack {
+                    Circle()
+                        .fill(isEnabled ? AppColors.referenceBlue : Color.clear)
+                        .overlay {
+                            Circle()
+                                .strokeBorder(
+                                    isEnabled ? AppColors.referenceBlue.opacity(0.90) : AppColors.border.opacity(colorScheme == .dark ? 0.40 : 0.62),
+                                    lineWidth: 1.2
+                                )
+                        }
+                    if isEnabled {
+                        AppGlyph(systemImage: "checkmark", size: 10.5, lineWidth: 2.4)
+                            .foregroundStyle(.white)
+                    }
+                }
+                .frame(width: 18, height: 18)
             }
-            .font(.callout.weight(.medium))
-            .padding(.horizontal, 12)
+            .font(.callout.weight(.bold))
+            .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .frame(maxWidth: .infinity)
-            .staticSurfaceBackground(selected: isEnabled, cornerRadius: 12, thickness: 0.94)
-            .repeatedSurfaceHover(isHovering, cornerRadius: 12, intensity: active ? 0.74 : 0.62)
-            .brightness(isHovering ? 0.006 : 0)
+            .background {
+                shape.fill(
+                    isEnabled
+                        ? AppColors.referenceBlue.opacity(colorScheme == .dark ? 0.18 : 0.075)
+                        : Color.white.opacity(colorScheme == .dark ? 0.07 : 0.92)
+                )
+            }
+            .overlay {
+                shape.strokeBorder(
+                    isEnabled
+                        ? AppColors.referenceBlue.opacity(colorScheme == .dark ? 0.34 : 0.24)
+                        : AppColors.border.opacity(colorScheme == .dark ? 0.28 : 0.38),
+                    lineWidth: 1
+                )
+            }
+            .brightness(isHovering ? 0.008 : 0)
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
@@ -1742,7 +1789,14 @@ struct SettingsRow<Content: View>: View {
 
     private var rowLabel: some View {
         HStack(spacing: 14) {
-            PlayfulSymbolIcon(systemImage: systemImage, size: 26)
+            // 系统页面 1:1：设置行图标统一为浅蓝芯片(#E7F0FD) + 蓝色线条(#2E90FA)。
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(AppColors.refIconChipBg)
+                .frame(width: 34, height: 34)
+                .overlay {
+                    AppGlyph(systemImage: systemImage, size: 17, lineWidth: 2)
+                        .foregroundStyle(AppColors.refIconGlyph)
+                }
 
             Text(appState.localized(title))
                 .font(.callout.weight(.medium))
@@ -1783,12 +1837,16 @@ private extension View {
         )
     }
 
+    @ViewBuilder
     func settingsActionButton(
-        width: CGFloat = SettingsControlMetrics.actionButtonWidth,
+        width: CGFloat? = nil,
         prominent: Bool = false
     ) -> some View {
-        buttonStyle(LiquidGlassButtonStyle(cornerRadius: 11, horizontalPadding: 10, minHeight: 30, prominent: prominent))
-            .frame(width: width, alignment: .trailing)
+        // 系统页面 1:1：设置按钮统一为白描边(高亮则蓝渐变)、固定高 34、随文字自适应宽度、纯文字无图标
+        // (参考页设置按钮均无图标)，同类按钮共享同一套设计语言。`width` 参数保留兼容但不再强制定宽。
+        labelStyle(.titleOnly)
+            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 14, minHeight: 34, prominent: prominent, outlined: !prominent))
+            .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -1842,17 +1900,37 @@ struct SettingsToggleRow: View {
         SettingsRow(title: title, systemImage: systemImage) {
             Toggle("", isOn: isOn)
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(AppSwitchToggleStyle())
         }
     }
 }
 
 struct SettingsDescription: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.colorScheme) private var colorScheme
     let text: String
 
     var body: some View {
-        AppInfoNote(text: appState.localized(text))
+        HStack(alignment: .center, spacing: 0) {
+            Text(appState.localized(text))
+                .font(.caption.weight(.medium))
+                .lineSpacing(1.5)
+                .foregroundStyle(AppColors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.leading, 60)
+        .padding(.trailing, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.42 : 0.62))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .strokeBorder(AppColors.refCardBorder.opacity(colorScheme == .dark ? 0.12 : 0.30), lineWidth: 0.45)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -1874,6 +1952,6 @@ struct SettingsPathText: View {
 
 struct SettingsGlassCard: View {
     var body: some View {
-        LiquidGlassSurfaceLayer(cornerRadius: 18)
+        ReferenceCardSurface(cornerRadius: 18)
     }
 }

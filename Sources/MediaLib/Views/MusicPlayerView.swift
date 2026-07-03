@@ -681,7 +681,7 @@ struct MusicPlayerView: View {
                     // 复用 MusicPlayerView 已加载的歌词与取色（经下面的 .onAppear/.onChange 维护）。
                     MusicShelfPlayerStage(context: playbackContext)
                 } else {
-                    MusicExpandedStage(context: playbackContext, variant: isWujie ? .wujie : .liuli)
+                    MusicExpandedStage(context: playbackContext, variant: isWujie ? .wujie : .liuli, transitionNamespace: transitionNamespace)
                 }
             }
             .id(appState.musicThemeRevision)
@@ -2339,6 +2339,7 @@ struct MusicExpandedArtwork: View {
     let posterSize: CGFloat
     let glowReach: CGFloat
     let coverGlowEnabled: Bool
+    let transitionNamespace: Namespace.ID?
     @StateObject private var playbackStateObserver: MusicMiniTransportStateObserver
     @State private var coverVisualProgress: Double = 1
     @State private var glowVisualProgress: Double = 1
@@ -2350,7 +2351,8 @@ struct MusicExpandedArtwork: View {
         palette: AlbumColorPalette,
         posterSize: CGFloat,
         glowReach: CGFloat,
-        coverGlowEnabled: Bool
+        coverGlowEnabled: Bool,
+        transitionNamespace: Namespace.ID? = nil
     ) {
         self.item = item
         self.controller = controller
@@ -2358,6 +2360,7 @@ struct MusicExpandedArtwork: View {
         self.posterSize = posterSize
         self.glowReach = glowReach
         self.coverGlowEnabled = coverGlowEnabled
+        self.transitionNamespace = transitionNamespace
         _playbackStateObserver = StateObject(wrappedValue: MusicMiniTransportStateObserver(controller: controller))
     }
 
@@ -2410,6 +2413,7 @@ struct MusicExpandedArtwork: View {
             PosterImage(path: item.posterPath, title: item.title, mediaType: item.type)
                 .aspectRatio(1, contentMode: .fit)
                 .frame(width: posterSize, height: posterSize)
+                .modifier(MusicCoverGeometryModifier(namespace: transitionNamespace))
                 .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
                 // 封面发光统一交给铺在整层背后的「模糊大封面」(AlbumGlowBlurCover)，
                 // 这里不再叠 image-based 三层封面色场，避免两套发光互相打架/发糊。
@@ -2509,6 +2513,19 @@ struct MusicExpandedArtwork: View {
     private func smoothstep(_ value: Double) -> Double {
         let clamped = min(max(value, 0), 1)
         return clamped * clamped * (3 - 2 * clamped)
+    }
+}
+
+private struct MusicCoverGeometryModifier: ViewModifier {
+    let namespace: Namespace.ID?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let namespace {
+            content.matchedGeometryEffect(id: "music-mini-cover", in: namespace, properties: .frame, anchor: .center)
+        } else {
+            content
+        }
     }
 }
 

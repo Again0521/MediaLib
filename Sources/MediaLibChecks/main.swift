@@ -211,6 +211,7 @@ let tagDraft = MusicTagDraft(
     title: "  Song Title  ",
     artist: " Artist ",
     album: " Album ",
+    genre: " Rock ",
     trackNumber: 3,
     year: 2026,
     lyrics: " Lyric ",
@@ -220,6 +221,8 @@ let tagDraft = MusicTagDraft(
 )
 check(tagDraft.metadataUpdate.title == "Song Title", "MusicTagDraft should trim title")
 check(tagDraft.metadataUpdate.metadataProvider == "TestProvider", "MusicTagDraft should keep provider")
+check(tagDraft.metadataUpdate.genre == "Rock", "MusicTagDraft should trim genre")
+check(tagDraft.writableMetadataPairs.contains { $0.0 == "genre" && $0.1 == "Rock" }, "MusicTagDraft should expose genre")
 check(tagDraft.writableMetadataPairs.contains { $0.0 == "tracknumber" && $0.1 == "3" }, "MusicTagDraft should expose tracknumber")
 check(tagDraft.writableMetadataPairs.contains { $0.0 == "lyrics" && $0.1 == "Lyric" }, "MusicTagDraft should expose lyrics")
 let musicTagService = MusicTagEditingService()

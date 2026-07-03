@@ -32,11 +32,12 @@ private enum MusicLyricsPresenceCache {
         let missing = missingEntries(for: paths)
         guard !missing.isEmpty else { return false }
 
-        let results = await Task.detached(priority: .utility) {
+        // 歌词文件探测是磁盘/NAS stat：走阻塞 I/O 专用队列，不占协作池。
+        let results = await BlockingIOExecutor.run {
             missing.map { entry in
                 (cacheKey: entry.cacheKey, exists: lyricsExist(filePath: entry.path))
             }
-        }.value
+        }
 
         return store(results)
     }
@@ -84,18 +85,20 @@ private enum MusicLyricsPresenceCache {
     }
 
     private static func lyricsExist(filePath: String) -> Bool {
-        let url = URL(fileURLWithPath: filePath)
-        let directory = url.deletingLastPathComponent()
-        let basename = url.deletingPathExtension().lastPathComponent
-        let candidates = [
-            directory.appendingPathComponent("\(basename).lrc"),
-            directory.appendingPathComponent("\(basename).txt")
-        ]
-
-        return candidates.contains { FileManager.default.fileExists(atPath: $0.path) }
+        // 词法拼路径（NSString 无 I/O），只让 fileExists 这两次探测真正touching NAS。
+        let ns = filePath as NSString
+        let directory = ns.deletingLastPathComponent as NSString
+        let basename = (ns.lastPathComponent as NSString).deletingPathExtension
+        return ["lrc", "txt"].contains { ext in
+            FileManager.default.fileExists(atPath: directory.appendingPathComponent("\(basename).\(ext)"))
+        }
     }
 }
 
+// 静态缓存字典只允许主线程访问：resolve 此前是 nonisolated async（跑在并发池上），
+// 与主线程 body 里的 snapshot(for:) 存在数据竞争。整个类型收敛到 MainActor，
+// 仅真正的快照构建仍在 detached 任务里进行。
+@MainActor
 private enum MusicLibrarySnapshotCache {
     struct Key: Hashable, Sendable {
         let section: MusicLibrarySection
@@ -104,6 +107,7 @@ private enum MusicLibrarySnapshotCache {
         let sortOrder: MusicSortOrder
         let filterMode: MusicFilterMode
         let revision: Int
+        let projectionRevision: Int
         let lyricsRevision: Int
     }
 
@@ -114,6 +118,7 @@ private enum MusicLibrarySnapshotCache {
     }
 
     private static var values: [Key: Snapshot] = [:]
+    private static var inFlight: [Key: Task<Snapshot, Never>] = [:]
     // 用单调递增时间戳替代线性扫描的 accessOrder 数组：O(1) 读写，淘汰时排序一次。
     private static var accessTick: [Key: Int] = [:]
     private static var tickCounter = 0
@@ -126,8 +131,9 @@ private enum MusicLibrarySnapshotCache {
 
     static func store(_ snapshot: Snapshot, for key: Key) {
         values[key] = snapshot
+        inFlight[key] = nil
         markRecentlyUsed(key)
-        if values.count > 24 {
+        if values.count > 48 {
             // 只在超出上限时排序一次，正常命中路径零开销。
             let oldest = accessTick.min { $0.value < $1.value }?.key
             if let oldest {
@@ -137,16 +143,121 @@ private enum MusicLibrarySnapshotCache {
         }
     }
 
+    /// 快照构建的专用队列。此前用 Task.detached 丢进全局协作线程池：库重载、
+    /// 全库健康检查等长阻塞任务会把池占满，几毫秒的构建排队 2 秒以上才开跑
+    /// （实测 315 首歌 resolve 2400ms），表现为音乐页长时间「正在载入」。
+    private static let buildQueue = DispatchQueue(label: "MediaLib.musicSnapshotBuild", qos: .userInitiated)
+
+    static func resolve(
+        for key: Key,
+        build: @escaping @Sendable () -> Snapshot
+    ) async -> Snapshot {
+        if let snapshot = snapshot(for: key) {
+            return snapshot
+        }
+        let task: Task<Snapshot, Never>
+        if let existing = inFlight[key] {
+            task = existing
+        } else {
+            task = Task {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Snapshot, Never>) in
+                    buildQueue.async {
+                        continuation.resume(returning: build())
+                    }
+                }
+            }
+            inFlight[key] = task
+        }
+        let snapshot = await task.value
+        store(snapshot, for: key)
+        return snapshot
+    }
+
     private static func markRecentlyUsed(_ key: Key) {
         tickCounter += 1
         accessTick[key] = tickCounter
     }
 }
 
+/// 音乐库列表预热器：库加载完成或音乐内容变化后，在后台按各分区上次保存的
+/// 排序/筛选预构建列表快照。用户点进音乐子页面时直接命中缓存，不再经历
+/// 长时间的「正在载入」骨架（此前每次启动/内容变化后的首次进入都要现场
+/// 全量排序 + 重建行模型）。
+@MainActor
+enum MusicLibraryContentPrewarmer {
+    private static var scheduleTask: Task<Void, Never>?
+
+    static func schedule(appState: AppState) {
+        scheduleTask?.cancel()
+        scheduleTask = Task { @MainActor [weak appState] in
+            // 防抖：等库加载后的连续修订收敛后再预热一次。
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled, let appState else { return }
+            await prewarm(appState: appState)
+        }
+    }
+
+    private static func prewarm(appState: AppState) async {
+        guard !appState.musicTracks.isEmpty else { return }
+        let sections: [MusicLibrarySection] = [.songs, .albums, .artists, .recent, .favorites, .unmatched]
+        let defaults = UserDefaults.standard
+        for section in sections {
+            guard !Task.isCancelled else { return }
+            // 与 MusicLibraryView.loadViewState 相同的持久化键与合法性回退。
+            let prefix = "MediaLib.musicState.\(section.rawValue)"
+            var sortMode = defaults.string(forKey: "\(prefix).sort")
+                .flatMap(MusicSortMode.init(rawValue:)) ?? .title
+            let sortOrder = defaults.string(forKey: "\(prefix).sortOrder")
+                .flatMap(MusicSortOrder.init(rawValue:)) ?? .primary
+            var filterMode = defaults.string(forKey: "\(prefix).filter")
+                .flatMap(MusicFilterMode.init(rawValue:)) ?? .all
+            let availableSorts: [MusicSortMode]
+            switch section {
+            case .artists: availableSorts = [.title, .workCount, .mostPlayed]
+            case .albums: availableSorts = [.title, .artist, .recent, .mostPlayed]
+            default: availableSorts = [.title, .artist, .album, .mostPlayed, .recent, .duration]
+            }
+            if !availableSorts.contains(sortMode) { sortMode = .title }
+            if section == .artists { filterMode = .all }
+            // 「有歌词」筛选依赖歌词存在性缓存的暖度、键会随缓存修订漂移，交给页面自身处理。
+            if filterMode == .withLyrics { continue }
+
+            let key = MusicLibrarySnapshotCache.Key(
+                section: section,
+                searchText: "",
+                sortMode: sortMode,
+                sortOrder: sortOrder,
+                filterMode: filterMode,
+                revision: appState.musicContentRevision,
+                projectionRevision: appState.musicProjectionRevision,
+                lyricsRevision: 0
+            )
+            guard MusicLibrarySnapshotCache.snapshot(for: key) == nil else { continue }
+            let needsTrackInput = section != .albums && section != .artists || filterMode == .unmatched
+            let input = MusicLibrarySnapshotBuildInput(
+                section: section,
+                tracks: needsTrackInput ? appState.items(for: .music(section), searchText: "") : [],
+                tracksByID: needsTrackInput ? appState.cachedMusicTracksByID : [:],
+                albums: appState.musicAlbumSummaries,
+                artists: appState.musicArtistSummaries,
+                searchText: "",
+                sortMode: sortMode,
+                sortOrder: sortOrder,
+                filterMode: filterMode
+            )
+            _ = await MusicLibrarySnapshotCache.resolve(for: key) {
+                MusicLibrarySnapshotBuilder.snapshot(from: input)
+            }
+        }
+    }
+}
+
 private struct MusicLibrarySnapshotBuildInput: Sendable {
     let section: MusicLibrarySection
     let tracks: [MediaItem]
-    let searchFieldsByTrackID: [String: [String?]]
+    let tracksByID: [String: MediaItem]
+    let albums: [MusicAlbumSummary]
+    let artists: [MusicArtistSummary]
     let searchText: String
     let sortMode: MusicSortMode
     let sortOrder: MusicSortOrder
@@ -172,32 +283,32 @@ private enum MusicFavoritePlaylist {
 }
 
 private func musicDisplayArtist(_ value: String?) -> String {
-    value.flatMap { $0.isEmpty ? nil : $0 } ?? "未知艺术家"
+    MusicLibraryProjectionRepository.displayArtist(value)
 }
 
 private func musicDisplayAlbum(_ value: String?) -> String {
-    value.flatMap { $0.isEmpty ? nil : $0 } ?? "未知专辑"
+    MusicLibraryProjectionRepository.displayAlbum(value)
 }
 
 private enum MusicLibrarySnapshotBuilder {
     static func snapshot(from input: MusicLibrarySnapshotBuildInput) -> MusicLibrarySnapshotCache.Snapshot {
-        let tracks = resolvedTracks(from: input.tracks, input: input)
         switch input.section {
         case .albums:
             return MusicLibrarySnapshotCache.Snapshot(
                 rows: [],
-                albums: albumGroups(from: tracks, sortMode: input.sortMode, sortOrder: input.sortOrder),
+                albums: albumGroups(from: input.albums, input: input),
                 artists: []
             )
         case .artists:
             return MusicLibrarySnapshotCache.Snapshot(
                 rows: [],
                 albums: [],
-                artists: artistGroups(from: tracks, sortMode: input.sortMode, sortOrder: input.sortOrder)
+                artists: artistGroups(from: input.artists, input: input)
             )
         case .playlists:
             return MusicLibrarySnapshotCache.Snapshot(rows: [], albums: [], artists: [])
         case .songs, .recent, .favorites, .unmatched:
+            let tracks = resolvedTracks(from: input.tracks, input: input)
             return MusicLibrarySnapshotCache.Snapshot(
                 rows: rowModels(from: tracks),
                 albums: [],
@@ -210,8 +321,8 @@ private enum MusicLibrarySnapshotBuilder {
         let tracks = resolvedTracks(from: input.tracks, input: input)
         return MusicLibrarySnapshotCache.Snapshot(
             rows: rowModels(from: tracks),
-            albums: albumGroups(from: tracks, sortMode: input.sortMode, sortOrder: input.sortOrder),
-            artists: artistGroups(from: tracks, sortMode: input.sortMode, sortOrder: input.sortOrder)
+            albums: albumGroups(from: input.albums, input: input),
+            artists: artistGroups(from: input.artists, input: input)
         )
     }
 
@@ -224,7 +335,7 @@ private enum MusicLibrarySnapshotBuilder {
             searched = tracks.filter {
                 PinyinSearchMatcher.matches(
                     query: query,
-                    in: input.searchFieldsByTrackID[$0.id] ?? [$0.title, $0.originalTitle, $0.artist, $0.album]
+                    in: [$0.title, $0.originalTitle, $0.artist, $0.album, $0.genre, $0.collectionTitle, $0.externalID]
                 )
             }
         }
@@ -270,7 +381,11 @@ private enum MusicLibrarySnapshotBuilder {
             MusicTrackRowModel(
                 track: track,
                 titleText: displayNameWithoutKnownExtension(track.title),
-                fileName: track.filePath.map { displayNameWithoutKnownExtension(URL(fileURLWithPath: $0).lastPathComponent) },
+                // NSString 路径操作是纯词法运算。此处绝不能用 URL(fileURLWithPath:)：
+                // 它初始化时会对路径 stat（判断目录性），歌曲在 NAS 上时一次就是一个
+                // 网络往返——实测 315 首 × 每首 2 次 ≈ 2.1 秒，NAS 睡眠时更以数十秒计，
+                // 正是音乐列表长期「正在载入」的元凶。
+                fileName: track.filePath.map { displayNameWithoutKnownExtension(($0 as NSString).lastPathComponent) },
                 artistText: musicDisplayArtist(track.artist),
                 albumText: musicDisplayAlbum(track.album),
                 hasLocalLyrics: MusicLyricsPresenceCache.cachedHasLyrics(filePath: track.filePath) ?? false,
@@ -279,52 +394,84 @@ private enum MusicLibrarySnapshotBuilder {
         }
     }
 
-    static func albumGroups(from tracks: [MediaItem], sortMode: MusicSortMode, sortOrder: MusicSortOrder) -> [MusicAlbumGroup] {
-        let grouped = Dictionary(grouping: tracks) { item in
-            MusicAlbumKey(title: musicDisplayAlbum(item.album), artist: musicDisplayArtist(item.artist))
-        }
-        let groups = grouped.map { key, items in
-            MusicAlbumGroup(key: key, tracks: items.sorted { ($0.trackNumber ?? 0, $0.title) < ($1.trackNumber ?? 0, $1.title) })
+    static func albumGroups(from albums: [MusicAlbumSummary], input: MusicLibrarySnapshotBuildInput) -> [MusicAlbumGroup] {
+        let query = input.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let groups = albums.compactMap { album -> MusicAlbumGroup? in
+            if !query.isEmpty,
+               !PinyinSearchMatcher.matches(query: query, in: [album.title, album.artist]) {
+                return nil
+            }
+            switch input.filterMode {
+            case .all:
+                break
+            case .favorites:
+                guard album.favoriteCount > 0 else { return nil }
+            case .withLyrics:
+                guard input.tracks.contains(where: { track in
+                    trackMatchesAlbum(track, album: album) &&
+                    (MusicLyricsPresenceCache.cachedHasLyrics(filePath: track.filePath) ?? false)
+                }) else { return nil }
+            case .unmatched:
+                guard input.tracks.contains(where: { track in
+                    guard trackMatchesAlbum(track, album: album) else { return false }
+                    return (track.artist?.isEmpty ?? true) || (track.album?.isEmpty ?? true) || track.metadataProvider == nil
+                }) else { return nil }
+            }
+            return MusicAlbumGroup(summary: album)
         }
         return groups.sorted { lhs, rhs in
-            switch sortMode {
+            switch input.sortMode {
             case .artist:
-                return sortedText(lhs.key.artist, rhs.key.artist, order: sortOrder) ??
+                return sortedText(lhs.key.artist, rhs.key.artist, order: input.sortOrder) ??
                     sortedText(lhs.key.title, rhs.key.title, order: .primary) ?? true
             case .recent:
-                return sortedDate(lhs.latestUpdatedAt, rhs.latestUpdatedAt, order: sortOrder) ??
+                return sortedDate(lhs.latestUpdatedAt, rhs.latestUpdatedAt, order: input.sortOrder) ??
                     sortedText(lhs.key.title, rhs.key.title, order: .primary) ?? true
             case .mostPlayed:
-                return sortedNumber(lhs.playCount, rhs.playCount, order: sortOrder) ??
+                return sortedNumber(lhs.playCount, rhs.playCount, order: input.sortOrder) ??
                     sortedText(lhs.key.title, rhs.key.title, order: .primary) ?? true
             case .workCount:
-                return sortedNumber(lhs.tracks.count, rhs.tracks.count, order: sortOrder) ??
+                return sortedNumber(lhs.trackCount, rhs.trackCount, order: input.sortOrder) ??
                     sortedText(lhs.key.title, rhs.key.title, order: .primary) ?? true
             default:
-                return sortedText(lhs.key.title, rhs.key.title, order: sortOrder) ?? true
+                return sortedText(lhs.key.title, rhs.key.title, order: input.sortOrder) ?? true
             }
         }
     }
 
-    static func artistGroups(from tracks: [MediaItem], sortMode: MusicSortMode, sortOrder: MusicSortOrder) -> [MusicArtistGroup] {
-        let grouped = Dictionary(grouping: tracks) { item in
-            musicDisplayArtist(item.artist)
-        }
-        let groups = grouped.map { name, items in
-            MusicArtistGroup(name: name, tracks: items.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending })
+    static func artistGroups(from artists: [MusicArtistSummary], input: MusicLibrarySnapshotBuildInput) -> [MusicArtistGroup] {
+        let query = input.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let groups = artists.compactMap { artist -> MusicArtistGroup? in
+            if !query.isEmpty,
+               !PinyinSearchMatcher.matches(query: query, in: [artist.name]) {
+                return nil
+            }
+            return MusicArtistGroup(summary: artist)
         }
         return groups.sorted { lhs, rhs in
-            switch sortMode {
+            switch input.sortMode {
             case .workCount:
-                return sortedNumber(lhs.tracks.count, rhs.tracks.count, order: sortOrder) ??
+                return sortedNumber(lhs.trackCount, rhs.trackCount, order: input.sortOrder) ??
                     sortedText(lhs.name, rhs.name, order: .primary) ?? true
             case .mostPlayed:
-                return sortedNumber(lhs.playCount, rhs.playCount, order: sortOrder) ??
+                return sortedNumber(lhs.playCount, rhs.playCount, order: input.sortOrder) ??
                     sortedText(lhs.name, rhs.name, order: .primary) ?? true
             default:
-                return sortedText(lhs.name, rhs.name, order: sortOrder) ?? true
+                return sortedText(lhs.name, rhs.name, order: input.sortOrder) ?? true
             }
         }
+    }
+
+    private static func trackMatchesAlbum(_ track: MediaItem, album: MusicAlbumSummary) -> Bool {
+        normalizedKey(musicDisplayAlbum(track.album)) == album.titleKey &&
+        normalizedKey(musicDisplayArtist(track.artist)) == album.artistKey
+    }
+
+    private static func normalizedKey(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+            .lowercased()
     }
 
     private static func sortedText(_ lhs: String, _ rhs: String, order: MusicSortOrder) -> Bool? {
@@ -354,15 +501,20 @@ private enum MusicLibrarySnapshotBuilder {
         return String(format: "%d:%02d", total / 60, total % 60)
     }
 
+    private static let knownAudioExtensions: Set<String> = [
+        "mp3", "flac", "m4a", "aac", "wav", "aiff", "aif", "ogg", "opus", "wma", "alac"
+    ]
+
     private static func displayNameWithoutKnownExtension(_ value: String) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        let url = URL(fileURLWithPath: trimmed)
-        let ext = url.pathExtension.lowercased()
-        guard !ext.isEmpty,
-              ["mp3", "flac", "m4a", "aac", "wav", "aiff", "aif", "ogg", "opus", "wma", "alac"].contains(ext) else {
+        // 用 NSString 的词法路径操作替代 URL(fileURLWithPath:)：后者初始化会 stat 路径，
+        // 值为 NAS 路径/文件名时产生网络或磁盘往返（每行数毫秒，是列表构建慢的根源）。
+        let ns = trimmed as NSString
+        let ext = ns.pathExtension.lowercased()
+        guard !ext.isEmpty, knownAudioExtensions.contains(ext) else {
             return trimmed
         }
-        return url.deletingPathExtension().lastPathComponent
+        return (ns.deletingPathExtension as NSString).lastPathComponent
     }
 }
 
@@ -392,8 +544,12 @@ struct MusicLibraryView: View {
 
     var body: some View {
         Group {
-            if usesStandaloneLongList {
+            if usesScrollableCollectionList {
+                scrollableCollectionListBody
+            } else if usesStandaloneLongList {
                 standaloneLongListBody
+            } else if section == .playlists {
+                fixedHeaderScrollableBody
             } else {
                 scrollingBody
             }
@@ -402,6 +558,7 @@ struct MusicLibraryView: View {
         .background(AppPageBackground())
         .navigationTitle(section.title)
         .onAppear {
+            logMusicPerf("onAppear[\(section.rawValue)]")
             loadViewState(for: section)
             refreshVisibleContent(for: section)
             presentSectionTipIfNeeded(section)
@@ -411,7 +568,15 @@ struct MusicLibraryView: View {
             scheduleSearchRefresh()
         }
         .onChange(of: section.id) { newSectionID in
-            guard let newSection = MusicLibrarySection(rawValue: newSectionID) else { return }
+            // 关键修复：MusicLibrarySection.id 是 "music-\(rawValue)"（如 "music-albums"），
+            // 旧代码用 MusicLibrarySection(rawValue: newSectionID) 解析必然得到 nil，
+            // guard 直接 return —— 切换分区时 loadViewState / refreshVisibleContent /
+            // drilldown 清理从未执行过。页面只能等后续无关的 libraryRevision 变化
+            // 兜底触发刷新才显示内容，表现为「切到另一个分区后长时间载入/难以载入」。
+            // 注意 onChange 闭包执行时 self.section 仍是旧值，必须从 newSectionID 解析
+            // 新分区（按 id 匹配，别再用 rawValue）。
+            guard let newSection = MusicLibrarySection.allCases.first(where: { $0.id == newSectionID }) else { return }
+            logMusicPerf("sectionChange -> \(newSectionID)")
             searchRefreshTask?.cancel()
             lyricsRefreshTask?.cancel()
             drilldown = nil
@@ -443,6 +608,23 @@ struct MusicLibraryView: View {
                 refreshVisibleContent(for: section, deferred: true)
             } else {
                 refreshActivePlaylistDrilldown()
+            }
+        }
+        // 喜欢/评级等乐观更新只改音乐内容修订号（不 bump libraryRevision），
+        // 列表行内的「喜欢」徽标等需据此重建快照刷新。
+        .onChange(of: appState.musicContentRevision) { _ in
+            searchRefreshTask?.cancel()
+            if drilldown == nil {
+                refreshVisibleContent(for: section, deferred: true)
+            } else {
+                refreshActivePlaylistDrilldown()
+            }
+        }
+        .onChange(of: appState.musicProjectionRevision) { _ in
+            guard section == .albums || section == .artists else { return }
+            searchRefreshTask?.cancel()
+            if drilldown == nil {
+                refreshVisibleContent(for: section, deferred: true)
             }
         }
         .onChange(of: appState.favoriteRevision) { _ in
@@ -569,6 +751,75 @@ struct MusicLibraryView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    private var fixedHeaderScrollableBody: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            pageHeader
+                .padding(.horizontal, AppSpacing.pageHorizontal)
+                .padding(.top, AppSpacing.pageVertical)
+                .padding(.bottom, AppSpacing.headerToControls)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Color.clear.frame(height: 0).id("top")
+                    content
+                        .padding(.horizontal, AppSpacing.pageHorizontal)
+                        .padding(.bottom, AppSpacing.headerToControls)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .suppressHoverEffectsDuringScroll()
+                .overlay(alignment: .bottomTrailing) {
+                    scrollTopButton {
+                        withAnimation(AppMotion.fast) {
+                            proxy.scrollTo("top", anchor: .top)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var scrollableCollectionListBody: some View {
+        GeometryReader { proxy in
+            let availableWidth = max(proxy.size.width - AppSpacing.pageHorizontal * 2, 1)
+            let albumColumns = musicAlbumColumnCount(for: availableWidth)
+            let artistColumns = musicArtistColumnCount(for: availableWidth)
+
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        Color.clear.frame(height: 0).id("top")
+
+                        VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
+                            pageHeader
+                            musicControls
+                        }
+                        .padding(.horizontal, AppSpacing.pageHorizontal)
+                        .padding(.top, AppSpacing.pageVertical)
+                        .padding(.bottom, AppSpacing.headerToControls)
+
+                        collectionListRows(albumColumns: albumColumns, artistColumns: artistColumns)
+
+                        Color.clear
+                            .frame(height: collectionListBottomInset)
+                    }
+                }
+                .suppressHoverEffectsDuringScroll()
+                .transaction { transaction in
+                    transaction.animation = nil
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    scrollTopButton {
+                        withAnimation(AppMotion.fast) {
+                            scrollProxy.scrollTo("top", anchor: .top)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
     private var pageHeader: some View {
         PageHeader(title: section.title, subtitle: subtitle, systemImage: section.systemImage) {
             GlassSearchField(placeholder: "搜索音乐", text: $searchText, minWidth: 158, maxWidth: 226)
@@ -630,16 +881,130 @@ struct MusicLibraryView: View {
         .help("返回顶部")
     }
 
+    private var usesScrollableCollectionList: Bool {
+        drilldown == nil && (section == .albums || section == .artists)
+    }
+
     private var usesStandaloneLongList: Bool {
         if drilldown != nil {
             return true
         }
         switch section {
-        case .songs, .albums, .artists, .recent, .favorites, .unmatched:
+        case .songs, .recent, .favorites, .unmatched:
             return true
-        case .playlists:
+        case .albums, .artists, .playlists:
             return false
         }
+    }
+
+    @ViewBuilder
+    private func collectionListRows(albumColumns: Int, artistColumns: Int) -> some View {
+        if isPreparingVisibleContent || visibleContentIsOutOfDate {
+            AppLoadingView(title: "正在载入\(section.title)", systemImage: section.systemImage, rowCount: 5)
+                .padding(.horizontal, AppSpacing.pageHorizontal)
+                .padding(.bottom, AppSpacing.headerToControls)
+        } else {
+            switch section {
+            case .albums:
+                if displayedAlbumGroups.isEmpty {
+                    EmptyStateView(title: "暂无专辑", systemImage: "square.stack", message: "扫描音乐目录后，歌曲会按专辑信息归类。")
+                        .staticSurfaceBackground(cornerRadius: 22)
+                        .padding(.horizontal, AppSpacing.pageHorizontal)
+                        .padding(.bottom, AppSpacing.headerToControls)
+                } else {
+                    ForEach(0..<musicAlbumRowCount(columns: albumColumns), id: \.self) { rowIndex in
+                        HStack(alignment: .top, spacing: 20) {
+                            ForEach(0..<albumColumns, id: \.self) { columnIndex in
+                                let index = rowIndex * albumColumns + columnIndex
+                                if index < displayedAlbumGroups.count {
+                                    let album = displayedAlbumGroups[index]
+                                    MusicAlbumCard(
+                                        album: album,
+                                        showsResetPlayCountAction: sortMode == .mostPlayed,
+                                        onOpen: { drilldown = .album(album, tracks(for: album)) },
+                                        onPlay: { appState.replaceMusicQueueAndPlay(tracks(for: album)) },
+                                        onCreatePlaylist: { playlistCreationRequest = $0 },
+                                        onResetPlayCounts: { appState.resetMusicPlayCounts(tracks(for: album)) },
+                                        tracksProvider: { appState.musicTracks(inAlbum: album.summary) }
+                                    )
+                                    .frame(maxWidth: .infinity, alignment: .top)
+                                } else {
+                                    Color.clear
+                                        .frame(maxWidth: .infinity)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, AppSpacing.pageHorizontal)
+                        .padding(.top, rowIndex == 0 ? 6 : 0)
+                        .padding(.bottom, 22)
+                    }
+                }
+            case .artists:
+                if displayedArtistGroups.isEmpty {
+                    EmptyStateView(title: "暂无艺术家", systemImage: "person.2", message: "扫描音乐目录后，歌曲会按艺术家信息归类。")
+                        .staticSurfaceBackground(cornerRadius: 22)
+                        .padding(.horizontal, AppSpacing.pageHorizontal)
+                        .padding(.bottom, AppSpacing.headerToControls)
+                } else {
+                    ForEach(0..<musicArtistRowCount(columns: artistColumns), id: \.self) { rowIndex in
+                        HStack(alignment: .top, spacing: 18) {
+                            ForEach(0..<artistColumns, id: \.self) { columnIndex in
+                                let index = rowIndex * artistColumns + columnIndex
+                                if index < displayedArtistGroups.count {
+                                    let artist = displayedArtistGroups[index]
+                                    MusicArtistRow(
+                                        artist: artist,
+                                        showsResetPlayCountAction: sortMode == .mostPlayed,
+                                        onOpen: { drilldown = .artist(artist, tracks(for: artist)) },
+                                        onPlay: { appState.replaceMusicQueueAndPlay(tracks(for: artist)) },
+                                        onCreatePlaylist: { playlistCreationRequest = $0 },
+                                        onResetPlayCounts: { appState.resetMusicPlayCounts(tracks(for: artist)) },
+                                        tracksProvider: { appState.musicTracks(inArtist: artist.summary) }
+                                    )
+                                    .frame(maxWidth: .infinity, alignment: .top)
+                                } else {
+                                    Color.clear
+                                        .frame(maxWidth: .infinity)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, AppSpacing.pageHorizontal)
+                        .padding(.top, rowIndex == 0 ? 2 : 0)
+                        .padding(.bottom, 24)
+                    }
+                }
+            default:
+                EmptyView()
+            }
+        }
+    }
+
+    private func musicAlbumColumnCount(for width: CGFloat) -> Int {
+        let spacing: CGFloat = 20
+        let minimumCardWidth: CGFloat = 220
+        let availableWidth = max(width - 20, minimumCardWidth)
+        return min(4, max(1, Int((availableWidth + spacing) / (minimumCardWidth + spacing))))
+    }
+
+    private func musicArtistColumnCount(for width: CGFloat) -> Int {
+        let spacing: CGFloat = 18
+        let minimumCardWidth: CGFloat = 128
+        let availableWidth = max(width - 20, minimumCardWidth)
+        return min(6, max(2, Int((availableWidth + spacing) / (minimumCardWidth + spacing))))
+    }
+
+    private func musicAlbumRowCount(columns: Int) -> Int {
+        guard columns > 0 else { return 0 }
+        return (displayedAlbumGroups.count + columns - 1) / columns
+    }
+
+    private func musicArtistRowCount(columns: Int) -> Int {
+        guard columns > 0 else { return 0 }
+        return (displayedArtistGroups.count + columns - 1) / columns
+    }
+
+    private var collectionListBottomInset: CGFloat {
+        appState.activePlayerItem?.type == .music ? 106 : 16
     }
 
     private var playbackTraceTracks: [MediaItem] {
@@ -683,7 +1048,10 @@ struct MusicLibraryView: View {
             sortMode: sortMode,
             sortOrder: sortOrder,
             filterMode: filterMode,
-            revision: appState.libraryRevision,
+            // 用音乐内容修订号而非全局 libraryRevision：视频入库/观看进度/健康检查等
+            // 与音乐无关的修订不再打失效音乐页快照，切换子页面可以稳定命中缓存秒开。
+            revision: appState.musicContentRevision,
+            projectionRevision: appState.musicProjectionRevision,
             // 歌词存在性只影响「有歌词」筛选；其它页面不应因为后台扫完歌词文件而整页快照失效、
             // 重新分组专辑/艺术家或重建上千行歌曲模型。
             lyricsRevision: filterMode == .withLyrics ? MusicLyricsPresenceCache.revision : 0
@@ -695,9 +1063,18 @@ struct MusicLibraryView: View {
         MusicLibrarySnapshotCache.snapshot(for: snapshotKey(for: section)) == nil
     }
 
+    private func logMusicPerf(_ message: String) {
+        guard appState.settings.debugLoggingEnabled else { return }
+        appState.logger?.log("[MusicPerf] \(message)")
+    }
+
     private func refreshVisibleContent(for targetSection: MusicLibrarySection, deferred: Bool = false) {
+        let refreshStart = Date()
         contentRefreshTask?.cancel()
-        let baseTracks = appState.items(for: .music(targetSection), searchText: "")
+        let needsTrackInput = targetSection != .albums && targetSection != .artists ||
+            filterMode == .withLyrics ||
+            filterMode == .unmatched
+        let baseTracks = needsTrackInput ? appState.items(for: .music(targetSection), searchText: "") : []
         if filterMode == .withLyrics {
             scheduleLyricsPresenceRefresh(for: baseTracks, section: targetSection)
         } else {
@@ -711,8 +1088,10 @@ struct MusicLibraryView: View {
             visibleArtistGroups = snapshot.artists
             visibleContentSectionID = targetSection.id
             isPreparingVisibleContent = false
+            logMusicPerf("refresh[\(targetSection.rawValue)] cache-hit \(String(format: "%.1f", Date().timeIntervalSince(refreshStart) * 1000))ms rows=\(snapshot.rows.count)")
             return
         }
+        logMusicPerf("refresh[\(targetSection.rawValue)] cache-miss deferred=\(deferred) tracks=\(baseTracks.count)")
 
         // Only clear section ID when section changes; keep old items visible during
         // filter/sort/revision updates so the page header doesn't jump or flash.
@@ -724,34 +1103,41 @@ struct MusicLibraryView: View {
             if deferred {
                 await Task.yield()
             }
-            await computeVisibleContent(for: targetSection, baseTracks: baseTracks, key: key)
+            await computeVisibleContent(for: targetSection, baseTracks: baseTracks, key: key, refreshStart: refreshStart)
         }
     }
 
     private func computeVisibleContent(
         for targetSection: MusicLibrarySection,
         baseTracks: [MediaItem],
-        key: MusicLibrarySnapshotCache.Key
+        key: MusicLibrarySnapshotCache.Key,
+        refreshStart: Date = Date()
     ) async {
         guard !Task.isCancelled else { return }
-        guard key == snapshotKey(for: targetSection) else { return }
+        guard key == snapshotKey(for: targetSection) else {
+            logMusicPerf("compute[\(targetSection.rawValue)] stale-key-abort \(String(format: "%.1f", Date().timeIntervalSince(refreshStart) * 1000))ms")
+            return
+        }
+        let needsTrackInput = targetSection != .albums && targetSection != .artists ||
+            key.filterMode == .withLyrics ||
+            key.filterMode == .unmatched
 
         let input = MusicLibrarySnapshotBuildInput(
             section: targetSection,
             tracks: baseTracks,
-            searchFieldsByTrackID: Dictionary(
-                uniqueKeysWithValues: baseTracks.map {
-                    ($0.id, [$0.title, $0.originalTitle, $0.artist, $0.album, $0.genre, $0.collectionTitle, $0.externalID])
-                }
-            ),
+            tracksByID: needsTrackInput ? appState.cachedMusicTracksByID : [:],
+            albums: appState.musicAlbumSummaries,
+            artists: appState.musicArtistSummaries,
             searchText: key.searchText,
             sortMode: key.sortMode,
             sortOrder: key.sortOrder,
             filterMode: key.filterMode
         )
-        let snapshot = await Task.detached(priority: .userInitiated) {
+        let buildStart = Date()
+        let snapshot = await MusicLibrarySnapshotCache.resolve(for: key) {
             MusicLibrarySnapshotBuilder.snapshot(from: input)
-        }.value
+        }
+        logMusicPerf("compute[\(targetSection.rawValue)] resolve \(String(format: "%.1f", Date().timeIntervalSince(buildStart) * 1000))ms sinceRefresh \(String(format: "%.1f", Date().timeIntervalSince(refreshStart) * 1000))ms")
 
         guard !Task.isCancelled else { return }
         guard key == snapshotKey(for: targetSection) else { return }
@@ -984,13 +1370,13 @@ struct MusicLibraryView: View {
                         .staticSurfaceBackground(cornerRadius: 22)
                 } else {
                     ProgressiveMusicAlbumGrid(albums: displayedAlbumGroups, showsResetPlayCountAction: sortMode == .mostPlayed) { album in
-                        drilldown = .album(album)
+                        drilldown = .album(album, tracks(for: album))
                     } onPlay: { album in
-                        appState.replaceMusicQueueAndPlay(album.tracks)
+                        appState.replaceMusicQueueAndPlay(tracks(for: album))
                     } onCreatePlaylist: { request in
                         playlistCreationRequest = request
                     } onResetPlayCounts: { album in
-                        appState.resetMusicPlayCounts(album.tracks)
+                        appState.resetMusicPlayCounts(tracks(for: album))
                     }
                 }
             case .artists:
@@ -999,13 +1385,13 @@ struct MusicLibraryView: View {
                         .staticSurfaceBackground(cornerRadius: 22)
                 } else {
                     ProgressiveMusicArtistList(artists: displayedArtistGroups, showsResetPlayCountAction: sortMode == .mostPlayed) { artist in
-                        drilldown = .artist(artist)
+                        drilldown = .artist(artist, tracks(for: artist))
                     } onPlay: { artist in
-                        appState.replaceMusicQueueAndPlay(artist.tracks)
+                        appState.replaceMusicQueueAndPlay(tracks(for: artist))
                     } onCreatePlaylist: { request in
                         playlistCreationRequest = request
                     } onResetPlayCounts: { artist in
-                        appState.resetMusicPlayCounts(artist.tracks)
+                        appState.resetMusicPlayCounts(tracks(for: artist))
                     }
                 }
             case .playlists:
@@ -1048,6 +1434,14 @@ struct MusicLibraryView: View {
             return appState.musicTracks.filter(\.favorite)
         }
         return appState.musicTracks(in: playlist)
+    }
+
+    private func tracks(for album: MusicAlbumGroup) -> [MediaItem] {
+        appState.musicTracks(inAlbum: album.summary)
+    }
+
+    private func tracks(for artist: MusicArtistGroup) -> [MediaItem] {
+        appState.musicTracks(inArtist: artist.summary)
     }
 
     private func rowModels(from tracks: [MediaItem]) -> [MusicTrackRowModel] {
@@ -1097,9 +1491,8 @@ private struct MusicSongListView: View {
                         // 点击列名行即回到顶部（取代原右下角的返回顶部按钮）。
                         MusicSongHeader()
                             .padding(.horizontal, 6)
-                            .padding(.top, 2)
-                            .padding(.bottom, 4)
-                            .background(AppColors.cleanPanelFill)
+                            .padding(.top, 4)
+                            .padding(.bottom, 6)
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 withAnimation(AppMotion.fast) {
@@ -1126,56 +1519,47 @@ private struct MusicSongListSurface: View {
     let cornerRadius: CGFloat
 
     var body: some View {
-        LiquidGlassSurfaceLayer(
-            cornerRadius: cornerRadius,
-            thickness: 1.02,
-            respondsToPointer: false,
-            renderMode: .efficient
-        )
+        ReferenceCardSurface(cornerRadius: cornerRadius)
     }
 }
 
 private extension View {
-    /// 列表外层玻璃卡片：上方圆角，下方为直角并延伸到窗口底部外，
-    /// 视觉上像列表直接连接到软件下边界，而不是被装在一个有限长度的卡片里。
+    /// 列表外层卡片遵守首页小组件标准：完整圆角、白底细描边、常态无投影。
     func bleedingListCard(cornerRadius: CGFloat = 22) -> some View {
         self
             .padding(.horizontal, 12)
             .padding(.top, 12)
             .background(alignment: .top) {
-                // 向下负内边距使卡片底部圆角被推到窗口下边界之外（被窗口裁剪），
-                // 只保留上方圆角，下方呈直角紧贴窗口底部。
                 MusicSongListSurface(cornerRadius: cornerRadius)
-                    .padding(.bottom, -200)
             }
     }
 }
 
 private enum MusicCollectionDrilldown: Identifiable {
-    case album(MusicAlbumGroup)
-    case artist(MusicArtistGroup)
+    case album(MusicAlbumGroup, [MediaItem])
+    case artist(MusicArtistGroup, [MediaItem])
     case playlist(MusicPlaylist, [MediaItem])
 
     var id: String {
         switch self {
-        case .album(let album): return "album-\(album.id)"
-        case .artist(let artist): return "artist-\(artist.id)"
+        case .album(let album, _): return "album-\(album.id)"
+        case .artist(let artist, _): return "artist-\(artist.id)"
         case .playlist(let playlist, _): return "playlist-\(playlist.id)"
         }
     }
 
     var title: String {
         switch self {
-        case .album(let album): return album.key.title
-        case .artist(let artist): return artist.name
+        case .album(let album, _): return album.key.title
+        case .artist(let artist, _): return artist.name
         case .playlist(let playlist, _): return playlist.name
         }
     }
 
     var subtitle: String {
         switch self {
-        case .album(let album): return "\(album.key.artist) · \(album.tracks.count) 首歌曲"
-        case .artist(let artist): return "\(artist.tracks.count) 首歌曲 · \(artist.albumCount) 张专辑"
+        case .album(let album, let tracks): return "\(album.key.artist) · \(tracks.count) 首歌曲"
+        case .artist(let artist, let tracks): return "\(tracks.count) 首歌曲 · \(artist.albumCount) 张专辑"
         case .playlist(_, let tracks): return "\(tracks.count) 首歌曲"
         }
     }
@@ -1190,8 +1574,8 @@ private enum MusicCollectionDrilldown: Identifiable {
 
     var tracks: [MediaItem] {
         switch self {
-        case .album(let album): return album.tracks
-        case .artist(let artist): return artist.tracks
+        case .album(_, let tracks): return tracks
+        case .artist(_, let tracks): return tracks
         case .playlist(_, let tracks): return tracks
         }
     }
@@ -1250,9 +1634,8 @@ private struct MusicCollectionTrackList: View {
                 PlayfulSymbolIcon(systemImage: collection.systemImage, size: 30)
 
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(collection.title)
-                        .font(.title3.weight(.semibold))
-                        .lineLimit(1)
+                    MarqueeText(text: collection.title, font: .title3.weight(.semibold))
+                        .frame(height: 25, alignment: .leading)
                     Text(collection.subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1609,27 +1992,47 @@ private struct MusicSongHeader: View {
     var body: some View {
         HStack(spacing: 12) {
             Color.clear.frame(width: 42)
-            Text("歌曲")
+            headerLabel("歌曲", systemImage: "music.note")
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text("艺术家")
+            headerLabel("艺术家", systemImage: "person.wave.2")
                 .frame(width: 150, alignment: .leading)
-            Text("专辑")
+            headerLabel("专辑", systemImage: "record.circle")
                 .frame(width: 170, alignment: .leading)
-            Text("歌词")
+            headerLabel("歌词", systemImage: "quote.bubble")
                 .frame(width: 48, alignment: .center)
-            Text("时长")
+            headerLabel("时长", systemImage: "clock")
                 .frame(width: 58, alignment: .trailing)
             Color.clear.frame(width: 30)
         }
-        .font(.caption2.weight(.semibold))
-        .foregroundStyle(.tertiary)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Color.primary.opacity(colorScheme == .dark ? 0.08 : 0.06))
-                .frame(height: 0.5)
-                .padding(.horizontal, 4)
+        .font(.caption2.weight(.bold))
+        .foregroundStyle(AppColors.textSecondary)
+        .padding(.horizontal, 10)
+        .frame(height: 34)
+        .staticSurfaceBackground(cornerRadius: 13, thickness: 0.88)
+        .overlay(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(colorScheme == .dark ? 0.08 : 0.30),
+                            AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.035 : 0.075),
+                            .clear
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func headerLabel(_ title: String, systemImage: String) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: systemImage)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(AppColors.refIconGlyph.opacity(colorScheme == .dark ? 0.82 : 0.74))
+            Text(title)
+                .lineLimit(1)
         }
     }
 }
@@ -1781,21 +2184,17 @@ private struct MusicSongRow: View {
         .padding(.vertical, 7)
         .frame(height: AppCardMetrics.musicRowHeight)
         .background {
-            if hoverActive {
-                LiquidGlassSurfaceLayer(
-                    selected: true,
-                    cornerRadius: 12,
-                    thickness: 0.98,
-                    respondsToPointer: false,
-                    renderMode: .efficient
-                )
+            if hoverActive || isCurrent {
+                ReferenceCardSurface(selected: true, cornerRadius: 12)
             } else {
                 rowShape.fill(Color.clear)
             }
         }
+        .repeatedCardChrome(hoverActive || isCurrent, cornerRadius: 12)
+        .repeatedSurfaceHover(hoverActive || isCurrent, cornerRadius: 12, tint: AppColors.pointerLightTint, intensity: isCurrent ? 0.78 : 0.62)
         .overlay(alignment: .leading) {
             Capsule()
-                .fill(AppColors.solarEdgeTint.opacity(hoverActive ? (colorScheme == .dark ? 0.22 : 0.28) : 0))
+                .fill(AppColors.solarEdgeTint.opacity((hoverActive || isCurrent) ? (colorScheme == .dark ? 0.22 : 0.28) : 0))
                 .frame(width: 3, height: 28)
                 .padding(.leading, 2)
         }
@@ -1809,9 +2208,10 @@ private struct MusicSongRow: View {
             .padding(.horizontal, 8)
             .allowsHitTesting(false)
         }
-        .scaleEffect(!reduceMotion && hoverActive ? 1.002 : 1)
         .contentShape(rowShape)
+        .scaleEffect(!reduceMotion && hoverActive ? 1.002 : 1, anchor: .center)
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hoverActive)
+        .animation(reduceMotion ? nil : AppMotion.listHover, value: isCurrent)
         .onHover { hovering in
             guard !suppressHoverDuringScroll else {
                 isHovering = false
@@ -1925,6 +2325,91 @@ private struct MusicRowArtwork: View {
     }
 }
 
+private struct ReferenceMusicVisualSeed {
+    let glyph: String
+    let start: Color
+    let end: Color
+
+    static func make(title: String, secondary: String = "") -> ReferenceMusicVisualSeed {
+        let palettes: [(Color, Color)] = [
+            (Color(red: 0.63, green: 0.31, blue: 0.45), Color(red: 0.98, green: 0.66, blue: 0.83)),
+            (Color(red: 0.16, green: 0.14, blue: 0.09), Color(red: 0.80, green: 0.71, blue: 0.52)),
+            (Color(red: 0.05, green: 0.29, blue: 0.22), Color(red: 0.52, green: 0.80, blue: 0.09)),
+            (Color(red: 0.29, green: 0.06, blue: 0.38), Color(red: 0.85, green: 0.27, blue: 0.94)),
+            (Color(red: 0.05, green: 0.23, blue: 0.37), Color(red: 0.22, green: 0.74, blue: 0.97)),
+            (Color(red: 0.11, green: 0.13, blue: 0.19), Color(red: 0.49, green: 0.54, blue: 0.63)),
+            (AppColors.referenceBlue, Color(red: 0.36, green: 0.42, blue: 1.0)),
+            (Color(red: 0.48, green: 0.06, blue: 0.13), Color(red: 0.94, green: 0.27, blue: 0.27))
+        ]
+        let raw = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = raw.isEmpty ? secondary.trimmingCharacters(in: .whitespacesAndNewlines) : raw
+        var hash: UInt64 = 1469598103934665603
+        for scalar in (display + secondary).unicodeScalars {
+            hash ^= UInt64(scalar.value)
+            hash &*= 1099511628211
+        }
+        let palette = palettes[Int(hash % UInt64(palettes.count))]
+        let glyph = display.unicodeScalars.first.map { String($0) } ?? "音"
+        return ReferenceMusicVisualSeed(glyph: glyph, start: palette.0, end: palette.1)
+    }
+}
+
+private struct ReferenceMusicGradientArtwork: View {
+    let title: String
+    let subtitle: String
+    let posterPath: String?
+    var cornerRadius: CGFloat = 14
+    var glyphSize: CGFloat = 42
+    var cacheTargetSize: CGSize? = nil
+
+    private var seed: ReferenceMusicVisualSeed {
+        ReferenceMusicVisualSeed.make(title: title, secondary: subtitle)
+    }
+
+    var body: some View {
+        Group {
+            if usesDefaultArtwork {
+                gradientArtwork
+            } else {
+                PosterImage(path: posterPath, title: title, mediaType: .music, cacheTargetSize: cacheTargetSize)
+                    .overlay {
+                        RadialGradient(
+                            colors: [.white.opacity(0.20), .clear],
+                            center: UnitPoint(x: 0.22, y: 0.16),
+                            startRadius: 4,
+                            endRadius: 140
+                        )
+                    }
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .shadow(color: Color.black.opacity(0.055), radius: 7, x: 0, y: 3)
+    }
+
+    private var gradientArtwork: some View {
+        ZStack(alignment: .bottomLeading) {
+            LinearGradient(colors: [seed.start, seed.end], startPoint: .topLeading, endPoint: .bottomTrailing)
+            RadialGradient(
+                colors: [.white.opacity(0.28), .clear],
+                center: UnitPoint(x: 0.25, y: 0.15),
+                startRadius: 4,
+                endRadius: 180
+            )
+            Text(seed.glyph)
+                .font(.system(size: glyphSize, weight: .black))
+                .foregroundStyle(.white.opacity(0.92))
+                .padding(.leading, 16)
+                .padding(.bottom, 14)
+        }
+    }
+
+    private var usesDefaultArtwork: Bool {
+        guard let posterPath else { return true }
+        return posterPath.hasSuffix("-default.jpg")
+    }
+}
+
 private struct MusicAlbumCard: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
@@ -1934,73 +2419,61 @@ private struct MusicAlbumCard: View {
     let onPlay: () -> Void
     let onCreatePlaylist: (MusicPlaylistCreationRequest) -> Void
     let onResetPlayCounts: () -> Void
+    let tracksProvider: () -> [MediaItem]
     @State private var isHovering = false
     private static let coverCacheTargetSize = CGSize(width: 180, height: 180)
 
     var body: some View {
         let hoverActive = isHovering && !suppressHoverDuringScroll
+        let cardShape = RoundedRectangle(cornerRadius: 18, style: .continuous)
 
         VStack(alignment: .leading, spacing: 10) {
-            PosterImage(path: album.coverPath, title: album.key.title, mediaType: .music, cacheTargetSize: Self.coverCacheTargetSize)
-                .aspectRatio(1, contentMode: .fit)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(.white.opacity(hoverActive ? 0.58 : 0.28), lineWidth: hoverActive ? 1.1 : 0.8)
-                }
-                .overlay {
-                    LinearGradient(
-                        colors: [.white.opacity(hoverActive ? 0.16 : 0.07), .clear, AppColors.pointerLightTint.opacity(hoverActive ? 0.08 : 0.025)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                }
-                .pointerInspectTilt(enabled: !suppressHoverDuringScroll, cornerRadius: 16)
+            ReferenceMusicGradientArtwork(
+                title: album.key.title,
+                subtitle: album.key.artist,
+                posterPath: album.coverPath,
+                cornerRadius: 14,
+                glyphSize: 42,
+                cacheTargetSize: Self.coverCacheTargetSize
+            )
 
-            MarqueeText(text: album.key.title, font: .headline)
-                .frame(height: 20)
-            MarqueeText(text: "\(album.key.artist) · \(album.tracks.count) 首", font: .caption)
-                .frame(height: 15)
-                .foregroundStyle(.secondary)
+            MarqueeText(text: album.key.title, font: .system(size: 14.5, weight: .heavy))
+                .foregroundStyle(Color(red: 34 / 255, green: 41 / 255, blue: 54 / 255))
+                .frame(height: 18, alignment: .leading)
 
-            HStack(spacing: 6) {
-                if album.favoriteCount > 0 {
-                    MusicCompactStatusBadge(
-                        title: "\(album.favoriteCount) 首喜欢",
-                        systemImage: "heart.fill",
-                        tint: .red
-                    )
+            HStack(alignment: .center, spacing: 10) {
+                Text("\(album.key.artist) · \(album.trackCount) 首")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(AppColors.refSubtle)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                Button {
+                    onPlay()
+                } label: {
+                    HStack(spacing: 6) {
+                        MusicPlayTriangle()
+                            .fill(AppColors.refSecondaryText)
+                            .frame(width: 8, height: 10)
+                        Text("播放")
+                    }
+                    .font(.system(size: 12.5, weight: .bold))
+                    .foregroundStyle(AppColors.refSecondaryText)
                 }
-                if showsResetPlayCountAction, album.playCount > 0 {
-                    MusicCompactStatusBadge(
-                        title: "\(album.playCount) 次播放",
-                        systemImage: "play.circle"
-                    )
-                }
-                if album.remoteCount > 0 {
-                    MusicCompactStatusBadge(
-                        title: "\(album.remoteCount) 首远程",
-                        systemImage: "cloud"
-                    )
-                }
+                .buttonStyle(.plain)
             }
-            .frame(height: 21, alignment: .leading)
-
-            Button {
-                onPlay()
-            } label: {
-                Label("播放", systemImage: "play.fill")
-            }
-            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
         }
-        .padding(AppCardMetrics.repeatedContentPadding)
-        .staticSurfaceBackground(cornerRadius: AppCardMetrics.repeatedCornerRadius)
-        .repeatedCardChrome(hoverActive)
-        .repeatedSurfaceHover(hoverActive, cornerRadius: AppCardMetrics.repeatedCornerRadius, tint: AppColors.pointerLightTint, intensity: 0.82)
-        .contentShape(RoundedRectangle(cornerRadius: AppCardMetrics.repeatedCornerRadius, style: .continuous))
-        // #1 同 PosterCardView：保留封面 3D 检视效果，只把悬停卡片 zIndex 抬到上层，
-        // 让放大干净地盖在邻格之上，修掉相互裁切/把相邻卡片撑歪的 bug。
+        .padding(12)
+        .background {
+            cardShape.fill(AppColors.refCardBg)
+        }
+        .overlay {
+            cardShape.strokeBorder(AppColors.refOutlineBorder.opacity(0.82), lineWidth: 0.8)
+        }
+        .shadow(color: Color.black.opacity(hoverActive ? 0.070 : 0.035), radius: hoverActive ? 14 : 8, x: 0, y: hoverActive ? 6 : 3)
+        .offset(y: !reduceMotion && hoverActive ? -5 : 0)
+        .contentShape(cardShape)
         .zIndex(hoverActive ? 1 : 0)
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hoverActive)
         .onHover { hovering in
@@ -2037,7 +2510,7 @@ private struct MusicAlbumCard: View {
                 }
             }
             MusicPlaylistActionsMenu(
-                tracks: album.tracks,
+                tracks: tracksProvider(),
                 suggestedName: album.key.title,
                 onCreateNew: onCreatePlaylist
             )
@@ -2045,8 +2518,18 @@ private struct MusicAlbumCard: View {
     }
 }
 
+private struct MusicPlayTriangle: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.closeSubpath()
+        return path
+    }
+}
+
 private struct MusicArtistRow: View {
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
     let artist: MusicArtistGroup
@@ -2055,83 +2538,46 @@ private struct MusicArtistRow: View {
     let onPlay: () -> Void
     let onCreatePlaylist: (MusicPlaylistCreationRequest) -> Void
     let onResetPlayCounts: () -> Void
+    let tracksProvider: () -> [MediaItem]
     @State private var isHovering = false
 
     var body: some View {
         let hoverActive = isHovering && !suppressHoverDuringScroll
-        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        let seed = ReferenceMusicVisualSeed.make(title: artist.name)
 
-        HStack(spacing: 14) {
+        VStack(alignment: .center, spacing: 0) {
             ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(AppColors.accentGradient)
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [.white.opacity(0.28), .clear, AppColors.pointerLightTint.opacity(0.10)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                Image(systemName: "person.fill")
-                    .font(.title2)
+                Circle()
+                    .fill(LinearGradient(colors: [seed.start, seed.end], startPoint: .topLeading, endPoint: .bottomTrailing))
+                RadialGradient(
+                    colors: [.white.opacity(0.28), .clear],
+                    center: UnitPoint(x: 0.25, y: 0.15),
+                    startRadius: 4,
+                    endRadius: 120
+                )
+                Text(seed.glyph)
+                    .font(.system(size: 34, weight: .black))
                     .foregroundStyle(.white)
             }
-            .frame(width: 54, height: 54)
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(.white.opacity(hoverActive ? 0.54 : 0.30), lineWidth: 0.9)
-            }
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(Circle())
+            .shadow(color: seed.end.opacity(0.34), radius: 15, x: 0, y: 8)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(artist.name)
-                    .font(.headline)
-                Text("\(artist.tracks.count) 首歌曲 · \(artist.albumCount) 张专辑")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 6) {
-                    if artist.favoriteCount > 0 {
-                        MusicCompactStatusBadge(
-                            title: "\(artist.favoriteCount) 首喜欢",
-                            systemImage: "heart.fill",
-                            tint: .red
-                        )
-                    }
-                    if showsResetPlayCountAction, artist.playCount > 0 {
-                        MusicCompactStatusBadge(
-                            title: "\(artist.playCount) 次播放",
-                            systemImage: "play.circle"
-                        )
-                    }
-                    if artist.remoteCount > 0 {
-                        MusicCompactStatusBadge(
-                            title: "\(artist.remoteCount) 首远程",
-                            systemImage: "cloud"
-                        )
-                    }
-                }
-            }
-            Spacer()
-            Button {
-                onPlay()
-            } label: {
-                Label("播放", systemImage: "play.fill")
-            }
-            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
+            MarqueeText(text: artist.name, font: .system(size: 13.5, weight: .heavy), alignment: .center)
+                .foregroundStyle(Color(red: 34 / 255, green: 41 / 255, blue: 54 / 255))
+                .frame(maxWidth: .infinity, minHeight: 17, maxHeight: 17, alignment: .center)
+                .padding(.top, 11)
+
+            Text("\(artist.trackCount) 首")
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(AppColors.refSubtle)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 2)
+
         }
-        .padding(AppCardMetrics.repeatedContentPadding)
-        .background {
-            LiquidGlassSurfaceLayer(
-                selected: hoverActive,
-                cornerRadius: AppCardMetrics.repeatedCornerRadius,
-                thickness: hoverActive ? 1.08 : 1.0,
-                respondsToPointer: false,
-                renderMode: GlassSurfaceRole.repeatedHover.renderMode
-            )
-        }
-        .repeatedCardChrome(hoverActive)
-        .repeatedSurfaceHover(hoverActive, cornerRadius: AppCardMetrics.repeatedCornerRadius, tint: AppColors.pointerLightTint, intensity: 0.92)
-        .contentShape(shape)
+        .padding(8)
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .offset(y: !reduceMotion && hoverActive ? -4 : 0)
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hoverActive)
         .onHover { hovering in
             guard !suppressHoverDuringScroll else {
@@ -2167,7 +2613,7 @@ private struct MusicArtistRow: View {
                 }
             }
             MusicPlaylistActionsMenu(
-                tracks: artist.tracks,
+                tracks: tracksProvider(),
                 suggestedName: artist.name,
                 onCreateNew: onCreatePlaylist
             )
@@ -2202,7 +2648,8 @@ private struct ProgressiveMusicAlbumGrid: View {
                                     onOpen: { onOpen(album) },
                                     onPlay: { onPlay(album) },
                                     onCreatePlaylist: onCreatePlaylist,
-                                    onResetPlayCounts: { onResetPlayCounts(album) }
+                                    onResetPlayCounts: { onResetPlayCounts(album) },
+                                    tracksProvider: { appState.musicTracks(inAlbum: album.summary) }
                                 )
                                 .frame(maxWidth: .infinity, alignment: .top)
                             } else {
@@ -2228,8 +2675,6 @@ private struct ProgressiveMusicAlbumGrid: View {
             .transaction { transaction in
                 transaction.animation = nil
             }
-            .bleedingListCard()
-            .environment(\.suppressPointerHoverDuringScroll, true)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .suppressHoverEffectsDuringScroll()
@@ -2240,7 +2685,7 @@ private struct ProgressiveMusicAlbumGrid: View {
         let spacing: CGFloat = 20
         let minimumCardWidth: CGFloat = 220
         let availableWidth = max(width - 20, minimumCardWidth)
-        return max(1, Int((availableWidth + spacing) / (minimumCardWidth + spacing)))
+        return min(4, max(1, Int((availableWidth + spacing) / (minimumCardWidth + spacing))))
     }
 
     private func rowCount(for columns: Int) -> Int {
@@ -2263,37 +2708,66 @@ private struct ProgressiveMusicArtistList: View {
     let onResetPlayCounts: (MusicArtistGroup) -> Void
 
     var body: some View {
-        List {
-            ForEach(artists) { artist in
-                MusicArtistRow(
-                    artist: artist,
-                    showsResetPlayCountAction: showsResetPlayCountAction,
-                    onOpen: { onOpen(artist) },
-                    onPlay: { onPlay(artist) },
-                    onCreatePlaylist: onCreatePlaylist,
-                    onResetPlayCounts: { onResetPlayCounts(artist) }
-                )
-                .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 10, trailing: 0))
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-            }
+        GeometryReader { proxy in
+            let columns = columnCount(for: proxy.size.width)
+            let rows = rowCount(for: columns)
 
-            Color.clear
-                .frame(height: listBottomInset)
-                .listRowInsets(EdgeInsets())
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-        }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .environment(\.defaultMinListRowHeight, 0)
-        .transaction { transaction in
-            transaction.animation = nil
+            List {
+                ForEach(0..<rows, id: \.self) { rowIndex in
+                    HStack(alignment: .top, spacing: 18) {
+                        ForEach(0..<columns, id: \.self) { columnIndex in
+                            let index = rowIndex * columns + columnIndex
+                            if index < artists.count {
+                                let artist = artists[index]
+                                MusicArtistRow(
+                                    artist: artist,
+                                    showsResetPlayCountAction: showsResetPlayCountAction,
+                                    onOpen: { onOpen(artist) },
+                                    onPlay: { onPlay(artist) },
+                                    onCreatePlaylist: onCreatePlaylist,
+                                    onResetPlayCounts: { onResetPlayCounts(artist) },
+                                    tracksProvider: { appState.musicTracks(inArtist: artist.summary) }
+                                )
+                                .frame(maxWidth: .infinity, alignment: .top)
+                            } else {
+                                Color.clear
+                                    .frame(maxWidth: .infinity)
+                            }
+                        }
+                    }
+                    .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 24, trailing: 0))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                }
+
+                Color.clear
+                    .frame(height: listBottomInset)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 0)
+            .transaction { transaction in
+                transaction.animation = nil
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .suppressHoverEffectsDuringScroll()
         .suppressListHighlight()
-        .bleedingListCard()
+    }
+
+    private func columnCount(for width: CGFloat) -> Int {
+        let spacing: CGFloat = 18
+        let minimumCardWidth: CGFloat = 128
+        let availableWidth = max(width - 20, minimumCardWidth)
+        return min(6, max(2, Int((availableWidth + spacing) / (minimumCardWidth + spacing))))
+    }
+
+    private func rowCount(for columns: Int) -> Int {
+        guard columns > 0 else { return 0 }
+        return (artists.count + columns - 1) / columns
     }
 
     private var listBottomInset: CGFloat {
@@ -2369,9 +2843,8 @@ private struct MusicPlaylistCard: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(playlist.name)
-                    .font(.headline)
-                    .lineLimit(1)
+                MarqueeText(text: playlist.name, font: .headline)
+                    .frame(height: 21, alignment: .leading)
                 Text("\(tracks.count) 首歌曲")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -2426,9 +2899,15 @@ private struct MusicPlaylistCard: View {
             }
         }
         .padding(AppCardMetrics.repeatedContentPadding)
-        .staticSurfaceBackground(cornerRadius: AppCardMetrics.repeatedCornerRadius)
-        .repeatedCardChrome(hoverActive)
-        .repeatedSurfaceHover(hoverActive, cornerRadius: AppCardMetrics.repeatedCornerRadius, tint: AppColors.pointerLightTint, intensity: 0.82)
+        .appInteractiveSurface(
+            active: hoverActive,
+            selected: isPinnedFavorite,
+            cornerRadius: AppCardMetrics.repeatedCornerRadius,
+            tint: isPinnedFavorite ? .red : AppColors.pointerLightTint,
+            intensity: 0.86,
+            scale: 1.006,
+            lift: 2
+        )
         .contentShape(RoundedRectangle(cornerRadius: AppCardMetrics.repeatedCornerRadius, style: .continuous))
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hoverActive)
         .onHover { hovering in
@@ -2480,28 +2959,28 @@ private struct MusicAlbumKey: Hashable, Sendable {
 }
 
 private struct MusicAlbumGroup: Identifiable, Sendable {
-    let key: MusicAlbumKey
-    let tracks: [MediaItem]
+    let summary: MusicAlbumSummary
 
-    var id: String { "\(key.artist)-\(key.title)" }
-    var coverPath: String? { tracks.first?.posterPath }
-    var playCount: Int { tracks.reduce(0) { $0 + $1.playCountValue } }
-    var favoriteCount: Int { tracks.filter(\.favorite).count }
-    var remoteCount: Int { tracks.filter(\.isRemoteResource).count }
-    var latestUpdatedAt: Date { tracks.map(\.updatedAt).max() ?? .distantPast }
+    var id: String { summary.id }
+    var key: MusicAlbumKey { MusicAlbumKey(title: summary.title, artist: summary.artist) }
+    var coverPath: String? { summary.coverPath }
+    var playCount: Int { summary.playCount }
+    var favoriteCount: Int { summary.favoriteCount }
+    var remoteCount: Int { summary.remoteCount }
+    var trackCount: Int { summary.trackCount }
+    var latestUpdatedAt: Date { summary.latestUpdatedAt }
 }
 
 private struct MusicArtistGroup: Identifiable, Sendable {
-    let name: String
-    let tracks: [MediaItem]
+    let summary: MusicArtistSummary
 
-    var id: String { name }
-    var playCount: Int { tracks.reduce(0) { $0 + $1.playCountValue } }
-    var favoriteCount: Int { tracks.filter(\.favorite).count }
-    var remoteCount: Int { tracks.filter(\.isRemoteResource).count }
-    var albumCount: Int {
-        Set(tracks.map { musicDisplayAlbum($0.album) }).count
-    }
+    var id: String { summary.id }
+    var name: String { summary.name }
+    var playCount: Int { summary.playCount }
+    var favoriteCount: Int { summary.favoriteCount }
+    var remoteCount: Int { summary.remoteCount }
+    var trackCount: Int { summary.trackCount }
+    var albumCount: Int { summary.albumCount }
 }
 
 private extension MediaItem {

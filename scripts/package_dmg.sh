@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="MediaLib"
 DISPLAY_NAME="MediaLIB"
 BUNDLE_ID="com.local.MediaLib"
-VERSION="1.2.5"
-BUILD="43"
+VERSION="1.2.6"
+BUILD="62"
 DIST_DIR="$ROOT_DIR/dist"
 BUILD_ROOT="/private/tmp/MediaLib-package"
 APP_BUNDLE="$BUILD_ROOT/$DISPLAY_NAME.app"
@@ -133,6 +133,10 @@ bundle_libmpv_runtime() {
       target_path="$frameworks_dir/$base_name"
     fi
 
+    if [[ -n "$framework_path" && -d "$frameworks_dir/$base_name" ]]; then
+      return 0
+    fi
+
     if [[ -f "$target_path" ]]; then
       return 0
     fi
@@ -140,6 +144,7 @@ bundle_libmpv_runtime() {
     if [[ -n "$framework_path" ]]; then
       cp -R "$framework_path" "$frameworks_dir/$base_name"
       chmod -R u+w "$frameworks_dir/$base_name"
+      rm -rf "$frameworks_dir/$base_name/$base_name"
       find "$frameworks_dir/$base_name/Versions" -name site-packages -type l -exec rm {} \; 2>/dev/null || true
       slim_framework_copy "$frameworks_dir/$base_name"
     else

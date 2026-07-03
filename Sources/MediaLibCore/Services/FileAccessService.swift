@@ -1,6 +1,6 @@
 import Foundation
 
-public struct AppDirectories {
+public struct AppDirectories: Sendable {
     public let applicationSupport: URL
     public let database: URL
     public let databaseBackups: URL

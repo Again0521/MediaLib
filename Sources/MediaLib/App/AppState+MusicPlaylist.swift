@@ -17,6 +17,7 @@ extension AppState {
     func saveMusicSmartPlaylist(_ playlist: MusicSmartPlaylist, notify: Bool = true) -> MusicSmartPlaylist? {
         do {
             guard let result = try musicPlaylistStore.saveSmart(playlist) else { return nil }
+            cachedMusicSmartTracksByPlaylistID.removeValue(forKey: result.saved.id)
             bumpLibraryRevision()
             if notify {
                 let title = result.isNew ? "智能歌单已创建" : "智能歌单已保存"
@@ -44,6 +45,7 @@ extension AppState {
     func deleteMusicSmartPlaylist(_ playlist: MusicSmartPlaylist) {
         do {
             if try musicPlaylistStore.deleteSmart(id: playlist.id) {
+                cachedMusicSmartTracksByPlaylistID.removeValue(forKey: playlist.id)
                 bumpLibraryRevision()
             }
         } catch {
@@ -53,6 +55,9 @@ extension AppState {
 
     /// 按规则实时求值：从全部音乐里筛选 → 排序 → 截断数量。曲目随库状态自动更新。
     func musicTracks(inSmart playlist: MusicSmartPlaylist) -> [MediaItem] {
+        if let cached = cachedMusicSmartTracksByPlaylistID[playlist.id] {
+            return cached
+        }
         var tracks = musicTracks
 
         switch playlist.filter {
@@ -89,6 +94,7 @@ extension AppState {
         if playlist.limit != .unlimited {
             tracks = Array(tracks.prefix(playlist.limit.rawValue))
         }
+        cachedMusicSmartTracksByPlaylistID[playlist.id] = tracks
         return tracks
     }
 

@@ -1,6 +1,6 @@
 import Foundation
 
-public struct MediaSource: Identifiable, Codable, Hashable {
+public struct MediaSource: Identifiable, Codable, Hashable, Sendable {
     public var id: String
     public var name: String
     public var path: String

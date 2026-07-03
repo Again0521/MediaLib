@@ -1,3 +1,4 @@
+import AppKit
 import MediaLibCore
 import SwiftUI
 
@@ -52,13 +53,40 @@ private enum HomeContentSnapshotBuilder {
     }
 }
 
-private struct HomeOverviewBoardModel: Identifiable {
+private struct HomeOverviewBoardModel: Identifiable, Sendable {
     let id: String
     let title: String
     let subtitle: String
     let systemImage: String
     let items: [MediaItem]
     let emptyMessage: String
+}
+
+private struct HomeOverviewSnapshotInput: Sendable {
+    let daySeed: Int
+    let now: Date
+    let language: AppLanguage
+    let watchedThreshold: Double
+    let visibleVideos: [MediaItem]
+    let continueWatchingItems: [MediaItem]
+    let nextUpItems: [MediaItem]
+    let offlineItems: [MediaItem]
+    let publishedBoards: [HomeOverviewBoardModel]
+    let backdropItemIDs: Set<String>
+}
+
+private struct HomePhotoWallTheme {
+    let title: String
+    let badge: String
+    let items: [MediaItem]
+}
+
+private struct HomeMusicStyleBucket: Identifiable {
+    let id: String
+    let key: String
+    let title: String
+    let tracks: [MediaItem]
+    let score: Double
 }
 
 private struct HomeRecommendationProfile {
@@ -95,11 +123,729 @@ private struct HomeRecommendationProfile {
     }
 }
 
+private enum HomeOverviewSnapshotBuilder {
+    static func makeBoards(from input: HomeOverviewSnapshotInput) -> [HomeOverviewBoardModel] {
+        let visibleVideos = input.visibleVideos.filter { $0.type != .music && $0.type != .episode && $0.type != .privateCollection }
+        let profile = recommendationProfile(
+            visibleVideos: visibleVideos,
+            continueWatchingItems: input.continueWatchingItems,
+            nextUpItems: input.nextUpItems,
+            watchedThreshold: input.watchedThreshold,
+            now: input.now
+        )
+        let dailyBannerItems = dailyBannerItems(
+            daySeed: input.daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile,
+            backdropItemIDs: input.backdropItemIDs,
+            watchedThreshold: input.watchedThreshold,
+            now: input.now
+        )
+        let recommendedItems = recommendedOverviewItems(
+            daySeed: input.daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile,
+            watchedThreshold: input.watchedThreshold,
+            now: input.now
+        )
+        let recommendedIDs = Set(recommendedItems.map(\.id))
+        let themeItems = themedHighRatedItems(
+            daySeed: input.daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile,
+            excludedIDs: recommendedIDs,
+            watchedThreshold: input.watchedThreshold,
+            now: input.now
+        )
+        let themeIDs = Set(themeItems.map(\.id))
+        let highRatedSeriesItems = highRatedSeriesOverviewItems(
+            daySeed: input.daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile,
+            excludedIDs: recommendedIDs.union(themeIDs),
+            watchedThreshold: input.watchedThreshold,
+            now: input.now
+        )
+        let seriesIDs = Set(highRatedSeriesItems.map(\.id))
+        let watchlistItems = watchlistOverviewItems(
+            daySeed: input.daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile,
+            watchedThreshold: input.watchedThreshold,
+            now: input.now
+        )
+        let recentSeriesItems = recentSeriesOverviewItems(
+            daySeed: input.daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile,
+            excludedIDs: recommendedIDs.union(seriesIDs),
+            watchedThreshold: input.watchedThreshold,
+            now: input.now
+        )
+        let recentHighRatedItems = recentHighRatedOverviewItems(
+            daySeed: input.daySeed,
+            visibleVideos: visibleVideos,
+            profile: profile,
+            excludedIDs: recommendedIDs.union(seriesIDs),
+            watchedThreshold: input.watchedThreshold,
+            now: input.now
+        )
+        let offlineItems = offlineOverviewItems(
+            daySeed: input.daySeed,
+            offlineItems: input.offlineItems,
+            profile: profile,
+            watchedThreshold: input.watchedThreshold,
+            now: input.now
+        )
+
+        var boards = [
+            HomeOverviewBoardModel(
+                id: "daily-banner",
+                title: localize("每日推荐", language: input.language),
+                subtitle: recommendationSubtitle(for: profile, language: input.language),
+                systemImage: "sparkles.tv",
+                items: dailyBannerItems,
+                emptyMessage: ""
+            ),
+            HomeOverviewBoardModel(
+                id: "continue",
+                title: localize("继续观看", language: input.language),
+                subtitle: localize("上次停下的地方还在这里。", language: input.language),
+                systemImage: "play.circle",
+                items: continueWatchingOverviewItems(
+                    daySeed: input.daySeed,
+                    items: input.continueWatchingItems,
+                    profile: profile,
+                    watchedThreshold: input.watchedThreshold,
+                    now: input.now
+                ),
+                emptyMessage: localize("开始播放后，这里会留下继续观看的入口。", language: input.language)
+            ),
+            HomeOverviewBoardModel(
+                id: "nextUp",
+                title: localize("下一集", language: input.language),
+                subtitle: localize("把故事接着往下看。", language: input.language),
+                systemImage: "forward.end.circle",
+                items: nextUpOverviewItems(
+                    daySeed: input.daySeed,
+                    items: input.nextUpItems,
+                    profile: profile,
+                    now: input.now
+                ),
+                emptyMessage: localize("看过系列剧集后，下一集会自动出现在这里。", language: input.language)
+            ),
+            HomeOverviewBoardModel(
+                id: "recommend",
+                title: localize("为你精选", language: input.language),
+                subtitle: recommendationSubtitle(for: profile, language: input.language),
+                systemImage: "sparkles.tv",
+                items: recommendedItems,
+                emptyMessage: localize("看过、喜欢或标星一些内容后，推荐会更有方向。", language: input.language)
+            )
+        ]
+
+        if !themeItems.isEmpty, let genreName = profile.strongestGenreDisplayName {
+            boards.append(
+                HomeOverviewBoardModel(
+                    id: "theme-\(profile.strongestGenre ?? genreName)",
+                    title: input.language == .zhHans ? "\(genreName)高分" : "\(localize("高分", language: input.language)) · \(genreName)",
+                    subtitle: localize("沿着你最近常看的题材继续挑。", language: input.language),
+                    systemImage: "tag",
+                    items: themeItems,
+                    emptyMessage: ""
+                )
+            )
+        }
+
+        if !highRatedSeriesItems.isEmpty {
+            boards.append(
+                HomeOverviewBoardModel(
+                    id: "high-rated-series",
+                    title: localize("高分剧集", language: input.language),
+                    subtitle: localize("优先展示评分较高、还没看完的系列。", language: input.language),
+                    systemImage: "star.circle",
+                    items: highRatedSeriesItems,
+                    emptyMessage: ""
+                )
+            )
+        }
+
+        if !watchlistItems.isEmpty {
+            boards.append(
+                HomeOverviewBoardModel(
+                    id: "watchlist",
+                    title: localize("想看清单", language: input.language),
+                    subtitle: localize("你之前留意过的内容，按适合度重新排好。", language: input.language),
+                    systemImage: "bookmark.circle",
+                    items: watchlistItems,
+                    emptyMessage: ""
+                )
+            )
+        }
+
+        if !recentSeriesItems.isEmpty {
+            boards.append(
+                HomeOverviewBoardModel(
+                    id: "recent-series",
+                    title: localize("最近添加 · 剧集", language: input.language),
+                    subtitle: localize("按入库时间、评分和偏好信号重新整理最近加入的剧集。", language: input.language),
+                    systemImage: "clock.badge.plus",
+                    items: recentSeriesItems,
+                    emptyMessage: ""
+                )
+            )
+        }
+
+        if !recentHighRatedItems.isEmpty {
+            boards.append(
+                HomeOverviewBoardModel(
+                    id: "recent-high-rated",
+                    title: localize("高分精选", language: input.language),
+                    subtitle: localize("避开上方推荐，优先展示电影、纪录片和综艺里的高评分内容。", language: input.language),
+                    systemImage: "clock.badge.star",
+                    items: recentHighRatedItems,
+                    emptyMessage: ""
+                )
+            )
+        }
+
+        if !offlineItems.isEmpty {
+            boards.append(
+                HomeOverviewBoardModel(
+                    id: "offline-ready",
+                    title: localize("离线可看", language: input.language),
+                    subtitle: localize("已经缓存好的内容，离线也能打开。", language: input.language),
+                    systemImage: "arrow.down.circle",
+                    items: offlineItems,
+                    emptyMessage: ""
+                )
+            )
+        }
+
+        boards.append(contentsOf: input.publishedBoards)
+        return boards.enumerated()
+            .sorted { lhs, rhs in
+                let leftHasContent = !lhs.element.items.isEmpty
+                let rightHasContent = !rhs.element.items.isEmpty
+                if leftHasContent != rightHasContent { return leftHasContent }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
+
+    private static func localize(_ key: String, language: AppLanguage) -> String {
+        AppLocalizer.text(key, language: language)
+    }
+
+    private static let seriesRecommendationTypes: Set<MediaType> = [.tvShow, .anime, .documentary, .variety]
+
+    private static func recommendationSubtitle(for profile: HomeRecommendationProfile, language: AppLanguage) -> String {
+        if let genreName = profile.strongestGenreDisplayName {
+            if language == .zhHans {
+                return "根据你的观看和标星偏好，优先挑 \(genreName) 与高分系列。"
+            }
+            return localize("根据你的观看和标星偏好，优先挑高分系列。", language: language)
+        }
+        return localize("先从库内高分系列和近期偏好里挑一些适合看的。", language: language)
+    }
+
+    private static func recommendationProfile(
+        visibleVideos: [MediaItem],
+        continueWatchingItems: [MediaItem],
+        nextUpItems: [MediaItem],
+        watchedThreshold: Double,
+        now: Date
+    ) -> HomeRecommendationProfile {
+        var profile = HomeRecommendationProfile()
+        let signalItems = visibleVideos + continueWatchingItems + nextUpItems
+        var seen = Set<String>()
+
+        for item in signalItems where seen.insert(item.id).inserted {
+            let signalWeight = recommendationSignalWeight(for: item, watchedThreshold: watchedThreshold, now: now)
+            guard signalWeight > 0 else { continue }
+            profile.signalItemIDs.insert(item.id)
+            profile.typeWeights[item.type, default: 0] += signalWeight * (seriesRecommendationTypes.contains(item.type) ? 1.1 : 0.8)
+
+            let genres = overviewGenres(for: item)
+            guard !genres.isEmpty else { continue }
+            let perGenreWeight = signalWeight / Double(genres.count)
+            for genre in genres {
+                profile.genreWeights[genre.key, default: 0] += perGenreWeight
+                profile.genreDisplayNames[genre.key] = profile.genreDisplayNames[genre.key] ?? genre.display
+            }
+        }
+        return profile
+    }
+
+    private static func recommendationSignalWeight(for item: MediaItem, watchedThreshold: Double, now: Date) -> Double {
+        guard item.type != .music, item.type != .privateCollection else { return 0 }
+        var weight = 0.0
+        if item.favorite { weight += 4.2 }
+        if item.watchlist { weight += 1.4 }
+        if let userRating = item.userRating, userRating.isFinite {
+            if userRating >= 4 {
+                weight += userRating * 1.15
+            } else if userRating >= 3 {
+                weight += userRating * 0.65
+            }
+        }
+        if item.watched || item.playProgress >= watchedThreshold {
+            weight += 3.0
+        } else if item.playProgress >= 0.12 {
+            weight += min(item.playProgress, 0.95) * 2.4
+        }
+        if let lastPlayedAt = item.lastPlayedAt {
+            let days = max(0, now.timeIntervalSince(lastPlayedAt) / 86_400)
+            if days <= 120 {
+                weight += max(0, 1.6 - days / 75)
+            }
+        }
+        if normalizedProviderScore(item.rating) >= 8.0 {
+            weight += 0.5
+        }
+        return weight
+    }
+
+    private static func dailyBannerItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile,
+        backdropItemIDs: Set<String>,
+        watchedThreshold: Double,
+        now: Date
+    ) -> [MediaItem] {
+        let qualified = visibleVideos.filter { item in
+            (normalizedProviderScore(item.rating) > 8 || normalizedUserScore(item.userRating) > 8) &&
+            item.type != .music &&
+            item.type != .privateCollection
+        }
+        let fallback = visibleVideos.filter { isHighRatedForOverview($0) }
+        var seen = Set<String>()
+        let base = (qualified.count >= 3 ? qualified : qualified + fallback).filter { seen.insert($0.id).inserted }
+        return rankedDiverseItems(from: base, limit: 7, now: now) { item in
+            var score = 0.0
+            score += normalizedProviderScore(item.rating) * 0.42
+            score += normalizedUserScore(item.userRating) * 0.48
+            score += profileAffinityScore(for: item, profile: profile) * 1.55
+            score += hasLandscape(item, backdropItemIDs: backdropItemIDs) ? 1.35 : -0.45
+            score += item.watchlist ? 0.55 : 0
+            score += item.favorite ? 0.42 : 0
+            score += isFinished(item, watchedThreshold: watchedThreshold) ? -0.92 : 0
+            score += recencyScore(for: item.updatedAt, horizonDays: 540, now: now) * 0.28
+            score += stableDailyValue(forID: item.id, daySeed: daySeed, salt: "daily-banner") * 3.2
+            return score
+        }
+    }
+
+    private static func recommendedOverviewItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile,
+        watchedThreshold: Double,
+        now: Date
+    ) -> [MediaItem] {
+        let preferred = visibleVideos.filter { item in
+            !isFinished(item, watchedThreshold: watchedThreshold) || item.watchlist
+        }
+        let base = preferred.count >= 6 ? preferred : visibleVideos
+        return rankedDiverseItems(from: base, limit: 12, now: now) { item in
+            recommendationScore(for: item, profile: profile, daySeed: daySeed, watchedThreshold: watchedThreshold, now: now)
+        }
+    }
+
+    private static func themedHighRatedItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile,
+        excludedIDs: Set<String>,
+        watchedThreshold: Double,
+        now: Date
+    ) -> [MediaItem] {
+        guard let strongestGenre = profile.strongestGenre else { return [] }
+        let candidates = visibleVideos.filter { item in
+            !excludedIDs.contains(item.id) &&
+            overviewGenres(for: item).contains { $0.key == strongestGenre } &&
+            isHighRatedForOverview(item) &&
+            !isFinished(item, watchedThreshold: watchedThreshold)
+        }
+        return rankedDiverseItems(from: candidates, limit: 12, now: now) { item in
+            recommendationScore(for: item, profile: profile, daySeed: daySeed, watchedThreshold: watchedThreshold, now: now) + 1.6
+        }
+    }
+
+    private static func highRatedSeriesOverviewItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile,
+        excludedIDs: Set<String>,
+        watchedThreshold: Double,
+        now: Date
+    ) -> [MediaItem] {
+        let candidates = visibleVideos.filter { item in
+            !excludedIDs.contains(item.id) &&
+            seriesRecommendationTypes.contains(item.type) &&
+            isHighRatedForOverview(item) &&
+            !isFinished(item, watchedThreshold: watchedThreshold)
+        }
+        return rankedDiverseItems(from: candidates, limit: 12, now: now) { item in
+            recommendationScore(for: item, profile: profile, daySeed: daySeed, watchedThreshold: watchedThreshold, now: now) + 1.2
+        }
+    }
+
+    private static func watchlistOverviewItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile,
+        watchedThreshold: Double,
+        now: Date
+    ) -> [MediaItem] {
+        let candidates = visibleVideos.filter(\.watchlist)
+        return rankedDiverseItems(from: candidates, limit: 12, now: now) { item in
+            recommendationScore(for: item, profile: profile, daySeed: daySeed, watchedThreshold: watchedThreshold, now: now) + 2.0
+        }
+    }
+
+    private static func continueWatchingOverviewItems(
+        daySeed: Int,
+        items: [MediaItem],
+        profile: HomeRecommendationProfile,
+        watchedThreshold: Double,
+        now: Date
+    ) -> [MediaItem] {
+        rankedDiverseItems(from: items, limit: 10, now: now) { item in
+            let progress = min(max(item.playProgress, 0), 1)
+            let sweetSpot = progress > 0.08 && progress < watchedThreshold ? 1.25 : 0
+            return recencyScore(for: item.lastPlayedAt ?? item.updatedAt, horizonDays: 45, now: now) * 3.2 +
+            sweetSpot +
+            profileAffinityScore(for: item, profile: profile) * 0.6 +
+            stableDailyValue(forID: item.id, daySeed: daySeed, salt: "continue") * 0.35
+        }
+    }
+
+    private static func nextUpOverviewItems(
+        daySeed: Int,
+        items: [MediaItem],
+        profile: HomeRecommendationProfile,
+        now: Date
+    ) -> [MediaItem] {
+        rankedDiverseItems(from: items, limit: 10, now: now) { item in
+            recencyScore(for: item.lastPlayedAt ?? item.updatedAt, horizonDays: 90, now: now) * 2.2 +
+            profileAffinityScore(for: item, profile: profile) * 0.8 +
+            stableDailyValue(forID: item.id, daySeed: daySeed, salt: "next-up") * 0.55
+        }
+    }
+
+    private static func recentSeriesOverviewItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile,
+        excludedIDs: Set<String>,
+        watchedThreshold: Double,
+        now: Date
+    ) -> [MediaItem] {
+        let candidates = visibleVideos.filter { item in
+            !excludedIDs.contains(item.id) && seriesRecommendationTypes.contains(item.type)
+        }
+        return rankedDiverseItems(from: candidates, limit: 24, now: now) { item in
+            recencyScore(for: item.updatedAt, horizonDays: 120, now: now) * 2.1 +
+            max(normalizedProviderScore(item.rating), normalizedUserScore(item.userRating)) * 0.22 +
+            profileAffinityScore(for: item, profile: profile) * 0.65 +
+            (isFinished(item, watchedThreshold: watchedThreshold) ? -0.65 : 0.35) +
+            stableDailyValue(forID: item.id, daySeed: daySeed, salt: "recent-series") * 0.75
+        }
+    }
+
+    private static func recentHighRatedOverviewItems(
+        daySeed: Int,
+        visibleVideos: [MediaItem],
+        profile: HomeRecommendationProfile,
+        excludedIDs: Set<String>,
+        watchedThreshold: Double,
+        now: Date
+    ) -> [MediaItem] {
+        let primaryCandidates = visibleVideos.filter { item in
+            !excludedIDs.contains(item.id) &&
+            !seriesRecommendationTypes.contains(item.type) &&
+            isHighRatedForOverview(item) &&
+            !isFinished(item, watchedThreshold: watchedThreshold)
+        }
+        let candidates = primaryCandidates.count >= 6
+            ? primaryCandidates
+            : visibleVideos.filter { item in
+                !excludedIDs.contains(item.id) &&
+                isHighRatedForOverview(item) &&
+                !isFinished(item, watchedThreshold: watchedThreshold)
+            }
+        return rankedDiverseItems(from: candidates, limit: 12, now: now) { item in
+            normalizedProviderScore(item.rating) * 1.8 +
+            normalizedUserScore(item.userRating) * 1.4 +
+            recencyScore(for: item.updatedAt, horizonDays: 240, now: now) * 0.8 +
+            profileAffinityScore(for: item, profile: profile) * 0.45 +
+            stableDailyValue(forID: item.id, daySeed: daySeed, salt: "recent-high-rated") * 1.75
+        }
+    }
+
+    private static func offlineOverviewItems(
+        daySeed: Int,
+        offlineItems: [MediaItem],
+        profile: HomeRecommendationProfile,
+        watchedThreshold: Double,
+        now: Date
+    ) -> [MediaItem] {
+        let candidates = offlineItems.filter { item in
+            item.type != .music && item.type != .episode && item.type != .privateCollection
+        }
+        return rankedDiverseItems(from: candidates, limit: 12, now: now) { item in
+            recommendationScore(for: item, profile: profile, daySeed: daySeed, watchedThreshold: watchedThreshold, now: now) + 1.4
+        }
+    }
+
+    private static func recommendationScore(
+        for item: MediaItem,
+        profile: HomeRecommendationProfile,
+        daySeed: Int,
+        watchedThreshold: Double,
+        now: Date
+    ) -> Double {
+        let providerScore = normalizedProviderScore(item.rating)
+        let userScore = normalizedUserScore(item.userRating)
+        let ratingScore = max(providerScore, userScore)
+        var score = ratingScore * 1.25
+        score += profileAffinityScore(for: item, profile: profile)
+        score += seriesRecommendationTypes.contains(item.type) ? 1.35 : 0.3
+        score += item.watchlist ? 1.0 : 0
+        score += item.favorite ? 0.4 : 0
+        score += item.playProgress <= 0.02 && !item.watched ? 0.75 : 0
+        score += recencyScore(for: item.updatedAt, horizonDays: 420, now: now) * 0.35
+        score += stableDailyValue(forID: item.id, daySeed: daySeed, salt: "item") * 1.65
+
+        if isFinished(item, watchedThreshold: watchedThreshold) {
+            score -= 3.8
+        } else if item.playProgress > 0.12 {
+            score -= 1.2
+        }
+        if profile.signalItemIDs.contains(item.id), !item.watchlist {
+            score -= 0.7
+        }
+        return score
+    }
+
+    private static func rankedDiverseItems(
+        from candidates: [MediaItem],
+        limit: Int,
+        now: Date,
+        score: (MediaItem) -> Double
+    ) -> [MediaItem] {
+        var seen = Set<String>()
+        var remaining = candidates.compactMap { item -> (item: MediaItem, score: Double)? in
+            guard seen.insert(item.id).inserted else { return nil }
+            return (item, score(item))
+        }
+        var selected: [MediaItem] = []
+        var typeCounts: [MediaType: Int] = [:]
+        var genreCounts: [String: Int] = [:]
+        var sourceCounts: [String: Int] = [:]
+
+        while !remaining.isEmpty, selected.count < limit {
+            let bestIndex = remaining.indices.max { lhsIndex, rhsIndex in
+                let lhs = diversityAdjustedScore(
+                    remaining[lhsIndex],
+                    typeCounts: typeCounts,
+                    genreCounts: genreCounts,
+                    sourceCounts: sourceCounts,
+                    now: now
+                )
+                let rhs = diversityAdjustedScore(
+                    remaining[rhsIndex],
+                    typeCounts: typeCounts,
+                    genreCounts: genreCounts,
+                    sourceCounts: sourceCounts,
+                    now: now
+                )
+                if lhs != rhs { return lhs < rhs }
+                return remaining[lhsIndex].item.title.localizedCaseInsensitiveCompare(remaining[rhsIndex].item.title) == .orderedDescending
+            }
+            guard let bestIndex else { break }
+            let picked = remaining.remove(at: bestIndex).item
+            selected.append(picked)
+            typeCounts[picked.type, default: 0] += 1
+            for genre in overviewGenres(for: picked) {
+                genreCounts[genre.key, default: 0] += 1
+            }
+            if let sourcePath = picked.sourcePath, !sourcePath.isEmpty {
+                sourceCounts[sourcePath, default: 0] += 1
+            }
+        }
+        return selected
+    }
+
+    private static func diversityAdjustedScore(
+        _ candidate: (item: MediaItem, score: Double),
+        typeCounts: [MediaType: Int],
+        genreCounts: [String: Int],
+        sourceCounts: [String: Int],
+        now: Date
+    ) -> Double {
+        let item = candidate.item
+        var adjusted = candidate.score
+        adjusted -= Double(typeCounts[item.type] ?? 0) * 0.42
+        let genres = overviewGenres(for: item)
+        if !genres.isEmpty {
+            let repeatedGenrePenalty = genres.reduce(0.0) { $0 + Double(genreCounts[$1.key] ?? 0) * 0.28 }
+            adjusted -= min(repeatedGenrePenalty, 1.4)
+        }
+        if let sourcePath = item.sourcePath {
+            adjusted -= Double(sourceCounts[sourcePath] ?? 0) * 0.16
+        }
+        adjusted += recencyScore(for: item.lastPlayedAt, horizonDays: 7, now: now) * 0.04
+        return adjusted
+    }
+
+    private static func profileAffinityScore(for item: MediaItem, profile: HomeRecommendationProfile) -> Double {
+        guard profile.hasSignals else { return 0 }
+        let genres = overviewGenres(for: item)
+        let rawGenreWeight = genres.reduce(0.0) { partial, genre in
+            partial + (profile.genreWeights[genre.key] ?? 0)
+        }
+        let genreScore: Double
+        if profile.maxGenreWeight > 0 {
+            genreScore = min(rawGenreWeight / profile.maxGenreWeight, 2.4) * 2.1
+        } else {
+            genreScore = 0
+        }
+        let typeWeight = profile.typeWeights[item.type] ?? 0
+        let typeScore = profile.maxTypeWeight > 0 ? min(typeWeight / profile.maxTypeWeight, 1.4) * 1.35 : 0
+        return genreScore + typeScore
+    }
+
+    private static func hasLandscape(_ item: MediaItem, backdropItemIDs: Set<String>) -> Bool {
+        backdropItemIDs.contains(item.id) || !(item.backdropPath ?? "").isEmpty
+    }
+
+    private static func isHighRatedForOverview(_ item: MediaItem) -> Bool {
+        normalizedProviderScore(item.rating) >= 7.3 || normalizedUserScore(item.userRating) >= 8
+    }
+
+    private static func isFinished(_ item: MediaItem, watchedThreshold: Double) -> Bool {
+        item.watched || item.playProgress >= watchedThreshold
+    }
+
+    private static func normalizedProviderScore(_ rating: Double?) -> Double {
+        guard let rating, rating.isFinite, rating > 0 else { return 0 }
+        return rating <= 5 ? rating * 2 : min(rating, 10)
+    }
+
+    private static func normalizedUserScore(_ rating: Double?) -> Double {
+        guard let rating, rating.isFinite, rating > 0 else { return 0 }
+        return min(rating, 5) * 2
+    }
+
+    private static func recencyScore(for date: Date?, horizonDays: Double, now: Date) -> Double {
+        guard let date else { return 0 }
+        let days = max(0, now.timeIntervalSince(date) / 86_400)
+        guard horizonDays > 0 else { return 0 }
+        return max(0, 1 - min(days, horizonDays) / horizonDays)
+    }
+
+    private static func overviewGenres(for item: MediaItem) -> [(key: String, display: String)] {
+        guard let genre = item.genre else { return [] }
+        let separators = CharacterSet(charactersIn: ",，、/|;；")
+        var seen = Set<String>()
+        return genre
+            .components(separatedBy: separators)
+            .compactMap { raw -> (key: String, display: String)? in
+                let display = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !display.isEmpty else { return nil }
+                let key = display
+                    .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+                    .lowercased()
+                guard !key.isEmpty, seen.insert(key).inserted else { return nil }
+                return (key, display)
+            }
+    }
+
+    private static func stableDailyValue(forID id: String, daySeed: Int, salt: String) -> Double {
+        let hash = (id + "-\(salt)-\(daySeed)").unicodeScalars.reduce(UInt64(5381)) { partial, scalar in
+            ((partial &* 33) &+ UInt64(scalar.value))
+        }
+        return Double(hash % 997) / 997.0
+    }
+}
+
+/// 首页总览的跨实例计算缓存（仅主线程访问）：
+/// 1) boards：HomeView 随导航切换被整体重建，@State 快照每次从空开始会导致
+///    「切回首页先空白/先走同步兜底重算」——把最近一次看板快照静态留存，init 时直接回填。
+/// 2) memo：photoWallTheme / 音乐推荐 / hero 兜底等重计算此前在每次 body 求值时
+///    同步重算（总览模块在非 Lazy 的 VStack 里），是切页与滚动卡顿的主因。
+///    以 overviewSnapshotKey 为键做单代记忆化：键不变直接复用，键变整体作废，
+///    输出值与原实时计算逐位一致，不改变任何视觉结果。
+@MainActor
+private enum HomeOverviewComputationCache {
+    static var boardsKey = ""
+    static var boards: [HomeOverviewBoardModel] = []
+
+    private static var memoKey = ""
+    private static var memo: [String: Any] = [:]
+
+    static func value<T>(_ id: String, key: String, compute: () -> T) -> T {
+        if memoKey != key {
+            memoKey = key
+            memo.removeAll(keepingCapacity: true)
+        }
+        if let cached = memo[id] as? T {
+            return cached
+        }
+        let value = compute()
+        memo[id] = value
+        return value
+    }
+}
+
+private enum HomeModuleKind: String, CaseIterable, Identifiable {
+    case hero
+    case stats
+    case dashboard
+    case seriesRecommendations
+    case continueWatching
+    case musicRecommendations
+    case continueListening
+    case recentSeries
+    case highRated
+    case photoWall
+
+    var id: String { rawValue }
+
+    static let defaultOrder: [HomeModuleKind] = [
+        .hero,
+        .stats,
+        .seriesRecommendations,
+        .continueWatching,
+        .musicRecommendations,
+        .continueListening,
+        .recentSeries,
+        .highRated,
+        .photoWall,
+        .dashboard
+    ]
+
+    static let vividVisibleOrder: [HomeModuleKind] = defaultOrder
+}
+
+private enum HomeVividFocusedCollection {
+    case seriesRecommendations
+    case recentSeries
+    case highRated
+}
+
 struct HomeView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.mainLayoutTransitionActive) private var layoutTransitionActive
     let onOpenHealthCenter: () -> Void
     let onOpenSources: () -> Void
+    let onOpenTasks: () -> Void
+    let onOpenVideoSection: (VideoLibrarySection) -> Void
+    let onOpenMusicSection: (MusicLibrarySection) -> Void
+    let onOpenAlbumSection: (AlbumLibrarySection) -> Void
     @State private var searchText: String
     @State private var committedSearchText: String
     @State private var visibleHomeItems: [MediaItem] = []
@@ -110,27 +856,46 @@ struct HomeView: View {
     @State private var restoredOverviewAnchorID: String?
     @State private var overviewBoardsSnapshot: [HomeOverviewBoardModel] = []
     @State private var overviewBoardsKey = ""
+    @State private var overviewBoardsRefreshTask: Task<Void, Never>?
     @State private var inlineReturnContentReady: Bool
     @State private var overviewVerticalReturnReady: Bool
     @State private var overviewHorizontalReturnReady: Bool
     @State private var homeReturnFallbackTask: Task<Void, Never>?
     @State private var homeInlineReturnRestoreTask: Task<Void, Never>?
+    @State private var homeTimeRefreshTask: Task<Void, Never>?
+    @State private var homeTimeRefreshToken = 0
+    @State private var photoWallViewerIndex: Int?
+    @State private var focusedVividCollection: HomeVividFocusedCollection?
     @AppStorage("MediaLib.home.selectedTab") private var selectedTabRaw = HomeTab.overview.rawValue
+    @AppStorage("MediaLib.home.moduleOrder") private var homeModuleOrderRaw = ""
+    @AppStorage("MediaLib.home.hiddenModules") private var hiddenHomeModulesRaw = ""
 
     init(
         initialSearchText: String = "",
         initialReturnAnchorID: String? = nil,
         onOpenHealthCenter: @escaping () -> Void = {},
-        onOpenSources: @escaping () -> Void = {}
+        onOpenSources: @escaping () -> Void = {},
+        onOpenTasks: @escaping () -> Void = {},
+        onOpenVideoSection: @escaping (VideoLibrarySection) -> Void = { _ in },
+        onOpenMusicSection: @escaping (MusicLibrarySection) -> Void = { _ in },
+        onOpenAlbumSection: @escaping (AlbumLibrarySection) -> Void = { _ in }
     ) {
         let normalizedInitialSearch = initialSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         _searchText = State(initialValue: normalizedInitialSearch)
         _committedSearchText = State(initialValue: normalizedInitialSearch)
+        // 回填最近一次总览看板快照：避免每次切回首页都从空快照起步、
+        // 首帧走同步兜底重算（卡顿）且内容闪变。键不匹配时会照常异步重建。
+        _overviewBoardsSnapshot = State(initialValue: HomeOverviewComputationCache.boards)
+        _overviewBoardsKey = State(initialValue: HomeOverviewComputationCache.boardsKey)
         _inlineReturnContentReady = State(initialValue: initialReturnAnchorID == nil)
         _overviewVerticalReturnReady = State(initialValue: initialReturnAnchorID == nil)
         _overviewHorizontalReturnReady = State(initialValue: initialReturnAnchorID == nil)
         self.onOpenHealthCenter = onOpenHealthCenter
         self.onOpenSources = onOpenSources
+        self.onOpenTasks = onOpenTasks
+        self.onOpenVideoSection = onOpenVideoSection
+        self.onOpenMusicSection = onOpenMusicSection
+        self.onOpenAlbumSection = onOpenAlbumSection
     }
 
     private var selectedTab: HomeTab {
@@ -144,6 +909,7 @@ struct HomeView: View {
         // 首页搜索框现在即"搜索全部媒体"：有输入时显示跨影音的全局结果（替代海报型分区路径）。
         let activeSearchText = committedSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
         let isSearching = !activeSearchText.isEmpty
+        let isShowingFocusedVividCollection = !isSearching && tab == .overview && focusedVividCollection != nil
 
         Group {
             if !isSearching, !appState.sources.isEmpty, isPosterTab(tab), !gridItems.isEmpty {
@@ -161,9 +927,11 @@ struct HomeView: View {
                         if let progress = appState.scanProgress, appState.isScanning {
                             ScanProgressView(progress: progress)
                         }
-                        HomeTabBar(tabs: enabledTabs, selection: tabSelection)
-                        Text(displayName(for: tab))
-                            .font(.title2.weight(.semibold))
+                        if usesLegacyHomeChrome {
+                            HomeTabBar(tabs: enabledTabs, selection: tabSelection)
+                            Text(displayName(for: tab))
+                                .font(.title2.weight(.semibold))
+                        }
                     }
                 }
                 .opacity(inlineReturnContentReady ? 1 : 0)
@@ -171,9 +939,11 @@ struct HomeView: View {
                 ScrollViewReader { scrollProxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
-                            header
+                            if !isShowingFocusedVividCollection {
+                                header
+                            }
 
-                            if let progress = appState.scanProgress, appState.isScanning {
+                            if !isShowingFocusedVividCollection, let progress = appState.scanProgress, appState.isScanning {
                                 ScanProgressView(progress: progress)
                             }
 
@@ -194,7 +964,9 @@ struct HomeView: View {
                                 }
                                 .environmentObject(appState)
                             } else {
-                                HomeTabBar(tabs: enabledTabs, selection: tabSelection)
+                                if usesLegacyHomeChrome {
+                                    HomeTabBar(tabs: enabledTabs, selection: tabSelection)
+                                }
                                 homeContent(for: tab)
                             }
                         }
@@ -215,7 +987,10 @@ struct HomeView: View {
                 }
             }
         }
-        .background(AppPageBackground())
+        .background(HomeVividPageBackground())
+        .overlay {
+            photoWallViewerOverlay
+        }
         .navigationTitle("首页")
         .transaction { transaction in
             if layoutTransitionActive {
@@ -226,6 +1001,7 @@ struct HomeView: View {
         .onAppear {
             normalizeSelectedTab()
             refreshOverviewBoardsIfNeeded(force: true)
+            startHomeTimeRefreshLoop()
             refreshHomeItems(for: currentTab)
             if activeReturnContext == nil {
                 inlineReturnContentReady = true
@@ -289,11 +1065,32 @@ struct HomeView: View {
             homeSearchRefreshTask?.cancel()
             refreshHomeItems(for: currentTab, deferred: true)
         }
+        // 日期刷新不能只靠定时循环（Task.sleep 在系统睡眠期间挂起，会把跨天刷新
+        // 拖延数小时）：日历日变更、系统唤醒、App 激活三个时机都主动对比快照键，
+        // 跨天/跨 3 小时桶立即换新推荐内容，并重排定时循环的下一次触发点。
+        .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged).receive(on: RunLoop.main)) { _ in
+            refreshOverviewBoardsIfNeeded()
+            startHomeTimeRefreshLoop()
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification).receive(on: RunLoop.main)) { _ in
+            refreshOverviewBoardsIfNeeded()
+            startHomeTimeRefreshLoop()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshOverviewBoardsIfNeeded()
+        }
+        // 今日推荐 banner 的横版图兜底补抓：没有横版剧照的条目先按竖版海报裁切显示，
+        // 后台异步经 TMDB/Emby 拉取 backdrop，拉到后随 backdropRevision 自动换图。
+        .task(id: overviewHeroWarmupKey) {
+            appState.warmHeroBackdrops(for: overviewFeaturedItems)
+        }
         .onDisappear {
             homeContentRefreshTask?.cancel()
             homeSearchRefreshTask?.cancel()
+            overviewBoardsRefreshTask?.cancel()
             homeReturnFallbackTask?.cancel()
             homeInlineReturnRestoreTask?.cancel()
+            homeTimeRefreshTask?.cancel()
         }
     }
 
@@ -303,40 +1100,58 @@ struct HomeView: View {
         return available.isEmpty ? [.overview] : available
     }
 
+    /// 顶部首页 chrome（标签栏 HomeTabBar + 页头操作按钮：搜索/扫描/清除记录）暂时废弃。
+    /// 置 false 隐藏并强制只显示总览；代码全部保留，置回 true 即恢复旧版顶部控制条与按钮。
+    private let usesLegacyHomeChrome = false
+
     private var currentTab: HomeTab {
-        enabledTabs.contains(selectedTab) ? selectedTab : (enabledTabs.first ?? .overview)
+        guard usesLegacyHomeChrome else { return .overview }
+        return enabledTabs.contains(selectedTab) ? selectedTab : (enabledTabs.first ?? .overview)
     }
 
     private var header: some View {
-        PageHeader(title: "MediaLIB", subtitle: appState.localized("家庭影音库"), systemImage: "play.rectangle.on.rectangle") {
-            if appState.isScanning {
-                Label("\(appState.localized("队列")) \(max(appState.scanQueueCount, 1))", systemImage: "waveform.path.ecg")
-                    .font(.callout.weight(.medium))
-                    .foregroundStyle(.secondary)
-            }
-            if showsPlaybackHistoryAction {
-                Button(role: .destructive) {
-                    appState.clearPlaybackHistory(homePlaybackTraceItems)
-                } label: {
-                    Label(appState.localized("清除记录"), systemImage: "clock.badge.xmark")
-                        .foregroundStyle(.red)
-                }
-                .disabled(homePlaybackTraceItems.isEmpty)
-            }
-            GlassSearchField(
-                placeholder: appState.localized("搜索全部媒体"),
-                text: $searchText,
-                minWidth: 178,
-                maxWidth: 236,
-                onSubmit: commitHomeSearch
-            )
-            Button {
-                appState.scanSources(for: currentTab)
-            } label: {
-                Label(appState.localized("扫描"), systemImage: "arrow.clockwise")
-            }
-            .disabled(appState.sources.isEmpty || appState.isScanning)
+        HomeVividHeader(
+            greeting: greeting,
+            searchText: $searchText,
+            isScanning: appState.isScanning,
+            scanQueueCount: appState.scanQueueCount,
+            onSubmitSearch: commitHomeSearch,
+            onScan: { appState.scanSources(for: currentTab) },
+            scanDisabled: appState.sources.isEmpty || appState.isScanning,
+            showsScanButton: false
+        )
+    }
+
+    private var greeting: String {
+        let hour = Calendar.current.component(.hour, from: Date())
+        switch hour {
+        case 5..<12: return appState.localized("早上好")
+        case 12..<14: return appState.localized("中午好")
+        case 14..<18: return appState.localized("下午好")
+        case 18..<23: return appState.localized("晚上好")
+        default: return appState.localized("夜深了")
         }
+    }
+
+    private func vividStatTiles(_ stats: HomeStatsSnapshot) -> [HomeVividStatTile] {
+        var values: [HomeVividStatTile] = []
+        values.append(HomeVividStatTile(id: "movies", title: appState.localized("影片"), value: vividCount(stats.movieCount), iconName: "movie", tint: HomeVividTokens.blue))
+        values.append(HomeVividStatTile(id: "series", title: appState.localized("系列"), value: vividCount(stats.seriesCount), iconName: "series", tint: HomeVividTokens.mint))
+        values.append(HomeVividStatTile(id: "episodes", title: appState.localized("剧集"), value: vividCount(stats.episodeCount), iconName: "episodes", tint: HomeVividTokens.orange))
+        values.append(HomeVividStatTile(id: "unwatched", title: appState.localized("未观看"), value: vividCount(stats.unwatchedCount), iconName: "unwatched", tint: HomeVividTokens.pink))
+        return values
+    }
+
+    private func vividCount(_ value: Int) -> String {
+        if value >= 10_000 {
+            return "\(value / 1000)K"
+        }
+        return value.formatted()
+    }
+
+    private func vividBarColors(seed: Int) -> [Color] {
+        let pair = HomeVividTokens.accentPair(seed: seed)
+        return [pair.0, pair.1]
     }
 
     private var tabSelection: Binding<HomeTab> {
@@ -358,33 +1173,16 @@ struct HomeView: View {
     private func homeContent(for tab: HomeTab) -> some View {
         switch tab {
         case .overview:
-            AppSectionHeading(
-                title: displayName(for: .overview),
-                systemImage: "chart.bar.xaxis"
-            )
-            HomeStatsView()
-            ForEach(overviewBoards) { board in
-                HomeOverviewBoard(
-                    title: board.title,
-                    subtitle: board.subtitle,
-                    systemImage: board.systemImage,
-                    items: board.items,
-                    emptyMessage: board.emptyMessage,
-                    metadata: overviewMetadata(for:),
-                    showsDeletePlaybackHistory: board.id == "continue" || board.id == "nextUp",
-                    onSelect: { item in
-                        appState.presentDetail(
-                            item,
-                            from: SidebarDestination.home.id,
-                            anchorID: item.id
-                        )
-                    },
-                    restoreAnchorID: activeReturnContext?.anchorID,
-                    onDidRestoreAnchor: completeOverviewHorizontalRestoration
-                )
-                .id("overview-board-\(board.id)")
+            if let focusedVividCollection {
+                focusedVividCollectionPage(focusedVividCollection)
+            } else {
+                VStack(alignment: .leading, spacing: HomeVividTokens.moduleSpacing) {
+                    ForEach(orderedHomeModules) { module in
+                        vividOverviewModuleContent(module)
+                            .id("home-module-\(module.rawValue)")
+                    }
+                }
             }
-            LibraryHealthView(onOpen: onOpenHealthCenter)
         case .privacy where !appState.privacyPINConfigured || !appState.privacyUnlocked:
             PrivacyLockView()
                 .frame(minHeight: 420)
@@ -407,6 +1205,322 @@ struct HomeView: View {
         }
     }
 
+    @ViewBuilder
+    private func vividOverviewModuleContent(_ module: HomeModuleKind) -> some View {
+        switch module {
+        case .hero:
+            let items = overviewFeaturedItems
+            if !items.isEmpty {
+                HomeVividHeroCarousel(
+                    items: items,
+                    cachedBanner: { cachedBannerPath(for: $0) },
+                    subtitle: { item in
+                        item.genre ?? recommendationSubtitle(for: recommendationProfile(from: overviewCandidateVideos()))
+                    },
+                    onPlay: { appState.play($0) },
+                    onToggleWatchlist: { appState.toggleWatchlist($0) },
+                    onSelect: { appState.presentDetail($0, from: SidebarDestination.home.id, anchorID: $0.id) }
+                )
+                .onAppear {
+                    if let anchorID = activeReturnContext?.anchorID, items.contains(where: { $0.id == anchorID }) {
+                        completeOverviewHorizontalRestoration()
+                    }
+                }
+            }
+        case .stats:
+            HomeVividStatsGrid(tiles: vividStatTiles(appState.homeStats))
+        case .dashboard:
+            HomeVividDashboard(
+                sourceGroups: dashboardSourceGroups,
+                sourceOnlineCount: dashboardOnlineSourceCount,
+                sourceTotalCount: dashboardVisibleSources.count,
+                healthScore: dashboardOverallHealthPercent,
+                sourceHealthPercent: dashboardSourceHealthPercent,
+                metadataHealthPercent: dashboardMetadataHealthPercent,
+                tasks: dashboardTaskSummaries,
+                onOpenSources: onOpenSources,
+                onOpenHealth: onOpenHealthCenter,
+                onOpenTasks: onOpenTasks
+            )
+        case .seriesRecommendations:
+            let items = seriesRecommendationItems
+            if !items.isEmpty {
+                HomeVividPosterRow(
+                    title: appState.localized("剧集推荐"),
+                    barColors: [HomeVividTokens.orange, HomeVividTokens.pink],
+                    actionTitle: "查看全部 ›",
+                    actionTint: HomeVividTokens.pink,
+                    items: items,
+                    variant: .poster,
+                    metadata: overviewMetadata(for:),
+                    onSelect: openHomeItem,
+                    action: { focusedVividCollection = .seriesRecommendations },
+                    restoreAnchorID: activeReturnContext?.anchorID,
+                    onDidRestoreAnchor: completeOverviewHorizontalRestoration
+                )
+            }
+        case .continueWatching:
+            let items = continueWatchingSeriesItems
+            if !items.isEmpty {
+                HomeVividPosterRow(
+                    title: appState.localized("继续观看 · 剧集"),
+                    barColors: [HomeVividTokens.cyan, HomeVividTokens.blue],
+                    actionTitle: "查看全部 ›",
+                    actionTint: HomeVividTokens.blue,
+                    items: items,
+                    variant: .progress,
+                    metadata: overviewMetadata(for:),
+                    onSelect: openHomeItem,
+                    action: { onOpenVideoSection(.watching) },
+                    restoreAnchorID: activeReturnContext?.anchorID,
+                    onDidRestoreAnchor: completeOverviewHorizontalRestoration
+                )
+            }
+        case .musicRecommendations:
+            let tracks = musicRecommendationItems
+            if !tracks.isEmpty {
+                HomeVividMusicRecommendation(
+                    tracks: tracks,
+                    playlist: recommendedPlaylistSummary,
+                    onTrackSelect: { track in appState.replaceMusicQueueAndPlay(tracks, startingAt: track) },
+                    onPlaylistSelect: playPlaylistSummary,
+                    onOpenMusic: { onOpenMusicSection(.songs) }
+                )
+            }
+        case .continueListening:
+            let tracks = continueListeningItems
+            if !tracks.isEmpty {
+                HomeVividContinueListening(
+                    tracks: tracks,
+                    onTrackSelect: { appState.play($0) },
+                    onOpenMusic: { onOpenMusicSection(.recent) }
+                )
+            }
+        case .recentSeries:
+            let items = recentSeriesItems
+            if !items.isEmpty {
+                HomeVividPosterRow(
+                    title: appState.localized("最近添加 · 剧集"),
+                    barColors: [HomeVividTokens.indigo, HomeVividTokens.blue],
+                    actionTitle: "查看全部 ›",
+                    actionTint: HomeVividTokens.blue,
+                    items: items,
+                    variant: .poster,
+                    metadata: overviewMetadata(for:),
+                    onSelect: openHomeItem,
+                    action: { focusedVividCollection = .recentSeries },
+                    restoreAnchorID: activeReturnContext?.anchorID,
+                    onDidRestoreAnchor: completeOverviewHorizontalRestoration
+                )
+            }
+        case .highRated:
+            let items = highRatedFeaturedItems
+            if !items.isEmpty {
+                HomeVividPosterRow(
+                    title: appState.localized("高分精选"),
+                    barColors: [HomeVividTokens.orange, HomeVividTokens.violet],
+                    actionTitle: "查看全部 ›",
+                    actionTint: HomeVividTokens.violet,
+                    items: items,
+                    variant: .poster,
+                    metadata: overviewMetadata(for:),
+                    onSelect: openHomeItem,
+                    action: { focusedVividCollection = .highRated },
+                    restoreAnchorID: activeReturnContext?.anchorID,
+                    onDidRestoreAnchor: completeOverviewHorizontalRestoration
+                )
+            }
+        case .photoWall:
+            let theme = photoWallTheme
+            if !theme.items.isEmpty {
+                HomeVividPhotoWall(
+                    items: theme.items,
+                    themeTitle: theme.title,
+                    badgeText: theme.badge,
+                    onOpenAlbum: { onOpenAlbumSection(.all) },
+                    onSelect: openPhotoWallItem
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func focusedVividCollectionPage(_ collection: HomeVividFocusedCollection) -> some View {
+        switch collection {
+        case .seriesRecommendations:
+            HomeVividPosterCollectionPage(
+                title: appState.localized("剧集推荐"),
+                subtitle: appState.localized("根据你的观看、想看和评分信号整理。"),
+                barColors: [HomeVividTokens.orange, HomeVividTokens.pink],
+                items: seriesRecommendationItems,
+                metadata: overviewMetadata(for:),
+                onBack: { focusedVividCollection = nil },
+                onSelect: openHomeItem
+            )
+        case .recentSeries:
+            HomeVividPosterCollectionPage(
+                title: appState.localized("最近添加 · 剧集"),
+                subtitle: appState.localized("按入库时间整理最近加入的剧集。"),
+                barColors: [HomeVividTokens.indigo, HomeVividTokens.blue],
+                items: recentSeriesItems,
+                metadata: overviewMetadata(for:),
+                onBack: { focusedVividCollection = nil },
+                onSelect: openHomeItem
+            )
+        case .highRated:
+            HomeVividPosterCollectionPage(
+                title: appState.localized("高分精选"),
+                subtitle: appState.localized("从高评分和偏好信号中挑选。"),
+                barColors: [HomeVividTokens.orange, HomeVividTokens.violet],
+                items: highRatedFeaturedItems,
+                metadata: overviewMetadata(for:),
+                onBack: { focusedVividCollection = nil },
+                onSelect: openHomeItem
+            )
+        }
+    }
+
+    @ViewBuilder
+    private var photoWallViewerOverlay: some View {
+        let items = photoWallItems
+        if let start = photoWallViewerIndex, items.indices.contains(start) {
+            MediaImageViewer(
+                items: items.map(MediaImageViewerEntry.init(item:)),
+                index: Binding(
+                    get: { photoWallViewerIndex ?? start },
+                    set: { photoWallViewerIndex = $0 }
+                ),
+                allowsFavorite: false,
+                onClose: { photoWallViewerIndex = nil },
+                onPlayVideo: { entry in
+                    photoWallViewerIndex = nil
+                    if let item = entry.item { appState.play(item) }
+                }
+            )
+            .environmentObject(appState)
+            .transition(.opacity)
+            .zIndex(50)
+        }
+    }
+
+    @ViewBuilder
+    private func overviewModuleContent(_ module: HomeModuleKind) -> some View {
+        switch module {
+        case .hero:
+            let featuredItems = overviewFeaturedItems
+            if !featuredItems.isEmpty {
+                AuroraHeroCarousel(
+                    items: featuredItems,
+                    localize: { appState.localized($0) },
+                    cachedBanner: { cachedBannerPath(for: $0) },
+                    resolveBanner: { _ in nil },
+                    onPrimary: { appState.play($0) },
+                    onSecondary: { appState.toggleWatchlist($0) },
+                    onSelect: { appState.presentDetail($0, from: SidebarDestination.home.id, anchorID: $0.id) }
+                )
+            }
+        case .stats:
+            HomeStatsView()
+        case .dashboard:
+            HomeDashboardModuleView(
+                sources: dashboardSourceSummaries,
+                spotlight: dashboardSpotlight,
+                accentColor: AuroraPalette.teal,
+                onOpenSources: onOpenSources,
+                onOpenSpotlight: dashboardSpotlight.progress == nil ? onOpenHealthCenter : onOpenTasks
+            )
+        case .seriesRecommendations:
+            let items = seriesRecommendationItems
+            if !items.isEmpty {
+                HomeRecommendRow(
+                    title: appState.localized("剧集推荐"),
+                    systemImage: "sparkles.tv",
+                    accentColor: AuroraPalette.blue,
+                    items: items,
+                    subtitle: { overviewMetadata(for: $0) },
+                    mediaType: { $0.type },
+                    onSelect: openHomeItem
+                )
+            }
+        case .continueWatching:
+            let items = continueWatchingSeriesItems
+            if !items.isEmpty {
+                HomeSectionBlock(
+                    title: appState.localized("继续观看"),
+                    subtitle: appState.localized("把上次停下的故事接着看。"),
+                    systemImage: "play.circle",
+                    accentColor: AuroraPalette.cyan,
+                    items: items,
+                    emptyMessage: appState.localized("开始播放后，这里会留下继续观看的入口。"),
+                    metadata: overviewMetadata(for:),
+                    showsDeletePlaybackHistory: true,
+                    onSelect: openHomeItem,
+                    restoreAnchorID: activeReturnContext?.anchorID,
+                    onDidRestoreAnchor: completeOverviewHorizontalRestoration
+                )
+            }
+        case .musicRecommendations:
+            let tracks = musicRecommendationItems
+            if !tracks.isEmpty {
+                HomeMusicRecommendationModule(
+                    title: appState.localized("音乐推荐"),
+                    subtitle: appState.localized("左侧挑歌，右侧留给今天的歌单。"),
+                    tracks: tracks,
+                    playlist: recommendedPlaylistSummary,
+                    accentColor: AuroraPalette.purple,
+                    onTrackSelect: { appState.play($0) },
+                    onPlaylistSelect: playPlaylistSummary
+                )
+            }
+        case .continueListening:
+            let tracks = continueListeningItems
+            if !tracks.isEmpty {
+                HomeContinueListeningModule(
+                    tracks: tracks,
+                    accentColor: AuroraPalette.magenta,
+                    onTrackSelect: { appState.play($0) }
+                )
+            }
+        case .recentSeries:
+            let items = recentSeriesItems
+            if !items.isEmpty {
+                HomeRecommendRow(
+                    title: appState.localized("最近添加"),
+                    systemImage: "clock.badge.plus",
+                    accentColor: AuroraPalette.orange,
+                    items: items,
+                    subtitle: { overviewMetadata(for: $0) },
+                    mediaType: { $0.type },
+                    onSelect: openHomeItem
+                )
+            }
+        case .highRated:
+            let items = highRatedFeaturedItems
+            if !items.isEmpty {
+                HomeRecommendRow(
+                    title: appState.localized("高分精选"),
+                    systemImage: "star.fill",
+                    accentColor: AuroraPalette.purple,
+                    items: items,
+                    subtitle: { overviewMetadata(for: $0) },
+                    mediaType: { $0.type },
+                    onSelect: openHomeItem
+                )
+            }
+        case .photoWall:
+            let theme = photoWallTheme
+            if !theme.items.isEmpty {
+                HomePhotoWallModule(
+                    items: theme.items,
+                    themeTitle: theme.title,
+                    badgeText: theme.badge,
+                    accentColor: AuroraPalette.cyan,
+                    onSelect: openHomeItem
+                )
+            }
+        }
+    }
+
     // 把"前缀 + 分区名"按语言拼成自然短语：中文紧贴，英文/日文按各自语序加分隔。
     private func homePhrase(prefix: String, name: String) -> String {
         switch appState.settings.appLanguage {
@@ -417,6 +1531,710 @@ struct HomeView: View {
         case .en:
             return "\(appState.localized(prefix)) \(name)"
         }
+    }
+
+    private var orderedHomeModules: [HomeModuleKind] {
+        let stored = homeModuleOrderRaw
+            .split(separator: ",")
+            .compactMap { HomeModuleKind(rawValue: String($0)) }
+        let allowed = HomeModuleKind.vividVisibleOrder
+        let base = stored.filter { allowed.contains($0) }
+        let ordered = base.isEmpty ? allowed : base + allowed.filter { !base.contains($0) }
+        let hidden = hiddenHomeModules
+        let visible = ordered.filter { !hidden.contains($0) }
+        return visible.isEmpty ? [.hero] : visible
+    }
+
+    private var hiddenHomeModules: Set<HomeModuleKind> {
+        Set(hiddenHomeModulesRaw
+            .split(separator: ",")
+            .compactMap { HomeModuleKind(rawValue: String($0)) })
+    }
+
+    private func openHomeItem(_ item: MediaItem) {
+        if item.type == .music {
+            appState.play(item)
+        } else {
+            appState.presentDetail(item, from: SidebarDestination.home.id, anchorID: item.id)
+        }
+    }
+
+    private func openPhotoWallItem(_ item: MediaItem) {
+        let items = photoWallItems
+        photoWallViewerIndex = items.firstIndex(where: { $0.id == item.id })
+    }
+
+    private var secondaryOverviewBoards: [HomeOverviewBoardModel] {
+        let primaryIDs: Set<String> = [
+            "continue",
+            "nextUp",
+            "recommend",
+            "high-rated-series"
+        ]
+        return overviewBoards.filter { board in
+            !primaryIDs.contains(board.id) && !board.items.isEmpty
+        }
+    }
+
+    private var seriesRecommendationItems: [MediaItem] {
+        if let items = overviewBoards.first(where: { $0.id == "high-rated-series" })?.items, !items.isEmpty {
+            return Array(items.prefix(24))
+        }
+        if let items = overviewBoards.first(where: { $0.id == "recommend" })?.items {
+            let series = items.filter { seriesRecommendationTypes.contains($0.type) || $0.type == .episode }
+            if !series.isEmpty { return Array(series.prefix(24)) }
+        }
+        return Array(appState.homeVideoItems.filter { seriesRecommendationTypes.contains($0.type) }.prefix(24))
+    }
+
+    private var continueWatchingSeriesItems: [MediaItem] {
+        if let items = overviewBoards.first(where: { $0.id == "continue" })?.items, !items.isEmpty {
+            let seriesItems = items.filter { seriesRecommendationTypes.contains($0.type) || $0.type == .episode }
+            return Array((seriesItems.isEmpty ? items : seriesItems).prefix(24))
+        }
+        var seen = Set<String>()
+        var combined: [MediaItem] = []
+        for item in appState.continueWatchingItems + appState.nextUpItems
+            where (seriesRecommendationTypes.contains(item.type) || item.type == .episode) && seen.insert(item.id).inserted {
+            combined.append(item)
+        }
+        if combined.isEmpty {
+            for item in appState.continueWatchingItems where seen.insert(item.id).inserted {
+                combined.append(item)
+            }
+        }
+        return Array(combined.prefix(24))
+    }
+
+    private var recentSeriesItems: [MediaItem] {
+        if let items = overviewBoards.first(where: { $0.id == "recent-series" })?.items, !items.isEmpty {
+            return Array(items.prefix(24))
+        }
+        return Array(appState.homeVideoItems
+            .filter { seriesRecommendationTypes.contains($0.type) }
+            .prefix(24))
+    }
+
+    private var highRatedFeaturedItems: [MediaItem] {
+        if let boardItems = overviewBoards.first(where: { $0.id == "recent-high-rated" })?.items, !boardItems.isEmpty {
+            return Array(boardItems.prefix(24))
+        }
+        let themeBoards = overviewBoards.filter { $0.id.hasPrefix("theme-") }.flatMap(\.items)
+        if !themeBoards.isEmpty {
+            return Array(themeBoards.prefix(24))
+        }
+        return Array(appState.homeVideoItems
+            .filter { ($0.rating ?? 0) >= 8.0 }
+            .sorted { lhs, rhs in
+                let lhsRating = lhs.rating ?? 0
+                let rhsRating = rhs.rating ?? 0
+                if lhsRating != rhsRating { return lhsRating > rhsRating }
+                return lhs.updatedAt > rhs.updatedAt
+            }
+            .prefix(24))
+    }
+
+    private var musicRecommendationItems: [MediaItem] {
+        // 全曲库打分 + 贪心多样性挑选，代价随曲库线性放大；按快照键记忆化，
+        // 避免每次 body 求值（滚动/悬停/播放态变化）都同步重算。
+        HomeOverviewComputationCache.value("music-recommendation", key: overviewSnapshotKey) {
+            let profile = musicRecommendationProfile()
+            return rankedOverviewItems(from: musicRecommendationPlayableTracks, limit: 30) { track in
+                musicRecommendationScore(for: track, profile: profile, daySeed: overviewDaySeed)
+            }
+        }
+    }
+
+    private var musicRecommendationPlayableTracks: [MediaItem] {
+        appState.homeMusicPlayableTracks
+    }
+
+    private var musicStyleBuckets: [HomeMusicStyleBucket] {
+        // 逐曲目风格分桶 + 每桶排序打分，属首页最重的同步计算之一；按快照键记忆化。
+        HomeOverviewComputationCache.value("music-style-buckets", key: overviewSnapshotKey) {
+            computeMusicStyleBuckets()
+        }
+    }
+
+    private func computeMusicStyleBuckets() -> [HomeMusicStyleBucket] {
+        var buckets: [String: (display: String, tracks: [MediaItem])] = [:]
+        for track in musicRecommendationPlayableTracks {
+            for token in musicStyleTokens(for: track) {
+                if buckets[token.key] == nil {
+                    buckets[token.key] = (token.display, [])
+                }
+                buckets[token.key]?.tracks.append(track)
+            }
+        }
+        let profile = musicRecommendationProfile()
+        return buckets.compactMap { key, value in
+            let uniqueTracks = Array(Dictionary(grouping: value.tracks, by: \.id).compactMap { $0.value.first })
+            guard uniqueTracks.count >= 3 else { return nil }
+            let rankedTracks = rankedOverviewItems(from: uniqueTracks, limit: 30) { track in
+                musicRecommendationScore(for: track, profile: profile, daySeed: overviewDaySeed) +
+                stableDailyValue(forID: track.id, daySeed: overviewDaySeed, salt: "music-style-\(key)") * 1.2
+            }
+            let affinity = (profile.genreWeights[key] ?? 0) / max(profile.maxGenreWeight, 1)
+            let score = min(Double(uniqueTracks.count), 36) * 0.10 +
+                min(affinity, 1.8) * 1.35 +
+                stableDailyValue(forID: key, daySeed: overviewDaySeed, salt: "style-playlist") * 2.4
+            return HomeMusicStyleBucket(
+                id: "style.\(key)",
+                key: key,
+                title: value.display,
+                tracks: rankedTracks,
+                score: score
+            )
+        }
+        .sorted { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }
+    }
+
+    private var continueListeningItems: [MediaItem] {
+        appState.homeContinueListeningTracks
+    }
+
+    private var recommendedPlaylistSummary: HomePlaylistSummary? {
+        if let bucket = musicStyleBuckets.first {
+            let covers = Array(bucket.tracks.prefix(6))
+            return HomePlaylistSummary(
+                id: "synthetic.style.\(bucket.key)",
+                title: "\(bucket.title)精选",
+                subtitle: "\(bucket.tracks.count) 首 · 风格歌单 · 每日换新",
+                posterPaths: covers.compactMap(\.posterPath),
+                trackIDs: bucket.tracks.map(\.id)
+            )
+        }
+        let playlists = appState.musicPlaylists.filter { !$0.itemIDs.isEmpty }
+        let selected = playlists.sorted { lhs, rhs in
+            let left = stableDailyValue(forID: lhs.id, daySeed: overviewDaySeed, salt: "playlist") + recencyScore(for: lhs.updatedAt, horizonDays: 120)
+            let right = stableDailyValue(forID: rhs.id, daySeed: overviewDaySeed, salt: "playlist") + recencyScore(for: rhs.updatedAt, horizonDays: 120)
+            if left != right { return left > right }
+            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+        }.first
+        guard let selected else {
+            let tracks = Array(musicRecommendationItems.prefix(6))
+            guard !tracks.isEmpty else { return nil }
+            let genreName = musicRecommendationProfile().strongestGenreDisplayName
+            return HomePlaylistSummary(
+                id: "synthetic.recommend",
+                title: appState.localized("今日推荐"),
+                subtitle: genreName.map { "\($0) · 30 首歌" } ?? "30 首歌 · 每日换新",
+                posterPaths: tracks.compactMap(\.posterPath),
+                trackIDs: musicRecommendationItems.map(\.id)
+            )
+        }
+        let tracks = selected.itemIDs.compactMap { appState.item(withID: $0) }
+        return HomePlaylistSummary(
+            id: selected.id,
+            title: selected.name,
+            subtitle: "\(selected.itemIDs.count) 首歌",
+            posterPaths: tracks.compactMap(\.posterPath),
+            trackIDs: tracks.map(\.id)
+        )
+    }
+
+    private func playPlaylistSummary(_ summary: HomePlaylistSummary) {
+        let summaryTracks = summary.trackIDs.compactMap { appState.item(withID: $0) }
+        if !summaryTracks.isEmpty {
+            appState.replaceMusicQueueAndPlay(summaryTracks)
+            return
+        }
+        if let playlist = appState.musicPlaylists.first(where: { $0.id == summary.id }) {
+            let playlistTracks = playlist.itemIDs.compactMap { appState.item(withID: $0) }
+            appState.replaceMusicQueueAndPlay(playlistTracks)
+            return
+        }
+        if !musicRecommendationItems.isEmpty {
+            appState.replaceMusicQueueAndPlay(musicRecommendationItems)
+        }
+    }
+
+    private func musicRecommendationProfile() -> HomeRecommendationProfile {
+        var profile = HomeRecommendationProfile()
+        let now = Date()
+        let signalTracks = appState.homeMusicSignalTracks
+        for track in signalTracks {
+            let tokens = musicTasteTokens(for: track)
+            guard !tokens.isEmpty else { continue }
+            var weight = Double(track.playCount ?? 0) * 0.35
+            if track.favorite { weight += 3.0 }
+            if let rating = track.userRating, rating > 0 { weight += normalizedUserScore(rating) * 0.45 }
+            if let lastPlayedAt = track.lastPlayedAt {
+                let days = max(0, now.timeIntervalSince(lastPlayedAt) / 86_400)
+                weight += max(0, 2.2 - days / 28)
+            }
+            guard weight > 0 else { continue }
+            profile.signalItemIDs.insert(track.id)
+            for token in tokens {
+                profile.genreWeights[token.key, default: 0] += weight / Double(tokens.count)
+                if profile.genreDisplayNames[token.key] == nil {
+                    profile.genreDisplayNames[token.key] = token.display
+                }
+            }
+        }
+        return profile
+    }
+
+    private func musicRecommendationScore(for track: MediaItem, profile: HomeRecommendationProfile, daySeed: Int) -> Double {
+        var score = 0.0
+        let playCount = track.playCount ?? 0
+        score += min(Double(playCount), 40) * 0.08
+        score += playCount <= 2 ? 0.48 : 0
+        score += track.favorite ? 1.6 : 0
+        score += normalizedUserScore(track.userRating) * 0.20
+        score += recencyScore(for: track.lastPlayedAt, horizonDays: 45) * 1.1
+        score += recencyScore(for: track.updatedAt, horizonDays: 180) * 0.35
+        score += musicAffinityScore(for: track, profile: profile)
+        score += stableDailyVariation(for: track, daySeed: daySeed) * 2.2
+        if let duration = track.duration, duration.isFinite, duration >= 60, duration <= 900 {
+            score += 0.18
+        }
+        if let lastPlayedAt = track.lastPlayedAt, Date().timeIntervalSince(lastPlayedAt) < 20 * 60 * 60 {
+            score -= 0.82
+        }
+        if profile.signalItemIDs.contains(track.id), playCount > 8 {
+            score -= 0.55
+        }
+        return score
+    }
+
+    private func musicAffinityScore(for track: MediaItem, profile: HomeRecommendationProfile) -> Double {
+        guard profile.hasSignals, profile.maxGenreWeight > 0 else { return 0 }
+        let raw = musicTasteTokens(for: track).reduce(0.0) { partial, token in
+            partial + (profile.genreWeights[token.key] ?? 0)
+        }
+        return min(raw / profile.maxGenreWeight, 2.4) * 1.45
+    }
+
+    private func musicTasteTokens(for track: MediaItem) -> [(key: String, display: String)] {
+        let styleTokens = musicStyleTokens(for: track)
+        if !styleTokens.isEmpty {
+            return styleTokens
+        }
+        let values = [track.artist, track.album]
+        return normalizedMusicTokens(from: values)
+    }
+
+    private func musicStyleTokens(for track: MediaItem) -> [(key: String, display: String)] {
+        normalizedMusicTokens(from: [track.genre])
+    }
+
+    private func normalizedMusicTokens(from values: [String?]) -> [(key: String, display: String)] {
+        var seen = Set<String>()
+        return values.flatMap { value -> [String] in
+            guard let value else { return [] }
+            return value.components(separatedBy: CharacterSet(charactersIn: ",，、/|;；·&＋+"))
+        }
+        .compactMap { raw -> (key: String, display: String)? in
+            let display = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard display.count >= 2 else { return nil }
+            let key = display
+                .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+                .lowercased()
+            guard !key.isEmpty, seen.insert(key).inserted else { return nil }
+            return (key, display)
+        }
+    }
+
+    private var photoWallTheme: HomePhotoWallTheme {
+        // 相册全量打分 + O(候选×张数) 贪心多样性挑选，是首页滚动卡顿的主要热点；
+        // 按快照键（含 3 小时桶）记忆化，桶未跨界时直接复用同一结果。
+        HomeOverviewComputationCache.value("photo-wall-theme", key: overviewSnapshotKey) {
+            computePhotoWallTheme()
+        }
+    }
+
+    private func computePhotoWallTheme() -> HomePhotoWallTheme {
+        let all = appState.albumItems
+        guard !all.isEmpty else {
+            return HomePhotoWallTheme(title: "照片墙", badge: "暂无照片", items: [])
+        }
+        let calendar = Calendar.current
+        let today = calendar.dateComponents([.month, .day], from: Date())
+        let currentMonth = today.month ?? 1
+        let refreshSeed = photoWallRefreshSeed
+        let variants: [(title: String, badge: String, items: [MediaItem])] = [
+            ("那年今日", "同日回忆", all.filter {
+                let comps = calendar.dateComponents([.month, .day], from: $0.createdAt)
+                return comps.month == today.month && comps.day == today.day
+            }),
+            ("本季色彩", seasonBadge(for: currentMonth), all.filter {
+                seasonIndex(for: calendar.component(.month, from: $0.createdAt)) == seasonIndex(for: currentMonth)
+            }),
+            ("喜欢瞬间", "收藏照片", all.filter(\.favorite)),
+            ("最近回忆", "最近入库", all),
+            ("此刻照片墙", "3 小时换新", all)
+        ]
+        let offset = refreshSeed % variants.count
+        let ordered = variants.indices.map { variants[($0 + offset) % variants.count] }
+        let selected = ordered.first { $0.items.count >= 6 } ?? ordered.first { !$0.items.isEmpty } ?? variants[3]
+        let ranked = rankedOverviewItems(from: selected.items, limit: 36) { item in
+            let itemMonth = calendar.component(.month, from: item.createdAt)
+            let itemDay = calendar.component(.day, from: item.createdAt)
+            let sameDayBonus = (itemMonth == today.month && itemDay == today.day) ? 1.4 : 0
+            let seasonBonus = seasonIndex(for: itemMonth) == seasonIndex(for: currentMonth) ? 0.42 : 0
+            return recencyScore(for: item.createdAt, horizonDays: selected.title == "最近回忆" ? 90 : 720) * 0.86 +
+            sameDayBonus +
+            seasonBonus +
+            (item.favorite ? 1.05 : 0) +
+            stableDailyValue(forID: item.id, daySeed: refreshSeed, salt: "photo-wall") * 2.7
+        }
+        let items = diversifiedPhotoWallItems(ranked, limit: 12, seed: refreshSeed)
+        return HomePhotoWallTheme(title: selected.title, badge: "\(selected.badge) · \(items.count) 张", items: items)
+    }
+
+    private func diversifiedPhotoWallItems(_ candidates: [MediaItem], limit: Int, seed: Int) -> [MediaItem] {
+        var remaining = candidates
+        var selected: [MediaItem] = []
+        var dayCounts: [String: Int] = [:]
+        var sourceCounts: [String: Int] = [:]
+        let calendar = Calendar.current
+
+        while !remaining.isEmpty, selected.count < limit {
+            let bestIndex = remaining.indices.max { lhsIndex, rhsIndex in
+                let lhs = photoWallDiversityScore(
+                    remaining[lhsIndex],
+                    calendar: calendar,
+                    dayCounts: dayCounts,
+                    sourceCounts: sourceCounts,
+                    seed: seed
+                )
+                let rhs = photoWallDiversityScore(
+                    remaining[rhsIndex],
+                    calendar: calendar,
+                    dayCounts: dayCounts,
+                    sourceCounts: sourceCounts,
+                    seed: seed
+                )
+                if lhs != rhs { return lhs < rhs }
+                return remaining[lhsIndex].createdAt < remaining[rhsIndex].createdAt
+            }
+            guard let bestIndex else { break }
+            let item = remaining.remove(at: bestIndex)
+            selected.append(item)
+            dayCounts[photoWallDayKey(for: item, calendar: calendar), default: 0] += 1
+            if let sourcePath = item.sourcePath, !sourcePath.isEmpty {
+                sourceCounts[sourcePath, default: 0] += 1
+            }
+        }
+        return selected
+    }
+
+    private func photoWallDiversityScore(
+        _ item: MediaItem,
+        calendar: Calendar,
+        dayCounts: [String: Int],
+        sourceCounts: [String: Int],
+        seed: Int
+    ) -> Double {
+        var score = stableDailyValue(forID: item.id, daySeed: seed, salt: "photo-wall-diversity")
+        score += item.favorite ? 0.24 : 0
+        score += recencyScore(for: item.createdAt, horizonDays: 900) * 0.22
+        score -= Double(dayCounts[photoWallDayKey(for: item, calendar: calendar)] ?? 0) * 0.52
+        if let sourcePath = item.sourcePath {
+            score -= Double(sourceCounts[sourcePath] ?? 0) * 0.18
+        }
+        if item.type == .homeVideo {
+            score += 0.08
+        }
+        return score
+    }
+
+    private func photoWallDayKey(for item: MediaItem, calendar: Calendar) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: item.createdAt)
+        return "\(components.year ?? 0)-\(components.month ?? 0)-\(components.day ?? 0)"
+    }
+
+    private var photoWallItems: [MediaItem] {
+        photoWallTheme.items
+    }
+
+    private var dashboardSourceGroups: [HomeVividSourceGroup] {
+        let visibleSources = dashboardVisibleSources
+        guard !visibleSources.isEmpty else { return [] }
+
+        let offlineIDs = Set(dashboardOfflineSources.map(\.id))
+        // 全库条目 × 来源归属解析，随库体量线性放大；按快照键记忆化（在线状态仍取实时值）。
+        let countsBySourceID = HomeOverviewComputationCache.value("dashboard-source-counts", key: overviewSnapshotKey) {
+            var counts: [String: Int] = [:]
+            for item in dashboardAllPublicItems {
+                guard let source = appState.source(for: item),
+                      visibleSources.contains(where: { $0.id == source.id }) else { continue }
+                counts[source.id, default: 0] += 1
+            }
+            return counts
+        }
+
+        return visibleSources.enumerated().map { index, source in
+            HomeVividSourceGroup(
+                id: source.id,
+                title: source.name,
+                count: countsBySourceID[source.id] ?? 0,
+                tint: dashboardSourceGroupTint(for: source, index: index),
+                isOnline: !offlineIDs.contains(source.id)
+            )
+        }
+    }
+
+    private var dashboardAllPublicItems: [MediaItem] {
+        var seen = Set<String>()
+        let combined = appState.homeVideoItems + appState.homeMusicPlayableTracks + appState.albumItems
+        return combined.filter { item in
+            guard appState.privacyUnlocked || item.type != .privateCollection else { return false }
+            return seen.insert(item.id).inserted
+        }
+    }
+
+    private var dashboardTaskSummaries: [HomeVividTaskSummary] {
+        appState.backgroundTasks
+            .sorted { lhs, rhs in
+                let lhsDate = lhs.finishedAt ?? lhs.startedAt
+                let rhsDate = rhs.finishedAt ?? rhs.startedAt
+                if lhs.state.isActive != rhs.state.isActive {
+                    return lhs.state.isActive && !rhs.state.isActive
+                }
+                return lhsDate > rhsDate
+            }
+            .prefix(3)
+            .map { task in
+                HomeVividTaskSummary(
+                    id: task.id,
+                    title: task.hidesDetail ? task.kind.title : task.title,
+                    detail: task.hidesDetail ? appState.localized("任务正在后台处理。") : (task.detail ?? task.kind.title),
+                    stateTitle: task.state.title,
+                    progress: task.progress,
+                    isActive: task.state.isActive,
+                    tint: dashboardTaskTint(for: task)
+                )
+            }
+    }
+
+    private var dashboardSourceHealthPercent: Int {
+        let total = max(dashboardVisibleSources.count, 1)
+        let offlinePenalty = min(dashboardOfflineSources.count, total) * 22
+        let excludedPenalty = dashboardVisibleSources.filter { !$0.includeInHealthCheck }.count * 4
+        return max(35, min(100, 100 - offlinePenalty - excludedPenalty))
+    }
+
+    private var dashboardMetadataHealthPercent: Int {
+        let totalItems = max(dashboardAllPublicItems.count, 1)
+        let issueCount =
+            dashboardPublicHealthItems(appState.missingMetadataItems).count +
+            dashboardPublicHealthItems(appState.detailMetadataGapItems).count +
+            dashboardPublicHealthItems(appState.unhealthyURLItems).count
+        let ratioPenalty = Int((Double(issueCount) / Double(totalItems) * 100).rounded())
+        let cappedPenalty = min(55, max(ratioPenalty, min(issueCount, 12) * 3))
+        return max(45, min(100, 100 - cappedPenalty))
+    }
+
+    private func dashboardSourceGroupTitle(for kind: MediaSourceKind) -> String {
+        switch kind {
+        case .local: return appState.localized("本地硬盘")
+        case .smb: return "NAS · SMB"
+        case .ftp: return "FTP"
+        case .emby: return "EMBY 服务器"
+        case .jellyfin: return "Jellyfin 服务器"
+        case .plex: return "Plex 服务器"
+        case .url: return appState.localized("网络视频")
+        }
+    }
+
+    private func dashboardSourceGroupTint(for source: MediaSource, index: Int) -> Color {
+        let palette: [Color] = [
+            HomeVividTokens.mint,
+            HomeVividTokens.pink,
+            HomeVividTokens.blue,
+            HomeVividTokens.orange,
+            HomeVividTokens.cyan,
+            HomeVividTokens.violet,
+            HomeVividTokens.indigo,
+            HomeVividTokens.color("F97316"),
+            HomeVividTokens.color("14B8A6"),
+            HomeVividTokens.color("A855F7")
+        ]
+        // 用溢出安全的运算合成哈希：hashValue 是全域 Int，直接相加/取 abs 会在
+        // 溢出或命中 Int.min 时触发算术溢出陷阱崩溃，改用 &+/&* 并手动取非负余数。
+        let combined = source.id.hashValue &+ source.name.hashValue &+ (index &* 31)
+        let bucket = combined % palette.count
+        return palette[bucket < 0 ? bucket + palette.count : bucket]
+    }
+
+    private func dashboardTaskTint(for task: BackgroundTaskSnapshot) -> Color {
+        switch task.kind {
+        case .fullScan, .incrementalScan: return HomeVividTokens.blue
+        case .embySync: return HomeVividTokens.pink
+        case .artworkWarmup: return HomeVividTokens.cyan
+        case .cleanup: return HomeVividTokens.mint
+        case .videoCache: return HomeVividTokens.orange
+        case .metadataSupplement: return HomeVividTokens.violet
+        case .keyframeStoryboard, .markerAnalysis, .musicIndex: return HomeVividTokens.cyan
+        }
+    }
+
+    private var dashboardSourceSummaries: [HomeDashboardSourceSummary] {
+        let offlineIDs = Set(appState.offlineSources.map(\.id))
+        return dashboardVisibleSources
+            .sorted { lhs, rhs in
+                let lhsRank = dashboardSourceRank(lhs, offlineIDs: offlineIDs)
+                let rhsRank = dashboardSourceRank(rhs, offlineIDs: offlineIDs)
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+                return lhs.updatedAt > rhs.updatedAt
+            }
+            .prefix(4)
+            .map { dashboardSourceSummary(for: $0, offlineIDs: offlineIDs) }
+    }
+
+    private var dashboardVisibleSources: [MediaSource] {
+        appState.sources.filter { $0.mediaType != .privateCollection }
+    }
+
+    private func dashboardSourceRank(_ source: MediaSource, offlineIDs: Set<String>) -> Int {
+        if offlineIDs.contains(source.id) { return 0 }
+        if !source.includeInHealthCheck { return 1 }
+        return 2
+    }
+
+    private func dashboardSourceSummary(for source: MediaSource, offlineIDs: Set<String>) -> HomeDashboardSourceSummary {
+        let isOffline = offlineIDs.contains(source.id)
+        let health: Double
+        let status: String
+        let tint: Color
+        if isOffline {
+            health = 0.42
+            status = appState.localized("有错误")
+            tint = AuroraPalette.magenta
+        } else if !source.includeInHealthCheck {
+            health = 0.76
+            status = appState.localized("已排除")
+            tint = AuroraPalette.orange
+        } else {
+            health = 1.0
+            status = appState.localized("在线")
+            tint = AuroraPalette.teal
+        }
+        return HomeDashboardSourceSummary(
+            id: source.id,
+            title: source.name,
+            detail: "\(source.sourceKind.displayName) · \(source.mediaType.displayName)",
+            statusTitle: status,
+            systemImage: dashboardSourceIcon(for: source),
+            health: health,
+            tint: tint
+        )
+    }
+
+    private func dashboardSourceIcon(for source: MediaSource) -> String {
+        switch source.sourceKind {
+        case .local: return source.mediaType == .music ? "music.note" : "externaldrive"
+        case .smb, .ftp: return "network"
+        case .emby, .jellyfin, .plex: return "server.rack"
+        case .url: return "link"
+        }
+    }
+
+    private var dashboardSpotlight: HomeDashboardSpotlight {
+        if let task = appState.backgroundTasks.first(where: { $0.state.isActive }) {
+            let safeTitle = task.hidesDetail ? task.kind.title : task.title
+            let safeDetail = task.hidesDetail ? appState.localized("任务正在后台处理。") : (task.detail ?? task.state.title)
+            return HomeDashboardSpotlight(
+                title: safeTitle,
+                subtitle: safeDetail,
+                systemImage: task.kind.systemImage,
+                tint: AuroraPalette.blue,
+                progress: task.progress ?? 0.04
+            )
+        }
+
+        let issueCount = dashboardIssueCount
+        if issueCount > 0 {
+            return HomeDashboardSpotlight(
+                title: appState.localized("媒体库需要处理"),
+                subtitle: appState.localized("优先查看离线来源、失效路径和资料缺口。"),
+                systemImage: "stethoscope",
+                tint: AuroraPalette.orange,
+                progress: nil,
+                primaryMetric: "\(issueCount)",
+                primaryLabel: appState.localized("待处理"),
+                secondaryMetric: "\(dashboardOverallHealthPercent)%",
+                secondaryLabel: appState.localized("健康度")
+            )
+        }
+
+        let recentPublicCount = dashboardRecentPublicItems.count
+        if recentPublicCount > 0 {
+            return HomeDashboardSpotlight(
+                title: appState.localized("最近入库"),
+                subtitle: appState.localized("片库保持更新，最近添加内容可继续整理。"),
+                systemImage: "clock.badge.plus",
+                tint: AuroraPalette.orange,
+                progress: nil,
+                primaryMetric: "\(recentPublicCount)",
+                primaryLabel: appState.localized("最近添加"),
+                secondaryMetric: "\(dashboardOverallHealthPercent)%",
+                secondaryLabel: appState.localized("健康度")
+            )
+        }
+
+        return HomeDashboardSpotlight(
+            title: appState.localized("片库状态良好"),
+            subtitle: appState.localized("当前没有发现需要立即处理的健康问题。"),
+            systemImage: "checkmark.seal",
+            tint: AuroraPalette.teal,
+            progress: nil,
+            primaryMetric: "\(dashboardOverallHealthPercent)%",
+            primaryLabel: appState.localized("健康度"),
+            secondaryMetric: "\(dashboardOnlineSourceCount)",
+            secondaryLabel: appState.localized("在线来源")
+        )
+    }
+
+    private var dashboardIssueCount: Int {
+        dashboardOfflineSources.count +
+            dashboardPublicHealthItems(appState.missingFileItems).count +
+            dashboardPublicDuplicateGroups.count +
+            dashboardPublicHealthItems(appState.missingMetadataItems).count +
+            dashboardPublicHealthItems(appState.detailMetadataGapItems).count +
+            dashboardPublicHealthItems(appState.unhealthyURLItems).count
+    }
+
+    private var dashboardOfflineSources: [MediaSource] {
+        appState.offlineSources.filter { source in
+            appState.privacyUnlocked || source.mediaType != .privateCollection
+        }
+    }
+
+    private var dashboardPublicDuplicateGroups: [[MediaItem]] {
+        appState.duplicateTitleGroups
+            .map(dashboardPublicHealthItems)
+            .filter { $0.count > 1 }
+    }
+
+    private func dashboardPublicHealthItems(_ items: [MediaItem]) -> [MediaItem] {
+        appState.privacyUnlocked ? items : items.filter { $0.type != .privateCollection }
+    }
+
+    private var dashboardRecentPublicItems: [MediaItem] {
+        let cutoff = Date().addingTimeInterval(-7 * 24 * 60 * 60)
+        return appState.homeVideoItems.filter { item in
+            item.updatedAt >= cutoff && (appState.privacyUnlocked || item.type != .privateCollection)
+        }
+    }
+
+    private var dashboardOnlineSourceCount: Int {
+        let offlineIDs = Set(dashboardOfflineSources.map(\.id))
+        return dashboardVisibleSources.filter { !offlineIDs.contains($0.id) }.count
+    }
+
+    private var dashboardOverallHealthPercent: Int {
+        let blended = Double(dashboardSourceHealthPercent) * 0.55 + Double(dashboardMetadataHealthPercent) * 0.45
+        let healthIssuePenalty = min(
+            dashboardPublicHealthItems(appState.missingFileItems).count + dashboardPublicDuplicateGroups.count,
+            8
+        )
+        return max(42, min(100, Int(blended.rounded()) - healthIssuePenalty * 2))
     }
 
     private func displayName(for tab: HomeTab) -> String {
@@ -448,7 +2266,7 @@ struct HomeView: View {
         case .homeVideos:
             return appState.homeVideoItems
         case .music:
-            return appState.musicTracks
+            return appState.musicItems(for: .songs)
         case .other:
             return appState.homeVideoItems
         case .favorites:
@@ -628,7 +2446,12 @@ struct HomeView: View {
             "\(appState.ratingRevision)",
             "\(appState.videoCacheRevision)",
             "\(appState.settings.watchedThreshold)",
-            "\(overviewDaySeed)"
+            appState.settings.appLanguage.rawValue,
+            "\(overviewDaySeed)",
+            // 照片墙 3 小时桶直接入键：系统睡眠会拖延定时循环，唤醒/激活时的
+            // 非强制刷新靠键变化即可感知「跨天/跨桶」，不再依赖定时器准点触发。
+            "\(photoWallRefreshSeed)",
+            "\(homeTimeRefreshToken)"
         ].joined(separator: "|")
     }
 
@@ -636,158 +2459,82 @@ struct HomeView: View {
         Calendar.current.ordinality(of: .day, in: .era, for: Date()) ?? 0
     }
 
+    private var photoWallRefreshSeed: Int {
+        let hourBucket = Calendar.current.component(.hour, from: Date()) / 3
+        return overviewDaySeed * 8 + hourBucket
+    }
+
     private func refreshOverviewBoardsIfNeeded(force: Bool = false) {
         let key = overviewSnapshotKey
         guard force || overviewBoardsKey != key else { return }
-        overviewBoardsSnapshot = makeOverviewBoards(daySeed: overviewDaySeed)
-        overviewBoardsKey = key
+        overviewBoardsRefreshTask?.cancel()
+        let input = HomeOverviewSnapshotInput(
+            daySeed: overviewDaySeed,
+            now: Date(),
+            language: appState.settings.appLanguage,
+            watchedThreshold: appState.settings.watchedThreshold,
+            visibleVideos: overviewCandidateVideos(),
+            continueWatchingItems: appState.continueWatchingItems,
+            nextUpItems: appState.nextUpItems,
+            offlineItems: appState.homeOfflineVideoItems,
+            publishedBoards: publishedCollectionBoards(),
+            backdropItemIDs: Set(appState.homeVideoItems.compactMap { item in
+                hasSyncLandscape(item) ? item.id : nil
+            })
+        )
+        overviewBoardsRefreshTask = Task { @MainActor in
+            await Task.yield()
+            let boards = await Task.detached(priority: .utility) {
+                HomeOverviewSnapshotBuilder.makeBoards(from: input)
+            }.value
+            guard !Task.isCancelled, key == overviewSnapshotKey else { return }
+            overviewBoardsSnapshot = boards
+            overviewBoardsKey = key
+            HomeOverviewComputationCache.boards = boards
+            HomeOverviewComputationCache.boardsKey = key
+        }
     }
 
-    private func makeOverviewBoards(daySeed: Int) -> [HomeOverviewBoardModel] {
-        let visibleVideos = overviewCandidateVideos()
-        let profile = recommendationProfile(from: visibleVideos)
-        let recommendedItems = recommendedOverviewItems(
-            daySeed: daySeed,
-            visibleVideos: visibleVideos,
-            profile: profile
-        )
-        let recommendedIDs = Set(recommendedItems.map(\.id))
-        let themeItems = themedHighRatedItems(
-            daySeed: daySeed,
-            visibleVideos: visibleVideos,
-            profile: profile,
-            excludedIDs: recommendedIDs
-        )
-        let themeIDs = Set(themeItems.map(\.id))
-        let highRatedSeriesItems = highRatedSeriesOverviewItems(
-            daySeed: daySeed,
-            visibleVideos: visibleVideos,
-            profile: profile,
-            excludedIDs: recommendedIDs.union(themeIDs)
-        )
-        let seriesIDs = Set(highRatedSeriesItems.map(\.id))
-        let watchlistItems = watchlistOverviewItems(
-            daySeed: daySeed,
-            visibleVideos: visibleVideos,
-            profile: profile
-        )
-        let recentHighRatedItems = recentHighRatedOverviewItems(
-            daySeed: daySeed,
-            visibleVideos: visibleVideos,
-            profile: profile,
-            excludedIDs: recommendedIDs.union(seriesIDs)
-        )
-        let offlineItems = offlineOverviewItems(
-            daySeed: daySeed,
-            profile: profile
-        )
-
-        var defaultBoards = [
-            HomeOverviewBoardModel(
-                id: "continue",
-                title: appState.localized("继续观看"),
-                subtitle: appState.localized("上次停下的地方还在这里。"),
-                systemImage: "play.circle",
-                items: Array(appState.continueWatchingItems.prefix(10)),
-                emptyMessage: appState.localized("开始播放后，这里会留下继续观看的入口。")
-            ),
-            HomeOverviewBoardModel(
-                id: "nextUp",
-                title: appState.localized("下一集"),
-                subtitle: appState.localized("把故事接着往下看。"),
-                systemImage: "forward.end.circle",
-                items: Array(appState.nextUpItems.prefix(10)),
-                emptyMessage: appState.localized("看过系列剧集后，下一集会自动出现在这里。")
-            ),
-            HomeOverviewBoardModel(
-                id: "recommend",
-                title: appState.localized("为你精选"),
-                subtitle: recommendationSubtitle(for: profile),
-                systemImage: "sparkles.tv",
-                items: recommendedItems,
-                emptyMessage: appState.localized("看过、喜欢或标星一些内容后，推荐会更有方向。")
-            )
-        ]
-
-        if !themeItems.isEmpty, let genreName = profile.strongestGenreDisplayName {
-            defaultBoards.append(
-                HomeOverviewBoardModel(
-                    id: "theme-\(profile.strongestGenre ?? genreName)",
-                    title: appState.settings.appLanguage == .zhHans ? "\(genreName)高分" : "\(appState.localized("高分")) · \(genreName)",
-                    subtitle: appState.localized("沿着你最近常看的题材继续挑。"),
-                    systemImage: "tag",
-                    items: themeItems,
-                    emptyMessage: ""
-                )
-            )
-        }
-
-        if !highRatedSeriesItems.isEmpty {
-            defaultBoards.append(
-                HomeOverviewBoardModel(
-                    id: "high-rated-series",
-                    title: appState.localized("高分剧集"),
-                    subtitle: appState.localized("优先展示评分较高、还没看完的系列。"),
-                    systemImage: "star.circle",
-                    items: highRatedSeriesItems,
-                    emptyMessage: ""
-                )
-            )
-        }
-
-        if !watchlistItems.isEmpty {
-            defaultBoards.append(
-                HomeOverviewBoardModel(
-                    id: "watchlist",
-                    title: appState.localized("想看清单"),
-                    subtitle: appState.localized("你之前留意过的内容，按适合度重新排好。"),
-                    systemImage: "bookmark.circle",
-                    items: watchlistItems,
-                    emptyMessage: ""
-                )
-            )
-        }
-
-        if !recentHighRatedItems.isEmpty {
-            defaultBoards.append(
-                HomeOverviewBoardModel(
-                    id: "recent-high-rated",
-                    title: appState.localized("高分精选"),
-                    subtitle: appState.localized("避开上方推荐，优先展示电影、纪录片和综艺里的高评分内容。"),
-                    systemImage: "clock.badge.star",
-                    items: recentHighRatedItems,
-                    emptyMessage: ""
-                )
-            )
-        }
-
-        if !offlineItems.isEmpty {
-            defaultBoards.append(
-                HomeOverviewBoardModel(
-                    id: "offline-ready",
-                    title: appState.localized("离线可看"),
-                    subtitle: appState.localized("已经缓存好的内容，离线也能打开。"),
-                    systemImage: "arrow.down.circle",
-                    items: offlineItems,
-                    emptyMessage: ""
-                )
-            )
-        }
-
-        let boards = defaultBoards + publishedCollectionBoards()
-        return boards.enumerated()
-            .sorted { lhs, rhs in
-                let leftHasContent = !lhs.element.items.isEmpty
-                let rightHasContent = !rhs.element.items.isEmpty
-                if leftHasContent != rightHasContent { return leftHasContent }
-                return lhs.offset < rhs.offset
+    private func startHomeTimeRefreshLoop() {
+        homeTimeRefreshTask?.cancel()
+        homeTimeRefreshTask = Task { @MainActor in
+            while !Task.isCancelled {
+                let seconds = secondsUntilNextHomeRefresh()
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                guard !Task.isCancelled else { break }
+                homeTimeRefreshToken &+= 1
+                refreshOverviewBoardsIfNeeded(force: true)
             }
-            .map(\.element)
+        }
+    }
+
+    private func secondsUntilNextHomeRefresh(from date: Date = Date()) -> TimeInterval {
+        let calendar = Calendar.current
+        let hour = calendar.component(.hour, from: date)
+        let nextBucketHour = ((hour / 3) + 1) * 3
+        let target: Date?
+        if nextBucketHour < 24 {
+            var components = calendar.dateComponents([.year, .month, .day], from: date)
+            components.hour = nextBucketHour
+            components.minute = 0
+            components.second = 0
+            target = calendar.date(from: components)
+        } else {
+            target = calendar.nextDate(
+                after: date,
+                matching: DateComponents(hour: 0, minute: 0, second: 0),
+                matchingPolicy: .nextTime
+            )
+        }
+        return max(60, target?.timeIntervalSince(date) ?? 10_800)
     }
 
     private func overviewCandidateVideos() -> [MediaItem] {
         appState.homeVideoItems.filter { item in
-            item.type != .music && item.type != .episode && item.type != .privateCollection
+            item.type != .music &&
+            item.type != .episode &&
+            item.type != .privateCollection &&
+            !(appState.isPrivateItem(item) && !appState.canDisplayPrivateItems)
         }
     }
 
@@ -934,12 +2681,12 @@ struct HomeView: View {
                 !excludedIDs.contains(item.id) &&
                 isHighRatedForOverview(item) &&
                 !isFinishedForRecommendation(item)
-            }
+        }
         return rankedOverviewItems(from: candidates, limit: 12) { item in
             normalizedProviderScore(item.rating) * 1.8 +
             normalizedUserScore(item.userRating) * 1.4 +
-            recencyScore(for: item.updatedAt, horizonDays: 240) * 1.2 +
-            stableDailyVariation(for: item, daySeed: daySeed) * 0.35
+            recencyScore(for: item.updatedAt, horizonDays: 240) * 0.8 +
+            stableDailyVariation(for: item, daySeed: daySeed) * 1.75
         }
     }
 
@@ -961,18 +2708,68 @@ struct HomeView: View {
         score: (MediaItem) -> Double
     ) -> [MediaItem] {
         var seen = Set<String>()
-        var unique: [MediaItem] = []
-        unique.reserveCapacity(candidates.count)
-        for item in candidates where seen.insert(item.id).inserted {
-            unique.append(item)
+        var remaining = candidates.compactMap { item -> (item: MediaItem, score: Double)? in
+            guard seen.insert(item.id).inserted else { return nil }
+            return (item, score(item))
         }
-        let scored = unique.map { item in
-            (item: item, score: score(item))
+        var selected: [MediaItem] = []
+        var typeCounts: [MediaType: Int] = [:]
+        var genreCounts: [String: Int] = [:]
+        var sourceCounts: [String: Int] = [:]
+
+        while !remaining.isEmpty, selected.count < limit {
+            let bestIndex = remaining.indices.max { lhsIndex, rhsIndex in
+                let lhs = diversityAdjustedScore(
+                    item: remaining[lhsIndex].item,
+                    baseScore: remaining[lhsIndex].score,
+                    typeCounts: typeCounts,
+                    genreCounts: genreCounts,
+                    sourceCounts: sourceCounts
+                )
+                let rhs = diversityAdjustedScore(
+                    item: remaining[rhsIndex].item,
+                    baseScore: remaining[rhsIndex].score,
+                    typeCounts: typeCounts,
+                    genreCounts: genreCounts,
+                    sourceCounts: sourceCounts
+                )
+                if lhs != rhs { return lhs < rhs }
+                return remaining[lhsIndex].item.title.localizedCaseInsensitiveCompare(remaining[rhsIndex].item.title) == .orderedDescending
+            }
+            guard let bestIndex else { break }
+            let picked = remaining.remove(at: bestIndex).item
+            selected.append(picked)
+            typeCounts[picked.type, default: 0] += 1
+            for genre in overviewGenres(for: picked) {
+                genreCounts[genre.key, default: 0] += 1
+            }
+            if let sourcePath = picked.sourcePath, !sourcePath.isEmpty {
+                sourceCounts[sourcePath, default: 0] += 1
+            }
         }
-        return Array(scored.sorted { lhs, rhs in
-            if lhs.score != rhs.score { return lhs.score > rhs.score }
-            return lhs.item.title.localizedCaseInsensitiveCompare(rhs.item.title) == .orderedAscending
-        }.prefix(limit).map(\.item))
+        return selected
+    }
+
+    private func diversityAdjustedScore(
+        item: MediaItem,
+        baseScore: Double,
+        typeCounts: [MediaType: Int],
+        genreCounts: [String: Int],
+        sourceCounts: [String: Int]
+    ) -> Double {
+        var adjusted = baseScore
+        adjusted -= Double(typeCounts[item.type] ?? 0) * 0.42
+        let genres = overviewGenres(for: item)
+        if !genres.isEmpty {
+            let repeatedGenrePenalty = genres.reduce(0.0) { partial, genre in
+                partial + Double(genreCounts[genre.key] ?? 0) * 0.28
+            }
+            adjusted -= min(repeatedGenrePenalty, 1.4)
+        }
+        if let sourcePath = item.sourcePath {
+            adjusted -= Double(sourceCounts[sourcePath] ?? 0) * 0.16
+        }
+        return adjusted
     }
 
     private func publishedCollectionBoards() -> [HomeOverviewBoardModel] {
@@ -1025,7 +2822,7 @@ struct HomeView: View {
         score += item.watchlist ? 1.0 : 0
         score += item.favorite ? 0.4 : 0
         score += item.playProgress <= 0.02 && !item.watched ? 0.75 : 0
-        score += stableDailyVariation(for: item, daySeed: daySeed) * 0.55
+        score += stableDailyVariation(for: item, daySeed: daySeed) * 1.65
 
         if item.watched || item.playProgress >= appState.settings.watchedThreshold {
             score -= 3.8
@@ -1056,10 +2853,32 @@ struct HomeView: View {
     }
 
     private func stableDailyVariation(for item: MediaItem, daySeed: Int) -> Double {
-        let hash = (item.id + "-\(daySeed)").unicodeScalars.reduce(UInt64(5381)) { partial, scalar in
+        stableDailyValue(forID: item.id, daySeed: daySeed, salt: "item")
+    }
+
+    private func stableDailyValue(forID id: String, daySeed: Int, salt: String) -> Double {
+        let hash = (id + "-\(salt)-\(daySeed)").unicodeScalars.reduce(UInt64(5381)) { partial, scalar in
             ((partial &* 33) &+ UInt64(scalar.value))
         }
         return Double(hash % 997) / 997.0
+    }
+
+    private func seasonIndex(for month: Int) -> Int {
+        switch month {
+        case 3...5: return 0
+        case 6...8: return 1
+        case 9...11: return 2
+        default: return 3
+        }
+    }
+
+    private func seasonBadge(for month: Int) -> String {
+        switch seasonIndex(for: month) {
+        case 0: return "春日记忆"
+        case 1: return "夏日记忆"
+        case 2: return "秋日记忆"
+        default: return "冬日记忆"
+        }
     }
 
     private func isHighRatedForOverview(_ item: MediaItem) -> Bool {
@@ -1104,6 +2923,92 @@ struct HomeView: View {
             }
     }
 
+    private func isDailyBannerQualified(_ item: MediaItem) -> Bool {
+        normalizedProviderScore(item.rating) > 8 || normalizedUserScore(item.userRating) > 8
+    }
+
+    private func dailyBannerScore(for item: MediaItem, profile: HomeRecommendationProfile, daySeed: Int) -> Double {
+        var score = 0.0
+        score += normalizedProviderScore(item.rating) * 0.42
+        score += normalizedUserScore(item.userRating) * 0.48
+        score += profileAffinityScore(for: item, profile: profile) * 1.55
+        score += hasSyncLandscape(item) ? 1.35 : -0.45
+        score += item.watchlist ? 0.55 : 0
+        score += item.favorite ? 0.42 : 0
+        score += item.watched || item.playProgress >= appState.settings.watchedThreshold ? -0.92 : 0
+        score += recencyScore(for: item.updatedAt, horizonDays: 540) * 0.28
+        score += stableDailyValue(forID: item.id, daySeed: daySeed, salt: "daily-banner") * 3.2
+        return score
+    }
+
+    // Hero 轮播是真正的每日推荐：评分 > 8 的高分视频优先，再按用户已看题材相似度、
+    // 横版剧照可用性和每日稳定随机值排序。候选不足时才降级到普通高分/推荐看板。
+    private var overviewFeaturedItems: [MediaItem] {
+        if let items = overviewBoards.first(where: { $0.id == "daily-banner" })?.items, !items.isEmpty {
+            return Array(items.prefix(7))
+        }
+        // 兜底路径按快照键记忆化：看板异步生成前，这段全量打分排序此前会在
+        // 每次 body 求值时同步重跑，是切到首页首帧卡顿的来源之一。
+        return HomeOverviewComputationCache.value("hero-fallback", key: overviewSnapshotKey) {
+            let videos = overviewCandidateVideos()
+            let profile = recommendationProfile(from: videos)
+            let qualified = videos.filter { item in
+                isDailyBannerQualified(item) &&
+                item.type != .music &&
+                !(appState.isPrivateItem(item) && !appState.canDisplayPrivateItems)
+            }
+            let fallback = highRatedFeaturedItems + (overviewBoards.first(where: { $0.id == "recommend" })?.items ?? [])
+            var seen = Set<String>()
+            let base = (qualified.count >= 3 ? qualified : qualified + fallback).filter { seen.insert($0.id).inserted }
+            let ranked = base.sorted { lhs, rhs in
+                let lhsScore = dailyBannerScore(for: lhs, profile: profile, daySeed: overviewDaySeed)
+                let rhsScore = dailyBannerScore(for: rhs, profile: profile, daySeed: overviewDaySeed)
+                if lhsScore != rhsScore { return lhsScore > rhsScore }
+                if hasSyncLandscape(lhs) != hasSyncLandscape(rhs) { return hasSyncLandscape(lhs) }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+            return Array(ranked.prefix(7))
+        }
+    }
+
+    /// banner 横版图补抓任务的触发键：推荐条目集合变化时重新检查一次。
+    private var overviewHeroWarmupKey: String {
+        overviewFeaturedItems.map(\.id).joined(separator: "|")
+    }
+
+    private func hasSyncLandscape(_ item: MediaItem) -> Bool {
+        if appState.cachedBackdropPath(for: item) != nil { return true }
+        if let backdrop = item.backdropPath, !backdrop.isEmpty { return true }
+        return false
+    }
+
+    private func firstBackdropPath(_ snapshot: MediaDetailSnapshot?) -> String? {
+        guard let snapshot else { return nil }
+        return snapshot.artwork
+            .filter { ($0.kind == "backdrop" || $0.aspectRatio >= 1.45) && $0.aspectRatio >= 1.3 }
+            .sorted { lhs, rhs in
+                if (lhs.kind == "backdrop") != (rhs.kind == "backdrop") {
+                    return lhs.kind == "backdrop"
+                }
+                if lhs.localPath != rhs.localPath {
+                    return lhs.localPath != nil
+                }
+                if abs(lhs.aspectRatio - rhs.aspectRatio) > 0.08 {
+                    return lhs.aspectRatio > rhs.aspectRatio
+                }
+                return lhs.order < rhs.order
+            }
+            .first
+            .map { $0.localPath ?? $0.fullURL }
+    }
+
+    // banner 图：同步优先详情快照横版艺术图，再用条目 backdrop，兜底竖版封面。
+    private func cachedBannerPath(for item: MediaItem) -> String? {
+        if let url = appState.cachedBackdropPath(for: item) { return url }
+        if let backdrop = item.backdropPath, !backdrop.isEmpty { return backdrop }
+        return item.posterPath
+    }
+
     private func overviewMetadata(for item: MediaItem) -> String {
         var parts: [String] = []
         if item.type == .episode {
@@ -1114,9 +3019,7 @@ struct HomeView: View {
         if item.year != nil {
             parts.append(item.displayYear)
         }
-        if let rating = item.rating, rating > 0 {
-            parts.append("★ \(String(format: "%.1f", rating))")
-        }
+        // 评分已由海报右上角徽标展示，元信息行不再重复（避免「★ 9.6」出现两次）。
         if item.playProgress > 0, item.playProgress < 0.98 {
             parts.append("\(appState.localized("已看")) \(Int((item.playProgress * 100).rounded()))%")
         }
@@ -1335,8 +3238,13 @@ struct HomeStatsView: View {
         )
 
         LazyVGrid(columns: columns, spacing: 12) {
-            ForEach(tiles) { tile in
-                StatTile(title: tile.title, value: tile.value, systemImage: tile.systemImage)
+            ForEach(Array(tiles.enumerated()), id: \.element.id) { index, tile in
+                AppStatTile(
+                    title: tile.title,
+                    value: tile.value,
+                    systemImage: tile.systemImage,
+                    color: AppColors.accentFamilyColor(forSeed: index)
+                )
             }
         }
     }
@@ -1379,6 +3287,71 @@ private struct HomeStatTileModel: Identifiable {
     let systemImage: String
 
     var id: String { "\(title)-\(systemImage)" }
+}
+
+/// 活力色彩区块：彩条标题 + 不横滚的整行分页海报。
+/// 返回首页时通过 onDidRestoreAnchor 兑现「水平就绪」契约（网格无需横向定位，命中即标记就绪）。
+struct HomeSectionBlock: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let accentColor: Color
+    let items: [MediaItem]
+    let emptyMessage: String
+    let metadata: (MediaItem) -> String
+    var showsDeletePlaybackHistory = false
+    let onSelect: (MediaItem) -> Void
+    var restoreAnchorID: String? = nil
+    var onDidRestoreAnchor: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            AppSectionHeading(
+                title: title,
+                subtitle: subtitle.isEmpty ? nil : subtitle,
+                systemImage: systemImage,
+                accentColor: accentColor,
+                usesAuroraIcon: true
+            )
+
+            if items.isEmpty {
+                Text(emptyMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
+            } else {
+                HomePagedPosterRow(
+                    items: items,
+                    maxItems: 24,
+                    minCardWidth: 132,
+                    spacing: 14,
+                    pageTint: accentColor
+                ) { item in
+                    AuroraPosterCard(
+                        title: item.cardTitle,
+                        subtitle: metadata(item),
+                        posterPath: item.posterPath,
+                        mediaType: item.type,
+                        rating: item.rating.map { String(format: "%.1f", $0) },
+                        progress: item.playProgress,
+                        accent: accentColor,
+                        onSelect: { onSelect(item) }
+                    )
+                    .id(item.id)
+                }
+            }
+        }
+        .padding(16)
+        .staticSurfaceBackground(cornerRadius: 20, thickness: 1.02)
+        .repeatedCardChrome(false, cornerRadius: 20)
+        .onAppear { notifyRestoreIfNeeded() }
+        .onChange(of: restoreAnchorID) { _ in notifyRestoreIfNeeded() }
+    }
+
+    private func notifyRestoreIfNeeded() {
+        guard let restoreAnchorID, items.contains(where: { $0.id == restoreAnchorID }) else { return }
+        onDidRestoreAnchor?()
+    }
 }
 
 struct HomeOverviewBoard: View {
@@ -1632,60 +3605,6 @@ private struct HomeOverviewPosterCard: View {
             }
         }
         .animation(reduceMotion ? nil : AppMotion.listHover, value: active)
-    }
-}
-
-struct StatTile: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
-    @Environment(\.mainLayoutTransitionActive) private var layoutTransitionActive
-    let title: String
-    let value: String
-    let systemImage: String
-    @State private var isHovering = false
-
-    var body: some View {
-        let active = isHovering && !suppressHoverDuringScroll && !layoutTransitionActive
-        HStack(spacing: 12) {
-            PlayfulSymbolIcon(systemImage: systemImage, size: 38)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(value)
-                    .font(.title2.weight(.semibold))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.58)
-                    .allowsTightening(true)
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-            Spacer()
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
-        .staticSurfaceBackground(cornerRadius: AppCardMetrics.repeatedCornerRadius)
-        .repeatedCardChrome(active)
-        .repeatedSurfaceHover(active, cornerRadius: AppCardMetrics.repeatedCornerRadius, intensity: 0.54)
-        .scaleEffect(!reduceMotion && active ? 1.022 : 1)
-        .animation(reduceMotion ? nil : AppMotion.fast, value: active)
-        .onHover { hovering in
-            guard !suppressHoverDuringScroll, !layoutTransitionActive else {
-                isHovering = false
-                return
-            }
-            isHovering = hovering
-        }
-        .onChange(of: suppressHoverDuringScroll) { suppressing in
-            if suppressing {
-                isHovering = false
-            }
-        }
-        .onChange(of: layoutTransitionActive) { active in
-            if active {
-                isHovering = false
-            }
-        }
     }
 }
 

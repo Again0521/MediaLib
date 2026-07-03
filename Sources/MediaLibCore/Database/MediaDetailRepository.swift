@@ -282,6 +282,45 @@ public final class MediaDetailRepository {
         return result
     }
 
+    public func firstBackdropPathsByMediaID() throws -> [String: String] {
+        let rows = try database.query(
+            """
+            SELECT media_id, kind, full_url, local_path, aspect_ratio, sort_order
+            FROM media_artwork
+            WHERE kind = 'backdrop' OR aspect_ratio >= 1.3
+            ORDER BY media_id, sort_order ASC, id ASC
+            """
+        ) {
+            (
+                mediaID: $0.string(0) ?? "",
+                kind: $0.string(1) ?? "backdrop",
+                fullURL: $0.string(2) ?? "",
+                localPath: $0.string(3),
+                aspectRatio: $0.double(4) ?? 1.78,
+                order: $0.int(5) ?? 0
+            )
+        }
+        let grouped = Dictionary(grouping: rows.filter { !$0.mediaID.isEmpty }, by: \.mediaID)
+        return grouped.compactMapValues { candidates in
+            candidates
+                .filter { ($0.kind == "backdrop" || $0.aspectRatio >= 1.45) && $0.aspectRatio >= 1.3 }
+                .sorted { lhs, rhs in
+                    if (lhs.kind == "backdrop") != (rhs.kind == "backdrop") {
+                        return lhs.kind == "backdrop"
+                    }
+                    if lhs.localPath != rhs.localPath {
+                        return lhs.localPath != nil
+                    }
+                    if abs(lhs.aspectRatio - rhs.aspectRatio) > 0.08 {
+                        return lhs.aspectRatio > rhs.aspectRatio
+                    }
+                    return lhs.order < rhs.order
+                }
+                .first
+                .flatMap { $0.localPath ?? ($0.fullURL.isEmpty ? nil : $0.fullURL) }
+        }
+    }
+
     public func staleMediaIDs(olderThan date: Date) throws -> Set<String> {
         Set(try database.query(
             "SELECT media_id FROM media_detail_metadata WHERE fetched_at < ?",

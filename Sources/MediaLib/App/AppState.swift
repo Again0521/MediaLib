@@ -262,6 +262,28 @@ private struct OneClickCleanupResult: Sendable {
     }
 }
 
+private struct LibraryReloadSnapshot: Sendable {
+    var sources: [MediaSource]
+    var items: [MediaItem]
+    var musicPlaylists: [MusicPlaylist]
+    var musicSmartPlaylists: [MusicSmartPlaylist]
+    var videoSmartCollections: [VideoSmartCollection]
+    var videoManualCollections: [VideoManualCollection]
+    var videoOfflineSubscriptions: [VideoOfflineSubscription]
+    var metadataCorrectionCountsByMediaID: [String: Int]
+    var metadataCorrectionRecordCount: Int
+    var metadataCorrectionBatches: [MetadataCorrectionBatchSummary]
+    var pendingSyncConflictCount: Int
+    var pendingSyncConflicts: [SyncConflict]
+    var remoteConnectorAccounts: [RemoteConnectorAccount]
+    var musicProjectionSnapshot: MusicLibraryProjectionSnapshot
+    var detailMetadataGapsByMediaID: [String: Set<String>]
+    var detailSearchTermsByMediaID: [String: [String]]
+    var detailBackdropPathsByMediaID: [String: String]
+    var mediaExternalIDIndex: [String: String]
+    var mediaIDsByPersonID: [String: Set<String>]
+}
+
 enum MusicRepeatMode: String, CaseIterable, Identifiable {
     case sequential
     case repeatAll
@@ -497,6 +519,7 @@ final class AppState: ObservableObject {
     @Published private(set) var isConnectingPlex = false
     private var version122MaintenanceTask: Task<Void, Never>?
     @Published var musicMetadataFetchProgress = ""
+    @Published private(set) var isLibraryReloading = false
     @Published private(set) var libraryRevision = 0
     /// 仅在 reload() 完成（元数据/封面路径真实变化）时递增；文件存在性检查不会触发它。
     /// LocalPosterImage 的 cacheKey 改用此值，避免文件健康检查后触发全量图片重载。
@@ -505,6 +528,16 @@ final class AppState: ObservableObject {
     @Published private(set) var watchlistRevision = 0
     @Published private(set) var ratingRevision = 0
     @Published private(set) var videoCacheRevision = 0
+    @Published private(set) var musicProjectionRevision = 0
+    /// 音乐内容修订号：仅当音乐曲目本身（曲目集合或其字段）真实变化时递增。
+    /// 音乐库各子页面的快照缓存以它为失效键，避免视频/扫描等无关 libraryRevision
+    /// 抖动把音乐列表快照全部打失效、每次切页都重新全量排序重建。
+    @Published private(set) var musicContentRevision = 0
+    private var musicContentFingerprint = 0
+    /// 详情横版剧照缓存修订号：后台补抓到新 backdrop 时递增，驱动首页 banner 换图。
+    @Published private(set) var backdropRevision = 0
+    private var heroBackdropWarmedIDs: Set<String> = []
+    private var heroBackdropWarmupTask: Task<Void, Never>?
     @Published private(set) var videoCacheStorageSummary = VideoCacheStorageSummary(entryCount: 0, totalBytes: 0, byteLimit: nil)
     @Published private(set) var videoOfflineSubscriptionWiFiAvailable = false
     // 播放歌名含「アゲイン」的歌曲时触发一次轻量樱花动效，仅限本次启动首次播放。
@@ -528,6 +561,7 @@ final class AppState: ObservableObject {
     private let playbackMarkerRepository: PlaybackMarkerRepository?
     // metadataCorrectionRepository 已移入 MetadataCorrectionStore 持有。
     private let mediaDetailRepository: MediaDetailRepository?
+    private let musicProjectionRepository: MusicLibraryProjectionRepository?
     // syncConflictRepository 已移入 SyncConflictStore 持有。
     // internal（非 private）：供拆到 AppState+TraktSync.swift 的方法使用。
     let remoteConnectorAccountRepository: RemoteConnectorAccountRepository?
@@ -546,6 +580,8 @@ final class AppState: ObservableObject {
     private var automaticTMDBMatchTask: Task<Void, Never>?
     private var configuredAutomaticTMDBMatchInterval: AutomaticScanInterval?
     private var tmdbMatchTask: Task<Void, Never>?
+    private var libraryReloadTask: Task<Void, Never>?
+    private var libraryReloadGeneration = 0
     private var detailEnrichmentTasks: [String: Task<TMDBEnrichment?, Never>] = [:]
     private var videoCacheJobs: [UUID: VideoCacheJob] = [:]
     private var videoOfflineSubscriptionMaintenanceTask: Task<Void, Never>?
@@ -554,6 +590,7 @@ final class AppState: ObservableObject {
     private let networkPathMonitorQueue = DispatchQueue(label: "MediaLIB.NetworkPathMonitor")
     private var keyframeStoryboardTasks: [UUID: Task<Void, Never>] = [:]
     private var playbackMarkerAnalysisTasks: [UUID: Task<Void, Never>] = [:]
+    private var musicProjectionTask: Task<Void, Never>?
     private var floatingNoticeDismissTasks: [UUID: Task<Void, Never>] = [:]
     private var floatingNoticeQueue: [PendingFloatingNotice] = []
     private var foregroundFallbackNotices: [PendingFloatingNotice] = []
@@ -577,6 +614,14 @@ final class AppState: ObservableObject {
     // 注：以下两个缓存放宽为 internal，供拆分到独立文件的 AppState extension（如歌单）读取。
     var cachedMusicTracks: [MediaItem] = []
     var cachedMusicTracksByID: [String: MediaItem] = [:]
+    var cachedMusicTracksBySection: [MusicLibrarySection: [MediaItem]] = [:]
+    var cachedMusicSmartTracksByPlaylistID: [String: [MediaItem]] = [:]
+    private var cachedMusicAlbumSummaries: [MusicAlbumSummary] = []
+    private var cachedMusicArtistSummaries: [MusicArtistSummary] = []
+    private var cachedMusicProjectionRebuiltAt: Date?
+    private var cachedHomeMusicPlayableTracks: [MediaItem] = []
+    private var cachedHomeContinueListeningTracks: [MediaItem] = []
+    private var cachedHomeMusicSignalTracks: [MediaItem] = []
     private var cachedEmbyTopLevelItems: [MediaItem] = []
     private var cachedAlbumItems: [MediaItem] = []
     private var cachedHomeVideoItems: [MediaItem] = []
@@ -603,6 +648,7 @@ final class AppState: ObservableObject {
     let urlHealthMonitor = URLSourceHealthMonitor()
     private var urlHealthForwarding: AnyCancellable?
     private var cachedHomeStats = HomeStatsSnapshot()
+    private var detailBackdropPathsByMediaID: [String: String] = [:]
     private var mediaExternalIDIndex: [String: String] = [:]
     private var mediaIDsByPersonID: [String: Set<String>] = [:]
     private var fileHealthTask: Task<Void, Never>?
@@ -696,7 +742,8 @@ final class AppState: ObservableObject {
     }
 
     init() {
-        let loadedSettings = settingsStore.load()
+        var loadedSettings = settingsStore.load()
+        LiveTitleIconDebugTool.adjustSettingsForDebug(&loadedSettings)
         self.settings = loadedSettings
         self.configuredWatchedThreshold = loadedSettings.watchedThreshold
         self.privacyPINConfigured = loadedSettings.privacyPINEnabled && privacyLockService.hasPIN()
@@ -724,29 +771,30 @@ final class AppState: ObservableObject {
             self.playbackMarkerRepository = PlaybackMarkerRepository(database: database)
             self.metadataCorrectionStore = MetadataCorrectionStore(repository: MetadataCorrectionRepository(database: database))
             self.mediaDetailRepository = MediaDetailRepository(database: database)
+            self.musicProjectionRepository = MusicLibraryProjectionRepository(database: database)
             self.syncConflictStore = SyncConflictStore(repository: SyncConflictRepository(database: database))
             self.remoteConnectorAccountRepository = RemoteConnectorAccountRepository(database: database)
             do {
                 self.videoOfflineCacheStore = try VideoOfflineCacheStore(
                     applicationSupportDirectory: directories.applicationSupport,
                     defaultCacheDirectory: directories.cache,
-                    customCacheDirectoryPath: loadedSettings.videoCacheDirectoryPath
+                    customCacheDirectoryPath: loadedSettings.videoCacheDirectoryPath,
+                    pruneOnInit: false
                 )
                 self.cachedVideoEntriesByItemID = self.videoOfflineCacheStore?.allEntries() ?? [:]
-                self.videoCacheStorageSummary = self.videoOfflineCacheStore?.storageSummary(
+                self.videoCacheStorageSummary = VideoCacheStorageSummary(
+                    entryCount: self.cachedVideoEntriesByItemID.count,
+                    totalBytes: self.cachedVideoEntriesByItemID.values.reduce(Int64(0)) { partial, entry in
+                        partial + max(entry.fileSize ?? 0, 0)
+                    },
                     byteLimit: Self.videoCacheByteLimit(from: loadedSettings.videoCacheSizeLimitGB)
-                ) ?? VideoCacheStorageSummary(entryCount: 0, totalBytes: 0, byteLimit: nil)
+                )
             } catch {
                 self.videoOfflineCacheStore = nil
                 logger.log("视频缓存清单初始化失败：\(error.localizedDescription)", level: .warning)
             }
-            restoreBackgroundTasksIfPossible()
-            reload()
-            restoreMusicQueueState()
-            configureAutomaticScan()
-            configureLocalFileEventMonitoring()
-            configureAutomaticTMDBMatch()
-            scheduleVersion122MaintenanceIfNeeded()
+            scheduleBackgroundTaskRestore()
+            scheduleLibraryReload(reason: "startup", delayNanoseconds: 120_000_000)
         } catch {
             self.directories = nil
             self.logger = nil
@@ -761,6 +809,7 @@ final class AppState: ObservableObject {
             self.playbackMarkerRepository = nil
             self.metadataCorrectionStore = MetadataCorrectionStore(repository: nil)
             self.mediaDetailRepository = nil
+            self.musicProjectionRepository = nil
             self.syncConflictStore = SyncConflictStore(repository: nil)
             self.remoteConnectorAccountRepository = nil
             self.videoOfflineCacheStore = nil
@@ -802,6 +851,7 @@ final class AppState: ObservableObject {
 
     deinit {
         version122MaintenanceTask?.cancel()
+        libraryReloadTask?.cancel()
         detailEnrichmentTasks.values.forEach { $0.cancel() }
         networkPathMonitor?.cancel()
         if let appDidBecomeActiveObserver {
@@ -882,17 +932,22 @@ final class AppState: ObservableObject {
     }
 
     var missingFileItems: [MediaItem] {
-        cachedMissingFileItems.filter(healthCheckEnabled(for:))
+        cachedMissingFileItems.filter {
+            healthCheckEnabled(for: $0) && !isHealthIssueIgnored(category: Self.healthCategoryMissingFile, id: $0.id)
+        }
     }
 
     var missingMetadataItems: [MediaItem] {
-        cachedMissingMetadataItems.filter(healthCheckEnabled(for:))
+        cachedMissingMetadataItems.filter {
+            healthCheckEnabled(for: $0) && !isHealthIssueIgnored(category: Self.healthCategoryMissingMetadata, id: $0.id)
+        }
     }
 
     var detailMetadataGapItems: [MediaItem] {
         topLevelItems.filter {
             detailMetadataGapsByMediaID[$0.id] != nil &&
                 healthCheckEnabled(for: $0) &&
+                !isHealthIssueIgnored(category: Self.healthCategoryDetailMetadata, id: $0.id) &&
                 !(isPrivateItem($0) && !canDisplayPrivateItems)
         }
     }
@@ -903,13 +958,48 @@ final class AppState: ObservableObject {
     }
 
     var offlineSources: [MediaSource] {
-        cachedOfflineSources.filter(\.includeInHealthCheck)
+        cachedOfflineSources.filter {
+            $0.includeInHealthCheck && !isHealthIssueIgnored(category: Self.healthCategoryOfflineSource, id: $0.id)
+        }
     }
 
     var duplicateTitleGroups: [[MediaItem]] {
         cachedDuplicateTitleGroups
             .map { $0.filter(healthCheckEnabled(for:)) }
-            .filter { $0.count > 1 }
+            .filter { $0.count > 1 && !isHealthIssueIgnored(category: Self.healthCategoryDuplicateGroup, id: duplicateHealthIssueID(for: $0)) }
+    }
+
+    static let healthCategoryMissingFile = "missing-file"
+    static let healthCategoryMissingMetadata = "missing-metadata"
+    static let healthCategoryDetailMetadata = "detail-metadata"
+    static let healthCategoryOfflineSource = "offline-source"
+    static let healthCategoryDuplicateGroup = "duplicate-group"
+    static let healthCategoryUnhealthyURL = "unhealthy-url"
+
+    func duplicateHealthIssueID(for group: [MediaItem]) -> String {
+        group.map(\.id).sorted().joined(separator: "|")
+    }
+
+    func isHealthIssueIgnored(category: String, id: String) -> Bool {
+        settings.ignoredHealthIssueIDs.contains(Self.healthIssueKey(category: category, id: id))
+    }
+
+    func ignoreHealthIssue(category: String, id: String, title: String? = nil) {
+        settings.ignoredHealthIssueIDs.insert(Self.healthIssueKey(category: category, id: id))
+        saveSettings()
+        showFloatingNotice(title: "已忽略健康项", message: title ?? "可在设置中恢复显示。", kind: .success)
+    }
+
+    func clearIgnoredHealthIssues() {
+        let count = settings.ignoredHealthIssueIDs.count
+        guard count > 0 else { return }
+        settings.ignoredHealthIssueIDs.removeAll()
+        saveSettings()
+        showFloatingNotice(title: "已恢复健康检查", message: "\(count) 项已重新纳入仪表盘。", kind: .success)
+    }
+
+    private static func healthIssueKey(category: String, id: String) -> String {
+        "\(category):\(id)"
     }
 
     /// 仅仍存在且明确开启健康检查的来源参与统计。
@@ -932,6 +1022,50 @@ final class AppState: ObservableObject {
 
     var musicTracks: [MediaItem] {
         cachedMusicTracks
+    }
+
+    var homeMusicPlayableTracks: [MediaItem] {
+        cachedHomeMusicPlayableTracks
+    }
+
+    var homeContinueListeningTracks: [MediaItem] {
+        cachedHomeContinueListeningTracks
+    }
+
+    var homeMusicSignalTracks: [MediaItem] {
+        cachedHomeMusicSignalTracks
+    }
+
+    var musicAlbumSummaries: [MusicAlbumSummary] {
+        cachedMusicAlbumSummaries
+    }
+
+    var musicArtistSummaries: [MusicArtistSummary] {
+        cachedMusicArtistSummaries
+    }
+
+    var musicProjectionRebuiltAt: Date? {
+        cachedMusicProjectionRebuiltAt
+    }
+
+    func musicTracks(inAlbum album: MusicAlbumSummary) -> [MediaItem] {
+        cachedMusicTracks.filter { track in
+            Self.normalizedMusicProjectionKey(MusicLibraryProjectionRepository.displayAlbum(track.album)) == album.titleKey &&
+            Self.normalizedMusicProjectionKey(MusicLibraryProjectionRepository.displayArtist(track.artist)) == album.artistKey
+        }
+    }
+
+    func musicTracks(inArtist artist: MusicArtistSummary) -> [MediaItem] {
+        cachedMusicTracks.filter { track in
+            Self.normalizedMusicProjectionKey(MusicLibraryProjectionRepository.displayArtist(track.artist)) == artist.nameKey
+        }
+    }
+
+    private static func normalizedMusicProjectionKey(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+            .lowercased()
     }
 
     func item(withID id: String) -> MediaItem? {
@@ -1448,18 +1582,7 @@ final class AppState: ObservableObject {
     }
 
     func musicItems(for section: MusicLibrarySection) -> [MediaItem] {
-        switch section {
-        case .songs, .albums, .artists:
-            return musicTracks
-        case .playlists:
-            return []
-        case .recent:
-            return musicTracks.filter { $0.lastPlayedAt != nil }.sorted { ($0.lastPlayedAt ?? .distantPast) > ($1.lastPlayedAt ?? .distantPast) }
-        case .favorites:
-            return musicTracks.filter(\.favorite)
-        case .unmatched:
-            return musicTracks.filter { ($0.artist?.isEmpty ?? true) || ($0.album?.isEmpty ?? true) || $0.metadataProvider == nil }
-        }
+        cachedMusicTracksBySection[section] ?? []
     }
 
     /// 自增库版本号。供拆分到独立文件的 AppState extension 调用，保留 libraryRevision 的 private(set) 封装。
@@ -2009,22 +2132,22 @@ final class AppState: ObservableObject {
 
         Task { [weak self] in
             do {
-                let cacheResult = try await Task.detached(priority: .utility) {
+                let cacheResult = try await BlockingIOExecutor.run {
                     try store?.runMaintenance(
                         validItemIDs: validItemIDs,
                         byteLimit: byteLimit,
                         cleanupHint: cleanupHint
                     )
-                }.value
+                }
                 await MainActor.run {
                     guard let self else { return }
                     self.updateBackgroundTask(id: taskID, progress: 0.62, detail: "正在清理任务历史")
                     self.refreshVideoCacheEntries()
                 }
 
-                let removedArtworkDirectories = await Task.detached(priority: .utility) {
+                let removedArtworkDirectories = await BlockingIOExecutor.run {
                     Self.removeEmptyArtworkCacheDirectories(in: directories?.cache)
-                }.value
+                }
                 await MainActor.run {
                     guard let self else { return }
                     let trimmedHistory = self.trimInactiveBackgroundTaskHistory(existingInactiveCount: existingInactiveTaskCount)
@@ -2564,69 +2687,69 @@ final class AppState: ObservableObject {
     }
 
     func reload() {
-        do {
-            let reloadStart = Date()
-            ArtworkImageCache.invalidateMissingPaths()
-            let fetchStart = Date()
-            sources = try sourceRepository?.fetchAll() ?? []
-            let fetchedItems = try mediaRepository?.fetchAll() ?? []
-            try musicPlaylistStore.reloadPlaylists()
-            videoSmartCollections = try videoSmartCollectionRepository?.fetchAll() ?? []
-            videoManualCollections = try videoManualCollectionRepository?.fetchAll() ?? []
-            videoOfflineSubscriptions = try videoOfflineSubscriptionRepository?.fetchAll() ?? []
-            try musicPlaylistStore.reloadSmartPlaylists()
-            try metadataCorrectionStore.reload()
-            try syncConflictStore.reload()
-            remoteConnectorAccounts = try remoteConnectorAccountRepository?.fetchAll() ?? []
-            items = fetchedItems
-            let detailCandidateIDs = fetchedItems.compactMap { item -> String? in
-                guard item.parentID == nil,
-                      item.type != .music,
-                      item.type != .photo,
-                      item.type != .homeVideo,
-                      item.type != .privateCollection else { return nil }
-                return item.id
-            }
-            detailMetadataGapsByMediaID = try mediaDetailRepository?
-                .detailCompleteness(mediaIDs: detailCandidateIDs) ?? [:]
-            detailSearchTermsByMediaID = try mediaDetailRepository?.searchTermsByMediaID() ?? [:]
-            mediaExternalIDIndex = try mediaDetailRepository?.externalMediaIDIndex() ?? [:]
-            mediaIDsByPersonID = try mediaDetailRepository?.mediaIDsByPersonID() ?? [:]
-            mediaSearchRevision += 1
-            logPerformance("reload.fetch repositories: \(Self.milliseconds(since: fetchStart))ms items=\(items.count) sources=\(sources.count) playlists=\(musicPlaylists.count)")
-            let cacheStart = Date()
-            rebuildDerivedItemCaches()
-            if didRestoreMusicQueue {
-                reconcileMusicQueueWithLibrary()
-            }
-            logPerformance("reload.rebuildDerivedItemCaches: \(Self.milliseconds(since: cacheStart))ms")
-            if let selectedItem, let refreshed = items.first(where: { $0.id == selectedItem.id }) {
-                self.selectedItem = refreshed
-            }
-            let healthStart = Date()
-            scheduleFileHealthRefresh()
-            configureLocalFileEventMonitoring()
-            logPerformance("reload.scheduleFileHealthRefresh: \(Self.milliseconds(since: healthStart))ms")
-            libraryRevision += 1
-            posterRevision += 1
-            pruneExpiredVideoOfflineSubscriptions(reason: "library reload", notify: false)
-            scheduleVideoOfflineSubscriptionExpirationCheck(reason: "library reload")
-            scheduleVideoOfflineSubscriptionMaintenance(reason: "library reload")
-            resumeRestoredArtworkWarmupTasksIfNeeded()
-            logPerformance("reload.total: \(Self.milliseconds(since: reloadStart))ms revision=\(libraryRevision) posterRevision=\(posterRevision)")
-        } catch {
-            showError("加载媒体库失败", error)
-        }
+        scheduleLibraryReload(reason: "reload")
     }
 
     private func reloadMediaItemsDuringScan(runID: UUID) {
         guard scanRunID == runID, isScanning else { return }
-        do {
+        scheduleLibraryReload(reason: "scan incremental", delayNanoseconds: 260_000_000)
+    }
+
+    private func scheduleLibraryReload(reason: String, delayNanoseconds: UInt64 = 180_000_000) {
+        guard let directories else { return }
+        libraryReloadGeneration += 1
+        let generation = libraryReloadGeneration
+        libraryReloadTask?.cancel()
+        libraryReloadTask = Task { @MainActor [weak self, directories] in
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.isLibraryReloading = true
             let reloadStart = Date()
+            do {
+                let snapshot = try await Self.loadLibraryReloadSnapshot(directories: directories)
+                guard !Task.isCancelled else { return }
+                guard self.libraryReloadGeneration == generation else { return }
+                self.applyLibraryReloadSnapshot(snapshot, reason: reason, reloadStart: reloadStart)
+                self.isLibraryReloading = false
+            } catch is CancellationError {
+                if self.libraryReloadGeneration == generation {
+                    self.isLibraryReloading = false
+                }
+            } catch {
+                if self.libraryReloadGeneration == generation {
+                    self.isLibraryReloading = false
+                    self.showError("加载媒体库失败", error)
+                } else {
+                    self.logger?.log("已忽略过期媒体库刷新错误：\(error.localizedDescription)", level: .warning)
+                }
+            }
+        }
+    }
+
+    private nonisolated static func loadLibraryReloadSnapshot(directories: AppDirectories) async throws -> LibraryReloadSnapshot {
+        // 全量 SQLite 读取（本库约 5.8 秒）属长阻塞 I/O，走专用队列而非协作池。
+        try await BlockingIOExecutor.run {
+            try Task.checkCancellation()
             ArtworkImageCache.invalidateMissingPaths()
-            let fetchedItems = try mediaRepository?.fetchAll() ?? []
-            items = fetchedItems
-            let detailCandidateIDs = fetchedItems.compactMap { item -> String? in
+            let database = try DatabaseManager(url: directories.database, backupDirectory: directories.databaseBackups)
+            let sourceRepository = SourceRepository(database: database)
+            let mediaRepository = MediaRepository(database: database)
+            let musicPlaylistRepository = MusicPlaylistRepository(database: database)
+            let musicSmartPlaylistRepository = MusicSmartPlaylistRepository(database: database)
+            let videoSmartCollectionRepository = VideoSmartCollectionRepository(database: database)
+            let videoManualCollectionRepository = VideoManualCollectionRepository(database: database)
+            let videoOfflineSubscriptionRepository = VideoOfflineSubscriptionRepository(database: database)
+            let metadataCorrectionRepository = MetadataCorrectionRepository(database: database)
+            let syncConflictRepository = SyncConflictRepository(database: database)
+            let remoteConnectorAccountRepository = RemoteConnectorAccountRepository(database: database)
+            let mediaDetailRepository = MediaDetailRepository(database: database)
+            let musicProjectionRepository = MusicLibraryProjectionRepository(database: database)
+
+            let sources = try sourceRepository.fetchAll()
+            let items = try mediaRepository.fetchAll()
+            let detailCandidateIDs = items.compactMap { item -> String? in
                 guard item.parentID == nil,
                       item.type != .music,
                       item.type != .photo,
@@ -2634,24 +2757,178 @@ final class AppState: ObservableObject {
                       item.type != .privateCollection else { return nil }
                 return item.id
             }
-            detailMetadataGapsByMediaID = try mediaDetailRepository?
-                .detailCompleteness(mediaIDs: detailCandidateIDs) ?? [:]
-            detailSearchTermsByMediaID = try mediaDetailRepository?.searchTermsByMediaID() ?? [:]
-            mediaExternalIDIndex = try mediaDetailRepository?.externalMediaIDIndex() ?? [:]
-            mediaIDsByPersonID = try mediaDetailRepository?.mediaIDsByPersonID() ?? [:]
-            mediaSearchRevision += 1
-            rebuildDerivedItemCaches()
-            if didRestoreMusicQueue {
-                reconcileMusicQueueWithLibrary()
+            try Task.checkCancellation()
+
+            return LibraryReloadSnapshot(
+                sources: sources,
+                items: items,
+                musicPlaylists: try musicPlaylistRepository.fetchAll(),
+                musicSmartPlaylists: try musicSmartPlaylistRepository.fetchAll(),
+                videoSmartCollections: try videoSmartCollectionRepository.fetchAll(),
+                videoManualCollections: try videoManualCollectionRepository.fetchAll(),
+                videoOfflineSubscriptions: try videoOfflineSubscriptionRepository.fetchAll(),
+                metadataCorrectionCountsByMediaID: try metadataCorrectionRepository.activeCountsByMediaID(),
+                metadataCorrectionRecordCount: try metadataCorrectionRepository.activeRecordCount(),
+                metadataCorrectionBatches: try metadataCorrectionRepository.fetchActiveBatches(limit: 120),
+                pendingSyncConflictCount: try syncConflictRepository.pendingCount(),
+                pendingSyncConflicts: try syncConflictRepository.fetchPending(limit: 120),
+                remoteConnectorAccounts: try remoteConnectorAccountRepository.fetchAll(),
+                musicProjectionSnapshot: try musicProjectionRepository.fetchSnapshot(),
+                detailMetadataGapsByMediaID: try mediaDetailRepository.detailCompleteness(mediaIDs: detailCandidateIDs),
+                detailSearchTermsByMediaID: try mediaDetailRepository.searchTermsByMediaID(),
+                detailBackdropPathsByMediaID: try mediaDetailRepository.firstBackdropPathsByMediaID(),
+                mediaExternalIDIndex: try mediaDetailRepository.externalMediaIDIndex(),
+                mediaIDsByPersonID: try mediaDetailRepository.mediaIDsByPersonID()
+            )
+        }
+    }
+
+    private func applyLibraryReloadSnapshot(
+        _ snapshot: LibraryReloadSnapshot,
+        reason: String,
+        reloadStart: Date
+    ) {
+        let applyStart = Date()
+        sources = snapshot.sources
+        items = snapshot.items
+        musicPlaylistStore.replaceLoaded(
+            playlists: snapshot.musicPlaylists,
+            smartPlaylists: snapshot.musicSmartPlaylists
+        )
+        videoSmartCollections = snapshot.videoSmartCollections
+        videoManualCollections = snapshot.videoManualCollections
+        videoOfflineSubscriptions = snapshot.videoOfflineSubscriptions
+        metadataCorrectionStore.replaceLoaded(
+            countsByMediaID: snapshot.metadataCorrectionCountsByMediaID,
+            recordCount: snapshot.metadataCorrectionRecordCount,
+            batches: snapshot.metadataCorrectionBatches
+        )
+        syncConflictStore.replaceLoaded(
+            pendingCount: snapshot.pendingSyncConflictCount,
+            pendingConflicts: snapshot.pendingSyncConflicts
+        )
+        remoteConnectorAccounts = snapshot.remoteConnectorAccounts
+        applyMusicProjectionSnapshot(snapshot.musicProjectionSnapshot)
+        detailMetadataGapsByMediaID = snapshot.detailMetadataGapsByMediaID
+        detailSearchTermsByMediaID = snapshot.detailSearchTermsByMediaID
+        detailBackdropPathsByMediaID = snapshot.detailBackdropPathsByMediaID
+        mediaExternalIDIndex = snapshot.mediaExternalIDIndex
+        mediaIDsByPersonID = snapshot.mediaIDsByPersonID
+        mediaSearchRevision += 1
+        logPerformance("reload.apply snapshot[\(reason)]: \(Self.milliseconds(since: applyStart))ms items=\(items.count) sources=\(sources.count) playlists=\(musicPlaylists.count)")
+
+        let cacheStart = Date()
+        rebuildDerivedItemCaches()
+        if didRestoreMusicQueue {
+            reconcileMusicQueueWithLibrary()
+        } else {
+            restoreMusicQueueState()
+        }
+        logPerformance("reload.rebuildDerivedItemCaches[\(reason)]: \(Self.milliseconds(since: cacheStart))ms")
+        if let selectedItem, let refreshed = items.first(where: { $0.id == selectedItem.id }) {
+            self.selectedItem = refreshed
+        }
+        let healthStart = Date()
+        scheduleFileHealthRefresh()
+        configureLocalFileEventMonitoring()
+        configureAutomaticScan()
+        configureAutomaticTMDBMatch()
+        scheduleVersion122MaintenanceIfNeeded()
+        logPerformance("reload.schedule background followups[\(reason)]: \(Self.milliseconds(since: healthStart))ms")
+        libraryRevision += 1
+        posterRevision += 1
+        pruneExpiredVideoOfflineSubscriptions(reason: "library reload", notify: false)
+        scheduleVideoOfflineSubscriptionExpirationCheck(reason: "library reload")
+        scheduleVideoOfflineSubscriptionMaintenance(reason: "library reload")
+        resumeRestoredArtworkWarmupTasksIfNeeded()
+        scheduleMusicProjectionMaintenanceIfNeeded(reason: reason)
+        logPerformance("reload.total[\(reason)]: \(Self.milliseconds(since: reloadStart))ms revision=\(libraryRevision) posterRevision=\(posterRevision)")
+    }
+
+    private func applyMusicProjectionSnapshot(_ snapshot: MusicLibraryProjectionSnapshot) {
+        // 投影内容没变就不 bump 修订号：每次库刷新都无条件递增会把专辑/艺术家页
+        // 的列表快照全部打失效，迫使切页时重新分组排序。
+        let unchanged = cachedMusicAlbumSummaries == snapshot.albums &&
+            cachedMusicArtistSummaries == snapshot.artists
+        cachedMusicAlbumSummaries = snapshot.albums
+        cachedMusicArtistSummaries = snapshot.artists
+        cachedMusicProjectionRebuiltAt = snapshot.rebuiltAt
+        if !unchanged {
+            musicProjectionRevision += 1
+        }
+    }
+
+    private func scheduleMusicProjectionMaintenanceIfNeeded(reason: String) {
+        guard !cachedMusicTracks.isEmpty || !cachedMusicAlbumSummaries.isEmpty || !cachedMusicArtistSummaries.isEmpty else { return }
+        scheduleMusicProjectionMaintenance(reason: reason, force: false)
+    }
+
+    func scheduleMusicProjectionMaintenance(reason: String, force: Bool, preferIncremental: Bool = false) {
+        guard let musicProjectionRepository else { return }
+        guard musicProjectionTask == nil else { return }
+        musicProjectionTask = Task { @MainActor [weak self, musicProjectionRepository] in
+            defer { self?.musicProjectionTask = nil }
+            do {
+                try await Task.sleep(nanoseconds: 420_000_000)
+            } catch {
+                return
             }
-            if let selectedItem, let refreshed = items.first(where: { $0.id == selectedItem.id }) {
-                self.selectedItem = refreshed
+            guard let self, !Task.isCancelled else { return }
+            do {
+                let plan: MusicProjectionMaintenancePlan
+                if force {
+                    plan = .bootstrap
+                } else if preferIncremental {
+                    let detectedPlan = try await musicProjectionRepository.maintenancePlanAsync()
+                    plan = detectedPlan == .bootstrap ? .bootstrap : .incremental
+                } else {
+                    plan = try await musicProjectionRepository.maintenancePlanAsync()
+                }
+                guard plan != .none, !Task.isCancelled else { return }
+
+                switch plan {
+                case .none:
+                    return
+                case .bootstrap:
+                    let taskID = self.beginBackgroundTask(
+                        kind: .musicIndex,
+                        title: BackgroundTaskKind.musicIndex.title,
+                        detail: "首次整理专辑与艺术家",
+                        progress: nil,
+                        isCancellable: false
+                    )
+                    do {
+                        let result = try await musicProjectionRepository.rebuildAll()
+                        let snapshot = try await musicProjectionRepository.fetchSnapshotAsync()
+                        guard !Task.isCancelled else { return }
+                        self.applyMusicProjectionSnapshot(snapshot)
+                        self.updateBackgroundTask(
+                            id: taskID,
+                            progress: 1,
+                            detail: "已整理 \(result.albumCount) 张专辑、\(result.artistCount) 位艺术家"
+                        )
+                        self.finishBackgroundTask(id: taskID, errors: [])
+                        self.logger?.log(
+                            "音乐索引已更新[\(reason)] albums=\(result.albumCount) artists=\(result.artistCount) tracks=\(result.musicItemCount)",
+                            level: .info
+                        )
+                    } catch {
+                        self.finishBackgroundTask(id: taskID, errors: [error.localizedDescription])
+                        throw error
+                    }
+                case .incremental:
+                    let result = try await musicProjectionRepository.synchronizeIncremental()
+                    let snapshot = try await musicProjectionRepository.fetchSnapshotAsync()
+                    guard !Task.isCancelled else { return }
+                    self.applyMusicProjectionSnapshot(snapshot)
+                    self.logger?.log(
+                        "音乐索引增量同步完成[\(reason)] albums=\(result.affectedAlbumCount) artists=\(result.affectedArtistCount) tracks=\(result.musicItemCount)",
+                        level: .info
+                    )
+                }
+            } catch {
+                self.logger?.log("音乐索引维护失败[\(reason)]：\(error.localizedDescription)", level: .warning)
             }
-            libraryRevision += 1
-            posterRevision += 1
-            logPerformance("scan.incrementalReload: \(Self.milliseconds(since: reloadStart))ms items=\(items.count) revision=\(libraryRevision)")
-        } catch {
-            logger?.log("扫描增量刷新媒体库失败：\(error.localizedDescription)", level: .warning)
         }
     }
 
@@ -2867,6 +3144,7 @@ final class AppState: ObservableObject {
             return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
         }
         cachedMusicTracksByID = Dictionary(uniqueKeysWithValues: cachedMusicTracks.map { ($0.id, $0) })
+        rebuildMusicSectionCaches()
         cachedEmbyTopLevelItems = embyTopLevelRaw.sorted { $0.updatedAt > $1.updatedAt }
         // 相册按拍摄日期（扫描时写入 createdAt）倒序，最新在前，照片 App 习惯。
         cachedAlbumItems = albumRaw.sorted { $0.createdAt > $1.createdAt }
@@ -3002,6 +3280,46 @@ final class AppState: ObservableObject {
 
     }
 
+    private func rebuildMusicSectionCaches() {
+        cachedMusicTracksBySection = [
+            .songs: cachedMusicTracks,
+            .albums: cachedMusicTracks,
+            .artists: cachedMusicTracks,
+            .playlists: [],
+            .recent: cachedMusicTracks
+                .filter { $0.lastPlayedAt != nil }
+                .sorted { ($0.lastPlayedAt ?? .distantPast) > ($1.lastPlayedAt ?? .distantPast) },
+            .favorites: cachedMusicTracks.filter(\.favorite),
+            .unmatched: cachedMusicTracks.filter {
+                ($0.artist?.isEmpty ?? true) || ($0.album?.isEmpty ?? true) || $0.metadataProvider == nil
+            }
+        ]
+        cachedHomeMusicPlayableTracks = cachedMusicTracks.filter { $0.filePath != nil || $0.posterPath != nil }
+        cachedHomeContinueListeningTracks = Array(cachedMusicTracks
+            .filter { $0.lastPlayedAt != nil || ($0.playProgress > 0 && $0.playProgress < 0.98) }
+            .sorted { ($0.lastPlayedAt ?? $0.updatedAt) > ($1.lastPlayedAt ?? $1.updatedAt) }
+            .prefix(6))
+        cachedHomeMusicSignalTracks = cachedMusicTracks.filter {
+            ($0.playCount ?? 0) > 0 || $0.lastPlayedAt != nil || $0.favorite || ($0.userRating ?? 0) > 0
+        }
+        cachedMusicSmartTracksByPlaylistID.removeAll(keepingCapacity: true)
+        refreshMusicContentRevisionIfNeeded()
+    }
+
+    /// 对全部音乐曲目取内容指纹，只有指纹变化才递增 musicContentRevision。
+    /// 视频入库、观看进度、健康检查等只碰 libraryRevision 的操作不会再打失效音乐页快照。
+    private func refreshMusicContentRevisionIfNeeded() {
+        var hasher = Hasher()
+        hasher.combine(cachedMusicTracks.count)
+        for track in cachedMusicTracks {
+            hasher.combine(track)
+        }
+        let fingerprint = hasher.finalize()
+        guard fingerprint != musicContentFingerprint else { return }
+        musicContentFingerprint = fingerprint
+        musicContentRevision += 1
+    }
+
     private static func isMissingCoreMetadata(_ item: MediaItem) -> Bool {
         if item.type == .music {
             return item.posterPath == nil ||
@@ -3118,6 +3436,11 @@ final class AppState: ObservableObject {
         refreshURLSourceHealth()
         let refreshID = UUID()
         fileHealthRefreshID = refreshID
+        // 记录清空前的结果：刷新结束若与上次完全一致就不 bump libraryRevision，
+        // 避免每次库重载 20 秒后无意义地打失效全 App 的派生缓存/视图。
+        let previousMissingIDs = Set(cachedMissingFileItems.map(\.id))
+        let previousSafeMissingIDs = cachedSafeMissingFileItemIDs
+        let previousOfflineSourceIDs = cachedOfflineSourceIDs
         cachedMissingFileItems = []
         cachedSafeMissingFileItemIDs = []
         cachedOfflineSources = []
@@ -3131,7 +3454,9 @@ final class AppState: ObservableObject {
 
         fileHealthTask = Task { [itemSnapshots, sourceSnapshots, privateItemIDs, healthExcludedPaths, refreshID] in
             let healthStart = Date()
-            let health = await Task.detached(priority: .utility) {
+            // 全库逐条 stat（本库 5.4 万次、NAS 上单次可达秒级）是长阻塞 I/O，
+            // 绝不能占协作线程池——否则音乐列表等轻量后台构建会排队数秒。
+            let health = await BlockingIOExecutor.run {
                 let missingItemIDs = Set(itemSnapshots.compactMap { item -> String? in
                     guard !privateItemIDs.contains(item.id),
                           item.type != .music,
@@ -3185,7 +3510,7 @@ final class AppState: ObservableObject {
                     safeMissingItemIDs: safeMissingItemIDs,
                     offlineSourceIDs: offlineSourceIDs
                 )
-            }.value
+            }
 
             guard !Task.isCancelled else { return }
             await MainActor.run {
@@ -3194,8 +3519,13 @@ final class AppState: ObservableObject {
                 self.cachedSafeMissingFileItemIDs = health.safeMissingItemIDs
                 self.cachedOfflineSourceIDs = health.offlineSourceIDs
                 self.cachedOfflineSources = sourceSnapshots.filter { health.offlineSourceIDs.contains($0.id) }
-                self.libraryRevision += 1
-                self.logPerformance("fileHealth.refresh: \(Self.milliseconds(since: healthStart))ms missing=\(health.missingItemIDs.count) offlineSources=\(health.offlineSourceIDs.count) revision=\(self.libraryRevision)")
+                let changed = health.missingItemIDs != previousMissingIDs ||
+                    health.safeMissingItemIDs != previousSafeMissingIDs ||
+                    health.offlineSourceIDs != previousOfflineSourceIDs
+                if changed {
+                    self.libraryRevision += 1
+                }
+                self.logPerformance("fileHealth.refresh: \(Self.milliseconds(since: healthStart))ms missing=\(health.missingItemIDs.count) offlineSources=\(health.offlineSourceIDs.count) changed=\(changed) revision=\(self.libraryRevision)")
             }
         }
     }
@@ -3564,7 +3894,10 @@ final class AppState: ObservableObject {
     /// URL 媒体源下被判定为失效（无法访问或无法解析）的链接。
     var unhealthyURLItems: [MediaItem] {
         guard urlMediaSource?.includeInHealthCheck ?? false else { return [] }
-        return urlSourceItems.filter { urlHealthMonitor.healthByID[$0.id]?.isUnhealthy == true }
+        return urlSourceItems.filter {
+            urlHealthMonitor.healthByID[$0.id]?.isUnhealthy == true &&
+                !isHealthIssueIgnored(category: Self.healthCategoryUnhealthyURL, id: $0.id)
+        }
     }
 
     /// URL 媒体源整体是否健康（无失效链接）。
@@ -4452,6 +4785,64 @@ final class AppState: ObservableObject {
         try? mediaDetailRepository?.fetch(mediaID: item.id)
     }
 
+    func cachedBackdropPath(for item: MediaItem) -> String? {
+        detailBackdropPathsByMediaID[item.id]
+    }
+
+    /// 从详情快照的艺术图里挑首选横版剧照（与 MediaDetailRepository.firstBackdropPathsByMediaID 同规则）。
+    static func preferredBackdropPath(in snapshot: MediaDetailSnapshot) -> String? {
+        snapshot.artwork
+            .filter { ($0.kind == "backdrop" || $0.aspectRatio >= 1.45) && $0.aspectRatio >= 1.3 }
+            .sorted { lhs, rhs in
+                if (lhs.kind == "backdrop") != (rhs.kind == "backdrop") {
+                    return lhs.kind == "backdrop"
+                }
+                if lhs.localPath != rhs.localPath {
+                    return lhs.localPath != nil
+                }
+                if abs(lhs.aspectRatio - rhs.aspectRatio) > 0.08 {
+                    return lhs.aspectRatio > rhs.aspectRatio
+                }
+                return lhs.order < rhs.order
+            }
+            .first
+            .flatMap { $0.localPath ?? ($0.fullURL.isEmpty ? nil : $0.fullURL) }
+    }
+
+    /// 把详情快照里的横版剧照回填进 banner 缓存（启动时整表加载，之后靠这里增量更新）。
+    private func registerBackdropPath(from snapshot: MediaDetailSnapshot, mediaID: String) {
+        guard let path = Self.preferredBackdropPath(in: snapshot),
+              detailBackdropPathsByMediaID[mediaID] != path else { return }
+        detailBackdropPathsByMediaID[mediaID] = path
+        backdropRevision += 1
+    }
+
+    /// 首页 banner 的横版剧照兜底补抓：对没有任何横版图的推荐条目，后台通过
+    /// TMDB/Emby 详情接口拉一张 backdrop 并回填缓存；期间 banner 先用竖版海报裁切显示，
+    /// 拉到后随 backdropRevision 刷新自动换成横版图。每个条目每次启动只尝试一次。
+    func warmHeroBackdrops(for items: [MediaItem]) {
+        let candidates = items.filter { item in
+            item.type != .music &&
+            cachedBackdropPath(for: item) == nil &&
+            (item.backdropPath ?? "").isEmpty &&
+            supportsDetailExtras(item) &&
+            !heroBackdropWarmedIDs.contains(item.id)
+        }
+        guard !candidates.isEmpty else { return }
+        for item in candidates {
+            heroBackdropWarmedIDs.insert(item.id)
+        }
+        let previousTask = heroBackdropWarmupTask
+        heroBackdropWarmupTask = Task { @MainActor [weak self] in
+            await previousTask?.value
+            for item in candidates {
+                guard let self, !Task.isCancelled else { return }
+                guard let snapshot = await self.loadDetailSnapshot(for: item) else { continue }
+                self.registerBackdropPath(from: snapshot, mediaID: item.id)
+            }
+        }
+    }
+
     func loadDetailSnapshot(for item: MediaItem, forceRefresh: Bool = false) async -> MediaDetailSnapshot? {
         let cached = cachedDetailSnapshot(for: item)
         let maxAge: TimeInterval = 30 * 24 * 60 * 60
@@ -4473,6 +4864,7 @@ final class AppState: ObservableObject {
             )
         }
         snapshot = snapshotWithLocalMatches(snapshot)
+        registerBackdropPath(from: snapshot, mediaID: item.id)
         do {
             try mediaDetailRepository?.save(snapshot)
             detailMetadataGapsByMediaID[item.id] = (
@@ -4837,6 +5229,8 @@ final class AppState: ObservableObject {
         "MediaLib.migration.1.2.2.videoMetadataAudit.completed"
     private static let version122ArtworkRebuildCompletedKey =
         "MediaLib.migration.1.2.2.remoteArtworkRebuild.completed"
+    private static let version122MaintenanceCompletedKey =
+        "MediaLib.migration.1.2.2.maintenance.completed"
     /// 标记“旧缓存已清理 + 任务已启动过一次”：用于在重新预热中途退出后，
     /// 下次启动时**继续**而不是再次清空已经预热好的封面、重头来过。
     private static let version122ArtworkRebuildStartedKey =
@@ -4850,14 +5244,19 @@ final class AppState: ObservableObject {
     private func scheduleVersion122MaintenanceIfNeeded() {
         guard version122MaintenanceTask == nil else { return }
         let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.version122MaintenanceCompletedKey) else { return }
         let needsMetadataAudit = !defaults.bool(forKey: Self.version122MetadataAuditCompletedKey)
         let needsArtworkRebuild = !defaults.bool(forKey: Self.version122ArtworkRebuildCompletedKey)
-        guard needsMetadataAudit || needsArtworkRebuild else { return }
+        guard needsMetadataAudit || needsArtworkRebuild else {
+            defaults.set(true, forKey: Self.version122MaintenanceCompletedKey)
+            return
+        }
         versionMaintenanceLogger.info(
             "Scheduling 1.2.2 maintenance metadata=\(needsMetadataAudit) artwork=\(needsArtworkRebuild)"
         )
 
         version122MaintenanceTask = Task { [weak self] in
+            defer { self?.version122MaintenanceTask = nil }
             do {
                 try await Task.sleep(nanoseconds: 1_000_000_000)
             } catch {
@@ -4871,7 +5270,11 @@ final class AppState: ObservableObject {
             if needsArtworkRebuild {
                 await self.runVersion122ArtworkRebuild()
             }
-            self.version122MaintenanceTask = nil
+            guard !Task.isCancelled else { return }
+            defaults.set(true, forKey: Self.version122MetadataAuditCompletedKey)
+            defaults.set(true, forKey: Self.version122ArtworkRebuildCompletedKey)
+            defaults.set(true, forKey: Self.version122MaintenanceCompletedKey)
+            versionMaintenanceLogger.info("Completed 1.2.2 maintenance batch")
         }
     }
 
@@ -4897,11 +5300,12 @@ final class AppState: ObservableObject {
                   URL(string: path)?.scheme == nil else { return nil }
             return (item.id, path)
         }
-        let missingLocalPosterIDs = await Task.detached(priority: .utility) {
+        // 逐条海报 stat（可达数万次）走阻塞 I/O 专用队列，不占协作池。
+        let missingLocalPosterIDs = await BlockingIOExecutor.run {
             Set(localPosterPaths.compactMap { id, path in
                 FileManager.default.fileExists(atPath: path) ? nil : id
             })
-        }.value
+        }
         let completeness = (try? mediaDetailRepository?.detailCompleteness(
             mediaIDs: candidates.map(\.id)
         )) ?? [:]
@@ -5424,8 +5828,25 @@ final class AppState: ObservableObject {
     }
 
     private func startScanQueue(_ sources: [MediaSource], silent: Bool = false) {
-        let reachableSources = sources.filter(isSourceCurrentlyReachable)
-        let unreachableSources = sources.filter { !isSourceCurrentlyReachable($0) }
+        guard !sources.isEmpty else { return }
+        Task { @MainActor [weak self] in
+            let reachableIDs = await Self.reachableSourceIDs(in: sources)
+            guard let self else { return }
+            self.startScanQueueAfterReachabilityCheck(
+                sources,
+                reachableIDs: reachableIDs,
+                silent: silent
+            )
+        }
+    }
+
+    private func startScanQueueAfterReachabilityCheck(
+        _ sources: [MediaSource],
+        reachableIDs: Set<String>,
+        silent: Bool
+    ) {
+        let reachableSources = sources.filter { reachableIDs.contains($0.id) }
+        let unreachableSources = sources.filter { !reachableIDs.contains($0.id) }
         let remountCandidates = unreachableSources.filter(canAttemptNetworkRemount)
 
         if !remountCandidates.isEmpty {
@@ -5453,6 +5874,22 @@ final class AppState: ObservableObject {
         enqueueScanSources(reachableSources)
     }
 
+    private nonisolated static func reachableSourceIDs(in sources: [MediaSource]) async -> Set<String> {
+        // NAS 可达性探测在挂载点半死时单次可阻塞数秒到分钟级：必须离开协作池。
+        await BlockingIOExecutor.run {
+            Set(sources.compactMap { source in
+                if source.sourceKind.isRemoteMediaServer { return source.id }
+                return FileAccessService.isReachableDirectory(source.path) ? source.id : nil
+            })
+        }
+    }
+
+    private nonisolated static func isSourceReachableOffMain(_ source: MediaSource) async -> Bool {
+        await BlockingIOExecutor.run {
+            source.sourceKind.isRemoteMediaServer || FileAccessService.isReachableDirectory(source.path)
+        }
+    }
+
     private func enqueueScanSources(_ sources: [MediaSource]) {
         guard !sources.isEmpty else { return }
         if isScanning {
@@ -5470,10 +5907,6 @@ final class AppState: ObservableObject {
         pendingIncrementalChanges[source.id, default: []].formUnion(paths)
         guard !isScanning else { return }
         runIncrementalScanQueue()
-    }
-
-    private func isSourceCurrentlyReachable(_ source: MediaSource) -> Bool {
-        source.sourceKind.isRemoteMediaServer || FileAccessService.isReachableDirectory(source.path)
     }
 
     private func canAttemptNetworkRemount(_ source: MediaSource) -> Bool {
@@ -5507,7 +5940,7 @@ final class AppState: ObservableObject {
     }
 
     private func attemptNetworkRemountIfNeeded(for source: MediaSource) async -> Bool {
-        if isSourceCurrentlyReachable(source) { return true }
+        if await Self.isSourceReachableOffMain(source) { return true }
         guard !remountingNetworkSourceIDs.contains(source.id) else { return false }
         remountingNetworkSourceIDs.insert(source.id)
         defer { remountingNetworkSourceIDs.remove(source.id) }
@@ -5527,7 +5960,7 @@ final class AppState: ObservableObject {
 
         for _ in 0..<16 {
             try? await Task.sleep(nanoseconds: 700_000_000)
-            if isSourceCurrentlyReachable(source) {
+            if await Self.isSourceReachableOffMain(source) {
                 logger?.log("网络媒体源已重新挂载：\(sourceLabel)")
                 return true
             }
@@ -5656,7 +6089,7 @@ final class AppState: ObservableObject {
                 }) else {
                     continue
                 }
-                guard FileAccessService.isReachableDirectory(source.path) else {
+                guard await Self.isSourceReachableOffMain(source) else {
                     let sourceLabel = self.safeSourceUserLabel(source)
                     logger?.log("增量扫描跳过不可访问来源：\(sourceLabel)", level: .warning)
                     continue
@@ -5784,6 +6217,8 @@ final class AppState: ObservableObject {
         case .markerAnalysis:
             guard let item = backgroundTaskRetryItem(for: task) else { return false }
             return canAnalyzeIntroOutroMarkers(for: item)
+        case .musicIndex:
+            return musicProjectionRepository != nil
         }
     }
 
@@ -5820,6 +6255,8 @@ final class AppState: ObservableObject {
         case .markerAnalysis:
             guard let item = backgroundTaskRetryItem(for: task) else { return }
             analyzeIntroOutroMarkers(for: item)
+        case .musicIndex:
+            scheduleMusicProjectionMaintenance(reason: "retry", force: true)
         }
     }
 
@@ -6032,10 +6469,34 @@ final class AppState: ObservableObject {
         directories?.applicationSupport.appendingPathComponent("ArtworkWarmupProgress.json", isDirectory: false)
     }
 
+    private func scheduleBackgroundTaskRestore() {
+        let url = backgroundTasksURL
+        Task { @MainActor [weak self] in
+            guard let decoded = await Self.loadBackgroundTasks(from: url),
+                  let self else { return }
+            self.applyRestoredBackgroundTasks(decoded)
+        }
+    }
+
+    private nonisolated static func loadBackgroundTasks(from url: URL?) async -> [BackgroundTaskSnapshot]? {
+        await Task.detached(priority: .utility) {
+            guard let url,
+                  let data = try? Data(contentsOf: url),
+                  let decoded = try? JSONDecoder().decode([BackgroundTaskSnapshot].self, from: data) else {
+                return nil
+            }
+            return decoded
+        }.value
+    }
+
     private func restoreBackgroundTasksIfPossible() {
         guard let url = backgroundTasksURL,
               let data = try? Data(contentsOf: url),
               let decoded = try? JSONDecoder().decode([BackgroundTaskSnapshot].self, from: data) else { return }
+        applyRestoredBackgroundTasks(decoded)
+    }
+
+    private func applyRestoredBackgroundTasks(_ decoded: [BackgroundTaskSnapshot]) {
         var resumableArtworkWarmupTasks: [BackgroundTaskSnapshot] = []
         isRestoringBackgroundTasks = true
         backgroundTasks = decoded.prefix(60).map { task in
@@ -7138,13 +7599,13 @@ final class AppState: ObservableObject {
     }
 
     nonisolated private static func writeVideoCacheSidecar(_ data: Data, to url: URL) async throws {
-        try await Task.detached(priority: .utility) {
+        try await BlockingIOExecutor.run {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true
             )
             try data.write(to: url, options: [.atomic])
-        }.value
+        }
     }
 
     nonisolated private static func moveVideoCacheDownload(
@@ -7152,7 +7613,7 @@ final class AppState: ObservableObject {
         response: URLResponse,
         destination: URL
     ) async throws -> Int64 {
-        try await Task.detached(priority: .utility) {
+        try await BlockingIOExecutor.run {
             defer { try? FileManager.default.removeItem(at: temporaryURL) }
             if let httpResponse = response as? HTTPURLResponse,
                !(200...299).contains(httpResponse.statusCode) {
@@ -7169,7 +7630,7 @@ final class AppState: ObservableObject {
             }
             let attributes = try? fileManager.attributesOfItem(atPath: destination.path)
             return attributes?[.size] as? Int64 ?? 0
-        }.value
+        }
     }
 
     nonisolated private static func shortByteCount(_ bytes: Int64) -> String {
@@ -7422,9 +7883,9 @@ final class AppState: ObservableObject {
             do {
                 try await Task.sleep(nanoseconds: 220_000_000)
                 try Task.checkCancellation()
-                try await Task.detached(priority: .utility) {
+                try await BlockingIOExecutor.run {
                     try musicQueueRepository.save(snapshot)
-                }.value
+                }
             } catch is CancellationError {
                 return
             } catch {
@@ -7633,6 +8094,7 @@ final class AppState: ObservableObject {
         do {
             try mediaRepository?.resetPlayCount(id: item.id)
             updateMusicPlayCountsInMemory(ids: [item.id], reset: true)
+            scheduleMusicProjectionMaintenance(reason: "music play count reset", force: false, preferIncremental: true)
         } catch {
             showError("播放次数重置失败", error)
         }
@@ -7644,6 +8106,7 @@ final class AppState: ObservableObject {
         do {
             try mediaRepository?.resetPlayCounts(ids: ids)
             updateMusicPlayCountsInMemory(ids: ids, reset: true)
+            scheduleMusicProjectionMaintenance(reason: "music play counts reset", force: false, preferIncremental: true)
         } catch {
             showError("播放次数重置失败", error)
         }
@@ -7659,6 +8122,7 @@ final class AppState: ObservableObject {
         do {
             try mediaRepository?.incrementPlayCount(id: item.id)
             updateMusicPlayCountsInMemory(ids: [item.id], reset: false, bumpRevision: false)
+            scheduleMusicProjectionMaintenance(reason: "music play count increment", force: false, preferIncremental: true)
         } catch {
             logger?.log("播放次数更新失败：\(error.localizedDescription)", level: .warning)
         }
@@ -7688,7 +8152,9 @@ final class AppState: ObservableObject {
         }
 
         items = items.map(updated)
-        cachedItemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        for item in items where targetIDs.contains(item.id) {
+            cachedItemsByID[item.id] = item
+        }
         musicQueue = musicQueue.map(updated)
         if let activePlayerItem {
             self.activePlayerItem = updated(activePlayerItem)
@@ -7699,7 +8165,9 @@ final class AppState: ObservableObject {
         if let quickPreviewItem {
             self.quickPreviewItem = updated(quickPreviewItem)
         }
-        rebuildDerivedItemCaches()
+        cachedMusicTracks = cachedMusicTracks.map(updated)
+        cachedMusicTracksByID = Dictionary(uniqueKeysWithValues: cachedMusicTracks.map { ($0.id, $0) })
+        rebuildMusicSectionCaches()
         if bumpRevision {
             libraryRevision += 1
         }
@@ -7826,6 +8294,10 @@ final class AppState: ObservableObject {
             do {
                 try mediaRepository.setFavorite(id: item.id, favorite: nextFavorite)
                 try await self?.syncEmbyFavorite(item, favorite: nextFavorite)
+                await MainActor.run {
+                    guard item.type == .music else { return }
+                    self?.scheduleMusicProjectionMaintenance(reason: "music favorite changed", force: false, preferIncremental: true)
+                }
             } catch {
                 await MainActor.run {
                     guard let self else { return }
@@ -7942,6 +8414,11 @@ final class AppState: ObservableObject {
         cachedPrivateTopLevelItems = cachedPrivateTopLevelItems.map(updated)
         cachedMusicTracks = cachedMusicTracks.map(updated)
         cachedMusicTracksByID = Dictionary(uniqueKeysWithValues: cachedMusicTracks.map { ($0.id, $0) })
+        if cachedMusicTracksByID[id] != nil {
+            // 音乐曲目喜欢态是乐观更新（只 bump favoriteRevision）：分区基表（收藏等）
+            // 与音乐内容指纹必须同步重建，否则「收藏」子页面与列表快照会保持陈旧。
+            rebuildMusicSectionCaches()
+        }
         cachedEmbyTopLevelItems = cachedEmbyTopLevelItems.map(updated)
         cachedHomeVideoItems = cachedHomeVideoItems.map(updated)
         cachedHomeOfflineVideoItems = cachedHomeOfflineVideoItems.map(updated)
@@ -8221,6 +8698,10 @@ final class AppState: ObservableObject {
         cachedPrivateTopLevelItems = cachedPrivateTopLevelItems.map(updated)
         cachedMusicTracks = cachedMusicTracks.map(updated)
         cachedMusicTracksByID = Dictionary(uniqueKeysWithValues: cachedMusicTracks.map { ($0.id, $0) })
+        if cachedMusicTracksByID[id] != nil {
+            // 音乐曲目评级同样是乐观更新：同步刷新音乐分区基表与内容指纹。
+            rebuildMusicSectionCaches()
+        }
         cachedEmbyTopLevelItems = cachedEmbyTopLevelItems.map(updated)
         cachedHomeVideoItems = cachedHomeVideoItems.map(updated)
         cachedHomeOfflineVideoItems = cachedHomeOfflineVideoItems.map(updated)
@@ -8571,8 +9052,15 @@ final class AppState: ObservableObject {
     }
 
     func verifyPrivacyPIN(_ pin: String) -> Bool {
-        guard privacyLockService.verify(pin: pin) else {
+        guard unlockPrivacyIfPINMatches(pin) else {
             alert = AppAlert(title: "无法解锁", message: "密码不正确，请输入 4 到 8 位数字密码。")
+            return false
+        }
+        return true
+    }
+
+    func unlockPrivacyIfPINMatches(_ pin: String) -> Bool {
+        guard privacyLockService.verify(pin: pin) else {
             return false
         }
         settings.privacyPINEnabled = true

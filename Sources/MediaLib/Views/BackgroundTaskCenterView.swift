@@ -2,6 +2,8 @@ import SwiftUI
 
 struct BackgroundTaskCenterView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
+    @State private var hoveringTaskID: UUID?
 
     var body: some View {
         ScrollView {
@@ -15,14 +17,14 @@ struct BackgroundTaskCenterView: View {
                         Button(role: .destructive) {
                             appState.cancelScanning()
                         } label: {
-                            Label("取消扫描", systemImage: "stop.circle")
+                            Label { Text("取消扫描") } icon: { AppGlyph(systemImage: "stop.circle", size: 15) }
                         }
                     }
                     if appState.backgroundTasks.contains(where: { !$0.state.isActive }) {
                         Button(role: .destructive) {
                             appState.clearCompletedBackgroundTasks()
                         } label: {
-                            Label("清除记录", systemImage: "trash")
+                            Label { Text("清除记录") } icon: { AppGlyph(systemImage: "trash", size: 15) }
                                 .foregroundStyle(.red)
                         }
                     }
@@ -64,8 +66,11 @@ struct BackgroundTaskCenterView: View {
     }
 
     private func taskRow(_ task: BackgroundTaskSnapshot) -> some View {
-        HStack(spacing: 12) {
-            PlayfulSymbolIcon(systemImage: task.kind.systemImage, size: 32)
+        let active = hoveringTaskID == task.id && !suppressHoverDuringScroll
+        return HStack(spacing: 12) {
+            AppGlyph(systemImage: task.kind.systemImage, size: 26)
+                .foregroundStyle(AppColors.selectedGlassTint)
+                .frame(width: 32, height: 32)
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
                     Text(task.title)
@@ -100,7 +105,22 @@ struct BackgroundTaskCenterView: View {
         }
         .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 9, minHeight: 30, thickness: 0.92))
         .padding(13)
-        .staticSurfaceBackground(cornerRadius: 15, thickness: 0.94)
+        .appInteractiveSurface(
+            active: active,
+            selected: task.state.isActive,
+            cornerRadius: 15,
+            tint: taskStateTint(task.state),
+            intensity: task.state.isActive ? 0.84 : 0.62,
+            scale: 1.003,
+            lift: 1,
+            castsHoverShadow: false
+        )
+        .onHover { hovering in
+            hoveringTaskID = hovering && !suppressHoverDuringScroll ? task.id : nil
+        }
+        .onChange(of: suppressHoverDuringScroll) { suppressing in
+            if suppressing { hoveringTaskID = nil }
+        }
     }
 
     private func taskStateSystemImage(_ state: BackgroundTaskState) -> String {
@@ -130,7 +150,7 @@ struct BackgroundTaskCenterView: View {
             Button {
                 appState.retryBackgroundTask(task)
             } label: {
-                Image(systemName: "arrow.clockwise.circle")
+                AppGlyph(systemImage: "arrow.clockwise.circle", size: 18)
             }
             .help("重试任务")
         }
@@ -142,19 +162,18 @@ struct BackgroundTaskCenterView: View {
                         Button {
                             appState.resumeBackgroundTask(id: task.id)
                         } label: {
-                            Image(systemName: "play.circle")
+                            AppGlyph(systemImage: "play.circle", size: 18)
                         }
                         .help("继续缓存")
                     } else if task.state == .pausing {
-                        Image(systemName: "pause.circle")
-                            .font(.body)
+                        AppGlyph(systemImage: "pause.circle", size: 18)
                             .foregroundStyle(.secondary)
                             .help("正在暂停缓存")
                     } else {
                         Button {
                             appState.pauseBackgroundTask(id: task.id)
                         } label: {
-                            Image(systemName: "pause.circle")
+                            AppGlyph(systemImage: "pause.circle", size: 18)
                         }
                         .help("暂停缓存")
                     }
@@ -162,7 +181,7 @@ struct BackgroundTaskCenterView: View {
                     Button(role: .destructive) {
                         appState.cancelBackgroundTask(id: task.id)
                     } label: {
-                        Image(systemName: "xmark.circle")
+                        AppGlyph(systemImage: "xmark.circle", size: 18)
                     }
                     .help("取消缓存")
                 }
@@ -170,7 +189,7 @@ struct BackgroundTaskCenterView: View {
                 Button(role: .destructive) {
                     appState.cancelBackgroundTask(id: task.id)
                 } label: {
-                    Image(systemName: "stop.circle")
+                    AppGlyph(systemImage: "stop.circle", size: 18)
                 }
                 .help("取消扫描")
             }

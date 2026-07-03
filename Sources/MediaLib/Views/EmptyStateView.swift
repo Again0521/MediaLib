@@ -14,6 +14,7 @@ struct EmptyStateView: View {
                         RadialGradient(
                             colors: [
                                 .white.opacity(colorScheme == .dark ? 0.12 : 0.64),
+                                AppColors.selectedGlassTint.opacity(colorScheme == .dark ? 0.14 : 0.20),
                                 AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.08 : 0.16),
                                 .clear
                             ],
@@ -44,7 +45,8 @@ struct EmptyStateView: View {
                     }
                     .frame(width: 76, height: 76)
 
-                PlayfulSymbolIcon(systemImage: systemImage, size: 52)
+                AppGlyph(systemImage: systemImage, size: 46, lineWidth: 2.2)
+                    .foregroundStyle(AppColors.selectedGlassTint.opacity(0.92))
             }
             .frame(width: 112, height: 104)
 
@@ -77,7 +79,9 @@ struct AppLoadingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
-                PlayfulSymbolIcon(systemImage: systemImage, size: 38)
+                AppGlyph(systemImage: systemImage, size: 32)
+                    .foregroundStyle(AppColors.selectedGlassTint.opacity(0.9))
+                    .frame(width: 38, height: 38)
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
                         .font(.headline)

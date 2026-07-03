@@ -40,21 +40,53 @@ enum AppColors {
     static var warning: Color { Color(nsColor: resolved.warning) }
     static var error: Color { Color(nsColor: resolved.error) }
 
-    // —— 焕彩 Aurora 派生（缓存读取）——
-    // 集中用于 Hero / 区块标题 / 统计磁贴 / 状态 / 空态 / 主 CTA；全部由当前主题高亮锚点派生，
-    // 换主题整套跟随。普通内容卡片底、列表行、设置分组、海报封面区不使用这些多色，保持克制。
+    // —— 活力语义色彩（固定调色板，见 AuroraPalette）——
+    // 不再由主题派生（主题后续废弃）：这是设计好的鲜明固定色，避免随浅灰主题变灰。
+    // 集中用于 Hero / 区块标题 / 统计磁贴 / 状态 / 空态 / 主 CTA。
     // 公开 API 一律返回 SwiftUI 类型（Color / LinearGradient），便于后续 iOS / iPadOS 移植复用。
-    static var auroraGradient: LinearGradient { resolved.auroraGradient }
-    static var auroraTextGradient: LinearGradient { resolved.auroraTextGradient }
-    static var auroraSoftWash: [Color] { resolved.auroraSoftWash }
-    static var accentFamily: [Color] { resolved.accentFamily }
-    static var heroSurface: Color { Color(nsColor: resolved.heroSurface) }
-    static var heroOnColor: Color { Color(nsColor: resolved.heroOnColor) }
+    static var auroraGradient: LinearGradient { AuroraPalette.brandGradient }
+    static var auroraTextGradient: LinearGradient { AuroraPalette.textGradient }
+    static var auroraSoftWash: [Color] { AuroraPalette.softWash }
+    static var accentFamily: [Color] { AuroraPalette.family }
+    static var heroSurface: Color { AuroraPalette.heroSurface }
+    static var heroOnColor: Color { AuroraPalette.heroOn }
+    static let referenceBlue = Color(red: 46 / 255, green: 144 / 255, blue: 250 / 255)
+    static let referenceCyan = Color(red: 54 / 255, green: 191 / 255, blue: 250 / 255)
+    static let referenceControlFill = Color(red: 243 / 255, green: 246 / 255, blue: 251 / 255)
 
-    /// 按稳定 seed（条目索引）从焕彩多色家族取一色：同一 seed 每次同色，相邻 seed 色相错开。
+    // MARK: - 系统页面 1:1 复刻常量（硬编码，主题派生已废弃）
+    // 取值来自 `MediaLIB 系统页面.html` 歌曲页/设置页 getComputedStyle 实测。
+    static let refCardBg = Color(red: 1, green: 1, blue: 1)                                  // #FFFFFF 卡片底
+    static let refCardBorder = Color(red: 237 / 255, green: 240 / 255, blue: 245 / 255)      // #EDF0F5 卡边
+    static let refCardShadow = Color(red: 40 / 255, green: 60 / 255, blue: 100 / 255)        // rgba(40,60,100,*) 卡片软阴影
+    static let refRowDivider = Color(red: 241 / 255, green: 244 / 255, blue: 248 / 255)      // #F1F4F8 行内分隔线
+    static let refIconChipBg = Color(red: 231 / 255, green: 240 / 255, blue: 253 / 255)      // #E7F0FD 设置图标芯片底
+    static let refIconGlyph = Color(red: 46 / 255, green: 144 / 255, blue: 250 / 255)        // #2E90FA 设置图标线条
+    static let refSubtle = Color(red: 154 / 255, green: 163 / 255, blue: 180 / 255)          // #9AA3B4 副文字/分组标签
+    static let refScanFill = Color(red: 241 / 255, green: 243 / 255, blue: 247 / 255)        // #F1F3F7 次级实心胶囊底（扫描）
+    static let refSecondaryText = Color(red: 90 / 255, green: 100 / 255, blue: 120 / 255)    // #5A6478 次级按钮文字
+    static let refOutlineBg = Color(red: 1, green: 1, blue: 1)                               // #FFFFFF 白描边按钮底
+    static let refOutlineBorder = Color(red: 230 / 255, green: 234 / 255, blue: 241 / 255)   // #E6EAF1 白描边按钮边
+    static let refMenuBorder = Color(red: 203 / 255, green: 213 / 255, blue: 225 / 255)      // #CBD5E1 网页下拉边
+    static let refMenuText = Color(red: 51 / 255, green: 65 / 255, blue: 85 / 255)            // #334155 网页下拉字
+    static let refChipBarFill = Color(red: 241 / 255, green: 245 / 255, blue: 249 / 255)     // #F1F5F9 筛选胶囊组底
+    static let refChipBarBorder = Color(red: 226 / 255, green: 232 / 255, blue: 240 / 255)   // #E2E8F0 筛选胶囊组边
+    static let refSearchFill = Color(red: 238 / 255, green: 241 / 255, blue: 246 / 255)      // #EEF1F6 搜索框底
+    static let refSearchPlaceholder = Color(red: 170 / 255, green: 178 / 255, blue: 192 / 255) // #AAB2C0 搜索占位
+    static let refPillActiveBg = Color.white                                                 // #FFFFFF 网页激活胶囊底
+    static let refPillActiveText = Color(red: 15 / 255, green: 23 / 255, blue: 42 / 255)      // #0F172A 激活胶囊字
+    static let refPillIdleText = Color(red: 100 / 255, green: 116 / 255, blue: 139 / 255)     // #64748B 非激活胶囊字
+    static let refTitleText = Color(red: 29 / 255, green: 29 / 255, blue: 31 / 255)          // #1D1D1F 主标题
+    static let refProminentStart = Color(red: 46 / 255, green: 144 / 255, blue: 250 / 255)   // #2E90FA 主按钮渐变起
+    static let refProminentEnd = Color(red: 54 / 255, green: 191 / 255, blue: 250 / 255)     // #36BFFA 主按钮渐变止
+    static var refProminentGradient: LinearGradient {
+        LinearGradient(colors: [refProminentStart, refProminentEnd], startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
+    /// 按稳定 seed（条目索引）从语义多色家族取一色：同一 seed 每次同色，相邻 seed 色相错开。
     static func accentFamilyColor(forSeed seed: Int) -> Color {
-        let family = resolved.accentFamily
-        guard !family.isEmpty else { return accent }
+        let family = AuroraPalette.family
+        guard !family.isEmpty else { return AuroraPalette.blue }
         let idx = ((seed % family.count) + family.count) % family.count
         return family[idx]
     }
@@ -111,18 +143,6 @@ enum AppColors {
         let iconColors: [Color]
         /// 强调按钮（prominent）填充用的三段主题色（由高亮锚点按明度派生，自上而下加深）。
         let accentButtonColors: [Color]
-        /// 焕彩 Aurora：Hero / 强调用极光渐变（由高亮锚点和谐色相旋转派生）。
-        let auroraGradient: LinearGradient
-        /// 焕彩 Aurora：强调字渐变（已按浅/深外观调整对比度）。
-        let auroraTextGradient: LinearGradient
-        /// 焕彩 Aurora：页面底极薄氛围柔斑（低透明度，默认很弱）。
-        let auroraSoftWash: [Color]
-        /// 焕彩 Aurora：和谐多色家族（统计磁贴 / 图标芯片 / 区块标识用，约 ±90° 内旋转、降饱和限亮度）。
-        let accentFamily: [Color]
-        /// 焕彩 Aurora：Hero 影院级深面。
-        let heroSurface: NSColor
-        /// 焕彩 Aurora：Hero 深面上的高对比前景色。
-        let heroOnColor: NSColor
 
         init(theme: ResolvedAppTheme) {
             // 系统色预设保持 Apple 式中性底：页面大面积区域低饱和，强调色主要出现在选中态、按钮和局部边缘光。
@@ -201,64 +221,6 @@ enum AppColors {
                 Color(nsColor: h.appThemeSaturated(by: 1.03).appThemeAdjustingBrightness(by: 0.86)),
                 Color(nsColor: h.appThemeSaturated(by: 1.04).appThemeAdjustingBrightness(by: 0.72))
             ]
-
-            // —— 焕彩 Aurora 派生 ——
-            // 目标是「焕彩」（生动、不再单一工具化）而非「炫彩」：多色由高亮锚点做和谐色相旋转
-            // （约 ±90° 内）派生，统一降饱和、限亮度，比旧版更有生气又不发展成全彩虹；
-            // 深色模式整体提亮以贴合深底。每个停靠点都是随外观切换的动态色。
-            func auroraColor(
-                rotation: CGFloat,
-                satL: CGFloat, briL: CGFloat,
-                satD: CGFloat, briD: CGFloat,
-                alpha: CGFloat = 1
-            ) -> Color {
-                Color(nsColor: AppColors.dynamic(
-                    light: theme.highlightLight
-                        .appThemeHueRotated(by: rotation)
-                        .appThemeSaturated(by: satL)
-                        .appThemeAdjustingBrightness(by: briL)
-                        .appThemeWithAlpha(alpha),
-                    dark: theme.highlightDark
-                        .appThemeHueRotated(by: rotation)
-                        .appThemeSaturated(by: satD)
-                        .appThemeAdjustingBrightness(by: briD)
-                        .appThemeWithAlpha(alpha)))
-            }
-
-            // 和谐多色家族（统计磁贴 / 图标芯片 / 区块标识用）。6 色覆盖约 ±90°，相邻可分辨但不刺眼。
-            let familyRotations: [CGFloat] = [-0.10, -0.04, 0.03, 0.10, 0.17, 0.24]
-            accentFamily = familyRotations.map {
-                auroraColor(rotation: $0, satL: 0.96, briL: 0.99, satD: 1.02, briD: 1.12)
-            }
-            // Hero / 强调极光渐变（少量停靠点的柔色）。
-            auroraGradient = LinearGradient(
-                colors: [
-                    auroraColor(rotation: -0.05, satL: 0.94, briL: 1.04, satD: 1.00, briD: 1.06),
-                    auroraColor(rotation: 0.06, satL: 0.98, briL: 0.98, satD: 1.04, briD: 1.00),
-                    auroraColor(rotation: 0.16, satL: 0.96, briL: 0.93, satD: 1.02, briD: 0.96)
-                ],
-                startPoint: .topLeading, endPoint: .bottomTrailing)
-            // 强调字渐变：浅色下压暗保证浅底上的可读性，深色下提亮。
-            auroraTextGradient = LinearGradient(
-                colors: [
-                    auroraColor(rotation: -0.04, satL: 1.00, briL: 0.84, satD: 1.00, briD: 1.12),
-                    auroraColor(rotation: 0.07, satL: 1.04, briL: 0.80, satD: 1.04, briD: 1.08),
-                    auroraColor(rotation: 0.17, satL: 1.02, briL: 0.78, satD: 1.02, briD: 1.04)
-                ],
-                startPoint: .leading, endPoint: .trailing)
-            // 页面底极薄氛围柔斑（默认很弱，由 AppPageBackground 决定是否启用）。
-            auroraSoftWash = [
-                auroraColor(rotation: -0.05, satL: 0.90, briL: 1.05, satD: 1.00, briD: 1.00, alpha: 0.10),
-                auroraColor(rotation: 0.08, satL: 0.95, briL: 1.00, satD: 1.00, briD: 0.98, alpha: 0.10),
-                auroraColor(rotation: 0.18, satL: 0.92, briL: 0.96, satD: 1.00, briD: 0.95, alpha: 0.09)
-            ]
-            // Hero 影院级深面（两种外观都偏深，作为聚焦元素）+ 其上的高对比前景色。
-            heroSurface = AppColors.dynamic(
-                light: theme.baseDark.appThemeBlended(toward: theme.highlightLight, fraction: 0.10).appThemeAdjustingBrightness(by: 0.66),
-                dark:  theme.baseDark.appThemeBlended(toward: theme.highlightDark, fraction: 0.12).appThemeAdjustingBrightness(by: 0.52))
-            heroOnColor = AppColors.dynamic(
-                light: NSColor(calibratedWhite: 0.98, alpha: 1),
-                dark:  NSColor(calibratedWhite: 0.96, alpha: 1))
         }
     }
 
@@ -267,18 +229,18 @@ enum AppColors {
     /// 强调按钮主题填充色（缓存读取）。
     static var accentButtonColors: [Color] { resolved.accentButtonColors }
 
-    // 屏幕外左上角斜射的一道光：左上受光面带暖白/微金色折射，右下只保留暗边。
-    // 用于所有液态玻璃卡片/按钮的描边，模拟物理光照染色。
+    // 屏幕外左上角斜射的一道光：普通页面按焕彩参考页改为冷白/浅蓝折射，
+    // 用于所有液态玻璃卡片/按钮的描边，模拟 Apple 软件常见的白色浮层。
     static func edgeLightStroke(_ colorScheme: ColorScheme, depth: Double = 1, intensity: Double = 1) -> LinearGradient {
         let k = depth * intensity
-        let warmWhite = Color(red: 1.0, green: 0.99, blue: 0.95)
-        let champagne = Color(red: 1.0, green: 0.90, blue: 0.70)
+        let coolWhite = Color(red: 0.99, green: 1.0, blue: 1.0)
+        let iceBlue = Color(red: 0.80, green: 0.90, blue: 1.0)
         return LinearGradient(
             colors: [
-                warmWhite.opacity((colorScheme == .dark ? 0.66 : 0.95) * k),
-                champagne.opacity((colorScheme == .dark ? 0.22 : 0.34) * k),
-                warmWhite.opacity((colorScheme == .dark ? 0.12 : 0.24) * k),
-                Color.black.opacity((colorScheme == .dark ? 0.10 : 0.040) * k)
+                coolWhite.opacity((colorScheme == .dark ? 0.66 : 0.96) * k),
+                iceBlue.opacity((colorScheme == .dark ? 0.20 : 0.30) * k),
+                coolWhite.opacity((colorScheme == .dark ? 0.12 : 0.26) * k),
+                Color.black.opacity((colorScheme == .dark ? 0.10 : 0.035) * k)
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
@@ -312,7 +274,7 @@ enum AppMotion {
     static let sidebar = Animation.spring(response: 0.46, dampingFraction: 0.82)
     static let sidebarSelection = Animation.easeOut(duration: 0.001)
 
-    // —— 焕彩 Aurora 新增（普通页面用，均需在调用处尊重 Reduce Motion）——
+    // —— 活力语义色彩新增（普通页面用，均需在调用处尊重 Reduce Motion）——
     // 统计数字递增：Reduce Motion 时调用处直接取终值、不使用本动画。
     static let countUp = Animation.easeOut(duration: 0.9)
     // Hero 背景柔动：极慢、低幅；仅在 full 性能档且非 Reduce Motion 时启用，窗口不可见 / 应用后台时暂停。
@@ -906,6 +868,23 @@ private struct RepeatedSurfaceHoverModifier: ViewModifier {
                     )
                     .allowsHitTesting(false)
             }
+            .overlay(alignment: .topLeading) {
+                shape
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                tint.opacity((colorScheme == .dark ? 0.070 : 0.115) * strength),
+                                Color.white.opacity((colorScheme == .dark ? 0.055 : 0.165) * strength),
+                                .clear
+                            ],
+                            center: UnitPoint(x: 0.02, y: 0.02),
+                            startRadius: 0,
+                            endRadius: 170
+                        )
+                    )
+                    .blendMode(.screen)
+                    .allowsHitTesting(false)
+            }
             .overlay(alignment: .leading) {
                 Capsule()
                     .fill(tint.opacity((colorScheme == .dark ? 0.24 : 0.34) * strength))
@@ -939,41 +918,7 @@ private struct RepeatedCardChromeModifier: ViewModifier {
     let tint: Color
 
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-
         content
-            .overlay(alignment: .top) {
-                LinearGradient(
-                    colors: [
-                        .clear,
-                        .white.opacity(colorScheme == .dark ? 0.16 : 0.48),
-                        tint.opacity(colorScheme == .dark ? 0.055 : 0.09),
-                        .clear
-                    ],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .frame(height: active ? 1.15 : 0.8)
-                .padding(.horizontal, cornerRadius * 0.72)
-                .allowsHitTesting(false)
-            }
-            .overlay {
-                shape
-                    .inset(by: 1.2)
-                    .strokeBorder(
-                        LinearGradient(
-                            colors: [
-                                .white.opacity(colorScheme == .dark ? (active ? 0.12 : 0.07) : (active ? 0.26 : 0.16)),
-                                .clear,
-                                tint.opacity(colorScheme == .dark ? 0.035 : 0.055)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 0.65
-                    )
-                    .allowsHitTesting(false)
-            }
     }
 }
 
@@ -1708,6 +1653,20 @@ struct SidebarGlassBackground: View {
 }
 
 extension View {
+    @ViewBuilder
+    func appNativeGlassEffect(cornerRadius: CGFloat, interactive: Bool = false, tint: Color? = nil) -> some View {
+        if #available(macOS 26.0, *) {
+            let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            if let tint {
+                self.glassEffect(.regular.tint(tint).interactive(interactive), in: shape)
+            } else {
+                self.glassEffect(.regular.interactive(interactive), in: shape)
+            }
+        } else {
+            self
+        }
+    }
+
     func surfaceBackground(
         selected: Bool = false,
         cornerRadius: CGFloat = AppRadius.control,
@@ -1721,8 +1680,9 @@ extension View {
         cornerRadius: CGFloat = AppRadius.control,
         thickness: Double = AppGlassMetrics.Thickness.surface
     ) -> some View {
+        // 系统页面 1:1：通用卡片统一为白底 + #EDF0F5 卡边，常态不投影。
         background {
-            LiquidGlassSurfaceLayer(selected: selected, cornerRadius: cornerRadius, thickness: thickness, respondsToPointer: false, renderMode: GlassSurfaceRole.repeated.renderMode)
+            ReferenceCardSurface(selected: selected, cornerRadius: cornerRadius)
         }
         .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
     }
@@ -1735,12 +1695,35 @@ extension View {
         modifier(RepeatedCardChromeModifier(active: active, cornerRadius: cornerRadius, tint: tint))
     }
 
+    func appInteractiveSurface(
+        active: Bool,
+        selected: Bool = false,
+        cornerRadius: CGFloat = AppCardMetrics.repeatedCornerRadius,
+        tint: Color = AppColors.pointerLightTint,
+        intensity: Double = 0.86,
+        scale: CGFloat = 1.006,
+        lift: CGFloat = 2,
+        castsHoverShadow: Bool = true
+    ) -> some View {
+        modifier(AppInteractiveSurfaceModifier(
+            active: active,
+            selected: selected,
+            cornerRadius: cornerRadius,
+            tint: tint,
+            intensity: intensity,
+            scale: scale,
+            lift: lift,
+            castsHoverShadow: castsHoverShadow
+        ))
+    }
+
     func liquidGlass(
         cornerRadius: CGFloat = 14,
         selected: Bool = false,
         thickness: Double = AppGlassMetrics.Thickness.surface
     ) -> some View {
-        modifier(SurfaceBackground(selected: selected, cornerRadius: cornerRadius, thickness: thickness))
+        // 系统页面 1:1：普通页面所有卡片统一走扁平参考白卡（玻璃材质仅音乐展开页保留）。
+        staticSurfaceBackground(selected: selected, cornerRadius: cornerRadius, thickness: thickness)
     }
 
     func pointerLiquidLight(cornerRadius: CGFloat = 14, tint: Color = AppColors.pointerLightTint, intensity: Double = 1) -> some View {
@@ -1797,6 +1780,88 @@ extension View {
     }
 }
 
+/// 系统页面/首页统一通用卡片底：白底 + #EDF0F5 卡边；常态不投影，hover 才浮起。
+struct ReferenceCardSurface: View {
+    @Environment(\.colorScheme) private var colorScheme
+    var selected: Bool = false
+    var cornerRadius: CGFloat = AppRadius.card
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        ZStack {
+            shape.fill(colorScheme == .dark ? AppColors.elevatedSurface : AppColors.refCardBg)
+            if selected {
+                shape.fill(AppColors.refProminentStart.opacity(colorScheme == .dark ? 0.11 : 0.045))
+            }
+        }
+        .overlay {
+            shape.strokeBorder(
+                selected ? AppColors.refProminentStart.opacity(0.28) : AppColors.refCardBorder,
+                lineWidth: 1
+            )
+        }
+        .clipShape(shape)
+        .shadow(
+            color: AppColors.refCardShadow.opacity(colorScheme == .dark ? 0.18 : 0.10),
+            radius: 15,
+            x: 0,
+            y: 6
+        )
+    }
+}
+
+/// 普通页面统一交互表面：常态白卡，悬停时只做绘制层高光、轻微 transform 与圆角柔影。
+struct AppInteractiveSurfaceModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let active: Bool
+    let selected: Bool
+    let cornerRadius: CGFloat
+    let tint: Color
+    let intensity: Double
+    let scale: CGFloat
+    let lift: CGFloat
+    let castsHoverShadow: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .staticSurfaceBackground(selected: selected || active, cornerRadius: cornerRadius)
+            .scaleEffect(!reduceMotion && active ? scale : 1, anchor: .center)
+            .offset(y: !reduceMotion && active ? -lift : 0)
+            .shadow(
+                color: AppColors.refCardShadow.opacity(active && castsHoverShadow ? 0.16 : 0),
+                radius: active && castsHoverShadow ? 18 : 0,
+                x: 0,
+                y: active && castsHoverShadow ? 7 : 0
+            )
+            .animation(reduceMotion ? nil : AppMotion.listHover, value: active)
+    }
+}
+
+/// 系统页面/首页一致的卡片悬停反馈：上浮 + hover-only 柔和阴影（参考首页小组件卡片手感）。
+struct ReferenceCardHoverModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var scale: CGFloat = 1
+    var lift: CGFloat = 4
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(hovering && !reduceMotion ? scale : 1, anchor: .center)
+            .offset(y: hovering && !reduceMotion ? -lift : 0)
+            .shadow(color: AppColors.refCardShadow.opacity(hovering ? 0.18 : 0), radius: hovering ? 22 : 0, x: 0, y: hovering ? 8 : 0)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: hovering)
+            .onHover { hovering = $0 }
+    }
+}
+
+extension View {
+    /// 给扁平参考卡片加上首页同款悬停放大/上浮反馈。
+    func referenceCardHover(scale: CGFloat = 1, lift: CGFloat = 4) -> some View {
+        modifier(ReferenceCardHoverModifier(scale: scale, lift: lift))
+    }
+}
+
 private struct GlassFocusRingModifier: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
     let active: Bool
@@ -1847,6 +1912,7 @@ struct LiquidGlassButtonStyle: ButtonStyle {
     var horizontalPadding: CGFloat = 12
     var minHeight: CGFloat = AppControlMetrics.defaultButtonHeight
     var prominent = false
+    var outlined = false
     var thickness: Double = AppGlassMetrics.Thickness.control
 
     func makeBody(configuration: Configuration) -> some View {
@@ -1856,6 +1922,7 @@ struct LiquidGlassButtonStyle: ButtonStyle {
             horizontalPadding: horizontalPadding,
             minHeight: minHeight,
             prominent: prominent,
+            outlined: outlined,
             thickness: thickness
         )
     }
@@ -1872,175 +1939,69 @@ private struct LiquidGlassButtonStyleBody: View {
     let horizontalPadding: CGFloat
     let minHeight: CGFloat
     let prominent: Bool
+    var outlined: Bool = false
     let thickness: Double
     @State private var isHovering = false
 
     var body: some View {
+        // 首页小组件同源按钮：主强调渐变 / 次级浅灰胶囊 / 白描边，状态靠填充层和描边，不靠投影。
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        let depth = min(max(thickness, 0.75), 2.0)
         let pressed = configuration.isPressed
-        let active = isEnabled && (isHovering || pressed || isFocused)
+        let active = isEnabled && (isHovering || pressed)
+        let resolvedHeight = minHeight
+        let textColor: Color = prominent ? .white : AppColors.refSecondaryText
 
-        // 用中间 let 把整条 body 修饰链拆成两段，缩短单个表达式的类型检查长度
-        // （避免「unable to type-check in reasonable time」，CI 旧编译器复现）。
-        let labelBase = configuration.label
-            .font(.callout.weight(.semibold))
+        return configuration.label
+            .font(.system(size: 13, weight: .bold))
             .lineLimit(1)
-            .foregroundStyle(prominent ? Color.white.opacity(0.96) : Color.primary.opacity(active ? 0.88 : 0.78))
+            .foregroundStyle(textColor)
             .padding(.horizontal, horizontalPadding)
-            .frame(minHeight: minHeight)
+            .frame(height: resolvedHeight)
             .background {
-                // 背景层抽到独立 @ViewBuilder helper，把 ZStack 内大量条件填充与内联三元的
-                // 类型检查与主修饰链解耦。
-                buttonBackgroundLayer(shape: shape, depth: depth, pressed: pressed)
-            }
-
-        return labelBase
-            .overlay(alignment: .topLeading) {
-                if prominent {
-                    EmptyView()
-                } else {
-                    shape
-                        .strokeBorder(.white.opacity((colorScheme == .dark ? 0.25 : 0.50) * depth), lineWidth: 0.95)
-                }
-            }
-            .overlay(alignment: .bottomTrailing) {
-                if prominent {
-                    EmptyView()
-                } else {
-                    shape
-                        .strokeBorder(Color.black.opacity(colorScheme == .dark ? 0.17 : 0.070), lineWidth: 0.75)
+                ZStack {
+                    if prominent {
+                        shape.fill(AppColors.refProminentGradient)
+                    } else if outlined {
+                        shape.fill(AppColors.refOutlineBg)
+                    } else {
+                        shape.fill(AppColors.refScanFill)
+                    }
+                    if active {
+                        shape.fill(Color.black.opacity(pressed ? 0.07 : 0.035))
+                    }
+                    if active && !pressed {
+                        shape.fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(prominent ? 0.16 : 0.28),
+                                    AppColors.pointerLightTint.opacity(prominent ? 0.08 : 0.10),
+                                    .clear
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                    }
                 }
             }
             .overlay {
-                // 描边渐变改用 helper 函数计算（显式 Double 常量），避免内联嵌套三元让编译器类型检查超时。
-                if prominent {
-                    shape.strokeBorder(prominentStrokeGradient(active: active), lineWidth: 0.9)
-                } else {
-                    shape.strokeBorder(regularStrokeGradient(active: active, depth: depth), lineWidth: 1)
-                }
+                shape.strokeBorder(
+                    prominent
+                        ? Color.white.opacity(active ? 0.30 : 0.18)
+                        : (outlined ? AppColors.refOutlineBorder : AppColors.refCardBorder),
+                    lineWidth: 1
+                )
             }
             .clipShape(shape)
             .modifier(GlassFocusRingModifier(active: isEnabled && isFocused, cornerRadius: cornerRadius))
-            // 按钮底部色块根因是外投影带 y 偏移：在暖白玻璃面上会被看成按钮下方的独立托盘。
-            // 这里不再给普通/强调按钮画任何向下偏移的外影，层级改由内高光、描边和边缘光表达。
-            .shadow(
-                color: prominent
-                    ? AppColors.selectedGlassTint.opacity(colorScheme == .dark ? (active ? 0.13 : 0.075) : (active ? 0.12 : 0.070))
-                    : .clear,
-                radius: prominent ? (active ? 5 : 3.5) : 0,
-                y: 0.5
-            )
-            .shadow(
-                color: prominent ? Color.black.opacity(colorScheme == .dark ? 0.22 : 0.075) : .clear,
-                radius: prominent ? 1.4 : 0,
-                y: prominent ? 0.5 : 0
-            )
-            .pointerLiquidEdge(
-                cornerRadius: cornerRadius,
-                tint: prominent ? AppColors.selectedGlassTint : AppColors.pointerLightTint,
-                intensity: (prominent ? (active ? 0.24 : 0.14) : (active ? 1.06 : 0.72)) * depth
-            )
-            .opacity(isEnabled ? (pressed ? 0.86 : 1) : AppControlMetrics.disabledControlOpacity)
-            .brightness(isHovering && isEnabled && !pressed ? (prominent ? 0.018 : 0.010) : 0)
+            .opacity(isEnabled ? 1 : AppControlMetrics.disabledControlOpacity)
+            .scaleEffect(!reduceMotion && prominent && pressed ? 0.98 : 1)
             .onHover { hovering in
                 isHovering = hovering
             }
             .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
             .animation(reduceMotion ? nil : AppMotion.fast, value: pressed)
             .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
-    }
-
-    @ViewBuilder
-    private func buttonBackgroundLayer(shape: RoundedRectangle, depth: Double, pressed: Bool) -> some View {
-        ZStack {
-            if prominent {
-                shape.fill(
-                    LinearGradient(
-                        colors: AppColors.accentButtonColors,
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-            } else {
-                // 非强调按钮：暖白半透明底，避免按钮底部露出冷蓝直角色块。
-                shape.fill(
-                    reduceTransparency
-                        ? AppColors.elevatedSurface
-                        : AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.40 : 0.66)
-                )
-            }
-            if !prominent {
-                shape.fill(regularBackgroundFillGradient(depth: depth))
-            }
-            if pressed {
-                shape.fill(
-                    prominent
-                        ? Color.black.opacity(colorScheme == .dark ? 0.20 : 0.16)
-                        : AppColors.selectedGlassTint.opacity(colorScheme == .dark ? 0.18 : 0.12)
-                )
-            } else if isHovering, isEnabled {
-                shape.fill(
-                    prominent
-                        ? Color.white.opacity(colorScheme == .dark ? 0.090 : 0.12)
-                        : AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.16 : 0.12)
-                )
-            }
-        }
-        .clipShape(shape)
-    }
-
-    private func regularBackgroundFillGradient(depth: Double) -> LinearGradient {
-        let isDark = colorScheme == .dark
-        let c0: Double = (isDark ? 0.22 : 0.46) * depth
-        let c1: Double = (isDark ? 0.070 : 0.105) * depth
-        let c2: Double = isDark ? 0.12 : 0.14
-        let c3: Double = isDark ? 0.46 : 0.56
-        return LinearGradient(
-            colors: [
-                .white.opacity(c0),
-                AppColors.solarLightTint.opacity(c1),
-                AppColors.cardAquaWash.opacity(c2),
-                AppColors.cleanFieldFill.opacity(c3)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-
-    // 描边渐变在普通函数里以显式 Double 常量计算，避免在 ViewBuilder 内联嵌套三元导致类型检查超时。
-    private func prominentStrokeGradient(active: Bool) -> LinearGradient {
-        let isDark = colorScheme == .dark
-        let c0: Double = isDark ? (active ? 0.42 : 0.32) : (active ? 0.58 : 0.46)
-        let c1: Double = isDark ? 0.14 : 0.22
-        let c2: Double = isDark ? 0.18 : 0.13
-        return LinearGradient(
-            colors: [
-                Color.white.opacity(c0),
-                Color.white.opacity(c1),
-                Color.black.opacity(c2)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-    }
-
-    private func regularStrokeGradient(active: Bool, depth: Double) -> LinearGradient {
-        let isDark = colorScheme == .dark
-        let c0: Double = (isDark ? (active ? 0.48 : 0.36) : (active ? 0.62 : 0.50)) * depth
-        let c1: Double = (isDark ? (active ? 0.18 : 0.12) : (active ? 0.30 : 0.22)) * depth
-        let c2: Double = (isDark ? (active ? 0.20 : 0.12) : (active ? 0.28 : 0.18)) * depth
-        let c3: Double = (isDark ? (active ? 0.16 : 0.12) : (active ? 0.070 : 0.045)) * depth
-        return LinearGradient(
-            colors: [
-                Color.white.opacity(c0),
-                AppColors.solarLightTint.opacity(c1),
-                AppColors.solarEdgeTint.opacity(c2),
-                Color.black.opacity(c3)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
     }
 }
 
@@ -2079,64 +2040,42 @@ private struct RepeatedGlassButtonStyleBody: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        let depth = min(max(thickness, 0.75), 1.6)
         let pressed = configuration.isPressed
         let active = isEnabled && (isHovering || pressed || isFocused)
 
         configuration.label
-            .font(.callout.weight(.medium))
+            .font(.callout.weight(.semibold))
             .lineLimit(1)
-            .foregroundStyle(Color.primary.opacity(active ? 0.88 : 0.76))
+            .foregroundStyle(AppColors.refSecondaryText.opacity(isEnabled ? 1 : 0.52))
             .padding(.horizontal, horizontalPadding)
             .frame(minHeight: minHeight)
             .background {
                 ZStack {
-                    if reduceTransparency {
-                        shape.fill(AppColors.elevatedSurface)
+                    shape.fill(reduceTransparency ? AppColors.elevatedSurface : AppColors.refScanFill)
+                    if active {
+                        shape.fill(AppColors.refProminentStart.opacity(pressed ? 0.12 : 0.06))
                     }
-                    shape.fill(
-                        LinearGradient(
-                            colors: [
-                                .white.opacity((colorScheme == .dark ? (active ? 0.22 : 0.14) : (active ? 0.50 : 0.36)) * depth),
-                                AppColors.solarLightTint.opacity((colorScheme == .dark ? (active ? 0.10 : 0.060) : (active ? 0.14 : 0.085)) * depth),
-                                AppColors.cleanFieldFill.opacity(colorScheme == .dark ? (active ? 0.48 : 0.40) : (active ? 0.62 : 0.54))
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
+                    if active && !pressed {
+                        shape.fill(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.28),
+                                    AppColors.pointerLightTint.opacity(0.08),
+                                    .clear
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
                         )
-                    )
+                    }
                 }
             }
             .overlay {
-                shape.strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 1.0, green: 0.99, blue: 0.95).opacity((colorScheme == .dark ? (active ? 0.34 : 0.24) : (active ? 0.72 : 0.56)) * depth),
-                            AppColors.solarLightTint.opacity((colorScheme == .dark ? (active ? 0.16 : 0.10) : (active ? 0.27 : 0.20)) * depth),
-                            AppColors.solarEdgeTint.opacity((colorScheme == .dark ? (active ? 0.22 : 0.14) : (active ? 0.28 : 0.18)) * depth),
-                            Color.black.opacity((colorScheme == .dark ? (active ? 0.15 : 0.11) : (active ? 0.060 : 0.038)) * depth)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.9
-                )
+                shape.strokeBorder(active ? AppColors.refProminentStart.opacity(0.20) : Color.clear, lineWidth: 1)
             }
             .clipShape(shape)
             .contentShape(shape)
             .modifier(GlassFocusRingModifier(active: isEnabled && isFocused, cornerRadius: cornerRadius))
-            .overlay {
-                if pressed {
-                    shape
-                        .fill(AppColors.selectedGlassTint.opacity(colorScheme == .dark ? 0.18 : 0.12))
-                        .allowsHitTesting(false)
-                } else if isHovering, isEnabled {
-                    shape
-                        .fill(AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.12 : 0.08))
-                        .allowsHitTesting(false)
-                }
-            }
-            .pointerLiquidEdge(cornerRadius: cornerRadius, intensity: (active ? 1.08 : 0.82) * depth)
             .opacity(isEnabled ? (pressed ? 0.84 : 1) : AppControlMetrics.disabledControlOpacity)
             .brightness(isHovering && isEnabled && !pressed ? 0.010 : 0)
             .onHover { hovering in
@@ -2202,23 +2141,22 @@ private struct HeaderControlGlassBackground: ViewModifier {
 
         content
             .background {
-                if reduceTransparency {
-                    shape.fill(AppColors.elevatedSurface)
-                } else {
-                    shape.fill(.regularMaterial)
-                }
+                shape.fill(AppColors.refSearchFill)
             }
             .background {
-                shape.fill(AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.54 : 0.76))
+                shape.fill(
+                    highlighted
+                        ? AppColors.referenceControlFill.opacity(colorScheme == .dark ? 0.34 : 0.96)
+                        : AppColors.referenceControlFill.opacity(colorScheme == .dark ? 0.30 : 0.92)
+                )
             }
             .background {
                 shape.fill(
                     LinearGradient(
                         colors: [
-                            .white.opacity(colorScheme == .dark ? 0.22 : 0.56),
-                            AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.11 : 0.20),
-                            AppColors.cardAquaWash.opacity(colorScheme == .dark ? 0.16 : 0.21),
-                            Color.black.opacity(colorScheme == .dark ? 0.035 : 0.018)
+                            .white.opacity(colorScheme == .dark ? 0.18 : 0.34),
+                            AppColors.referenceControlFill.opacity(colorScheme == .dark ? 0.08 : 0.20),
+                            Color.black.opacity(colorScheme == .dark ? 0.030 : 0.010)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -2229,8 +2167,8 @@ private struct HeaderControlGlassBackground: ViewModifier {
                 shape.fill(
                     RadialGradient(
                         colors: [
-                            .white.opacity(colorScheme == .dark ? 0.13 : (focused ? 0.34 : 0.26)),
-                            AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.07 : (focused ? 0.16 : 0.11)),
+                            .white.opacity(colorScheme == .dark ? 0.13 : (focused ? 0.36 : 0.28)),
+                            AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.06 : (focused ? 0.14 : 0.10)),
                             .clear
                         ],
                         center: UnitPoint(x: -0.08, y: -0.14),
@@ -2244,10 +2182,10 @@ private struct HeaderControlGlassBackground: ViewModifier {
                 shape.strokeBorder(
                     LinearGradient(
                         colors: [
-                            .white.opacity(colorScheme == .dark ? 0.42 : 0.88),
-                            AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.18 : 0.34),
-                            focused ? AppColors.selectedGlassTint.opacity(colorScheme == .dark ? 0.36 : 0.34) : AppColors.solarEdgeTint.opacity(colorScheme == .dark ? 0.20 : 0.30),
-                            Color.black.opacity(colorScheme == .dark ? 0.12 : 0.055)
+                            .white.opacity(colorScheme == .dark ? 0.42 : 0.94),
+                            AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.16 : 0.30),
+                            focused ? AppColors.selectedGlassTint.opacity(colorScheme == .dark ? 0.36 : 0.34) : AppColors.solarEdgeTint.opacity(colorScheme == .dark ? 0.18 : 0.24),
+                            Color.black.opacity(colorScheme == .dark ? 0.11 : 0.045)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -2257,9 +2195,6 @@ private struct HeaderControlGlassBackground: ViewModifier {
             }
             .clipShape(shape)
             .modifier(GlassFocusRingModifier(active: focused && enabled, cornerRadius: cornerRadius))
-            .shadow(color: .white.opacity(colorScheme == .dark ? 0.020 : 0.20), radius: 1, y: -0.5)
-            .shadow(color: AppColors.solarEdgeTint.opacity(colorScheme == .dark ? 0.052 : (focused ? 0.082 : 0.062)), radius: highlighted ? 5 : 7, y: 0)
-            .shadow(color: .black.opacity(colorScheme == .dark ? 0.085 : 0.040), radius: 5, y: 1)
             .opacity(enabledOpacity * (highlighted ? 0.92 : 1))
             .contentShape(shape)
     }
@@ -2268,7 +2203,7 @@ private struct HeaderControlGlassBackground: ViewModifier {
 struct HeaderActionGlassButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var cornerRadius: CGFloat = 13
+    var cornerRadius: CGFloat = 12
     var horizontalPadding: CGFloat = 12
     var minHeight: CGFloat = AppControlMetrics.headerButtonHeight
 
@@ -2293,32 +2228,94 @@ private struct HeaderActionGlassButtonStyleBody: View {
     @State private var isHovering = false
 
     var body: some View {
+        // 系统页面 1:1：页头次级按钮(扫描/筛选/选择)=冷灰实心胶囊 #F1F3F7 + #5A6478 文字。
         let pressed = configuration.isPressed
-        let active = isEnabled && (isHovering || pressed || isFocused)
+        let active = isEnabled && (isHovering || pressed)
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
 
-        configuration.label
+        return configuration.label
             .font(.callout.weight(.semibold))
             .lineLimit(1)
-            .foregroundStyle(Color.primary.opacity(isEnabled ? (active ? 0.90 : 0.74) : 0.42))
+            .foregroundStyle(AppColors.refSecondaryText.opacity(isEnabled ? 1 : 0.5))
             .padding(.horizontal, horizontalPadding)
             .frame(minHeight: minHeight)
-            .modifier(HeaderControlGlassBackground(
-                cornerRadius: cornerRadius,
-                highlighted: active,
-                focused: isFocused,
-                accent: AppColors.solarEdgeTint,
-                enabled: isEnabled
-            ))
-            .overlay {
-                if active {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(AppColors.pointerLightTint.opacity(pressed ? 0.42 : 0.28), lineWidth: pressed ? 1.35 : 1.05)
-                        .allowsHitTesting(false)
+            .background {
+                ZStack {
+                    shape.fill(AppColors.refScanFill)
+                    if active {
+                        shape.fill(AppColors.refProminentStart.opacity(pressed ? 0.12 : 0.06))
+                    }
                 }
             }
-            .pointerLiquidEdge(cornerRadius: cornerRadius, intensity: active ? 1.46 : 1.18)
-            .opacity(pressed ? 0.84 : 1)
-            .brightness(isHovering && isEnabled && !pressed ? 0.012 : 0)
+            .overlay {
+                shape.strokeBorder(active ? AppColors.refProminentStart.opacity(0.24) : AppColors.refCardBorder, lineWidth: 1)
+            }
+            .clipShape(shape)
+            .modifier(GlassFocusRingModifier(active: isEnabled && isFocused, cornerRadius: cornerRadius))
+            .opacity(isEnabled ? 1 : AppControlMetrics.disabledControlOpacity)
+            .onHover { hovering in
+                isHovering = hovering
+            }
+            .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
+            .animation(reduceMotion ? nil : AppMotion.fast, value: pressed)
+            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
+    }
+}
+
+struct HeaderProminentActionButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var cornerRadius: CGFloat = 13
+    var horizontalPadding: CGFloat = 18
+    var minHeight: CGFloat = AppControlMetrics.headerButtonHeight
+
+    func makeBody(configuration: Configuration) -> some View {
+        HeaderProminentActionButtonStyleBody(
+            configuration: configuration,
+            cornerRadius: cornerRadius,
+            horizontalPadding: horizontalPadding,
+            minHeight: minHeight
+        )
+    }
+}
+
+private struct HeaderProminentActionButtonStyleBody: View {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.isFocused) private var isFocused
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let configuration: ButtonStyle.Configuration
+    let cornerRadius: CGFloat
+    let horizontalPadding: CGFloat
+    let minHeight: CGFloat
+    @State private var isHovering = false
+
+    var body: some View {
+        let pressed = configuration.isPressed
+        let active = isEnabled && (isHovering || pressed)
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        return configuration.label
+            .font(.callout.weight(.semibold))
+            .lineLimit(1)
+            .foregroundStyle(Color.white.opacity(isEnabled ? 1 : 0.68))
+            .padding(.horizontal, horizontalPadding)
+            .frame(minHeight: minHeight)
+            .background {
+                ZStack {
+                    shape.fill(AppColors.refProminentGradient)
+                    if active {
+                        shape.fill(Color.white.opacity(pressed ? 0.08 : 0.05))
+                    }
+                }
+            }
+            .overlay {
+                shape.strokeBorder(Color.white.opacity(active ? 0.32 : 0.18), lineWidth: 1)
+            }
+            .clipShape(shape)
+            .modifier(GlassFocusRingModifier(active: isEnabled && isFocused, cornerRadius: cornerRadius))
+            .opacity(isEnabled ? 1 : AppControlMetrics.disabledControlOpacity)
+            .scaleEffect(!reduceMotion && pressed ? 0.985 : 1)
             .onHover { hovering in
                 isHovering = hovering
             }
@@ -2334,9 +2331,9 @@ struct GlassCapsuleControl<Content: View>: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.isEnabled) private var isEnabled
     var isSelected: Bool
-    var height: CGFloat = 28
-    var horizontalPadding: CGFloat = 12
-    var font: Font = .caption.weight(.semibold)
+    var height: CGFloat = 32
+    var horizontalPadding: CGFloat = 13
+    var font: Font = .system(size: 13, weight: .bold)
     // 默认用主题高亮色而非系统 .accentColor：后者不随自定义配色变化，会让筛选胶囊高光一直是蓝色。
     var tint: Color = AppColors.selectedGlassTint
     /// 禁用后不挂 onContinuousHover，适用于大量并排出现的筛选胶囊，降低指针事件订阅数量。
@@ -2363,62 +2360,28 @@ struct GlassCapsuleControl<Content: View>: View {
     }
 
     var body: some View {
-        let active = isEnabled && (isSelected || isHovering)
-        // 用中间 let 拆分整条 body 修饰链，缩短单表达式类型检查长度（避免 CI 旧编译器超时）。
-        let capsuleBase = content
+        // 系统页面网页筛选胶囊：激活白底深字，非激活透明 slate 字。
+        let textColor: Color = isSelected
+            ? AppColors.refPillActiveText
+            : (isHovering && isEnabled ? AppColors.refMenuText : AppColors.refPillIdleText)
+        let fill: Color = isSelected
+            ? AppColors.refPillActiveBg
+            : (isHovering && isEnabled ? Color.white.opacity(0.46) : Color.clear)
+
+        return content
             .font(font)
             .lineLimit(1)
-            .foregroundStyle(isSelected ? tint : Color.primary.opacity(isEnabled ? (isHovering ? 0.86 : 0.70) : 0.42))
+            .foregroundStyle(textColor)
             .padding(.horizontal, horizontalPadding)
             .frame(height: height)
-            // 在更深底色上，未选中胶囊白色填充稍加浓，视觉区分度提高。
-            .background(
-                Capsule().fill(capsuleFillColor)
-            )
-
-        return capsuleBase
-            .overlay {
-                Capsule()
-                    .stroke(capsuleStrokeGradient(active: active), lineWidth: 1)
-            }
-            .shadow(color: tint.opacity(isSelected ? (colorScheme == .dark ? 0.08 : 0.06) : (isHovering ? (colorScheme == .dark ? 0.045 : 0.030) : 0)), radius: isHovering ? 9 : 8, y: 2)
-            .modifier(CapsulePointerEdgeModifier(enabled: enablePointerEdge, cornerRadius: height / 2, tint: tint, isSelected: isSelected || isHovering))
-            .brightness(isHovering && !isSelected && isEnabled ? 0.008 : 0)
+            .background(Capsule().fill(fill))
+            .shadow(color: AppColors.refCardShadow.opacity(isSelected ? 0.08 : 0), radius: 3, y: 1)
+            .contentShape(Capsule())
             .onHover { hovering in
                 isHovering = hovering
             }
             .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
             .animation(reduceMotion ? nil : AppMotion.fast, value: isSelected)
-    }
-
-    // 胶囊底色以显式分支计算，避免内联嵌套三元让类型检查超时。
-    private var capsuleFillColor: Color {
-        if reduceTransparency { return AppColors.elevatedSurface }
-        let isDark = colorScheme == .dark
-        if isSelected { return Color.white.opacity(isDark ? 0.30 : 0.76) }
-        let o: Double = isDark ? (isHovering ? 0.24 : 0.17) : (isHovering ? 0.70 : 0.58)
-        return Color.white.opacity(o)
-    }
-
-    // 胶囊描边渐变以显式 Double / Color 常量计算，避免内联嵌套三元让类型检查超时。
-    private func capsuleStrokeGradient(active: Bool) -> LinearGradient {
-        let isDark = colorScheme == .dark
-        let c0: Double = isDark ? (active ? 0.42 : 0.32) : (active ? 0.96 : 0.82)
-        let c1: Double = isDark ? (active ? 0.18 : 0.12) : (active ? 0.32 : 0.24)
-        let c3: Double = isDark ? (active ? 0.14 : 0.10) : (active ? 0.055 : 0.036)
-        let edge: Color = isSelected
-            ? tint.opacity(isDark ? 0.24 : 0.30)
-            : AppColors.solarEdgeTint.opacity(isDark ? (isHovering ? 0.22 : 0.14) : (isHovering ? 0.30 : 0.18))
-        return LinearGradient(
-            colors: [
-                Color(red: 1.0, green: 0.99, blue: 0.95).opacity(c0),
-                AppColors.solarLightTint.opacity(c1),
-                edge,
-                Color.black.opacity(c3)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
     }
 }
 
@@ -2552,7 +2515,7 @@ struct PageHeader<Actions: View>: View {
                 compactLayout
             } else {
                 titleCluster
-                    .padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, minHeight: AppSpacing.pageHeaderIconSafeHeight, alignment: .bottomLeading)
             }
         }
         .padding(.horizontal, AppSpacing.pageHeaderHorizontal)
@@ -2568,7 +2531,12 @@ struct PageHeader<Actions: View>: View {
                 endPoint: .trailing
             )
             .frame(width: 168, height: 0.8)
-            .offset(x: systemImage == nil ? 0 : 58, y: 1)
+            .offset(
+                x: systemImage == nil
+                    ? 0
+                    : AppSpacing.pageHeaderIconSafeSlot + AppSpacing.pageHeaderIconToText,
+                y: 1
+            )
             .allowsHitTesting(false)
         }
         .transaction { transaction in
@@ -2579,19 +2547,25 @@ struct PageHeader<Actions: View>: View {
     private var titleCluster: some View {
         HStack(alignment: .center, spacing: AppSpacing.pageHeaderIconToText) {
             if let systemImage {
-                PlayfulSymbolIcon(systemImage: systemImage, size: 42)
-                    .fixedSize()
+                VividPageIcon(systemImage: systemImage)
+                    .frame(
+                        width: AppSpacing.pageHeaderIconSafeSlot,
+                        height: AppSpacing.pageHeaderIconSafeHeight,
+                        alignment: .leading
+                    )
+                    .fixedSize(horizontal: true, vertical: false)
             }
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text(title)
-                    .font(.system(size: AppDesignStandard.pageHeaderTitleSize, weight: .semibold))
+                    .font(.system(size: AppDesignStandard.pageHeaderTitleSize, weight: .black))
+                    .foregroundStyle(AppColors.refTitleText)
                     .lineLimit(1)
                     .minimumScaleFactor(0.86)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(AppColors.refSubtle)
                         .lineLimit(2)
                         .lineSpacing(1)
                         .frame(maxWidth: AppDesignStandard.pageHeaderSubtitleMaxWidth, alignment: .leading)
@@ -2620,9 +2594,9 @@ struct PageHeader<Actions: View>: View {
                                 .id("page-header-actions-trailing-anchor")
                         }
                         .buttonStyle(HeaderActionGlassButtonStyle(
-                            cornerRadius: 13,
-                            horizontalPadding: 12,
-                            minHeight: AppControlMetrics.headerButtonHeight
+                            cornerRadius: 12,
+                            horizontalPadding: 15,
+                            minHeight: 36
                         ))
                         .fixedSize(horizontal: true, vertical: false)
                         .background {
@@ -2642,7 +2616,7 @@ struct PageHeader<Actions: View>: View {
                         alignment: .trailing
                     )
                     .padding(.horizontal, AppGlassMetrics.Focus.outerPadding)
-                    .padding(.vertical, 3)
+                    .padding(.vertical, 0)
                 }
                 .verticalScrollPassthroughFromNestedHorizontal()
                 .onAppear {
@@ -2657,6 +2631,7 @@ struct PageHeader<Actions: View>: View {
             guard width > 0, abs(measuredActionsContentWidth - width) > 0.5 else { return }
             measuredActionsContentWidth = width
         }
+        .frame(height: 36, alignment: .bottomTrailing)
         .accessibilityElement(children: .contain)
     }
 
@@ -2684,12 +2659,12 @@ struct PageHeader<Actions: View>: View {
                     )
 
                 actionsCluster
-                    .frame(width: actionsWidth, alignment: .trailing)
-                    .clipped()
+                    .frame(width: actionsWidth, height: 36, alignment: .bottomTrailing)
+                    .offset(y: subtitle == nil ? 0 : -AppSpacing.pageHeaderActionSubtitleBottomLift)
             }
-            .frame(width: availableWidth, height: 62, alignment: .bottomLeading)
+            .frame(width: availableWidth, height: AppSpacing.pageHeaderIconSafeHeight, alignment: .bottomLeading)
         }
-        .frame(height: 62)
+        .frame(height: AppSpacing.pageHeaderIconSafeHeight)
     }
 
     private func scrollActionsToTrailingEdge(_ proxy: ScrollViewProxy) {
@@ -2723,27 +2698,12 @@ struct AppSheetHeader: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.48 : 0.76))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        .white.opacity(colorScheme == .dark ? 0.24 : 0.74),
-                                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.10 : 0.20),
-                                        AppColors.cleanPanelBorder.opacity(0.48)
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 0.9
-                            )
-                    }
-
-                PlayfulSymbolIcon(systemImage: systemImage, size: AppSheetMetrics.headerIconSize)
-            }
+            VividPageIcon(
+                systemImage: systemImage,
+                chip: AppSheetMetrics.headerIconContainerSize,
+                glyph: AppSheetMetrics.headerIconSize * 0.62,
+                tint: AppColors.referenceBlue
+            )
             .frame(width: AppSheetMetrics.headerIconContainerSize, height: AppSheetMetrics.headerIconContainerSize)
             .fixedSize()
             .accessibilityHidden(true)
@@ -2833,17 +2793,22 @@ struct AppSheetSection<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
-            HStack(alignment: .center, spacing: 9) {
-                PlayfulSymbolIcon(systemImage: systemImage, size: 24)
+            HStack(alignment: .center, spacing: 14) {
+                VividPageIcon(
+                    systemImage: systemImage,
+                    chip: 52,
+                    glyph: 25,
+                    tint: vividReferenceTint(forSystemImage: systemImage)
+                )
                     .fixedSize()
                     .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(title)
-                        .font(.subheadline.weight(.semibold))
+                        .font(.headline.weight(.semibold))
                     if let subtitle {
                         Text(subtitle)
-                            .font(.caption)
+                            .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -2895,29 +2860,64 @@ struct AppInlineNoticeLabel: View {
     }
 }
 
-struct AppSectionHeading: View {
+/// 普通页面与首页区块统一的二级标题。
+///
+/// 活力色彩升级：标题前增加一道「区块识别彩条」（默认主题选中色，首页区块可传入 `accentColor`
+/// 使用语义多色家族中的某一色），并支持尾部动作槽（如「查看全部」「换一批」）。
+/// 通过泛型 `Trailing` + `EmptyView` 默认特化保持对既有调用点的向后兼容。
+struct AppSectionHeading<Trailing: View>: View {
     let title: String
     let subtitle: String?
     let systemImage: String
     var badgeText: String?
+    /// 徽章着色；默认 `selectedGlassTint`，仪表盘等可传区块语义色（如设计稿「实时」绿胶囊）。
+    var badgeTint: Color?
+    var accentColor: Color
+    /// 首页/总览传 true 时图标改用精绘语义色彩 `VividSemanticIcon`（兼容入口 `AuroraSymbolIcon`）；其它页面保持 PlayfulSymbolIcon。
+    var usesAuroraIcon: Bool
+    @ViewBuilder var trailing: Trailing
 
     init(
         title: String,
         subtitle: String? = nil,
         systemImage: String,
-        badgeText: String? = nil
+        badgeText: String? = nil,
+        badgeTint: Color? = nil,
+        accentColor: Color = AppColors.selectedGlassTint,
+        usesAuroraIcon: Bool = false,
+        @ViewBuilder trailing: () -> Trailing
     ) {
         self.title = title
         self.subtitle = subtitle
         self.systemImage = systemImage
         self.badgeText = badgeText
+        self.badgeTint = badgeTint
+        self.accentColor = accentColor
+        self.usesAuroraIcon = usesAuroraIcon
+        self.trailing = trailing()
     }
 
     var body: some View {
         HStack(alignment: .center, spacing: 11) {
-            PlayfulSymbolIcon(systemImage: systemImage, size: 30)
-                .fixedSize()
+            Capsule(style: .continuous)
+                .fill(AuroraPalette.accentBarGradient(accentColor))
+                .frame(
+                    width: AppAuroraMetrics.sectionAccentBarWidth,
+                    height: AppAuroraMetrics.sectionAccentBarHeight
+                )
                 .accessibilityHidden(true)
+
+            // 首页/总览（usesAuroraIcon）保留精绘渐变图标（禁区不动）；其它页面改用焕彩线性图标。
+            if usesAuroraIcon {
+                VividSemanticIcon(systemName: systemImage, size: 22, color: accentColor)
+                    .fixedSize()
+                    .accessibilityHidden(true)
+            } else {
+                AppGlyph(systemImage: systemImage, size: 18)
+                    .foregroundStyle(accentColor)
+                    .fixedSize()
+                    .accessibilityHidden(true)
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -2933,40 +2933,80 @@ struct AppSectionHeading: View {
             Spacer(minLength: 8)
 
             if let badgeText {
+                let bTint = badgeTint ?? AppColors.selectedGlassTint
                 Text(badgeText)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(AppColors.selectedGlassTint.opacity(0.92))
+                    .foregroundStyle(bTint.opacity(0.95))
                     .padding(.horizontal, 9)
                     .padding(.vertical, 5)
-                    .background(AppColors.selectedGlassTint.opacity(0.09), in: Capsule())
+                    .background(bTint.opacity(0.13), in: Capsule())
                     .overlay {
                         Capsule()
-                            .strokeBorder(AppColors.cleanPanelBorder.opacity(0.82), lineWidth: 0.75)
+                            .strokeBorder(bTint.opacity(0.28), lineWidth: 0.75)
                     }
                     .fixedSize()
             }
+
+            trailing
+                .fixedSize()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
 }
 
+extension AppSectionHeading where Trailing == EmptyView {
+    init(
+        title: String,
+        subtitle: String? = nil,
+        systemImage: String,
+        badgeText: String? = nil,
+        badgeTint: Color? = nil,
+        accentColor: Color = AppColors.selectedGlassTint,
+        usesAuroraIcon: Bool = false
+    ) {
+        self.init(
+            title: title,
+            subtitle: subtitle,
+            systemImage: systemImage,
+            badgeText: badgeText,
+            badgeTint: badgeTint,
+            accentColor: accentColor,
+            usesAuroraIcon: usesAuroraIcon
+        ) { EmptyView() }
+    }
+}
+
 struct AppStatusBadge: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
     let systemImage: String
     var tint: Color = AppColors.selectedGlassTint
 
     var body: some View {
-        Label(title, systemImage: systemImage)
+        HStack(spacing: 4) {
+            AppGlyph(systemImage: systemImage, size: 11.5, lineWidth: 1.9)
+            Text(title)
+        }
             .font(.caption2.weight(.semibold))
             .foregroundStyle(tint.opacity(0.92))
             .lineLimit(1)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background(AppColors.cleanFieldFill.opacity(0.76), in: Capsule())
+            .background(
+                LinearGradient(
+                    colors: [
+                        tint.opacity(colorScheme == .dark ? 0.22 : 0.13),
+                        tint.opacity(colorScheme == .dark ? 0.12 : 0.07)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: Capsule()
+            )
             .overlay {
                 Capsule()
-                    .strokeBorder(tint.opacity(0.20), lineWidth: 0.7)
+                    .strokeBorder(tint.opacity(colorScheme == .dark ? 0.34 : 0.26), lineWidth: 0.7)
             }
             .fixedSize()
             .accessibilityElement(children: .combine)
@@ -3003,32 +3043,14 @@ struct AppSurfaceToolbar<Content: View>: View {
         .verticalScrollPassthroughFromNestedHorizontal()
         .frame(maxWidth: .infinity, alignment: .leading)
         .clipShape(shape)
+        // 系统页面 1:1：纯扁平白卡，不再叠玻璃 edge-light 与高光线。
         .staticSurfaceBackground(cornerRadius: cornerRadius, thickness: thickness)
-        .overlay {
-            shape.strokeBorder(
-                AppColors.edgeLightStroke(colorScheme, depth: thickness, intensity: 0.72),
-                lineWidth: 0.8
-            )
-        }
-        .overlay(alignment: .topLeading) {
-            LinearGradient(
-                colors: [
-                    .white.opacity(colorScheme == .dark ? 0.34 : 0.72),
-                    AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.12 : 0.24),
-                    .clear
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(height: 0.8)
-            .padding(.horizontal, cornerRadius * 0.72)
-            .padding(.top, 1.5)
-            .allowsHitTesting(false)
-        }
     }
 }
 
 struct AppAdaptiveControlBar<Leading: View, Trailing: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let cornerRadius: CGFloat
     let thickness: Double
     @ViewBuilder var leading: Leading
@@ -3049,14 +3071,16 @@ struct AppAdaptiveControlBar<Leading: View, Trailing: View>: View {
     var body: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 12) {
-                leading
+                AppControlSegmentedShell {
+                    leading
+                }
                 Spacer(minLength: 18)
                 trailing
             }
 
             VStack(alignment: .leading, spacing: 10) {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
+                    AppControlSegmentedShell {
                         leading
                     }
                     .fixedSize(horizontal: true, vertical: false)
@@ -3072,11 +3096,40 @@ struct AppAdaptiveControlBar<Leading: View, Trailing: View>: View {
                 .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
-        .padding(.horizontal, AppSpacing.controlGroupHorizontal)
-        .padding(.vertical, AppSpacing.controlGroupVertical)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
         .frame(maxWidth: .infinity)
+        // 系统页面网页控制栏：白底、#EDF0F5 描边、16 圆角、常态轻柔影；本体不 hover 变形。
         .staticSurfaceBackground(cornerRadius: cornerRadius, thickness: thickness)
-        .repeatedCardChrome(false, cornerRadius: cornerRadius)
+    }
+}
+
+private struct AppControlSegmentedShell<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @ViewBuilder var content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            content
+        }
+        .padding(5)
+        .frame(minHeight: 44)
+        .background {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(colorScheme == .dark ? Color.white.opacity(0.065) : Color(red: 238 / 255, green: 243 / 255, blue: 249 / 255))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(
+                    colorScheme == .dark ? Color.white.opacity(0.08) : Color(red: 221 / 255, green: 231 / 255, blue: 243 / 255).opacity(0.95),
+                    lineWidth: 1
+                )
+        }
+        .fixedSize(horizontal: true, vertical: false)
     }
 }
 
@@ -3108,6 +3161,81 @@ struct AppSheetActionFooter<Content: View>: View {
             .frame(height: 0.7)
             .allowsHitTesting(false)
         }
+    }
+}
+
+struct AppSwitchToggleStyle: ToggleStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            let update = { configuration.isOn.toggle() }
+            if reduceMotion {
+                update()
+            } else {
+                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
+                    update()
+                }
+            }
+        } label: {
+            HStack(spacing: 10) {
+                configuration.label
+                switchTrack(isOn: configuration.isOn)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.48)
+        .accessibilityValue(configuration.isOn ? "开启" : "关闭")
+    }
+
+    private func switchTrack(isOn: Bool) -> some View {
+        ZStack(alignment: isOn ? .trailing : .leading) {
+            Capsule(style: .continuous)
+                .fill(trackFill(isOn: isOn))
+                .overlay {
+                    Capsule(style: .continuous)
+                        .strokeBorder(trackStroke(isOn: isOn), lineWidth: isOn ? 0.75 : 0.65)
+                }
+                .shadow(color: isOn ? AppColors.referenceBlue.opacity(0.16) : .clear, radius: 8, y: 2)
+
+            Circle()
+                .fill(Color.white.opacity(colorScheme == .dark ? 0.94 : 0.98))
+                .frame(width: 20, height: 20)
+                .overlay {
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.76), lineWidth: 0.7)
+                }
+                .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.30 : 0.15), radius: 4, y: 1.5)
+                .padding(3)
+        }
+        .frame(width: 44, height: 26)
+    }
+
+    private func trackFill(isOn: Bool) -> AnyShapeStyle {
+        if isOn {
+            return AnyShapeStyle(LinearGradient(
+                colors: [AppColors.referenceBlue, AppColors.referenceCyan],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ))
+        }
+        return AnyShapeStyle(LinearGradient(
+            colors: [
+                AppColors.cleanPanelFill.opacity(colorScheme == .dark ? 0.40 : 0.86),
+                AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.14 : 0.22)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        ))
+    }
+
+    private func trackStroke(isOn: Bool) -> Color {
+        if isOn { return Color.white.opacity(0.42) }
+        return AppColors.cleanPanelBorder.opacity(colorScheme == .dark ? 0.50 : 0.38)
     }
 }
 
@@ -3688,11 +3816,12 @@ struct GlassSearchField: View {
     var onSubmit: (() -> Void)? = nil
 
     var body: some View {
-        let depth = min(max(thickness, 0.8), 2.0)
+        // 系统页面 1:1：搜索框 = #EEF1F6 实底、12 圆角、#AAB2C0 占位、放大镜线条。
         let width = adaptiveSearchWidth
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(isFocused ? AppColors.selectedGlassTint.opacity(0.92) : Color.primary.opacity(0.56))
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return HStack(spacing: 8) {
+            AppGlyph(systemImage: "magnifyingglass", size: 16, lineWidth: 2)
+                .foregroundStyle(isFocused ? AppColors.refIconGlyph : AppColors.refSearchPlaceholder)
                 .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
             TransparentSearchTextField(placeholder: placeholder, text: $text, isFocused: $isFocused, onSubmit: onSubmit)
                 .frame(height: 20)
@@ -3701,23 +3830,25 @@ struct GlassSearchField: View {
                     text = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(AppColors.refSubtle)
                 }
                 .buttonStyle(SubtleIconButtonStyle(minSize: 20))
                 .accessibilityLabel("清除搜索")
                 .help("清除搜索")
             }
         }
-        .padding(.horizontal, 13)
+        .padding(.horizontal, 14)
         .frame(height: AppControlMetrics.searchFieldHeight)
         .frame(width: width)
-        .modifier(HeaderControlGlassBackground(
-            cornerRadius: 18,
-            focused: isFocused,
-            accent: AppColors.solarEdgeTint,
-            enabled: true
-        ))
-        .pointerLiquidEdge(cornerRadius: 18, intensity: (isFocused ? 1.22 : 1.04) * depth)
+        .background {
+            shape.fill(AppColors.refSearchFill)
+        }
+        .overlay {
+            if isFocused {
+                shape.strokeBorder(AppColors.refIconGlyph.opacity(0.55), lineWidth: 1.2)
+            }
+        }
+        .clipShape(shape)
         .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
     }
 
@@ -3838,64 +3969,33 @@ struct GlassMenuButton<MenuItems: View>: View {
         Menu {
             menuItems
         } label: {
-            let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
-            let depth = min(max(thickness, 0.8), 2.0)
+            // 系统页面网页下拉：白底 + #CBD5E1 描边 + #334155 字。
+            let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
             HStack(spacing: 8) {
                 Text(title)
                     .lineLimit(1)
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(AppColors.refSubtle)
             }
-            .font(.callout.weight(.medium))
-            .padding(.horizontal, 12)
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(AppColors.refMenuText)
+            .padding(.horizontal, 13)
             .frame(width: width ?? adaptiveMenuControlWidth(for: title), height: AppControlMetrics.defaultButtonHeight)
-            // 菜单按钮会在页头和来源行重复出现，这里避免创建实时 material 层。
-            .background(
-                shape.fill(
-                    reduceTransparency
-                        ? AppColors.elevatedSurface
-                        : AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.86 : 0.78)
-                )
-            )
-            .background(
-                shape.fill(
-                    LinearGradient(
-                        colors: [
-                            .white.opacity((colorScheme == .dark ? (isHovering ? 0.32 : 0.24) : (isHovering ? 0.62 : 0.50)) * depth),
-                            AppColors.solarLightTint.opacity((colorScheme == .dark ? (isHovering ? 0.12 : 0.08) : (isHovering ? 0.18 : 0.12)) * depth),
-                            AppColors.cleanFieldFill.opacity(colorScheme == .dark ? (isHovering ? 0.66 : 0.58) : (isHovering ? 0.80 : 0.72)),
-                            .white.opacity((colorScheme == .dark ? (isHovering ? 0.10 : 0.07) : (isHovering ? 0.32 : 0.24)) * depth)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-            )
-            .overlay(alignment: .topLeading) {
-                shape
-                    .strokeBorder(.white.opacity((colorScheme == .dark ? 0.18 : 0.44) * depth), lineWidth: 1.0)
+            .background {
+                ZStack {
+                    shape.fill(AppColors.refCardBg)
+                    if isHovering {
+                        shape.fill(Color.black.opacity(0.025))
+                    }
+                }
             }
             .overlay {
-                shape.stroke(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 1.0, green: 0.99, blue: 0.95).opacity((colorScheme == .dark ? (isHovering ? 0.42 : 0.32) : (isHovering ? 1.0 : 0.88)) * depth),
-                            .white.opacity((colorScheme == .dark ? (isHovering ? 0.20 : 0.14) : (isHovering ? 0.42 : 0.30)) * depth),
-                            AppColors.solarEdgeTint.opacity((colorScheme == .dark ? (isHovering ? 0.24 : 0.14) : (isHovering ? 0.30 : 0.18)) * depth),
-                            Color.black.opacity((colorScheme == .dark ? (isHovering ? 0.16 : 0.12) : (isHovering ? 0.064 : 0.044)) * depth)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
+                shape.strokeBorder(AppColors.refMenuBorder, lineWidth: 1)
             }
             .clipShape(shape)
-            .shadow(color: .black.opacity((colorScheme == .dark ? (isHovering ? 0.13 : 0.10) : (isHovering ? 0.045 : 0.030)) * depth), radius: (isHovering ? 7 : 6) * depth, y: 2)
-            .pointerLiquidEdge(cornerRadius: 9, intensity: (isHovering ? 1.26 : 1.04) * depth)
-            .brightness(isHovering ? 0.010 : 0)
+            .shadow(color: Color.black.opacity(0.04), radius: 2, x: 0, y: 1)
             .onHover { hovering in
                 isHovering = hovering
             }

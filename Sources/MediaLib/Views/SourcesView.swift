@@ -28,9 +28,9 @@ struct SourcesView: View {
                     title: "媒体源",
                     subtitle: "管理本地文件夹、移动硬盘、网络挂载、Emby、Jellyfin 和 Plex 媒体库。",
                     systemImage: "externaldrive"
-                )
-
-                sourceActionsToolbar
+                ) {
+                    sourceActionsRow
+                }
 
                 if let progress = appState.scanProgress, appState.isScanning {
                     ScanProgressView(progress: progress)
@@ -44,17 +44,26 @@ struct SourcesView: View {
                     )
                     .frame(minHeight: 320)
                 } else {
-                    AppSectionHeading(
-                        title: "已连接媒体源",
-                        subtitle: "状态、参与策略和扫描操作集中在每个来源行中。",
-                        systemImage: "externaldrive.connected.to.line.below",
-                        badgeText: "\(appState.sources.count) 个"
-                    )
+                    if !connectedSources.isEmpty {
+                        sourcesSection(
+                            title: "已连接媒体源",
+                            subtitle: "状态、参与策略和扫描操作集中在每个来源行中。",
+                            systemImage: "externaldrive.badge.checkmark",
+                            tint: AppColors.referenceBlue,
+                            count: connectedSources.count
+                        )
+                        sourcesList(connectedSources)
+                    }
 
-                    LazyVStack(spacing: 12) {
-                        ForEach(appState.sources) { source in
-                            SourceRowView(source: source)
-                        }
+                    if !disconnectedSources.isEmpty {
+                        sourcesSection(
+                            title: "已断开媒体源",
+                            subtitle: "这些来源暂时不可访问，可重新挂载、检查设置或稍后再扫描。",
+                            systemImage: "externaldrive.badge.exclamationmark",
+                            tint: Color(red: 1.0, green: 0.62, blue: 0.27),
+                            count: disconnectedSources.count
+                        )
+                        sourcesList(disconnectedSources)
                     }
                 }
             }
@@ -79,23 +88,83 @@ struct SourcesView: View {
         }
     }
 
-    private var sourceActionsToolbar: some View {
-        AppSurfaceToolbar {
+    private var connectedSources: [MediaSource] {
+        appState.sources.filter { appState.sourceIsReachable($0) }
+    }
+
+    private var disconnectedSources: [MediaSource] {
+        appState.sources.filter { !appState.sourceIsReachable($0) }
+    }
+
+    private var sourceActionsRow: some View {
+        HStack(spacing: 12) {
             Button {
                 showingAddSourceWizard = true
             } label: {
-                Label("添加媒体源…", systemImage: "plus")
+                Label { Text("添加媒体源…") } icon: { AppGlyph(systemImage: "plus", size: 15, lineWidth: 2.2) }
             }
-            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+            .buttonStyle(
+                HeaderProminentActionButtonStyle(
+                    cornerRadius: 13,
+                    horizontalPadding: 18,
+                    minHeight: AppControlMetrics.prominentButtonHeight
+                )
+            )
 
             Button {
                 appState.scanAllSources()
             } label: {
-                Label("扫描全部", systemImage: "arrow.clockwise")
+                Label { Text("扫描全部") } icon: { AppGlyph(systemImage: "arrow.clockwise", size: 15) }
             }
-            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
+            .buttonStyle(
+                HeaderActionGlassButtonStyle(
+                    cornerRadius: 13,
+                    horizontalPadding: 18,
+                    minHeight: AppControlMetrics.prominentButtonHeight
+                )
+            )
             .disabled(appState.sources.isEmpty || appState.isScanning)
         }
+    }
+
+    private func sourcesSection(title: String, subtitle: String, systemImage: String, tint: Color, count: Int) -> some View {
+        HStack(spacing: 14) {
+            Capsule()
+                .fill(tint)
+                .frame(width: 4, height: 46)
+
+            VividPageIcon(systemImage: systemImage, chip: 54, glyph: 26, tint: tint)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.title3.weight(.bold))
+                    .foregroundStyle(AppColors.textPrimary)
+                Text(subtitle)
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(AppColors.textSecondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 12)
+
+            Text("\(count)个")
+                .font(.callout.weight(.bold))
+                .foregroundStyle(tint)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(tint.opacity(0.10), in: Capsule())
+        }
+        .padding(.top, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sourcesList(_ sources: [MediaSource]) -> some View {
+        LazyVStack(spacing: 14) {
+            ForEach(sources) { source in
+                SourceRowView(source: source)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -249,8 +318,7 @@ private struct AddMediaSourceWizardSheet: View {
             }
         } label: {
             HStack(alignment: .top, spacing: 11) {
-                Image(systemName: kind.systemImage)
-                    .font(.title3.weight(.semibold))
+                AppGlyph(systemImage: kind.systemImage, size: 19)
                     .foregroundStyle(selectedKind == kind ? AppColors.selectedGlassTint : .secondary)
                     .frame(width: 26)
 
@@ -327,6 +395,7 @@ private struct AddMediaSourceWizardSheet: View {
                 .glassFormField()
 
             Toggle("匿名登录", isOn: $networkAnonymous)
+                .toggleStyle(AppSwitchToggleStyle())
 
             if !networkAnonymous {
                 TextField("用户名", text: $networkUsername)
@@ -1137,10 +1206,13 @@ private struct SourceBehaviorSettingsPanel: View {
                             }
                         }
                     ))
+                    .toggleStyle(AppSwitchToggleStyle())
                 }
                 Toggle("参与健康检查", isOn: $includeInHealthCheck)
+                    .toggleStyle(AppSwitchToggleStyle())
                 if !isRemoteMediaServer && showsMetadataParticipation {
                     Toggle("元数据优先写入源目录", isOn: $preferMetadataWriteToSource)
+                        .toggleStyle(AppSwitchToggleStyle())
                         .disabled(!includeInMetadataFetch)
                 }
             }
@@ -1230,6 +1302,7 @@ private struct MediaTypeGridPicker: View {
 
 struct SourceRowView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
     let source: MediaSource
@@ -1243,52 +1316,56 @@ struct SourceRowView: View {
     var body: some View {
         let isLockedPrivateSource = source.mediaType == .privateCollection && !appState.privacyUnlocked
         let isReachable = appState.sourceIsReachable(source)
+        let accent = sourceAccent(isReachable: isReachable)
 
-        HStack(spacing: 14) {
+        HStack(spacing: 16) {
             ZStack {
-                RoundedRectangle(cornerRadius: AppCardMetrics.compactArtworkCornerRadius, style: .continuous)
-                    .fill(isReachable ? AppColors.selectedGlassTint.opacity(0.12) : Color.orange.opacity(0.14))
-                RoundedRectangle(cornerRadius: AppCardMetrics.compactArtworkCornerRadius, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(
                         LinearGradient(
-                            colors: [.white.opacity(0.24), .clear],
+                            colors: [
+                                accent.opacity(isReachable ? 1.0 : 0.92),
+                                accent.opacity(isReachable ? 0.78 : 0.66)
+                            ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
                     )
-                Image(systemName: iconName)
-                    .font(.title2)
-                    .foregroundStyle(isReachable ? AppColors.selectedGlassTint.opacity(0.90) : Color.orange.opacity(0.88))
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(.white.opacity(colorScheme == .dark ? 0.24 : 0.42), lineWidth: 1)
+                AppGlyph(systemImage: iconName, size: 25)
+                    .foregroundStyle(.white)
             }
             .frame(width: 52, height: 52)
-            .overlay {
-                RoundedRectangle(cornerRadius: AppCardMetrics.compactArtworkCornerRadius, style: .continuous)
-                    .strokeBorder(.white.opacity(isHovering && !suppressHoverDuringScroll ? 0.48 : 0.24), lineWidth: 0.8)
-            }
+            .compositingGroup()
+            .shadow(color: accent.opacity(isReachable ? 0.30 : 0.14), radius: 16, x: -5, y: 8)
+            .shadow(color: AppColors.referenceBlue.opacity(isReachable ? 0.16 : 0.08), radius: 10, x: 5, y: -4)
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
                     Text(sourceTitle(isLockedPrivateSource: isLockedPrivateSource))
-                        .font(.headline)
+                        .font(.headline.weight(.bold))
+                        .foregroundStyle(AppColors.textPrimary)
 
                     if isURLSource {
                         let unhealthy = appState.unhealthyURLItems.count
                         AppStatusBadge(
                             title: unhealthy == 0 ? "链接正常" : "\(unhealthy) 个链接失效",
                             systemImage: unhealthy == 0 ? "checkmark.circle" : "exclamationmark.circle",
-                            tint: unhealthy == 0 ? AppColors.selectedGlassTint : .orange
+                            tint: unhealthy == 0 ? Color(red: 0.13, green: 0.72, blue: 0.42) : Color(red: 1.0, green: 0.62, blue: 0.27)
                         )
                     } else {
                         AppStatusBadge(
                             title: isReachable ? "可访问" : "不可访问",
                             systemImage: isReachable ? "checkmark.circle" : "exclamationmark.circle",
-                            tint: isReachable ? AppColors.selectedGlassTint : .orange
+                            tint: isReachable ? Color(red: 0.13, green: 0.72, blue: 0.42) : Color(red: 1.0, green: 0.62, blue: 0.27)
                         )
                     }
 
                     AppStatusBadge(
                         title: source.sourceKind.displayName,
-                        systemImage: sourceKindBadgeIcon
+                        systemImage: sourceKindBadgeIcon,
+                        tint: accent
                     )
                 }
                 if isLockedPrivateSource {
@@ -1311,57 +1388,67 @@ struct SourceRowView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: 12) {
+            HStack(spacing: 14) {
                 if isURLSource {
                     Button {
                         showingURLManager = true
                     } label: {
-                        Label("管理", systemImage: "slider.horizontal.3")
-                            .frame(height: 18)
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(AppColors.textSecondary)
+                            .frame(width: 20, height: 20)
                     }
-                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 10, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
+                    .buttonStyle(SubtleIconButtonStyle(minSize: 34))
                     .help("管理 URL 视频地址")
+                    .accessibilityLabel("管理 URL 视频地址")
                 } else {
                     Button {
                         showingSettings = true
                     } label: {
                         Image(systemName: "slider.horizontal.3")
-                            .frame(width: 18, height: 18)
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(AppColors.textSecondary)
+                            .frame(width: 20, height: 20)
                     }
-                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
+                    .buttonStyle(SubtleIconButtonStyle(minSize: 34))
                     .help("设置")
+                    .accessibilityLabel("设置")
 
                     if !isReachable, appState.canRemountNetworkSource(source) {
                         Button {
                             appState.remountNetworkSource(source)
                         } label: {
-                            Image(systemName: "arrow.triangle.2.circlepath")
+                            AppGlyph(systemImage: "arrow.triangle.2.circlepath", size: 18)
                                 .frame(width: 18, height: 18)
                         }
-                        .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
+                        .buttonStyle(SubtleIconButtonStyle(minSize: 34))
                         .help("重新挂载")
+                        .accessibilityLabel("重新挂载")
                     }
 
                     Button {
                         appState.scan(source)
                     } label: {
-                        Image(systemName: "arrow.clockwise")
+                        AppGlyph(systemImage: "arrow.clockwise", size: 18)
                             .frame(width: 18, height: 18)
                     }
-                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
+                    .buttonStyle(SubtleIconButtonStyle(minSize: 34))
                     .disabled(appState.isScanning || !isReachable)
                     .help("扫描")
+                    .accessibilityLabel("扫描")
                 }
 
                 Button(role: .destructive) {
                     showDeleteConfirmation = true
                 } label: {
                     Image(systemName: "trash")
-                        .frame(width: 18, height: 18)
-                        .foregroundStyle(.red)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Color(red: 1.0, green: 0.30, blue: 0.42))
+                        .frame(width: 20, height: 20)
                 }
-                .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
+                .buttonStyle(SubtleIconButtonStyle(minSize: 34))
                 .help("删除")
+                .accessibilityLabel("删除")
                 .confirmationDialog(
                     "删除媒体源「\(sourceTitle(isLockedPrivateSource: isLockedPrivateSource))」？",
                     isPresented: $showDeleteConfirmation,
@@ -1377,11 +1464,18 @@ struct SourceRowView: View {
             }
             .fixedSize(horizontal: true, vertical: false)
         }
-        .padding(AppCardMetrics.repeatedContentPadding)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
         .frame(maxWidth: .infinity, alignment: .trailing)
-        .staticSurfaceBackground(selected: isHovering && !suppressHoverDuringScroll, cornerRadius: AppCardMetrics.repeatedCornerRadius)
-        .repeatedCardChrome(isHovering && !suppressHoverDuringScroll)
-        .scaleEffect(!reduceMotion && isHovering && !suppressHoverDuringScroll ? 1.002 : 1)
+        .staticSurfaceBackground(selected: isHovering && !suppressHoverDuringScroll, cornerRadius: 16)
+        // 系统页面/首页一致：媒体源卡片常态平铺，悬停时才上浮和浮出柔影。
+        .shadow(
+            color: AppColors.refCardShadow.opacity(isHovering && !suppressHoverDuringScroll ? 0.18 : 0),
+            radius: isHovering && !suppressHoverDuringScroll ? 22 : 0,
+            x: 0,
+            y: isHovering && !suppressHoverDuringScroll ? 8 : 0
+        )
+        .offset(y: !reduceMotion && isHovering && !suppressHoverDuringScroll ? -4 : 0)
         .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering && !suppressHoverDuringScroll)
         .onHover { hovering in
             guard !suppressHoverDuringScroll else {
@@ -1420,7 +1514,7 @@ struct SourceRowView: View {
 
     private var iconName: String {
         if !appState.sourceIsReachable(source) {
-            return "externaldrive.badge.exclamationmark"
+            return "exclamationmark.triangle"
         }
         switch source.sourceKind {
         case .emby, .jellyfin, .plex:
@@ -1430,7 +1524,35 @@ struct SourceRowView: View {
         case .url:
             return "link"
         case .local:
-            return "externaldrive.fill"
+            return "internaldrive"
+        }
+    }
+
+    private func sourceAccent(isReachable: Bool) -> Color {
+        guard isReachable else { return Color(red: 1.0, green: 0.62, blue: 0.27) }
+        if source.mediaType == .privateCollection {
+            return Color(red: 1.0, green: 0.36, blue: 0.54)
+        }
+        switch source.sourceKind {
+        case .emby:
+            return Color(red: 0.13, green: 0.83, blue: 0.66)
+        case .jellyfin:
+            return Color(red: 0.85, green: 0.27, blue: 0.94)
+        case .plex:
+            return Color(red: 1.0, green: 0.62, blue: 0.27)
+        case .smb, .ftp:
+            return AppColors.referenceCyan
+        case .url:
+            return Color(red: 0.13, green: 0.83, blue: 0.66)
+        case .local:
+            switch source.mediaType {
+            case .music:
+                return Color(red: 1.0, green: 0.62, blue: 0.27)
+            case .photo, .homeVideo:
+                return AppColors.referenceCyan
+            default:
+                return AppColors.referenceBlue
+            }
         }
     }
 
@@ -1638,7 +1760,7 @@ private struct URLSourceManagementSheet: View {
                         Label("选择自定义封面…", systemImage: "photo.badge.plus")
                     }
                 } label: {
-                    Image(systemName: "photo")
+                    AppGlyph(systemImage: "photo", size: 18)
                         .frame(width: 18, height: 18)
                 }
                 .menuIndicator(.hidden)
@@ -1651,7 +1773,7 @@ private struct URLSourceManagementSheet: View {
                     editTitle = item.title
                     editingItemID = item.id
                 } label: {
-                    Image(systemName: "pencil")
+                    AppGlyph(systemImage: "pencil", size: 18)
                         .frame(width: 18, height: 18)
                 }
                 .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 8, minHeight: AppControlMetrics.defaultButtonHeight, thickness: 0.96))
@@ -1660,7 +1782,7 @@ private struct URLSourceManagementSheet: View {
                 Button(role: .destructive) {
                     pendingDeleteID = item.id
                 } label: {
-                    Image(systemName: "trash")
+                    AppGlyph(systemImage: "trash", size: 18)
                         .frame(width: 18, height: 18)
                         .foregroundStyle(.red)
                 }

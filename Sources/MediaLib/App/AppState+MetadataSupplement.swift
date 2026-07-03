@@ -291,6 +291,7 @@ extension AppState {
         let draft = MusicTagDraft(
             artist: update.artist,
             album: update.album,
+            genre: update.genre,
             trackNumber: update.trackNumber,
             year: update.year,
             artworkPath: update.posterPath,
@@ -345,6 +346,7 @@ extension AppState {
 
     func updateMetadataInMemory(id: String, metadata: MediaMetadataUpdate) {
         let now = Date()
+        let isMusicItem = items.contains { $0.id == id && $0.type == .music }
 
         func updated(_ item: MediaItem) -> MediaItem {
             guard item.id == id else { return item }
@@ -380,6 +382,9 @@ extension AppState {
             self.quickPreviewItem = updated(quickPreviewItem)
         }
         rebuildDerivedItemCaches()
+        if isMusicItem {
+            scheduleMusicProjectionMaintenance(reason: "music metadata changed", force: false, preferIncremental: true)
+        }
         bumpLibraryRevision()
     }
 

@@ -407,11 +407,17 @@ struct MusicTagScraperSheet: View {
                         artworkDirectory: appState.directories?.thumbnails,
                         preserveEmbeddedPoster: track.hasEmbeddedArtwork
                     )
+                    let genre = await service.musicStyleTags(
+                        for: result,
+                        fallbackTrack: track,
+                        lastfmAPIKey: appState.settings.lastfmAPIKey
+                    ) ?? update.genre ?? track.genre
                     let lyrics = includeLyrics ? await fetchLyrics(for: update, fallbackTrack: track) : nil
                     let draft = MusicTagDraft(
                         title: update.title,
                         artist: update.artist,
                         album: update.album,
+                        genre: genre,
                         trackNumber: update.trackNumber,
                         year: update.year,
                         lyrics: lyrics,
@@ -704,6 +710,9 @@ private struct MusicTagDraftEditor: View {
             HStack(spacing: 10) {
                 MusicTagField(title: "曲序", text: intBinding(\.trackNumber), width: 96)
                 MusicTagField(title: "年份", text: intBinding(\.year), width: 112)
+                MusicTagField(title: "流派 / 标签", text: textBinding(\.genre))
+            }
+            HStack(spacing: 10) {
                 MusicTagField(title: "封面路径", text: textBinding(\.artworkPath))
             }
 

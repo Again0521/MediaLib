@@ -4,12 +4,14 @@ import SwiftUI
 
 struct LibraryHealthCenterView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
     @State private var removalRequest: MissingIndexRemovalRequest?
     @State private var duplicateMergeRequest: DuplicateMergeRequest?
     // 健康中心的“补充”复用详情页/音乐库的 MetadataSearchView，保持匹配和写入策略一致。
     @State private var metadataItem: MediaItem?
     @State private var restoredReturnAnchorID: String?
     @State private var returnContentReady: Bool
+    @State private var hoveringTaskID: UUID?
 
     init(initialReturnAnchorID: String? = nil) {
         _returnContentReady = State(initialValue: initialReturnAnchorID == nil)
@@ -20,23 +22,10 @@ struct LibraryHealthCenterView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     header
-                    summary
+                    dashboardOverview
 
-                    if hasIssues {
-                        offlineSourcesSection
-                        missingFilesSection
-                        failedLinksSection
-                        duplicateGroupsSection
-                        missingMetadataSection
-                        missingDetailMetadataSection
-                    } else {
-                        EmptyStateView(
-                            title: "片库状态良好",
-                            systemImage: "checkmark.seal",
-                            message: "未发现离线来源、失效路径、疑似重复项或关键信息缺失。"
-                        )
-                        .frame(minHeight: 340)
-                    }
+                    healthDetails
+                    backgroundTaskDetails
                 }
                 .pageContainer()
             }
@@ -53,11 +42,11 @@ struct LibraryHealthCenterView: View {
         }
         .suppressHoverEffectsDuringScroll()
         .background(AppPageBackground())
-        .navigationTitle("片库健康")
+        .navigationTitle("仪表盘")
         .onAppear {
             appState.showInterfaceTipOnce(
-                key: "health.supplement.metadata",
-                message: "一键补充只填空缺，不会覆盖已有信息。"
+                key: "dashboard.health.tasks",
+                message: "仪表盘集中展示片库健康和后台任务；一键补充只填空缺，不会覆盖已有信息。"
             )
         }
         .confirmationDialog(
@@ -108,15 +97,30 @@ struct LibraryHealthCenterView: View {
 
     private var header: some View {
         PageHeader(
-            title: "片库健康",
-            subtitle: "检查来源、文件/播放路径、重复项和关键信息。",
-            systemImage: "stethoscope"
+            title: "仪表盘",
+            subtitle: "汇总片库健康、后台任务和需要处理的维护事项。",
+            systemImage: "dashboard"
         ) {
+            if appState.backgroundTasks.contains(where: { $0.state.isActive && $0.isCancellable && ($0.kind == .fullScan || $0.kind == .incrementalScan) }) {
+                Button(role: .destructive) {
+                    appState.cancelScanning()
+                } label: {
+                    Label { Text("取消扫描") } icon: { AppGlyph(systemImage: "stop.circle", size: 15) }
+                }
+            }
+            if appState.backgroundTasks.contains(where: { !$0.state.isActive }) {
+                Button(role: .destructive) {
+                    appState.clearCompletedBackgroundTasks()
+                } label: {
+                    Label { Text("清除记录") } icon: { AppGlyph(systemImage: "trash", size: 15) }
+                        .foregroundStyle(.red)
+                }
+            }
             if !safeMissingItems.isEmpty {
                 Button(role: .destructive) {
                     removalRequest = MissingIndexRemovalRequest(items: safeMissingItems)
                 } label: {
-                    Label("清理失效索引", systemImage: "trash")
+                    Label { Text("清理失效索引") } icon: { AppGlyph(systemImage: "trash", size: 15) }
                         .foregroundStyle(.red)
                 }
             }
@@ -124,80 +128,110 @@ struct LibraryHealthCenterView: View {
                 Button {
                     appState.supplementMissingMetadataFromHealth()
                 } label: {
-                    Label(appState.isSupplementingMetadata ? "补充中…" : "一键补充", systemImage: "tag.badge.plus")
+                    Label { Text(appState.isSupplementingMetadata ? "补充中…" : "一键补充") } icon: { AppGlyph(systemImage: "tag.badge.plus", size: 15) }
                 }
                 .disabled(appState.isSupplementingMetadata)
             }
             Button {
                 appState.scanAllSources()
             } label: {
-                Label("扫描全部", systemImage: "arrow.clockwise")
+                Label { Text("扫描全部") } icon: { AppGlyph(systemImage: "arrow.clockwise", size: 15) }
             }
             .disabled(appState.sources.isEmpty || appState.isScanning)
             Button {
                 appState.refreshLibraryHealth()
             } label: {
-                Label("重新检查", systemImage: "stethoscope")
+                Label { Text("重新检查") } icon: { AppGlyph(systemImage: "stethoscope", size: 15) }
             }
         }
     }
 
-    private var summary: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 168), spacing: 12), count: 4), spacing: 12) {
-            healthMetric(title: "离线媒体源", value: appState.offlineSources.count, systemImage: "externaldrive.badge.exclamationmark")
-            healthMetric(title: "失效路径", value: appState.missingFileItems.count, systemImage: "doc.badge.ellipsis")
-            healthMetric(title: "疑似重复组", value: appState.duplicateTitleGroups.count, systemImage: "square.on.square")
-            healthMetric(
-                title: "资料缺口",
-                value: appState.missingMetadataItems.count + appState.detailMetadataGapItems.count,
-                systemImage: "tag.slash"
+    private var dashboardOverview: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(minimum: 188), spacing: 12), count: 4), spacing: 12) {
+            DashboardMetricCard(
+                title: "健康评分",
+                value: "\(healthScore)%",
+                subtitle: healthIssueCount == 0 ? "未发现待处理项" : "\(healthIssueCount) 项需处理",
+                systemImage: "checkmark.seal",
+                tint: healthIssueCount == 0 ? AppColors.selectedGlassTint : .orange,
+                progress: Double(healthScore) / 100
             )
-            if !appState.unhealthyURLItems.isEmpty {
-                healthMetric(title: "失效链接", value: appState.unhealthyURLItems.count, systemImage: "link.badge.plus")
-            }
+            DashboardMetricCard(
+                title: "来源可用",
+                value: "\(reachableSourceCount)/\(max(appState.sources.count, 1))",
+                subtitle: appState.offlineSources.isEmpty ? "全部在线" : "\(appState.offlineSources.count) 个离线",
+                systemImage: "externaldrive.badge.checkmark",
+                tint: appState.offlineSources.isEmpty ? AppColors.referenceCyan : .orange,
+                progress: sourceAvailabilityProgress
+            )
+            DashboardMetricCard(
+                title: "资料完整",
+                value: "\(metadataScore)%",
+                subtitle: metadataGapCount == 0 ? "资料完整" : "\(metadataGapCount) 个缺口",
+                systemImage: "tag",
+                tint: metadataGapCount == 0 ? Color.green : Color.orange,
+                progress: Double(metadataScore) / 100
+            )
+            DashboardMetricCard(
+                title: "后台任务",
+                value: "\(activeTaskCount)",
+                subtitle: failedTaskCount > 0 ? "\(failedTaskCount) 个失败可处理" : "\(appState.backgroundTasks.count) 条记录",
+                systemImage: "checklist",
+                tint: failedTaskCount > 0 ? .red : AppColors.selectedGlassTint,
+                progress: taskActivityProgress
+            )
         }
     }
 
-    private func healthMetric(title: String, value: Int, systemImage: String) -> some View {
-        let needsAttention = value > 0
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                PlayfulSymbolIcon(systemImage: systemImage, size: 34)
-                Spacer(minLength: 8)
-                Label(needsAttention ? "需处理" : "正常", systemImage: needsAttention ? "exclamationmark.circle" : "checkmark.circle")
-                    .labelStyle(.titleAndIcon)
-                    .font(.caption2.weight(.semibold))
-                    .lineLimit(1)
-                    .fixedSize()
-                    .foregroundStyle(needsAttention ? Color.orange : AppColors.selectedGlassTint.opacity(0.88))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        (needsAttention ? Color.orange : AppColors.selectedGlassTint)
-                            .opacity(0.09),
-                        in: Capsule()
-                    )
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("\(value)")
-                    .font(.title2.weight(.semibold))
-                    .monospacedDigit()
-                    .lineLimit(1)
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            // 图标字形在 34pt 方框内居中，可见左缘较方框内缩约 6pt；
-            // 文字行同步内缩，使其左边界与上方图标字形左缘对齐。
-            .padding(.leading, 6)
+    @ViewBuilder
+    private var healthDetails: some View {
+        AppSectionHeading(
+            title: "健康详情",
+            subtitle: "来源、路径、重复项与元数据缺口集中处理。",
+            systemImage: "stethoscope",
+            badgeText: healthIssueCount == 0 ? "正常" : "\(healthIssueCount) 项"
+        )
+        if hasIssues {
+            offlineSourcesSection
+            missingFilesSection
+            failedLinksSection
+            duplicateGroupsSection
+            missingMetadataSection
+            missingDetailMetadataSection
+        } else {
+            EmptyStateView(
+                title: "片库状态良好",
+                systemImage: "checkmark.seal",
+                message: "未发现离线来源、失效路径、疑似重复项或关键信息缺失。"
+            )
+            .frame(minHeight: 220)
+            .staticSurfaceBackground(cornerRadius: 18, thickness: 0.94)
         }
-        .padding(14)
-        .staticSurfaceBackground(cornerRadius: 16)
-        .repeatedCardChrome(needsAttention, cornerRadius: 16, tint: needsAttention ? .orange : AppColors.pointerLightTint)
-        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var backgroundTaskDetails: some View {
+        AppSectionHeading(
+            title: "任务记录",
+            subtitle: "扫描、同步、缓存和补充任务集中展示。",
+            systemImage: "clock.arrow.circlepath",
+            badgeText: "\(appState.backgroundTasks.count) 项"
+        )
+        if appState.backgroundTasks.isEmpty {
+            EmptyStateView(
+                title: "暂无后台任务",
+                systemImage: "checkmark.circle",
+                message: "扫描、同步和缓存任务会在运行时集中展示。"
+            )
+            .frame(minHeight: 220)
+            .staticSurfaceBackground(cornerRadius: 18, thickness: 0.94)
+        } else {
+            LazyVStack(spacing: 10) {
+                ForEach(appState.backgroundTasks) { task in
+                    taskRow(task)
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -206,7 +240,9 @@ struct LibraryHealthCenterView: View {
             healthSection(title: "离线媒体源", subtitle: "恢复挂载后即可继续扫描；暂时离线不会清理条目。", systemImage: "externaldrive.badge.exclamationmark") {
                 ForEach(appState.offlineSources) { source in
                     HStack(spacing: 12) {
-                        PlayfulSymbolIcon(systemImage: source.sourceKind == .local ? "externaldrive" : "network", size: 28)
+                        AppGlyph(systemImage: source.sourceKind == .local ? "externaldrive" : "network", size: 23)
+                            .foregroundStyle(AppColors.selectedGlassTint)
+                            .frame(width: 28, height: 28)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(hiddenSourceName(source))
                                 .font(.callout.weight(.semibold))
@@ -221,15 +257,16 @@ struct LibraryHealthCenterView: View {
                             Button {
                                 appState.remountNetworkSource(source)
                             } label: {
-                                Label("重新挂载", systemImage: "arrow.triangle.2.circlepath")
+                                Label { Text("重新挂载") } icon: { AppGlyph(systemImage: "arrow.triangle.2.circlepath", size: 14) }
                             }
                         }
                         Button {
                             appState.scan(source)
                         } label: {
-                            Label("扫描", systemImage: "arrow.clockwise")
+                            Label { Text("扫描") } icon: { AppGlyph(systemImage: "arrow.clockwise", size: 14) }
                         }
                         .disabled(!appState.sourceIsReachable(source) || appState.isScanning)
+                        ignoreHealthButton(category: AppState.healthCategoryOfflineSource, id: source.id, title: hiddenSourceName(source))
                     }
                     .healthRow()
                 }
@@ -246,13 +283,14 @@ struct LibraryHealthCenterView: View {
                         Button {
                             openDetail(item)
                         } label: {
-                            Label("查看", systemImage: "info.circle")
+                            Label { Text("查看") } icon: { AppGlyph(systemImage: "info.circle", size: 14) }
                         }
+                        ignoreHealthButton(category: AppState.healthCategoryMissingFile, id: item.id, title: item.cardTitle)
                         if appState.canRemoveMissingItemFromIndex(item) {
                             Button(role: .destructive) {
                                 removalRequest = MissingIndexRemovalRequest(items: [item])
                             } label: {
-                                Label("移出索引", systemImage: "trash")
+                                Label { Text("移出索引") } icon: { AppGlyph(systemImage: "trash", size: 14) }
                                     .foregroundStyle(.red)
                             }
                         }
@@ -276,19 +314,24 @@ struct LibraryHealthCenterView: View {
                             Text("\(group.count) 项")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            ignoreHealthButton(
+                                category: AppState.healthCategoryDuplicateGroup,
+                                id: appState.duplicateHealthIssueID(for: group),
+                                title: group.first?.cardTitle ?? "重复条目"
+                            )
                         }
                         ForEach(group) { item in
                             healthItemRow(item, detail: duplicateDetail(item)) {
                                 Button {
                                     openDetail(item)
                                 } label: {
-                                    Label("核对", systemImage: "arrow.up.forward.square")
+                                    Label { Text("核对") } icon: { AppGlyph(systemImage: "arrow.up.forward.square", size: 14) }
                                 }
                                 if group.count > 1 {
                                     Button {
                                         duplicateMergeRequest = DuplicateMergeRequest(kept: item, group: group)
                                     } label: {
-                                        Label("保留此项", systemImage: "checkmark.circle")
+                                        Label { Text("保留此项") } icon: { AppGlyph(systemImage: "checkmark.circle", size: 14) }
                                     }
                                 }
                             }
@@ -311,8 +354,9 @@ struct LibraryHealthCenterView: View {
                         Button {
                             metadataItem = item
                         } label: {
-                            Label("补充", systemImage: "magnifyingglass")
+                            Label { Text("补充") } icon: { AppGlyph(systemImage: "magnifyingglass", size: 14) }
                         }
+                        ignoreHealthButton(category: AppState.healthCategoryMissingMetadata, id: item.id, title: item.cardTitle)
                     }
                     .id(item.id)
                 }
@@ -336,8 +380,9 @@ struct LibraryHealthCenterView: View {
                         Button {
                             openDetail(item)
                         } label: {
-                            Label("查看详情", systemImage: "info.circle")
+                            Label { Text("查看详情") } icon: { AppGlyph(systemImage: "info.circle", size: 14) }
                         }
+                        ignoreHealthButton(category: AppState.healthCategoryDetailMetadata, id: item.id, title: item.cardTitle)
                     }
                     .id("detail-metadata-\(item.id)")
                 }
@@ -360,7 +405,9 @@ struct LibraryHealthCenterView: View {
         @ViewBuilder actions: () -> Actions
     ) -> some View {
         HStack(spacing: 12) {
-            PlayfulSymbolIcon(systemImage: item.type == .music ? "music.note" : "play.rectangle", size: 28)
+            AppGlyph(systemImage: item.type == .music ? "music.note" : "play.rectangle", size: 23)
+                .foregroundStyle(AppColors.selectedGlassTint)
+                .frame(width: 28, height: 28)
             VStack(alignment: .leading, spacing: 3) {
                 Text(item.cardTitle)
                     .font(.callout.weight(.semibold))
@@ -377,6 +424,15 @@ struct LibraryHealthCenterView: View {
         .healthRow()
     }
 
+    private func ignoreHealthButton(category: String, id: String, title: String) -> some View {
+        Button {
+            appState.ignoreHealthIssue(category: category, id: id, title: title)
+        } label: {
+            Label { Text("忽略") } icon: { AppGlyph(systemImage: "eye.slash", size: 14) }
+        }
+        .help("永久忽略此检查结果，可在设置中恢复")
+    }
+
     @ViewBuilder
     private var failedLinksSection: some View {
         if !appState.unhealthyURLItems.isEmpty {
@@ -390,18 +446,150 @@ struct LibraryHealthCenterView: View {
                                 appState.showFloatingNotice(title: "已复制链接", message: link, kind: .success)
                             }
                         } label: {
-                            Label("复制链接", systemImage: "link")
+                            Label { Text("复制链接") } icon: { AppGlyph(systemImage: "link", size: 14) }
                         }
                         Button(role: .destructive) {
                             appState.removeURLVideos(ids: [item.id])
                         } label: {
-                            Label("移除", systemImage: "trash")
+                            Label { Text("移除") } icon: { AppGlyph(systemImage: "trash", size: 14) }
                                 .foregroundStyle(.red)
                         }
+                        ignoreHealthButton(category: AppState.healthCategoryUnhealthyURL, id: item.id, title: item.cardTitle)
                     }
                     .id(item.id)
                 }
             }
+        }
+    }
+
+    private func taskRow(_ task: BackgroundTaskSnapshot) -> some View {
+        let active = hoveringTaskID == task.id && !suppressHoverDuringScroll
+        return HStack(spacing: 12) {
+            AppGlyph(systemImage: task.kind.systemImage, size: 26)
+                .foregroundStyle(taskStateTint(task.state))
+                .frame(width: 32, height: 32)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(task.title)
+                        .font(.callout.weight(.semibold))
+                        .lineLimit(1)
+                    AppStatusBadge(
+                        title: task.state.title,
+                        systemImage: taskStateSystemImage(task.state),
+                        tint: taskStateTint(task.state)
+                    )
+                }
+                if task.state.isActive, let progress = task.progress {
+                    ProgressView(value: progress)
+                        .tint(AppColors.selectedGlassTint)
+                } else if task.state.isActive {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                if task.hidesDetail {
+                    Text("条目、路径和文件名已隐藏")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if let detail = task.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer()
+            taskActions(task)
+        }
+        .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 9, minHeight: 30, thickness: 0.92))
+        .padding(13)
+        .appInteractiveSurface(
+            active: active,
+            selected: task.state.isActive,
+            cornerRadius: 15,
+            tint: taskStateTint(task.state),
+            intensity: task.state.isActive ? 0.78 : 0.56,
+            scale: 1.002,
+            lift: 1,
+            castsHoverShadow: false
+        )
+        .onHover { hovering in
+            hoveringTaskID = hovering && !suppressHoverDuringScroll ? task.id : nil
+        }
+        .onChange(of: suppressHoverDuringScroll) { suppressing in
+            if suppressing { hoveringTaskID = nil }
+        }
+    }
+
+    @ViewBuilder
+    private func taskActions(_ task: BackgroundTaskSnapshot) -> some View {
+        if task.state == .failed, appState.canRetryBackgroundTask(task) {
+            Button {
+                appState.retryBackgroundTask(task)
+            } label: {
+                AppGlyph(systemImage: "arrow.clockwise.circle", size: 18)
+            }
+            .help("重试任务")
+        }
+
+        if task.isCancellable, task.state.isActive {
+            if task.kind == .videoCache {
+                HStack(spacing: 8) {
+                    if task.state == .paused {
+                        Button {
+                            appState.resumeBackgroundTask(id: task.id)
+                        } label: {
+                            AppGlyph(systemImage: "play.circle", size: 18)
+                        }
+                        .help("继续缓存")
+                    } else if task.state == .pausing {
+                        AppGlyph(systemImage: "pause.circle", size: 18)
+                            .foregroundStyle(.secondary)
+                            .help("正在暂停缓存")
+                    } else {
+                        Button {
+                            appState.pauseBackgroundTask(id: task.id)
+                        } label: {
+                            AppGlyph(systemImage: "pause.circle", size: 18)
+                        }
+                        .help("暂停缓存")
+                    }
+
+                    Button(role: .destructive) {
+                        appState.cancelBackgroundTask(id: task.id)
+                    } label: {
+                        AppGlyph(systemImage: "xmark.circle", size: 18)
+                    }
+                    .help("取消缓存")
+                }
+            } else if task.kind == .fullScan || task.kind == .incrementalScan {
+                Button(role: .destructive) {
+                    appState.cancelBackgroundTask(id: task.id)
+                } label: {
+                    AppGlyph(systemImage: "stop.circle", size: 18)
+                }
+                .help("取消扫描")
+            }
+        }
+    }
+
+    private func taskStateSystemImage(_ state: BackgroundTaskState) -> String {
+        switch state {
+        case .queued: return "clock"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .pausing: return "pause.circle"
+        case .paused: return "pause.circle.fill"
+        case .completed: return "checkmark.circle"
+        case .failed: return "exclamationmark.circle"
+        case .cancelled: return "xmark.circle"
+        }
+    }
+
+    private func taskStateTint(_ state: BackgroundTaskState) -> Color {
+        switch state {
+        case .failed: return .red
+        case .cancelled, .paused, .pausing: return .orange
+        case .completed, .queued, .running: return AppColors.selectedGlassTint
         }
     }
 
@@ -412,6 +600,48 @@ struct LibraryHealthCenterView: View {
             !appState.missingMetadataItems.isEmpty ||
             !appState.detailMetadataGapItems.isEmpty ||
             !appState.unhealthyURLItems.isEmpty
+    }
+
+    private var healthIssueCount: Int {
+        appState.offlineSources.count +
+            appState.missingFileItems.count +
+            appState.unhealthyURLItems.count +
+            appState.duplicateTitleGroups.count +
+            metadataGapCount
+    }
+
+    private var metadataGapCount: Int {
+        appState.missingMetadataItems.count + appState.detailMetadataGapItems.count
+    }
+
+    private var activeTaskCount: Int {
+        appState.backgroundTasks.filter { $0.state.isActive }.count
+    }
+
+    private var failedTaskCount: Int {
+        appState.backgroundTasks.filter { $0.state == .failed }.count
+    }
+
+    private var reachableSourceCount: Int {
+        max(appState.sources.count - appState.offlineSources.count, 0)
+    }
+
+    private var sourceAvailabilityProgress: Double {
+        guard !appState.sources.isEmpty else { return 1 }
+        return Double(reachableSourceCount) / Double(appState.sources.count)
+    }
+
+    private var taskActivityProgress: Double {
+        guard !appState.backgroundTasks.isEmpty else { return 1 }
+        return Double(activeTaskCount) / Double(max(appState.backgroundTasks.count, 1))
+    }
+
+    private var healthScore: Int {
+        max(0, min(100, 100 - min(healthIssueCount * 7, 82)))
+    }
+
+    private var metadataScore: Int {
+        max(0, min(100, 100 - min(metadataGapCount * 6, 80)))
     }
 
     private var safeMissingItems: [MediaItem] {
@@ -514,6 +744,56 @@ private struct DuplicateMergeRequest: Identifiable {
     var title: String { "保留“\(kept.title)”，从索引移除同组其余 \(removeCount) 项？" }
 }
 
+private struct DashboardMetricCard: View {
+    let title: String
+    let value: String
+    let subtitle: String
+    let systemImage: String
+    let tint: Color
+    let progress: Double
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .stroke(tint.opacity(colorScheme == .dark ? 0.16 : 0.12), lineWidth: 7)
+                Circle()
+                    .trim(from: 0, to: CGFloat(min(max(progress, 0), 1)))
+                    .stroke(
+                        LinearGradient(colors: [tint, AppColors.referenceCyan.opacity(0.86)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                        style: StrokeStyle(lineWidth: 7, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                AppGlyph(systemImage: systemImage, size: 20)
+                    .foregroundStyle(tint)
+            }
+            .frame(width: 54, height: 54)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(value)
+                    .font(.title3.weight(.bold))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(15)
+        .staticSurfaceBackground(cornerRadius: 18, thickness: 0.94)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 private extension View {
     func healthRow() -> some View {
         HealthRowSurface { self }
@@ -546,8 +826,7 @@ private struct CollapsibleHealthSection<Content: View>: View {
                         systemImage: systemImage
                     )
                     Spacer(minLength: 8)
-                    Image(systemName: "chevron.down")
-                        .font(.callout.weight(.semibold))
+                    AppGlyph(systemImage: "chevron.down", size: 15)
                         .foregroundStyle(.secondary)
                         .rotationEffect(.degrees(expanded ? 0 : -90))
                         .padding(.top, 4)
@@ -590,9 +869,15 @@ private struct HealthRowSurface<Content: View>: View {
         content()
             .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 10, horizontalPadding: 9, minHeight: 30, thickness: 0.92))
             .padding(12)
-            .staticSurfaceBackground(selected: active, cornerRadius: 14, thickness: 0.92)
-            .repeatedCardChrome(active, cornerRadius: 14)
-            .scaleEffect(!reduceMotion && active ? 1.005 : 1)
+            .appInteractiveSurface(
+                active: active,
+                cornerRadius: 14,
+                tint: AppColors.pointerLightTint,
+                intensity: 0.66,
+                scale: 1.003,
+                lift: 1,
+                castsHoverShadow: false
+            )
             .animation(reduceMotion ? nil : AppMotion.fast, value: active)
             .onHover { hovering in
                 isHovering = suppressHoverDuringScroll ? false : hovering

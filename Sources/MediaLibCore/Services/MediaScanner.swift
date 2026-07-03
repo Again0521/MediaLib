@@ -274,7 +274,8 @@ public final class MediaScanner {
                 loudnessAlbumGainDB: audioMetadata.loudnessAlbumGainDB,
                 loudnessTrackPeak: audioMetadata.loudnessTrackPeak,
                 loudnessAlbumPeak: audioMetadata.loudnessAlbumPeak,
-                metadataProvider: audioMetadata.hasEmbeddedMetadata ? "Embedded" : nil
+                metadataProvider: audioMetadata.hasEmbeddedMetadata ? "Embedded" : nil,
+                genre: audioMetadata.genre
             )
             try mediaRepository.deleteItems(filePath: canonicalFileURL.path, excludingID: id)
             try mediaRepository.upsert(item)

@@ -6,8 +6,10 @@ import SwiftUI
 
 struct EpisodeRowView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
     let episode: MediaItem
     let selected: Bool
+    @State private var isHovering = false
 
     var body: some View {
         let cached = appState.isVideoCached(episode)
@@ -15,6 +17,7 @@ struct EpisodeRowView: View {
         let isWatched = episode.watched || episode.playProgress >= threshold
         // 半途观看：有进度但还没看完，给出进度条与“剩余”提示。
         let inProgress = !isWatched && episode.playProgress > 0.015
+        let active = selected || (isHovering && !suppressHoverDuringScroll)
         HStack(spacing: 14) {
             episodeThumbnail(isWatched: isWatched, inProgress: inProgress)
 
@@ -76,7 +79,16 @@ struct EpisodeRowView: View {
                 .foregroundStyle(selected ? AppColors.selectedGlassTint.opacity(0.92) : Color.secondary)
         }
         .padding(10)
-        .staticSurfaceBackground(selected: selected, thickness: selected ? 1.36 : 1.18)
+        .appInteractiveSurface(
+            active: active,
+            selected: selected,
+            cornerRadius: AppRadius.control,
+            tint: AppColors.pointerLightTint,
+            intensity: selected ? 0.86 : 0.62,
+            scale: 1.002,
+            lift: 1,
+            castsHoverShadow: false
+        )
         .overlay(alignment: .leading) {
             if selected {
                 Capsule()
@@ -99,6 +111,12 @@ struct EpisodeRowView: View {
                     selected ? AppColors.selectedGlassTint.opacity(0.42) : Color.clear,
                     lineWidth: selected ? 1.2 : 0
                 )
+        }
+        .onHover { hovering in
+            isHovering = hovering && !suppressHoverDuringScroll
+        }
+        .onChange(of: suppressHoverDuringScroll) { suppressing in
+            if suppressing { isHovering = false }
         }
     }
 

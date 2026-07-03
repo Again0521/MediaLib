@@ -361,6 +361,38 @@ struct MetadataSearchService {
         return update
     }
 
+    func musicStyleTags(
+        for result: MetadataSearchResult,
+        fallbackTrack: MediaItem,
+        lastfmAPIKey: String?
+    ) async -> String? {
+        if let genre = result.genre?.trimmingCharacters(in: .whitespacesAndNewlines), !genre.isEmpty {
+            return genre
+        }
+        if result.provider == "Last.fm",
+           let tags = try? await lastFMTopTags(
+            artist: result.artist ?? fallbackTrack.artist,
+            track: result.title,
+            mbid: lastFMMBID(from: result.id),
+            apiKey: lastfmAPIKey
+           ),
+           !tags.isEmpty {
+            return tags.joined(separator: ", ")
+        }
+        if let key = lastfmAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !key.isEmpty,
+           let tags = try? await lastFMTopTags(
+            artist: result.artist ?? fallbackTrack.artist,
+            track: result.title,
+            mbid: nil,
+            apiKey: key
+           ),
+           !tags.isEmpty {
+            return tags.joined(separator: ", ")
+        }
+        return nil
+    }
+
     func searchTMDB(query: String, itemType: MediaType, apiKey: String?, language: String) async throws -> [MetadataSearchResult] {
         let token = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !token.isEmpty else { throw MetadataSearchError.missingTMDBKey }
@@ -583,10 +615,57 @@ struct MetadataSearchService {
         }
     }
 
+    private func lastFMMBID(from id: String) -> String? {
+        guard id.hasPrefix("lastfm:") else { return nil }
+        let value = String(id.dropFirst("lastfm:".count))
+        return UUID(uuidString: value) == nil ? nil : value
+    }
+
+    private func lastFMTopTags(
+        artist: String?,
+        track: String?,
+        mbid: String?,
+        apiKey: String?
+    ) async throws -> [String] {
+        let key = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !key.isEmpty else { throw MetadataSearchError.missingLastFMKey }
+        var queryItems = [
+            URLQueryItem(name: "method", value: "track.getTopTags"),
+            URLQueryItem(name: "api_key", value: key),
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "autocorrect", value: "1")
+        ]
+        if let mbid, !mbid.isEmpty {
+            queryItems.append(URLQueryItem(name: "mbid", value: mbid))
+        } else {
+            guard let artist = artist?.trimmingCharacters(in: .whitespacesAndNewlines), !artist.isEmpty,
+                  let track = track?.trimmingCharacters(in: .whitespacesAndNewlines), !track.isEmpty else {
+                return []
+            }
+            queryItems.append(URLQueryItem(name: "artist", value: artist))
+            queryItems.append(URLQueryItem(name: "track", value: track))
+        }
+        var components = URLComponents(string: "https://ws.audioscrobbler.com/2.0/")
+        components?.queryItems = queryItems
+        guard let url = components?.url else { throw MetadataSearchError.invalidRequest }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        let (data, response) = try await HTTPClient.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw MetadataSearchError.invalidResponse }
+        let decoded = try JSONDecoder().decode(LastFMTopTagsResponse.self, from: data)
+        return normalizedMusicStyleNames(
+            decoded.toptags?.tag?
+                .sorted { ($0.count ?? 0) > ($1.count ?? 0) }
+                .compactMap(\.name) ?? [],
+            limit: 5
+        )
+    }
+
     private func searchMusicBrainz(query: String) async throws -> [MetadataSearchResult] {
         var components = URLComponents(string: "https://musicbrainz.org/ws/2/recording")
         components?.queryItems = [
             URLQueryItem(name: "query", value: query),
+            URLQueryItem(name: "inc", value: "artist-credits+releases+genres+tags"),
             URLQueryItem(name: "fmt", value: "json"),
             URLQueryItem(name: "limit", value: "12")
         ]
@@ -603,6 +682,7 @@ struct MetadataSearchService {
         return decoded.recordings.prefix(12).map { recording in
             let artist = recording.artistCredit?.compactMap(\.name).joined(separator: ", ")
             let release = recording.releases?.first
+            let genreNames = musicBrainzGenreNames(for: recording)
             return MetadataSearchResult(
                 id: "musicbrainz:recording:\(recording.id)",
                 provider: "MusicBrainz",
@@ -612,9 +692,34 @@ struct MetadataSearchService {
                 overview: nil,
                 artist: artist,
                 album: release?.title,
-                trackNumber: release?.media?.first?.tracks?.first?.number.flatMap(Int.init)
+                trackNumber: release?.media?.first?.tracks?.first?.number.flatMap(Int.init),
+                genre: genreNames.isEmpty ? nil : genreNames.joined(separator: ", ")
             )
         }
+    }
+
+    private func musicBrainzGenreNames(for recording: MusicBrainzRecording) -> [String] {
+        let genres = recording.genres?.sorted { ($0.count ?? 0) > ($1.count ?? 0) }.compactMap(\.name) ?? []
+        if !genres.isEmpty {
+            return normalizedMusicStyleNames(genres, limit: 5)
+        }
+        let tags = recording.tags?.sorted { ($0.count ?? 0) > ($1.count ?? 0) }.compactMap(\.name) ?? []
+        return normalizedMusicStyleNames(tags, limit: 5)
+    }
+
+    private func normalizedMusicStyleNames(_ names: [String], limit: Int) -> [String] {
+        var seen = Set<String>()
+        return names.compactMap { raw -> String? in
+            let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard cleaned.count >= 2 else { return nil }
+            let key = cleaned
+                .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+                .lowercased()
+            guard !key.isEmpty, seen.insert(key).inserted else { return nil }
+            return cleaned
+        }
+        .prefix(limit)
+        .map { $0 }
     }
 
     private func searchITunes(query: String) async throws -> [MetadataSearchResult] {
@@ -642,7 +747,8 @@ struct MetadataSearchService {
                 posterPath: item.artworkUrl100?.replacingOccurrences(of: "100x100bb", with: "600x600bb"),
                 artist: item.artistName,
                 album: item.collectionName,
-                trackNumber: item.trackNumber
+                trackNumber: item.trackNumber,
+                genre: item.primaryGenreName
             )
         }
     }
@@ -791,12 +897,19 @@ private struct MusicBrainzRecording: Decodable {
     var firstReleaseDate: String?
     var artistCredit: [MusicBrainzArtistCredit]?
     var releases: [MusicBrainzRelease]?
+    var genres: [MusicBrainzTag]?
+    var tags: [MusicBrainzTag]?
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, releases
+        case id, title, releases, genres, tags
         case firstReleaseDate = "first-release-date"
         case artistCredit = "artist-credit"
     }
+}
+
+private struct MusicBrainzTag: Decodable {
+    var count: Int?
+    var name: String?
 }
 
 private struct MusicBrainzArtistCredit: Decodable {
@@ -944,4 +1057,17 @@ private struct LastFMImage: Decodable {
         case text = "#text"
         case size
     }
+}
+
+private struct LastFMTopTagsResponse: Decodable {
+    let toptags: LastFMTopTags?
+}
+
+private struct LastFMTopTags: Decodable {
+    let tag: [LastFMTag]?
+}
+
+private struct LastFMTag: Decodable {
+    let name: String?
+    let count: Int?
 }

@@ -74,7 +74,7 @@ struct VideoSmartCollectionSheet: View {
                 VStack(alignment: .leading, spacing: 18) {
                     sectionsContent
                 }
-                .padding(.bottom, 2)
+                .padding(.bottom, 92)
                 .background(
                     GeometryReader { proxy in
                         Color.clear.preference(
@@ -125,7 +125,7 @@ struct VideoSmartCollectionSheet: View {
     private var scrollHeightCap: CGFloat {
         let screenHeight = NSScreen.main?.visibleFrame.height ?? 820
         // 预留头部、底部按钮与外层留白后的可滚动区域上限。
-        let reserved: CGFloat = 250
+        let reserved: CGFloat = 340
         return max(220, screenHeight - 120 - reserved)
     }
 
@@ -168,7 +168,7 @@ struct VideoSmartCollectionSheet: View {
                 SettingsRow(title: "首页展示", systemImage: "house") {
                     Toggle("", isOn: $showOnHome)
                         .labelsHidden()
-                        .toggleStyle(.switch)
+                        .toggleStyle(AppSwitchToggleStyle())
                         .accessibilityLabel("首页展示")
                 }
                 }

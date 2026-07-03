@@ -4,6 +4,7 @@ public struct MusicTagDraft: Sendable, Hashable {
     public var title: String?
     public var artist: String?
     public var album: String?
+    public var genre: String?
     public var trackNumber: Int?
     public var year: Int?
     public var lyrics: String?
@@ -15,6 +16,7 @@ public struct MusicTagDraft: Sendable, Hashable {
         title: String? = nil,
         artist: String? = nil,
         album: String? = nil,
+        genre: String? = nil,
         trackNumber: Int? = nil,
         year: Int? = nil,
         lyrics: String? = nil,
@@ -25,6 +27,7 @@ public struct MusicTagDraft: Sendable, Hashable {
         self.title = Self.cleaned(title)
         self.artist = Self.cleaned(artist)
         self.album = Self.cleaned(album)
+        self.genre = Self.cleaned(genre)
         self.trackNumber = trackNumber
         self.year = year
         self.lyrics = Self.cleaned(lyrics)
@@ -38,6 +41,7 @@ public struct MusicTagDraft: Sendable, Hashable {
             title: item.title,
             artist: item.artist,
             album: item.album,
+            genre: item.genre,
             trackNumber: item.trackNumber,
             year: item.year,
             lyrics: lyrics,
@@ -56,7 +60,8 @@ public struct MusicTagDraft: Sendable, Hashable {
             year: year,
             posterPath: artworkPath,
             externalID: externalID,
-            metadataProvider: metadataProvider ?? "MediaLIB MusicTag"
+            metadataProvider: metadataProvider ?? "MediaLIB MusicTag",
+            genre: genre
         )
     }
 
@@ -65,6 +70,7 @@ public struct MusicTagDraft: Sendable, Hashable {
         Self.append("title", title, to: &pairs)
         Self.append("artist", artist, to: &pairs)
         Self.append("album", album, to: &pairs)
+        Self.append("genre", genre, to: &pairs)
         if let trackNumber, trackNumber > 0 {
             pairs.append(("track", "\(trackNumber)"))
             pairs.append(("tracknumber", "\(trackNumber)"))

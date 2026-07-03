@@ -2,7 +2,7 @@ import Foundation
 import SQLite3
 
 public final class DatabaseManager {
-    public static let currentSchemaVersion = 19
+    public static let currentSchemaVersion = 20
 
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
@@ -352,6 +352,13 @@ public final class DatabaseManager {
                 try execute("PRAGMA user_version = 19")
             }
             version = 19
+        }
+        if version < 20 {
+            try transaction {
+                try migrateToVersion20()
+                try execute("PRAGMA user_version = 20")
+            }
+            version = 20
         }
         guard version == Self.currentSchemaVersion else {
             throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
@@ -941,6 +948,87 @@ public final class DatabaseManager {
         )
         """)
         try execute("CREATE INDEX IF NOT EXISTS index_detail_backfill_status ON media_detail_backfill_jobs(status, next_retry_at)")
+    }
+
+    private func migrateToVersion20() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_album_index (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          artist TEXT NOT NULL,
+          title_key TEXT NOT NULL,
+          artist_key TEXT NOT NULL,
+          track_count INTEGER NOT NULL DEFAULT 0,
+          favorite_count INTEGER NOT NULL DEFAULT 0,
+          remote_count INTEGER NOT NULL DEFAULT 0,
+          play_count INTEGER NOT NULL DEFAULT 0,
+          total_duration REAL,
+          cover_path TEXT,
+          latest_updated_at TEXT NOT NULL,
+          rebuilt_at TEXT NOT NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_title ON music_album_index(title COLLATE NOCASE, artist COLLATE NOCASE)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_artist ON music_album_index(artist COLLATE NOCASE, title COLLATE NOCASE)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_recent ON music_album_index(latest_updated_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_play_count ON music_album_index(play_count)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_album_track_index (
+          album_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          track_number INTEGER,
+          title TEXT NOT NULL,
+          PRIMARY KEY(album_id, media_id),
+          FOREIGN KEY(album_id) REFERENCES music_album_index(id) ON DELETE CASCADE,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_track_position ON music_album_track_index(album_id, position)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_track_media ON music_album_track_index(media_id)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_artist_index (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          name_key TEXT NOT NULL,
+          track_count INTEGER NOT NULL DEFAULT 0,
+          album_count INTEGER NOT NULL DEFAULT 0,
+          favorite_count INTEGER NOT NULL DEFAULT 0,
+          remote_count INTEGER NOT NULL DEFAULT 0,
+          play_count INTEGER NOT NULL DEFAULT 0,
+          cover_path TEXT,
+          latest_updated_at TEXT NOT NULL,
+          rebuilt_at TEXT NOT NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_music_artist_name ON music_artist_index(name COLLATE NOCASE)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_artist_track_count ON music_artist_index(track_count)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_artist_play_count ON music_artist_index(play_count)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_artist_track_index (
+          artist_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          PRIMARY KEY(artist_id, media_id),
+          FOREIGN KEY(artist_id) REFERENCES music_artist_index(id) ON DELETE CASCADE,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_music_artist_track_position ON music_artist_track_index(artist_id, position)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_artist_track_media ON music_artist_track_index(media_id)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_projection_state (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          music_item_count INTEGER NOT NULL DEFAULT 0,
+          latest_music_updated_at TEXT,
+          rebuilt_at TEXT NOT NULL
+        )
+        """)
     }
 
     private func validateBackup(at backupURL: URL) throws {

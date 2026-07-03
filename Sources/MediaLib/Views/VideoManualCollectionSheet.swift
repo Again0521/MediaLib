@@ -63,9 +63,9 @@ struct VideoManualCollectionSheet: View {
                         .frame(width: adaptiveFieldWidth(text: name, placeholder: "集合"), alignment: .trailing)
                 }
                 SettingsRow(title: "首页展示", systemImage: "house") {
-                    Toggle("", isOn: $showOnHome)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
+                        Toggle("", isOn: $showOnHome)
+                            .labelsHidden()
+                            .toggleStyle(AppSwitchToggleStyle())
                         .accessibilityLabel("首页展示")
                 }
                 }
