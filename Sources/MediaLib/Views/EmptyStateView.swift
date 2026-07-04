@@ -26,10 +26,10 @@ struct EmptyStateView: View {
                     .frame(width: 104, height: 104)
                     .blur(radius: 2)
 
-                RoundedRectangle(cornerRadius: 25, style: .continuous)
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.40 : 0.72))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 25, style: .continuous)
+                        RoundedRectangle(cornerRadius: 24, style: .continuous)
                             .strokeBorder(
                                 LinearGradient(
                                     colors: [

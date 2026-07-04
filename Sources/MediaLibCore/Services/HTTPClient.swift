@@ -22,7 +22,7 @@ public final class HTTPClient: @unchecked Sendable {
         session: URLSession = .shared,
         maxRetries: Int = 2,
         defaultTimeout: TimeInterval = 20,
-        retryDelay: @escaping @Sendable (HTTPURLResponse, Int) -> Double = HTTPClient.defaultRetryDelay
+        retryDelay: @escaping @Sendable (HTTPURLResponse, Int) -> Double = { HTTPClient.defaultRetryDelay($0, attempt: $1) }
     ) {
         self.session = session
         self.maxRetries = max(maxRetries, 0)

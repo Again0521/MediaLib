@@ -105,7 +105,7 @@ struct SourcesView: View {
             }
             .buttonStyle(
                 HeaderProminentActionButtonStyle(
-                    cornerRadius: 13,
+                    cornerRadius: 12,
                     horizontalPadding: 18,
                     minHeight: AppControlMetrics.prominentButtonHeight
                 )
@@ -118,7 +118,7 @@ struct SourcesView: View {
             }
             .buttonStyle(
                 HeaderActionGlassButtonStyle(
-                    cornerRadius: 13,
+                    cornerRadius: 12,
                     horizontalPadding: 18,
                     minHeight: AppControlMetrics.prominentButtonHeight
                 )
@@ -214,7 +214,7 @@ private struct AddMediaSourceWizardSheet: View {
                     Button("取消", role: .cancel) {
                         dismiss()
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                    .buttonStyle(AppSheetSecondaryButtonStyle())
 
                     if step != .source {
                         Button("上一步") {
@@ -222,7 +222,7 @@ private struct AddMediaSourceWizardSheet: View {
                                 step = previousStep
                             }
                         }
-                        .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                        .buttonStyle(AppSheetSecondaryButtonStyle())
                     }
 
                     Button {
@@ -230,7 +230,7 @@ private struct AddMediaSourceWizardSheet: View {
                     } label: {
                         Label(primaryActionTitle, systemImage: primaryActionIcon)
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+                    .buttonStyle(AppSheetPrimaryButtonStyle())
                     .disabled(submitDisabled)
                 }
             }
@@ -264,9 +264,11 @@ private struct AddMediaSourceWizardSheet: View {
                 .frame(height: 2)
             wizardStepPill(title: "设置", index: 3, active: step == .settings, completed: false, alignment: .trailing)
         }
-        .padding(10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .staticSurfaceBackground(cornerRadius: 16, thickness: 0.9)
+        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(AppColors.refCardBg))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(AppColors.refCardBorder, lineWidth: 1))
     }
 
     private func wizardStepPill(title: String, index: Int, active: Bool, completed: Bool, alignment: Alignment) -> some View {
@@ -345,43 +347,48 @@ private struct AddMediaSourceWizardSheet: View {
 
     private var localConfiguration: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                Button {
-                    chooseLocalDirectories()
-                } label: {
-                    Label(selectedURLs.isEmpty ? "选择文件夹" : "重新选择文件夹", systemImage: "folder.badge.plus")
-                }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight, prominent: selectedURLs.isEmpty))
+            AppSheetSection(title: "选择文件夹", systemImage: "folder.badge.plus", subtitle: "选择要接入的本地文件夹，可多选。") {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Button {
+                            chooseLocalDirectories()
+                        } label: {
+                            Label(selectedURLs.isEmpty ? "选择文件夹" : "重新选择文件夹", systemImage: "folder.badge.plus")
+                        }
+                        .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight, prominent: selectedURLs.isEmpty))
 
-                Text(localSelectionSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-
-                Spacer(minLength: 0)
-            }
-
-            if !selectedURLs.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(selectedURLs.prefix(4), id: \.path) { url in
-                        Label(folderTitle(url), systemImage: "folder")
-                            .font(.caption)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    if selectedURLs.count > 4 {
-                        Text("另有 \(selectedURLs.count - 4) 个文件夹")
+                        Text(localSelectionSummary)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+
+                        Spacer(minLength: 0)
+                    }
+
+                    if !selectedURLs.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(selectedURLs.prefix(4), id: \.path) { url in
+                                Label(folderTitle(url), systemImage: "folder")
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            if selectedURLs.count > 4 {
+                                Text("另有 \(selectedURLs.count - 4) 个文件夹")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .staticSurfaceBackground(cornerRadius: 14, shadowed: false)
                     }
                 }
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .staticSurfaceBackground(cornerRadius: 14)
             }
 
-            sectionTitle("分类")
-            MediaTypeGridPicker(selection: $mediaType, mediaTypes: mediaTypes, vaultName: vaultName)
+            AppSheetSection(title: "分类", systemImage: "square.grid.2x2", subtitle: "决定内容归入哪个媒体库分类。") {
+                MediaTypeGridPicker(selection: $mediaType, mediaTypes: mediaTypes, vaultName: vaultName, showsCard: false)
+            }
 
             AppInfoNote(text: "添加后会立即进入扫描队列；更多参与策略会在下一步确认。", systemImage: "arrow.clockwise")
         }
@@ -390,22 +397,26 @@ private struct AddMediaSourceWizardSheet: View {
 
     private var networkConfiguration: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("网络地址")
-            TextField("smb://nas.local/Media 或 ftp://192.168.1.10/Movies", text: $networkURL)
-                .glassFormField()
+            AppSheetSection(title: "网络地址", systemImage: "network", subtitle: "填写共享地址和登录方式。") {
+                VStack(alignment: .leading, spacing: 12) {
+                    TextField("smb://nas.local/Media 或 ftp://192.168.1.10/Movies", text: $networkURL)
+                        .glassFormField()
 
-            Toggle("匿名登录", isOn: $networkAnonymous)
-                .toggleStyle(AppSwitchToggleStyle())
+                    Toggle("匿名登录", isOn: $networkAnonymous)
+                        .toggleStyle(AppSwitchToggleStyle())
 
-            if !networkAnonymous {
-                TextField("用户名", text: $networkUsername)
-                    .glassFormField()
-                SecureField("密码", text: $networkPassword)
-                    .glassFormField()
+                    if !networkAnonymous {
+                        TextField("用户名", text: $networkUsername)
+                            .glassFormField()
+                        SecureField("密码", text: $networkPassword)
+                            .glassFormField()
+                    }
+                }
             }
 
-            sectionTitle("分类")
-            MediaTypeGridPicker(selection: $mediaType, mediaTypes: mediaTypes, vaultName: vaultName)
+            AppSheetSection(title: "分类", systemImage: "square.grid.2x2", subtitle: "决定内容归入哪个媒体库分类。") {
+                MediaTypeGridPicker(selection: $mediaType, mediaTypes: mediaTypes, vaultName: vaultName, showsCard: false)
+            }
 
             AppInfoNote(text: "MediaLIB 会先让 macOS 打开网络位置，再从已挂载目录中选择真实扫描路径。参与策略会在下一步确认。", systemImage: "externaldrive.connected.to.line.below")
         }
@@ -414,13 +425,14 @@ private struct AddMediaSourceWizardSheet: View {
 
     private var urlConfiguration: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("视频地址")
-            TextField("https://example.com/video.mp4 或 rtsp://…", text: $urlInput)
-                .glassFormField()
-
-            sectionTitle("名称（可选）")
-            TextField("留空则自动取文件名", text: $urlTitleInput)
-                .glassFormField()
+            AppSheetSection(title: "视频地址", systemImage: "link", subtitle: "支持直链视频地址，名称可选填。") {
+                VStack(alignment: .leading, spacing: 12) {
+                    TextField("https://example.com/video.mp4 或 rtsp://…", text: $urlInput)
+                        .glassFormField()
+                    TextField("名称（留空则自动取文件名）", text: $urlTitleInput)
+                        .glassFormField()
+                }
+            }
 
             AppInfoNote(text: "添加后会出现在「其他视频」分类，与本地视频一致支持播放、下载和封面管理。多个地址会合并到同一个 URL 媒体源，可在媒体源行的「管理」中增删改查。", systemImage: "link")
         }
@@ -429,18 +441,21 @@ private struct AddMediaSourceWizardSheet: View {
 
     private var remoteConfiguration: some View {
         VStack(alignment: .leading, spacing: 14) {
-            sectionTitle("服务器")
-            TextField(serverPlaceholder, text: $server)
-                .glassFormField()
+            AppSheetSection(title: "服务器连接", systemImage: "server.rack", subtitle: "填写服务器地址和登录凭据。") {
+                VStack(alignment: .leading, spacing: 12) {
+                    TextField(serverPlaceholder, text: $server)
+                        .glassFormField()
 
-            if selectedKind == .plex {
-                SecureField("Plex Token", text: $token)
-                    .glassFormField()
-            } else {
-                TextField("用户名", text: $username)
-                    .glassFormField()
-                SecureField("密码", text: $password)
-                    .glassFormField()
+                    if selectedKind == .plex {
+                        SecureField("Plex Token", text: $token)
+                            .glassFormField()
+                    } else {
+                        TextField("用户名", text: $username)
+                            .glassFormField()
+                        SecureField("密码", text: $password)
+                            .glassFormField()
+                    }
+                }
             }
 
             AppInfoNote(text: credentialNote, systemImage: "lock")
@@ -450,23 +465,20 @@ private struct AddMediaSourceWizardSheet: View {
 
     private var wizardSettings: some View {
         VStack(alignment: .leading, spacing: 14) {
-            SourceBehaviorSettingsPanel(
-                isRemoteMediaServer: selectedKind.isRemoteMediaServer,
-                mediaType: mediaType,
-                includeInMetadataFetch: $includeInMetadataFetch,
-                includeInHealthCheck: $includeInHealthCheck,
-                preferMetadataWriteToSource: $preferMetadataWriteToSource,
-                remoteTraceSyncMode: $remoteTraceSyncMode
-            )
+            AppSheetSection(title: "参与策略", systemImage: "slider.horizontal.3", subtitle: "控制此媒体源是否参与元数据拉取、健康检查和同步。") {
+                SourceBehaviorSettingsPanel(
+                    isRemoteMediaServer: selectedKind.isRemoteMediaServer,
+                    mediaType: mediaType,
+                    includeInMetadataFetch: $includeInMetadataFetch,
+                    includeInHealthCheck: $includeInHealthCheck,
+                    preferMetadataWriteToSource: $preferMetadataWriteToSource,
+                    remoteTraceSyncMode: $remoteTraceSyncMode
+                )
+            }
 
             AppInfoNote(text: selectedKind.isRemoteMediaServer ? "这些设置会随远程媒体源一起保存，后续可在媒体源行的设置按钮中修改。" : "这些设置会随目录媒体源一起保存，后续可在媒体源行的设置按钮中修改。", systemImage: "slider.horizontal.3")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func sectionTitle(_ text: String) -> some View {
-        Text(text)
-            .font(.callout.weight(.semibold))
     }
 
     private var localSelectionSummary: String {
@@ -892,25 +904,32 @@ private struct SourceSettingsSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if source.sourceKind.isRemoteMediaServer {
-                        remoteLibrarySection
+                        AppSheetSection(title: "同步库", systemImage: "server.rack", subtitle: remoteLibrarySummary) {
+                            remoteLibrarySection
+                        }
                     } else {
-                        sectionTitle("分类")
-                        MediaTypeGridPicker(selection: mediaTypeBinding, mediaTypes: mediaTypes, vaultName: appState.settings.privacyVaultName)
+                        AppSheetSection(title: "分类", systemImage: "square.grid.2x2", subtitle: "决定内容归入哪个媒体库分类。") {
+                            MediaTypeGridPicker(selection: mediaTypeBinding, mediaTypes: mediaTypes, vaultName: appState.settings.privacyVaultName, showsCard: false)
+                        }
                     }
 
-                    sectionTitle("参与策略")
-                    SourceBehaviorSettingsPanel(
-                        isRemoteMediaServer: source.sourceKind.isRemoteMediaServer,
-                        mediaType: draft.mediaType,
-                        includeInMetadataFetch: includeInMetadataFetchBinding,
-                        includeInHealthCheck: includeInHealthCheckBinding,
-                        preferMetadataWriteToSource: preferMetadataWriteToSourceBinding,
-                        remoteTraceSyncMode: remoteTraceSyncModeBinding
-                    )
+                    AppSheetSection(title: "参与策略", systemImage: "slider.horizontal.3", subtitle: "控制此媒体源是否参与元数据拉取、健康检查和同步。") {
+                        SourceBehaviorSettingsPanel(
+                            isRemoteMediaServer: source.sourceKind.isRemoteMediaServer,
+                            mediaType: draft.mediaType,
+                            includeInMetadataFetch: includeInMetadataFetchBinding,
+                            includeInHealthCheck: includeInHealthCheckBinding,
+                            preferMetadataWriteToSource: preferMetadataWriteToSourceBinding,
+                            remoteTraceSyncMode: remoteTraceSyncModeBinding
+                        )
+                    }
 
-                    AppInfoNote(text: "保存只更新 MediaLIB 内部媒体源设置；不会移动、删除或重命名媒体文件。", systemImage: "checkmark.shield")
+                    AppInfoNote(text: "保存只更新 MediaLIB 内部媒体源设置；不会移动、删除或重命名媒体文件。", systemImage: "checkmark.shield", shadowed: false)
                 }
-                .padding(.vertical, 2)
+                // ScrollView 默认按自身 frame 边界硬裁切内容——卡片投影(radius14/y6)若净空不够，
+                // 底部就会被切成一条直角硬边（本弹窗"非柔和阴影"根因之一）。上下各留够净空。
+                .padding(.top, 8)
+                .padding(.bottom, 20)
             }
             .frame(maxHeight: 520)
             .scrollContentBackground(.hidden)
@@ -919,14 +938,14 @@ private struct SourceSettingsSheet: View {
                 Button("取消", role: .cancel) {
                     dismiss()
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                .buttonStyle(AppSheetSecondaryButtonStyle())
 
                 Button {
                     save()
                 } label: {
                     Label(isSaving ? "保存中" : saveTitle, systemImage: "checkmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+                .buttonStyle(AppSheetPrimaryButtonStyle())
                 .disabled(saveDisabled)
             }
         }
@@ -990,16 +1009,10 @@ private struct SourceSettingsSheet: View {
         )
     }
 
+    // 标题/概要已交给外层 AppSheetSection 卡头；这里只保留内容本身，且内部行统一
+    // shadowed:false——嵌套在同一张卡片里，避免多层各自投影叠加发闷发硬（非柔和阴影）。
     private var remoteLibrarySection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                sectionTitle("同步库")
-                Spacer()
-                Text(remoteLibrarySummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
+        VStack(alignment: .leading, spacing: 10) {
             Button {
                 withAnimation(AppMotion.fast) {
                     syncAll = true
@@ -1019,15 +1032,13 @@ private struct SourceSettingsSheet: View {
                     Spacer()
                 }
                 .padding(12)
-                .staticSurfaceBackground(selected: syncAll, cornerRadius: 14)
+                .staticSurfaceBackground(selected: syncAll, cornerRadius: 14, shadowed: false)
                 .pointerLiquidEdge(cornerRadius: 14, intensity: 0.82)
             }
             .buttonStyle(.plain)
 
             remoteLibraryList
         }
-        .padding(12)
-        .staticSurfaceBackground(cornerRadius: 16)
     }
 
     @ViewBuilder
@@ -1035,7 +1046,7 @@ private struct SourceSettingsSheet: View {
         if isLoadingLibraries {
             ProgressView("正在读取服务器媒体库…")
                 .frame(maxWidth: .infinity, minHeight: 130)
-                .staticSurfaceBackground(cornerRadius: 14)
+                .staticSurfaceBackground(cornerRadius: 14, shadowed: false)
         } else if let errorMessage {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
@@ -1056,7 +1067,7 @@ private struct SourceSettingsSheet: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .staticSurfaceBackground(cornerRadius: 14)
+            .staticSurfaceBackground(cornerRadius: 14, shadowed: false)
         } else if libraries.isEmpty {
             EmptyStateView(
                 title: "服务器未返回媒体库",
@@ -1106,7 +1117,7 @@ private struct SourceSettingsSheet: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 9)
-            .staticSurfaceBackground(selected: isSelected && !syncAll, cornerRadius: 12, thickness: 0.94)
+            .staticSurfaceBackground(selected: isSelected && !syncAll, cornerRadius: 12, thickness: 0.94, shadowed: false)
             .pointerLiquidEdge(cornerRadius: 12, intensity: 0.78)
         }
         .buttonStyle(.plain)
@@ -1149,11 +1160,6 @@ private struct SourceSettingsSheet: View {
                 appState.updateSource(updated)
             }
         }
-    }
-
-    private func sectionTitle(_ text: String) -> some View {
-        Text(text)
-            .font(.callout.weight(.semibold))
     }
 
     private func title(for type: MediaType) -> String {
@@ -1218,7 +1224,7 @@ private struct SourceBehaviorSettingsPanel: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .staticSurfaceBackground(cornerRadius: 16)
+            .staticSurfaceBackground(cornerRadius: 16, shadowed: false)
 
             if isRemoteMediaServer {
                 VStack(alignment: .leading, spacing: 10) {
@@ -1244,7 +1250,7 @@ private struct SourceBehaviorSettingsPanel: View {
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .staticSurfaceBackground(cornerRadius: 16)
+                .staticSurfaceBackground(cornerRadius: 16, shadowed: false)
             }
         }
     }
@@ -1254,11 +1260,13 @@ private struct MediaTypeGridPicker: View {
     @Binding var selection: MediaType
     let mediaTypes: [MediaType]
     let vaultName: String
+    /// 已被外层 AppSheetSection 卡片包裹时传 false，避免卡中卡（双重白底+双重投影）。
+    var showsCard: Bool = true
 
     private let columns = Array(repeating: GridItem(.flexible(minimum: 118), spacing: 8), count: 3)
 
     var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+        let grid = LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
             ForEach(mediaTypes, id: \.self) { type in
                 Button {
                     withAnimation(AppMotion.fast) {
@@ -1274,8 +1282,13 @@ private struct MediaTypeGridPicker: View {
                 .help(title(for: type))
             }
         }
-        .padding(10)
-        .staticSurfaceBackground(cornerRadius: 16)
+        if showsCard {
+            grid
+                .padding(10)
+                .staticSurfaceBackground(cornerRadius: 16)
+        } else {
+            grid
+        }
     }
 
     private func title(for type: MediaType) -> String {
@@ -1618,13 +1631,13 @@ private struct URLSourceManagementSheet: View {
                 } label: {
                     Label("重新检查链接", systemImage: "arrow.triangle.2.circlepath")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                .buttonStyle(AppSheetSecondaryButtonStyle())
                 .disabled(items.isEmpty)
 
                 Button("完成") {
                     dismiss()
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+                .buttonStyle(AppSheetPrimaryButtonStyle())
             }
         }
         .appSheetChrome(width: AppSheetMetrics.wideWidth, maxHeight: 720)

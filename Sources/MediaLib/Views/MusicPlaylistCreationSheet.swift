@@ -53,7 +53,7 @@ struct MusicPlaylistCreationSheet: View {
                 Button("取消") {
                     onCancel()
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                .buttonStyle(AppSheetSecondaryButtonStyle())
                 .keyboardShortcut(.cancelAction)
 
                 Button {
@@ -61,7 +61,7 @@ struct MusicPlaylistCreationSheet: View {
                 } label: {
                     Label("创建", systemImage: "plus")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+                .buttonStyle(AppSheetPrimaryButtonStyle())
                 .disabled(trimmedName.isEmpty)
                 .keyboardShortcut(.defaultAction)
             }
@@ -121,7 +121,7 @@ struct MusicPlaylistRenameSheet: View {
                 Button("取消") {
                     onCancel()
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                .buttonStyle(AppSheetSecondaryButtonStyle())
                 .keyboardShortcut(.cancelAction)
 
                 Button {
@@ -129,7 +129,7 @@ struct MusicPlaylistRenameSheet: View {
                 } label: {
                     Label("保存", systemImage: "checkmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+                .buttonStyle(AppSheetPrimaryButtonStyle())
                 .disabled(trimmedName.isEmpty)
                 .keyboardShortcut(.defaultAction)
             }

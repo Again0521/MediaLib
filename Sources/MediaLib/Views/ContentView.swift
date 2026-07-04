@@ -297,6 +297,9 @@ struct ContentView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 侧边栏底部状态卡片轮换间隔：原 18s 太慢，容易让人觉得"一直在显示同一条"
+    /// （尤其是 ambient 池里内容本就不多时）。缩短到 6s 让轮换观感更明显。
+    static let sidebarStatusRotationInterval: TimeInterval = 6
     @State private var selection: SidebarDestination? = .home
     @State private var isVideoExpanded = true
     @State private var isAlbumExpanded = true
@@ -321,6 +324,7 @@ struct ContentView: View {
     @State private var musicWindowPaletteTask: Task<Void, Never>?
     @State private var mainLayoutTransitionActive = false
     @State private var mainLayoutTransitionResetTask: Task<Void, Never>?
+    @State private var sidebarStatusRotationTick = Int(Date().timeIntervalSinceReferenceDate / Self.sidebarStatusRotationInterval)
     @State private var smartCollectionEditor: VideoSmartCollectionEditorRequest?
     @State private var manualCollectionEditor: VideoManualCollectionEditorRequest?
     @State private var musicSmartPlaylistEditor: MusicSmartPlaylistEditorRequest?
@@ -344,6 +348,14 @@ struct ContentView: View {
         switch selection {
         case .music, .musicSmartPlaylist: return true
         default: return false
+        }
+    }
+    private var hasMusicSidebarSection: Bool {
+        if !appState.musicTracks.isEmpty || !appState.musicPlaylists.isEmpty || !appState.musicSmartPlaylists.isEmpty {
+            return true
+        }
+        return appState.sources.contains { source in
+            !source.sourceKind.isRemoteMediaServer && (source.mediaType == .music || source.mediaType == .auto)
         }
     }
     private var isAlbumSectionActive: Bool {
@@ -684,7 +696,6 @@ struct ContentView: View {
             let activeMusic = appState.activePlayerItem?.type == .music
             loadMusicWindowPalette()
             if activeMusic {
-                musicMiniPlayerCollapsed = false
                 if !hadActiveMusic {
                     hadActiveMusic = true
                     presentMusicMiniPlayer()
@@ -767,24 +778,262 @@ struct ContentView: View {
         }
     }
 
-    private var visibleSidebarSourceCount: Int {
-        appState.sources.filter { source in
-            appState.canDisplayPrivateItems || source.mediaType != .privateCollection
-        }.count
+    /// 媒体源总数：始终统计全部媒体源（含保险库），不随保险库锁定状态增减——
+    /// 侧边栏摘要就该直接回答"总共有多少个媒体源"，不需要区分保险库可见性。
+    private var totalSidebarSourceCount: Int {
+        appState.sources.count
     }
 
     private var activeSidebarTaskCount: Int {
         appState.backgroundTasks.filter { $0.state.isActive }.count
     }
 
-    private var sidebarBrandTopPadding: CGFloat {
-        if case .video(.privacy) = selection, !appState.canDisplayPrivateItems {
-            // 锁定态的详情页是深色整窗背景，NavigationSplitView 不再给侧边栏保留与普通
-            // PageHeader 页面一致的顶部工具栏安全区；品牌区会被顶到红黄绿按钮下方。
-            // 在侧边栏入口按同一链路补偿，让左栏在锁定/解锁间保持同一视觉锚点。
-            return SidebarMetrics.brandPrivacyLockedTopPadding
+    private var sidebarStatusContent: SidebarStatusContent {
+        if let priorityContent = sidebarPriorityStatusContent {
+            return priorityContent
         }
-        return SidebarMetrics.brandDefaultTopPadding
+
+        let tieredCandidates = sidebarRotatingStatusTiers.first(where: { !$0.isEmpty }) ?? []
+        guard !tieredCandidates.isEmpty else {
+            return sidebarSourceSummaryStatus
+        }
+        let index = abs(sidebarStatusRotationTick) % tieredCandidates.count
+        return tieredCandidates[index]
+    }
+
+    private var sidebarPriorityStatusContent: SidebarStatusContent? {
+        if let item = appState.activePlayerItem, item.type == .music {
+            return SidebarStatusContent(
+                kind: .music(item),
+                title: item.title,
+                subtitle: musicSidebarSubtitle(for: item),
+                systemImage: "music.note",
+                colors: [Color(red: 0.22, green: 0.62, blue: 1.0), Color(red: 0.99, green: 0.42, blue: 0.62)],
+                progress: musicController.duration > 0 ? min(max(musicController.currentTime / musicController.duration, 0), 1) : nil
+            )
+        }
+
+        if let update = appState.availableUpdate {
+            return SidebarStatusContent(
+                kind: .update(update),
+                title: "MediaLIB \(update.version)",
+                subtitle: update.downloadURL == nil ? "新版本可查看" : "新版本可下载",
+                systemImage: "sparkles",
+                colors: [SidebarReferenceTokens.pink, SidebarReferenceTokens.orange]
+            )
+        }
+
+        if appState.isCheckingForUpdates {
+            return SidebarStatusContent(
+                kind: .checkingUpdate,
+                title: "正在检查更新",
+                subtitle: "后台获取最新版本",
+                systemImage: "arrow.triangle.2.circlepath",
+                colors: [SidebarReferenceTokens.blue, Color(red: 0.31, green: 0.82, blue: 0.91)]
+            )
+        }
+
+        if let task = appState.backgroundTasks.first(where: { $0.state.isActive }) {
+            return SidebarStatusContent(
+                kind: .activeTask(task),
+                title: task.title,
+                subtitle: sidebarTaskSubtitle(task),
+                systemImage: task.kind.systemImage,
+                colors: [SidebarReferenceTokens.blue, Color(red: 0.33, green: 0.82, blue: 0.74)],
+                progress: task.progress
+            )
+        }
+
+        return nil
+    }
+
+    private var sidebarRotatingStatusTiers: [[SidebarStatusContent]] {
+        var attention: [SidebarStatusContent] = []
+        var ambient: [SidebarStatusContent] = []
+
+        if !appState.offlineSources.isEmpty {
+            attention.append(SidebarStatusContent(
+                kind: .sourceIssue,
+                title: "\(appState.offlineSources.count) 个媒体源离线",
+                subtitle: "点击查看连接状态",
+                systemImage: "externaldrive.badge.exclamationmark",
+                colors: [Color(red: 1.0, green: 0.47, blue: 0.42), SidebarReferenceTokens.orange]
+            ))
+        }
+
+        if let failedTask = appState.backgroundTasks.first(where: { $0.state == .failed }) {
+            attention.append(SidebarStatusContent(
+                kind: .failedTask(failedTask),
+                title: failedTask.title,
+                subtitle: appState.canRetryBackgroundTask(failedTask) ? "任务失败 · 可重试" : "任务失败 · 查看详情",
+                systemImage: "exclamationmark.triangle",
+                colors: [Color(red: 1.0, green: 0.48, blue: 0.35), Color(red: 1.0, green: 0.72, blue: 0.34)]
+            ))
+        }
+
+        if appState.privacyPINConfigured, appState.privacyUnlocked {
+            attention.append(SidebarStatusContent(
+                kind: .vaultUnlocked,
+                title: "保险库已解锁",
+                subtitle: "点击立即锁定",
+                systemImage: "lock.open",
+                colors: [Color(red: 0.31, green: 0.71, blue: 1.0), Color(red: 0.25, green: 0.83, blue: 0.72)]
+            ))
+        }
+
+        let healthScore = sidebarHealthScore
+        if healthScore < 100 {
+            let healthContent = SidebarStatusContent(
+                kind: .health(score: healthScore),
+                title: "媒体健康度 \(healthScore)",
+                subtitle: "点击查看仪表盘",
+                systemImage: "waveform.path.ecg",
+                colors: [Color(red: 0.25, green: 0.81, blue: 0.68), SidebarReferenceTokens.blue],
+                progress: Double(healthScore) / 100
+            )
+            if healthScore < 85 {
+                attention.append(healthContent)
+            } else {
+                ambient.append(healthContent)
+            }
+        }
+
+        if let continueItem = sidebarContinueWatchingItem {
+            ambient.append(SidebarStatusContent(
+                kind: .continueWatching(continueItem),
+                title: continueItem.title,
+                subtitle: "继续播放上次内容",
+                systemImage: "play.rectangle",
+                colors: [Color(red: 0.32, green: 0.59, blue: 1.0), Color(red: 0.45, green: 0.33, blue: 0.95)]
+            ))
+        }
+
+        if let lastTask = sidebarRecentFinishedTask {
+            ambient.append(SidebarStatusContent(
+                kind: .lastTask(lastTask),
+                title: lastTask.title,
+                subtitle: "上次任务 · \(lastTask.state.title)",
+                systemImage: lastTask.kind.systemImage,
+                colors: [SidebarReferenceTokens.blue, Color(red: 0.55, green: 0.55, blue: 0.93)],
+                progress: lastTask.progress
+            ))
+        }
+
+        ambient.append(SidebarStatusContent(
+            kind: .sponsor,
+            title: appState.localized("软件不错？"),
+            subtitle: appState.localized("点击投喂作者"),
+            systemImage: "heart.fill",
+            colors: [SidebarReferenceTokens.pink, SidebarReferenceTokens.orange]
+        ))
+        ambient.append(sidebarSourceSummaryStatus)
+        return [attention, ambient]
+    }
+
+    private var sidebarSourceSummaryStatus: SidebarStatusContent {
+        // 只回答"总共有多少个媒体源、有多少在线"，不再按保险库可见性改变文案措辞——
+        // 计数和在线状态始终把保险库计算在内。
+        let offlineCount = appState.offlineSources.count
+        return SidebarStatusContent(
+            kind: .sourceSummary(
+                count: totalSidebarSourceCount,
+                hidesPrivateSources: appState.privacyPINConfigured && !appState.canDisplayPrivateItems
+            ),
+            title: "\(totalSidebarSourceCount) 个媒体源",
+            subtitle: offlineCount == 0 ? "全部在线 · 刚刚" : "\(offlineCount) 个离线",
+            systemImage: "server.rack",
+            colors: [SidebarReferenceTokens.orange, SidebarReferenceTokens.pink]
+        )
+    }
+
+    private var sidebarRecentFinishedTask: BackgroundTaskSnapshot? {
+        let recentCutoff: TimeInterval = 30 * 60
+        return appState.backgroundTasks.first { task in
+            guard !task.state.isActive else { return false }
+            let referenceDate = task.finishedAt ?? task.startedAt
+            return Date().timeIntervalSince(referenceDate) <= recentCutoff
+        }
+    }
+
+    private var sidebarContinueWatchingItem: MediaItem? {
+        appState.continueWatchingItems.first { item in
+            item.type != .music && (appState.canDisplayPrivateItems || item.type != .privateCollection)
+        }
+    }
+
+    private var sidebarHealthScore: Int {
+        let issueWeight =
+            appState.offlineSources.count * 18 +
+            appState.missingFileItems.count * 12 +
+            appState.missingMetadataItems.count * 5 +
+            appState.detailMetadataGapItems.count * 4 +
+            appState.duplicateTitleGroups.count * 6
+        return max(0, 100 - min(issueWeight, 90))
+    }
+
+    private func musicSidebarSubtitle(for item: MediaItem) -> String {
+        let artist = item.artist?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let album = item.album?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail = [artist, album].compactMap { value in
+            guard let value, !value.isEmpty else { return nil }
+            return value
+        }.joined(separator: " · ")
+        return detail.isEmpty ? "正在播放音乐" : detail
+    }
+
+    private func sidebarTaskSubtitle(_ task: BackgroundTaskSnapshot) -> String {
+        if let progress = task.progress {
+            return "\(task.state.title) · \(Int((progress * 100).rounded()))%"
+        }
+        return task.state.title
+    }
+
+    @MainActor
+    private func sidebarStatusRotationLoop() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: UInt64(Self.sidebarStatusRotationInterval * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            withAnimation(AppMotion.fast) {
+                sidebarStatusRotationTick &+= 1
+            }
+        }
+    }
+
+    private func handleSidebarStatusPrimaryAction(_ status: SidebarStatusContent) {
+        switch status.kind {
+        case .music:
+            appState.sendPlaybackCommand(.togglePlay)
+        case .update(let update):
+            NSWorkspace.shared.open(update.downloadURL ?? update.releaseURL)
+            appState.availableUpdate = nil
+        case .checkingUpdate, .activeTask, .failedTask, .lastTask, .health:
+            selection = .health
+        case .vaultUnlocked:
+            appState.lockPrivacy()
+        case .sourceIssue, .sourceSummary:
+            selection = .sources
+        case .continueWatching(let item):
+            appState.play(item)
+        case .sponsor:
+            NSWorkspace.shared.open(appState.sponsorURL)
+        }
+    }
+
+    private func handleSidebarStatusSecondaryAction(_ status: SidebarStatusContent) {
+        switch status.kind {
+        case .failedTask(let task) where appState.canRetryBackgroundTask(task):
+            appState.retryBackgroundTask(task)
+        case .activeTask(let task) where task.isCancellable:
+            appState.cancelBackgroundTask(id: task.id)
+        default:
+            handleSidebarStatusPrimaryAction(status)
+        }
+    }
+
+    private var sidebarBrandTopPadding: CGFloat {
+        // 顶部留白对所有页面统一：锁定态的详情页已改为 ScrollView 结构、正常预留标题栏安全区，
+        // 不再需要对保险库单独补偿位移（那种固定像素补偿在改窗口尺寸后必然错位）。
+        SidebarMetrics.brandDefaultTopPadding
     }
 
     private func finishMainLayoutTransition(after nanoseconds: UInt64) {
@@ -884,26 +1133,28 @@ struct ContentView: View {
                             .listRowSeparator(.hidden)
                         }
 
-                        SidebarGroupHeaderButton(
-                            systemImage: "music.note",
-                            title: appState.localized("音乐"),
-                            isExpanded: $isMusicExpanded,
-                            collapsedCount: MusicLibrarySection.sidebarCases.count + appState.musicSmartPlaylists.count,
-                            active: isMusicSectionActive
-                        )
-                        if isMusicExpanded {
-                            ForEach(MusicLibrarySection.sidebarCases) { section in
-                                sidebarRow(.music(section), indented: true)
-                            }
-                            // 仅在有智能歌单时才显示分隔线 + 列表；空列表下不再多出一条分割线，
-                            // 否则会让「音乐↔远程媒体库」的间距大于「视频↔音乐」，造成不统一。
-                            if !appState.musicSmartPlaylists.isEmpty {
-                                Divider()
-                                    .listRowInsets(EdgeInsets(top: 3, leading: SidebarMetrics.basePadding + SidebarMetrics.childIndent + SidebarMetrics.rowHPad, bottom: 3, trailing: SidebarMetrics.basePadding + SidebarMetrics.rowHPad))
-                                    .listRowBackground(Color.clear)
-                                    .listRowSeparator(.hidden)
-                                ForEach(appState.musicSmartPlaylists) { playlist in
-                                    musicSmartPlaylistSidebarRow(playlist)
+                        if hasMusicSidebarSection {
+                            SidebarGroupHeaderButton(
+                                systemImage: "music.note",
+                                title: appState.localized("音乐"),
+                                isExpanded: $isMusicExpanded,
+                                collapsedCount: MusicLibrarySection.sidebarCases.count + appState.musicSmartPlaylists.count,
+                                active: isMusicSectionActive
+                            )
+                            if isMusicExpanded {
+                                ForEach(MusicLibrarySection.sidebarCases) { section in
+                                    sidebarRow(.music(section), indented: true)
+                                }
+                                // 仅在有智能歌单时才显示分隔线 + 列表；空列表下不再多出一条分割线，
+                                // 否则会让「音乐↔远程媒体库」的间距大于「视频↔音乐」，造成不统一。
+                                if !appState.musicSmartPlaylists.isEmpty {
+                                    Divider()
+                                        .listRowInsets(EdgeInsets(top: 3, leading: SidebarMetrics.basePadding + SidebarMetrics.childIndent + SidebarMetrics.rowHPad, bottom: 3, trailing: SidebarMetrics.basePadding + SidebarMetrics.rowHPad))
+                                        .listRowBackground(Color.clear)
+                                        .listRowSeparator(.hidden)
+                                    ForEach(appState.musicSmartPlaylists) { playlist in
+                                        musicSmartPlaylistSidebarRow(playlist)
+                                    }
                                 }
                             }
                         }
@@ -945,10 +1196,14 @@ struct ContentView: View {
                 .tint(SidebarReferenceTokens.blue)
                 .id(appState.themeRevision)
 
-                SidebarSourceSummaryCard(
-                    sourceCount: visibleSidebarSourceCount,
-                    activeTaskCount: activeSidebarTaskCount,
-                    hidesPrivateSources: appState.privacyPINConfigured && !appState.canDisplayPrivateItems
+                SidebarStatusCenterCard(
+                    status: sidebarStatusContent,
+                    controller: musicController,
+                    onPrevious: { appState.sendPlaybackCommand(.previous) },
+                    onTogglePlay: { appState.sendPlaybackCommand(.togglePlay) },
+                    onNext: { appState.sendPlaybackCommand(.next) },
+                    onPrimaryAction: handleSidebarStatusPrimaryAction,
+                    onSecondaryAction: handleSidebarStatusSecondaryAction
                 )
             }
             .background(SidebarReferenceBackground())
@@ -956,6 +1211,9 @@ struct ContentView: View {
             // tint 仅供 Disclosure 箭头等附属控件跟随主题。
             .tint(SidebarReferenceTokens.blue)
             .navigationSplitViewColumnWidth(min: SidebarMetrics.columnMin, ideal: SidebarMetrics.columnIdeal, max: SidebarMetrics.columnMax)
+            .task {
+                await sidebarStatusRotationLoop()
+            }
             .onAppear {
                 selection = SidebarDestination(storedID: storedSelectionID) ?? .home
             }
@@ -1015,11 +1273,12 @@ struct ContentView: View {
     }
 
     private var musicWindowChromeHidden: Bool {
-        appState.activePlayerItem?.type == .music && musicImmersive
+        appState.activePlayerItem?.type == .music &&
+        (musicTransitionShieldActive || musicPlayerExpanded || musicImmersive || musicTransitionSuppressesBackground)
     }
 
     private var musicChromeShouldBeHidden: Bool {
-        appState.activePlayerItem?.type == .music && musicImmersive
+        musicWindowChromeHidden
     }
 
     private var musicWindowBackdropShouldBeActive: Bool {
@@ -1323,10 +1582,12 @@ struct ContentView: View {
             } else {
                 SidebarSectionIconChip(systemImage: sidebarSystemImage(for: destination), active: selected)
             }
+            // 一级目录（未缩进）与分组头共用同一字体样式（bold + groupText），
+            // 二级目录保持 semibold + itemText，形成稳定的两级字体层级。
             Text(appState.localized(title(for: destination)))
-                .foregroundStyle(selected ? SidebarReferenceTokens.selectedText : SidebarReferenceTokens.itemText)
+                .foregroundStyle(selected ? SidebarReferenceTokens.selectedText : (indented ? SidebarReferenceTokens.itemText : SidebarReferenceTokens.groupText))
                 .font(SidebarMetrics.itemFont)
-                .fontWeight(selected ? .bold : .semibold)
+                .fontWeight(indented ? (selected ? .bold : .semibold) : .bold)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
@@ -1373,8 +1634,11 @@ struct ContentView: View {
         return SidebarSelectableRow(selected: selected, indent: true, action: { selection = .smartCollection(collection.id) }) {
             PlayfulSymbolIcon(systemImage: "sparkles.rectangle.stack", size: 22)
             Text(collection.name)
-                .foregroundStyle(.primary)
-                .fontWeight(selected ? .semibold : .regular)
+                .foregroundStyle(selected ? SidebarReferenceTokens.selectedText : SidebarReferenceTokens.itemText)
+                .font(SidebarMetrics.itemFont)
+                .fontWeight(selected ? .bold : .semibold)
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
         .contextMenu {
             Button {
@@ -1410,8 +1674,11 @@ struct ContentView: View {
                 selected: selected
             )
             Text(collection.name)
-                .foregroundStyle(.primary)
-                .fontWeight(selected ? .semibold : .regular)
+                .foregroundStyle(selected ? SidebarReferenceTokens.selectedText : SidebarReferenceTokens.itemText)
+                .font(SidebarMetrics.itemFont)
+                .fontWeight(selected ? .bold : .semibold)
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
         .contextMenu {
             Button {
@@ -1484,8 +1751,11 @@ struct ContentView: View {
         return SidebarSelectableRow(selected: selected, indent: true, action: { selection = .musicSmartPlaylist(playlist.id) }) {
             PlayfulSymbolIcon(systemImage: "music.note.list", size: 22)
             Text(playlist.name)
-                .foregroundStyle(.primary)
-                .fontWeight(selected ? .semibold : .regular)
+                .foregroundStyle(selected ? SidebarReferenceTokens.selectedText : SidebarReferenceTokens.itemText)
+                .font(SidebarMetrics.itemFont)
+                .fontWeight(selected ? .bold : .semibold)
+                .lineLimit(1)
+                .truncationMode(.tail)
         }
         .contextMenu {
             Button {
@@ -1602,6 +1872,7 @@ struct ContentView: View {
             MusicLibraryView(section: section) {
                 musicSmartPlaylistEditor = .create()
             }
+            .id(section.id)
         case .musicSmartPlaylist(let playlistID):
             if let playlist = appState.musicSmartPlaylist(id: playlistID) {
                 MusicSmartPlaylistDetailView(playlist: playlist) {
@@ -1624,10 +1895,15 @@ struct ContentView: View {
             LibraryHealthCenterView(
                 initialReturnAnchorID: appState.detailReturnContext?.destinationID == destination.id
                     ? appState.detailReturnContext?.anchorID
-                    : nil
+                    : nil,
+                onOpenSources: { selection = .sources },
+                onOpenSection: { selection = $0 }
             )
         case .tasks:
-            LibraryHealthCenterView()
+            LibraryHealthCenterView(
+                onOpenSources: { selection = .sources },
+                onOpenSection: { selection = $0 }
+            )
         case .sources:
             SourcesView()
         case .settings:
@@ -1710,27 +1986,24 @@ private struct SidebarReferenceBackground: View {
                     startPoint: .top,
                     endPoint: .bottom
                 )
-            } else {
+            }
+            // 参照原生 App（Finder/Notes/Mail）侧边栏：`.sidebar` 材质本身就是磨砂 + 透出桌面壁纸。
+            // 任何叠加纱罩（哪怕每层只有 5%~7%）累计起来都会把壁纸透过感洗成近实底白，
+            // 因此非「降低透明度」模式下不再叠任何着色层，让材质以原生形态直接呈现。
+            if !reduceTransparency {
                 LinearGradient(
                     colors: [
-                        SidebarReferenceTokens.backgroundTop.opacity(colorScheme == .dark ? 0.12 : 0.18),
-                        SidebarReferenceTokens.backgroundBottom.opacity(colorScheme == .dark ? 0.10 : 0.14)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(colorScheme == .dark ? 0.035 : 0.10),
-                        AppColors.sidebarBlueWash.opacity(colorScheme == .dark ? 0.038 : 0.046),
-                        Color.clear
+                        Color.white.opacity(colorScheme == .dark ? 0.015 : 0.035),
+                        Color.white.opacity(colorScheme == .dark ? 0.006 : 0.012)
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
+                .blendMode(.plusLighter)
+                .allowsHitTesting(false)
             }
             SidebarReferenceTokens.divider
-                .opacity(colorScheme == .dark ? 0.54 : 0.78)
+                .opacity(colorScheme == .dark ? 0.44 : 0.46)
                 .frame(width: 1)
         }
         .ignoresSafeArea()
@@ -1742,16 +2015,44 @@ private struct SidebarNativeMaterialBackground: NSViewRepresentable {
         let view = NSVisualEffectView()
         view.material = .sidebar
         view.blendingMode = .behindWindow
-        view.state = .followsWindowActiveState
-        view.isEmphasized = false
+        view.state = .active
+        view.isEmphasized = true
         return view
     }
 
     func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
         nsView.material = .sidebar
         nsView.blendingMode = .behindWindow
-        nsView.state = .followsWindowActiveState
-        nsView.isEmphasized = false
+        nsView.state = .active
+        nsView.isEmphasized = true
+        // ★根因：SwiftUI 把这个 NSVisualEffectView 塞进了 NSHostingView 自己的 layer 树很深的位置。
+        // `.behindWindow` 混合模式要求从这个 view 一路到 window 的 contentView，中间每一层 CALayer
+        // 都不能是不透明的——只要有一层 `isOpaque`/纯色背景挡着，取样的就是那层 layer 的颜色，
+        // 而不是真正窗口后面的桌面，效果上就是"整片糊成一个纯色磨砂"而不是"透出桌面"。
+        // SwiftUI 的宿主 layer 默认按不透明优化（层展平/离屏合成），所以之前不管怎么调这个视图
+        // 自己的参数、纱罩透明度都没用——问题根本不在这个 view 上，而在它上面的祖先层。
+        // 这里显式把从本视图到 window.contentView 之间的每一层都掰成非不透明、透明背景色。
+        DispatchQueue.main.async {
+            var view: NSView? = nsView
+            while let current = view {
+                current.layer?.isOpaque = false
+                current.layer?.backgroundColor = NSColor.clear.cgColor
+                if let scrollView = current as? NSScrollView {
+                    scrollView.drawsBackground = false
+                }
+                if current === nsView.window?.contentView {
+                    break
+                }
+                view = current.superview
+            }
+            if let contentView = nsView.window?.contentView {
+                contentView.layer?.isOpaque = false
+                contentView.layer?.backgroundColor = NSColor.clear.cgColor
+                contentView.superview?.wantsLayer = true
+                contentView.superview?.layer?.isOpaque = false
+                contentView.superview?.layer?.backgroundColor = NSColor.clear.cgColor
+            }
+        }
     }
 }
 
@@ -1790,9 +2091,9 @@ private struct SidebarAppIcon: View {
             .resizable()
             .interpolation(.high)
             .aspectRatio(contentMode: .fill)
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(.white.opacity(0.65), lineWidth: 0.8)
             }
             .shadow(color: SidebarReferenceTokens.blue.opacity(0.28), radius: 10, y: 4)
@@ -1803,69 +2104,236 @@ private struct SidebarAppIcon: View {
     private static let darkImage = loadImage(named: "AppIconDark") ?? lightImage
 
     private static func loadImage(named name: String) -> NSImage? {
-        guard let url = Bundle.module.url(forResource: name, withExtension: "png") else { return nil }
+        guard let url = Bundle.main.url(forResource: name, withExtension: "png") else { return nil }
         return NSImage(contentsOf: url)
     }
 }
 
-private struct SidebarSourceSummaryCard: View {
-    let sourceCount: Int
-    let activeTaskCount: Int
-    let hidesPrivateSources: Bool
+private struct SidebarStatusContent {
+    enum Kind {
+        case music(MediaItem)
+        case update(AppUpdateInfo)
+        case checkingUpdate
+        case activeTask(BackgroundTaskSnapshot)
+        case vaultUnlocked
+        case sourceIssue
+        case failedTask(BackgroundTaskSnapshot)
+        case health(score: Int)
+        case lastTask(BackgroundTaskSnapshot)
+        case continueWatching(MediaItem)
+        case sourceSummary(count: Int, hidesPrivateSources: Bool)
+        case sponsor
+    }
+
+    let kind: Kind
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    let colors: [Color]
+    var progress: Double?
+}
+
+private struct SidebarStatusCenterCard: View {
+    let status: SidebarStatusContent
+    @ObservedObject var controller: MpvPlayerController
+    let onPrevious: () -> Void
+    let onTogglePlay: () -> Void
+    let onNext: () -> Void
+    let onPrimaryAction: (SidebarStatusContent) -> Void
+    let onSecondaryAction: (SidebarStatusContent) -> Void
+
+    /// 状态轮换的过渡键：只随「是哪条状态」变化（图标 + 标题），
+    /// 不含 subtitle——任务进度百分比等高频文本更新不应触发整卡重入场。
+    private var contentTransitionKey: String {
+        "\(status.systemImage)|\(status.title)"
+    }
 
     var body: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(
-                    LinearGradient(
-                        colors: [SidebarReferenceTokens.orange, SidebarReferenceTokens.pink],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .frame(width: 30, height: 30)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(summaryTitle)
-                    .font(.system(size: 12.5, weight: .bold))
-                    .foregroundStyle(SidebarReferenceTokens.bodyText)
-                    .lineLimit(1)
-                Text(summarySubtitle)
-                    .font(.system(size: 10.5, weight: .medium))
-                    .foregroundStyle(SidebarReferenceTokens.mutedText)
-                    .lineLimit(1)
+        ZStack {
+            HStack(spacing: 10) {
+                leadingVisual
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(status.title)
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundStyle(SidebarReferenceTokens.bodyText)
+                        .lineLimit(1)
+                    Text(status.subtitle)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(SidebarReferenceTokens.mutedText)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .minimumScaleFactor(0.82)
+
+                trailingControls
             }
-            Spacer(minLength: 0)
+            // 状态轮换时旧内容淡出、新内容自下方轻浮入（卡片外壳保持不动），
+            // 覆盖定时轮换与播放/任务等即时切换两类来源。
+            .id(contentTransitionKey)
+            .transition(.asymmetric(
+                insertion: .opacity.combined(with: .offset(y: 7)),
+                removal: .opacity
+            ))
         }
+        .animation(AppMotion.fast, value: contentTransitionKey)
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(AppColors.refCardBg)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .strokeBorder(AppColors.refCardBorder, lineWidth: 1)
+        .frame(minHeight: 58)
+        .background(cardBackground)
+        .overlay(alignment: .bottomLeading) {
+            if let progress = status.progress {
+                GeometryReader { proxy in
+                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                        .fill(progressGradient.opacity(0.72))
+                        .frame(width: max(10, proxy.size.width * min(max(progress, 0), 1)), height: 3)
+                        .frame(maxHeight: .infinity, alignment: .bottomLeading)
                 }
-        )
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .allowsHitTesting(false)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .onTapGesture {
+            onPrimaryAction(status)
+        }
         .shadow(color: AppColors.refCardShadow.opacity(0.10), radius: 15, x: 0, y: 6)
         .padding(.horizontal, 14)
         .padding(.top, 10)
         .padding(.bottom, 14)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(summaryTitle)，\(summarySubtitle)")
+        .accessibilityLabel("\(status.title)，\(status.subtitle)")
     }
 
-    private var summaryTitle: String {
-        if hidesPrivateSources {
-            return "\(sourceCount) 个非保险库媒体源"
+    @ViewBuilder
+    private var leadingVisual: some View {
+        if case .music(let item) = status.kind {
+            PosterImage(
+                path: item.posterPath,
+                title: item.title,
+                mediaType: .music,
+                cacheTargetSize: CGSize(width: 68, height: 68)
+            )
+            .frame(width: 34, height: 34)
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(.white.opacity(0.62), lineWidth: 0.7)
+            }
+            .shadow(color: primaryColor.opacity(0.22), radius: 8, y: 3)
+        } else {
+            ZStack {
+                Circle()
+                    .fill(progressGradient)
+                Image(systemName: status.systemImage)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 32, height: 32)
+            .shadow(color: primaryColor.opacity(0.22), radius: 8, y: 3)
         }
-        return "\(sourceCount) 个媒体源"
     }
 
-    private var summarySubtitle: String {
-        if activeTaskCount > 0 {
-            return "\(activeTaskCount) 项任务进行中"
+    @ViewBuilder
+    private var trailingControls: some View {
+        if case .music = status.kind {
+            HStack(spacing: 2) {
+                sidebarStatusButton(systemImage: "backward.fill", action: onPrevious)
+                sidebarStatusButton(systemImage: controller.isPlaying ? "pause.fill" : "play.fill", emphasized: true, action: onTogglePlay)
+                sidebarStatusButton(systemImage: "forward.fill", action: onNext)
+            }
+            .accessibilityElement(children: .contain)
+        } else {
+            Button {
+                onSecondaryAction(status)
+            } label: {
+                Image(systemName: trailingSystemImage)
+                    .font(.system(size: 11.5, weight: .bold))
+                    .foregroundStyle(SidebarReferenceTokens.itemText.opacity(0.76))
+                    .frame(width: 25, height: 25)
+                    .background(
+                        Circle()
+                            .fill(AppColors.refScanFill.opacity(0.82))
+                    )
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(trailingAccessibilityLabel)
         }
-        return hidesPrivateSources ? "保险库已隐藏" : "已同步 · 刚刚"
+    }
+
+    private func sidebarStatusButton(systemImage: String, emphasized: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: emphasized ? 14 : 12, weight: .bold))
+                .foregroundStyle(Color.black.opacity(0.82))
+                .frame(width: emphasized ? 29 : 25, height: emphasized ? 29 : 25)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var cardBackground: some View {
+        RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .fill(AppColors.refCardBg)
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(AppColors.refCardBorder.opacity(0.82), lineWidth: 0.8)
+            }
+    }
+
+    private var progressGradient: LinearGradient {
+        LinearGradient(colors: gradientColors, startPoint: .topLeading, endPoint: .bottomTrailing)
+    }
+
+    private var gradientColors: [Color] {
+        if status.colors.count >= 2 {
+            return status.colors
+        }
+        return [SidebarReferenceTokens.blue, SidebarReferenceTokens.pink]
+    }
+
+    private var primaryColor: Color {
+        gradientColors.first ?? SidebarReferenceTokens.blue
+    }
+
+    private var trailingSystemImage: String {
+        switch status.kind {
+        case .update:
+            return "arrow.down.circle.fill"
+        case .checkingUpdate:
+            return "clock.arrow.circlepath"
+        case .activeTask(let task):
+            return task.isCancellable ? "xmark" : "chevron.right"
+        case .vaultUnlocked:
+            return "lock.fill"
+        case .failedTask:
+            return "arrow.clockwise"
+        case .continueWatching:
+            return "play.fill"
+        case .sponsor:
+            return "heart.fill"
+        default:
+            return "chevron.right"
+        }
+    }
+
+    private var trailingAccessibilityLabel: String {
+        switch status.kind {
+        case .update:
+            return "打开更新"
+        case .activeTask(let task) where task.isCancellable:
+            return "取消任务"
+        case .vaultUnlocked:
+            return "锁定保险库"
+        case .failedTask:
+            return "重试或查看任务"
+        case .continueWatching:
+            return "继续播放"
+        case .sponsor:
+            return "投喂作者"
+        default:
+            return "查看详情"
+        }
     }
 }
 
@@ -2069,7 +2537,7 @@ private struct SidebarGroupHeaderButton: View {
                 SidebarSectionIconChip(systemImage: systemImage, active: active)
                 Text(title)
                     .font(SidebarMetrics.itemFont)
-                    .fontWeight(.heavy)
+                    .fontWeight(.bold)
                     .foregroundStyle(SidebarReferenceTokens.groupText)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -3050,14 +3518,14 @@ struct EmbySourceRenameSheet: View {
 
             AppSheetActionFooter {
                 Button("取消", action: onCancel)
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                    .buttonStyle(AppSheetSecondaryButtonStyle())
                     .keyboardShortcut(.cancelAction)
                 Button {
                     onSave(name.trimmingCharacters(in: .whitespacesAndNewlines))
                 } label: {
                     Label("保存", systemImage: "checkmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+                .buttonStyle(AppSheetPrimaryButtonStyle())
                 .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .keyboardShortcut(.defaultAction)
             }
@@ -3109,14 +3577,24 @@ private struct FloatingNoticeCapsule: View {
         let active = isHovering
         let capsuleWidth = resolvedWidth
         let textWidth = max(capsuleWidth - Self.horizontalChromeWidth, Self.minimumTextWidth)
-        HStack(spacing: 10) {
-            Image(systemName: notice.kind.systemImage)
-                .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(kindTint.opacity(colorScheme == .dark ? 0.98 : 0.94))
-                .symbolRenderingMode(.monochrome)
-                .frame(width: Self.sideSlotWidth, height: Self.sideSlotWidth)
+        // 重做：去掉"圆角胶囊+竖直硬直线"的冲突组合（直线切角与圆角轮廓打架，
+        // 且内容居中排版在图标+关闭按钮的不对称布局下显得别扭）。改为系统通知常见排版：
+        // 语义色图标芯片(左) + 左对齐标题/正文 + 关闭按钮(右)，扁平白卡单层柔光，
+        // 与本轮弹窗系统统一的 refCardBg/refCardBorder/refCardShadow 一致。
+        // 关闭按钮改用 .center 对齐：之前整行 .top 对齐时，22pt 的关闭按钮和 28pt 的图标芯片
+        // 顶部齐平，按钮本身比图标矮，会让它在行内偏上——与卡片的上下 padding 不对称
+        // （上边距=verticalPadding，下边距=verticalPadding+差值）。整行居中对齐后，
+        // 关闭按钮到卡片上下边缘的距离才会真正一致。
+        HStack(alignment: .center, spacing: 12) {
+            ZStack {
+                Circle().fill(kindTint.opacity(colorScheme == .dark ? 0.16 : 0.11))
+                Image(systemName: notice.kind.systemImage)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(kindTint)
+            }
+            .frame(width: Self.sideSlotWidth, height: Self.sideSlotWidth)
 
-            VStack(alignment: .center, spacing: 1) {
+            VStack(alignment: .center, spacing: 2) {
                 Text(notice.title)
                     .font(.callout.weight(.semibold))
                     .lineLimit(notice.message == nil ? 2 : 1)
@@ -3129,69 +3607,44 @@ private struct FloatingNoticeCapsule: View {
                         .truncationMode(.middle)
                 }
             }
+            // 标题/正文文字居中显示（按需求："提示/通知"等标题在提示窗内居中）。
             .multilineTextAlignment(.center)
             .frame(width: textWidth, alignment: .center)
 
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
-                    .frame(width: Self.sideSlotWidth, height: Self.sideSlotWidth)
+                    .frame(width: Self.closeSlotWidth, height: Self.closeSlotWidth)
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .help("关闭")
         }
         .padding(.horizontal, Self.horizontalPadding)
-        .padding(.vertical, notice.message == nil ? 8 : 9)
-        .frame(width: capsuleWidth, alignment: .center)
+        .padding(.vertical, notice.message == nil ? 10 : 11)
+        .frame(width: capsuleWidth, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
         .background {
-            Capsule(style: .continuous)
-                .fill(.thinMaterial)
-        }
-        .background {
-            Capsule(style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(colorScheme == .dark ? 0.20 : 0.70),
-                            AppColors.cleanPanelFill.opacity(colorScheme == .dark ? 0.62 : 0.84),
-                            kindTint.opacity(colorScheme == .dark ? 0.16 : 0.12)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+            RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous)
+                .fill(colorScheme == .dark ? AppColors.elevatedSurface : AppColors.refCardBg)
         }
         .overlay {
-            Capsule(style: .continuous)
-                .strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            Color.white.opacity(colorScheme == .dark ? 0.42 : 0.92),
-                            AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.18 : 0.28),
-                            kindTint.opacity(colorScheme == .dark ? 0.26 : 0.20),
-                            Color.black.opacity(colorScheme == .dark ? 0.12 : 0.045)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.9
-                )
+            RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous)
+                .strokeBorder(AppColors.refCardBorder, lineWidth: 1)
         }
-        .shadow(color: kindTint.opacity(colorScheme == .dark ? 0.18 : 0.12), radius: active ? 18 : 12, x: 0, y: active ? 9 : 6)
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.24 : 0.08), radius: active ? 20 : 14, x: 0, y: active ? 12 : 8)
-        .scaleEffect(active ? 1.012 : 1)
+        .shadow(color: AppColors.refCardShadow.opacity(colorScheme == .dark ? 0.20 : 0.11), radius: active ? 18 : 14, x: 0, y: active ? 8 : 6)
+        .scaleEffect(active ? 1.006 : 1)
         .onHover { hovering in
             isHovering = hovering
         }
         .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
     }
 
-    private static let sideSlotWidth: CGFloat = 24
-    private static let horizontalPadding: CGFloat = 8
+    private static let sideSlotWidth: CGFloat = 28
+    private static let closeSlotWidth: CGFloat = 22
+    private static let horizontalPadding: CGFloat = 12
     private static let textSpacing: CGFloat = 20
-    private static let horizontalChromeWidth = sideSlotWidth * 2 + horizontalPadding * 2 + textSpacing
+    private static let horizontalChromeWidth = sideSlotWidth + closeSlotWidth + horizontalPadding * 2 + textSpacing
     private static let minimumTextWidth: CGFloat = 48
     private static let minimumWidth: CGFloat = horizontalChromeWidth + minimumTextWidth
 
@@ -3209,8 +3662,15 @@ private struct FloatingNoticeCapsule: View {
         return (trimmed as NSString).size(withAttributes: [.font: font]).width
     }
 
+    // 语义色：不同通知类型不该看起来都一样（此前恒为蓝色，色彩不传达任何含义）。
     private var kindTint: Color {
-        AppColors.selectedGlassTint
+        switch notice.kind {
+        case .info: return AppColors.referenceBlue
+        case .success: return Color(red: 0.20, green: 0.72, blue: 0.48)
+        case .warning: return Color(red: 0.95, green: 0.62, blue: 0.16)
+        case .error: return Color(red: 0.92, green: 0.30, blue: 0.32)
+        case .tip: return Color(red: 0.62, green: 0.44, blue: 0.94)
+        }
     }
 }
 
@@ -3257,7 +3717,7 @@ struct NetworkStreamPromptSheet: View {
     }
 }
 
-/// 发现新版本的提示弹窗：展示版本与更新内容，提供跳过/永不提醒/前往更新。
+/// 发现新版本的提示弹窗：展示版本与更新内容，提供跳过此版本/前往更新。
 struct AppUpdatePromptSheet: View {
     @EnvironmentObject private var appState: AppState
     let update: AppUpdateInfo
@@ -3321,17 +3781,6 @@ struct AppUpdatePromptSheet: View {
             HStack(spacing: 10) {
                 Button(appState.localized("跳过此版")) {
                     appState.settings.updateSkippedVersion = update.tagName
-                    appState.saveSettings()
-                    appState.availableUpdate = nil
-                }
-                .buttonStyle(.plain)
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 10)
-                .frame(height: 32)
-
-                Button(appState.localized("不再自动提醒")) {
-                    appState.settings.updateRemindersDisabled = true
                     appState.saveSettings()
                     appState.availableUpdate = nil
                 }

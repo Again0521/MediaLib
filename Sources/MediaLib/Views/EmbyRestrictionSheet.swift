@@ -74,7 +74,7 @@ struct EmbyRestrictionSheet: View {
 
             AppSheetActionFooter {
                 Button("关闭", action: onDismiss)
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+                    .buttonStyle(AppSheetPrimaryButtonStyle())
                     .keyboardShortcut(.defaultAction)
             }
         }

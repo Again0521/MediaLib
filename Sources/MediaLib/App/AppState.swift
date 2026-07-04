@@ -744,6 +744,9 @@ final class AppState: ObservableObject {
     init() {
         var loadedSettings = settingsStore.load()
         LiveTitleIconDebugTool.adjustSettingsForDebug(&loadedSettings)
+        if ProcessInfo.processInfo.arguments.contains("--debug-force-onboarding") {
+            loadedSettings.hasCompletedOnboarding = false
+        }
         self.settings = loadedSettings
         self.configuredWatchedThreshold = loadedSettings.watchedThreshold
         self.privacyPINConfigured = loadedSettings.privacyPINEnabled && privacyLockService.hasPIN()
@@ -3280,7 +3283,7 @@ final class AppState: ObservableObject {
 
     }
 
-    private func rebuildMusicSectionCaches() {
+    private func rebuildMusicSectionCaches(bumpContentRevision: Bool = true) {
         cachedMusicTracksBySection = [
             .songs: cachedMusicTracks,
             .albums: cachedMusicTracks,
@@ -3303,7 +3306,11 @@ final class AppState: ObservableObject {
             ($0.playCount ?? 0) > 0 || $0.lastPlayedAt != nil || $0.favorite || ($0.userRating ?? 0) > 0
         }
         cachedMusicSmartTracksByPlaylistID.removeAll(keepingCapacity: true)
-        refreshMusicContentRevisionIfNeeded()
+        // 播放次数递增（每次点击播放都会调用）故意跳过这里：内容修订号驱动音乐列表快照缓存 key，
+        // 高频、非展示语义的字段变化不应让整页列表快照失效重建。见 incrementMusicPlayCountInMemory。
+        if bumpContentRevision {
+            refreshMusicContentRevisionIfNeeded()
+        }
     }
 
     /// 对全部音乐曲目取内容指纹，只有指纹变化才递增 musicContentRevision。
@@ -5993,7 +6000,7 @@ final class AppState: ObservableObject {
         isScanning = true
         scanQueueCount = sources.count
 
-        scanTask = Task { [settings, logger] in
+        scanTask = Task { [settings, logger, self] in
             var queue = sources
             var allErrors: [String] = []
             let progressThrottler = ScanProgressThrottler()
@@ -6079,7 +6086,7 @@ final class AppState: ObservableObject {
         isScanning = true
         scanQueueCount = queuedChanges.count
 
-        scanTask = Task { [settings, logger] in
+        scanTask = Task { [settings, logger, self] in
             var allErrors: [String] = []
             let progressThrottler = ScanProgressThrottler()
             for (sourceID, paths) in queuedChanges {
@@ -6175,6 +6182,12 @@ final class AppState: ObservableObject {
 
     func clearCompletedBackgroundTasks() {
         backgroundTasks.removeAll { !$0.state.isActive }
+    }
+
+    func clearBackgroundTask(id: UUID) {
+        backgroundTasks.removeAll { task in
+            task.id == id && !task.state.isActive
+        }
     }
 
     func canRetryBackgroundTask(_ task: BackgroundTaskSnapshot) -> Bool {
@@ -6415,18 +6428,22 @@ final class AppState: ObservableObject {
         showFloatingNotice(title: title, message: message, kind: .tip, duration: 5.8)
     }
 
-    private func showOneShotInterfaceTip(key: String, title: String = "提示", message: String) {
+    private func showOneShotInterfaceTip(key: String, title: String = "提示", message: String, duration: TimeInterval = 6.2) {
         loadShownInterfaceTipKeysIfNeeded()
         guard shownInterfaceTipKeys.insert(key).inserted else { return }
         UserDefaults.standard.set(Array(shownInterfaceTipKeys).sorted(), forKey: Self.shownInterfaceTipDefaultsKey)
-        showFloatingNotice(title: title, message: message, kind: .tip, duration: 6.2)
+        showFloatingNotice(title: title, message: message, kind: .tip, duration: duration)
     }
 
     private func showInitialIndexingTipIfNeeded() {
+        // 首次扫描的卡顿提示单独延长到 1 分钟：这条提示是关于"接下来一段时间可能会卡"的
+        // 前瞻性提醒，短暂的默认时长(6.2s)读完就消失，用户往往还没真正遇到卡顿就看不到提示了。
+        // 其它一次性提示(showOneShotInterfaceTip 的默认时长/showInterfaceTipOnce)不受影响。
         showOneShotInterfaceTip(
             key: "sources.initialIndexing.performance",
             title: "正在建立媒体索引",
-            message: "首次加入媒体源时，MediaLIB 会整理文件、封面和基础信息，短时间内可能不够轻快；索引完成后，浏览和搜索会顺畅许多。"
+            message: "首次加入媒体源时，MediaLIB 会整理文件、封面和基础信息，短时间内可能不够轻快；索引完成后，浏览和搜索会顺畅许多。",
+            duration: 60
         )
     }
 
@@ -8121,7 +8138,7 @@ final class AppState: ObservableObject {
         scrobbleMusicStart(item)
         do {
             try mediaRepository?.incrementPlayCount(id: item.id)
-            updateMusicPlayCountsInMemory(ids: [item.id], reset: false, bumpRevision: false)
+            incrementMusicPlayCountInMemory(id: item.id)
             scheduleMusicProjectionMaintenance(reason: "music play count increment", force: false, preferIncremental: true)
         } catch {
             logger?.log("播放次数更新失败：\(error.localizedDescription)", level: .warning)
@@ -8171,6 +8188,42 @@ final class AppState: ObservableObject {
         if bumpRevision {
             libraryRevision += 1
         }
+    }
+
+    /// 单曲播放次数 +1 的轻量路径：每次点击播放都会走这里，绝不能像 `updateMusicPlayCountsInMemory`
+    /// 那样 `.map` 整个 `items`/`musicQueue`/`cachedMusicTracks`（`items` 是全库，含全部影视条目，
+    /// 可能数万条）。只按索引原地更新命中的那一条，且不刷新 `musicContentRevision`——
+    /// 该修订号驱动音乐列表快照缓存 key，播放次数这种高频、非展示语义变化的字段不应让
+    /// 用户每点一次播放就触发整页列表快照失效重建（表现为「点击播放就刷新一次界面」）。
+    /// 播放次数在列表里的可见文案（徽标、"最多播放"排序）会在下一次真正的内容修订
+    /// （收藏、评分、扫描、编辑元数据等）时自然跟上，不需要用整页刷新换取实时性。
+    private func incrementMusicPlayCountInMemory(id: String) {
+        func bump(_ item: MediaItem) -> MediaItem {
+            var copy = item
+            copy.playCount = (copy.playCount ?? 0) + 1
+            return copy
+        }
+        if let index = items.firstIndex(where: { $0.id == id }) {
+            items[index] = bump(items[index])
+            cachedItemsByID[id] = items[index]
+        }
+        if let index = musicQueue.firstIndex(where: { $0.id == id }) {
+            musicQueue[index] = bump(musicQueue[index])
+        }
+        if let activePlayerItem, activePlayerItem.id == id {
+            self.activePlayerItem = bump(activePlayerItem)
+        }
+        if let selectedItem, selectedItem.id == id {
+            self.selectedItem = bump(selectedItem)
+        }
+        if let quickPreviewItem, quickPreviewItem.id == id {
+            self.quickPreviewItem = bump(quickPreviewItem)
+        }
+        if let index = cachedMusicTracks.firstIndex(where: { $0.id == id }) {
+            cachedMusicTracks[index] = bump(cachedMusicTracks[index])
+            cachedMusicTracksByID[id] = cachedMusicTracks[index]
+        }
+        rebuildMusicSectionCaches(bumpContentRevision: false)
     }
 
     private func updatePlaybackInMemory(id: String, position: Double, duration: Double?) {

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import MediaLibCore
 import SwiftUI
 
@@ -33,8 +34,22 @@ enum HomeVividTokens {
     static let hoverShadowOpacity: Double = 0.18
     static let hoverShadowRadius: CGFloat = 22
     static let hoverShadowY: CGFloat = 8
-    static let musicRecommendationContentHeight: CGFloat = 358
-    static let dashboardPanelHeight: CGFloat = 236
+    static let widgetQuarterHeight: CGFloat = AppWidgetGridMetrics.homeHeight(.quarter)
+    static let widgetHalfHeight: CGFloat = AppWidgetGridMetrics.homeHeight(.half)
+    static let widgetTwoThirdsHeight: CGFloat = AppWidgetGridMetrics.homeHeight(.twoThirds)
+    static let widgetThreeQuartersHeight: CGFloat = AppWidgetGridMetrics.homeHeight(.threeQuarters)
+    static let widgetFullHeight: CGFloat = AppWidgetGridMetrics.homeHeight(.full)
+    static let widgetCompactHeight: CGFloat = widgetHalfHeight
+    static let widgetRegularHeight: CGFloat = widgetHalfHeight
+    static let widgetListHeight: CGFloat = widgetThreeQuartersHeight
+    static let widgetTallHeight: CGFloat = widgetThreeQuartersHeight
+    static let statCardHeight: CGFloat = widgetQuarterHeight * 0.75
+    static let musicRecommendationContentHeight: CGFloat = widgetThreeQuartersHeight
+    static let dashboardPanelHeight: CGFloat = widgetHalfHeight
+    static let statCardMinWidth: CGFloat = AppWidgetGridMetrics.fractionalMinWidth(.quarter)
+    static let dashboardPanelMinWidth: CGFloat = AppWidgetGridMetrics.fractionalMinWidth(.third)
+    static let musicListMinWidth: CGFloat = AppWidgetGridMetrics.fractionalMinWidth(.twoThirds)
+    static let playlistRailMinWidth: CGFloat = AppWidgetGridMetrics.fractionalMinWidth(.third)
 
     static func color(_ hex: String) -> Color {
         Color(nsColor: NSColor(appThemeHex: hex) ?? .labelColor)
@@ -148,9 +163,19 @@ struct HomeVividHeroCarousel: View {
             HomeVividHorizontalScrollBridge { delta in
                 step(delta, count: slides.count)
             }
-            .frame(width: 520)
-            .padding(.bottom, 54)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .allowsHitTesting(slides.count > 1)
+        }
+        .overlay {
+            HomeVividSidePagerControls(
+                hovering: $hovering,
+                canGoPrevious: current > 0,
+                canGoNext: current < slides.count - 1,
+                onPrevious: { stepClamped(-1, current: current, count: slides.count) },
+                onNext: { stepClamped(1, current: current, count: slides.count) },
+                itemCount: slides.count
+            )
+            .padding(.horizontal, -24)
         }
         .gesture(
             DragGesture(minimumDistance: 16)
@@ -176,6 +201,16 @@ struct HomeVividHeroCarousel: View {
         let current = ((index % count) + count) % count
         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.42)) {
             index = ((current + delta) % count + count) % count
+        }
+    }
+
+    private func stepClamped(_ delta: Int, current: Int, count: Int) {
+        guard count > 1 else { return }
+        let target = min(max(current + delta, 0), count - 1)
+        guard target != current else { return }
+        lastManualStepAt = Date()
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.42)) {
+            index = target
         }
     }
 }
@@ -248,6 +283,73 @@ private struct HomeVividHorizontalScrollBridge: NSViewRepresentable {
             accumulatedX = 0
             return true
         }
+    }
+}
+
+private struct HomeVividSidePagerControls: View {
+    /// 与外层内容共享同一个悬停状态：外层容器只覆盖组件自身的原始宽度，
+    /// 而箭头靠负 padding 视觉上"探出"到组件与页面边距之间的空白——那块区域
+    /// 在 SwiftUI 的命中测试意义上落在外层 `.onHover` 的框之外，鼠标一移过去
+    /// 外层 hover 就会先翻 false，箭头随即淡出、点不到。这里箭头自己也订阅
+    /// `onHover` 写回同一个 binding，鼠标进入箭头自身范围时保持可见。
+    @Binding var hovering: Bool
+    let canGoPrevious: Bool
+    let canGoNext: Bool
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+    let itemCount: Int
+
+    private var visible: Bool { hovering && itemCount > 1 }
+
+    var body: some View {
+        HStack {
+            sideButton(direction: .previous, enabled: canGoPrevious, action: onPrevious)
+            Spacer(minLength: 0)
+            sideButton(direction: .next, enabled: canGoNext, action: onNext)
+        }
+        .opacity(visible ? 1 : 0)
+        .animation(.easeOut(duration: visible ? 0.16 : 0.28), value: visible)
+        .allowsHitTesting(visible)
+        .onHover { hovering = $0 }
+    }
+
+    private func sideButton(direction: HomeVividSidePagerLine.Direction, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HomeVividSidePagerLine(direction: direction)
+                .stroke(
+                    enabled ? HomeVividTokens.textPrimary.opacity(0.68) : HomeVividTokens.textTertiary.opacity(0.34),
+                    style: StrokeStyle(lineWidth: 1.45, lineCap: .round, lineJoin: .round)
+                )
+                // 缩短箭头视觉长度（原 72pt 太长）；收紧命中区，让箭头能落在
+                // 组件与页面边距正中间，而不是紧贴组件或探到边距外沿。
+                .frame(width: 14, height: 40)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+}
+
+private struct HomeVividSidePagerLine: Shape {
+    enum Direction {
+        case previous
+        case next
+    }
+
+    let direction: Direction
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let insetX = rect.width * 0.28
+        let top = CGPoint(x: direction == .previous ? rect.maxX - insetX : rect.minX + insetX, y: rect.minY)
+        let middle = CGPoint(x: direction == .previous ? rect.minX + insetX : rect.maxX - insetX, y: rect.midY)
+        let bottom = CGPoint(x: direction == .previous ? rect.maxX - insetX : rect.minX + insetX, y: rect.maxY)
+        path.move(to: top)
+        path.addLine(to: middle)
+        path.addLine(to: bottom)
+        return path
     }
 }
 
@@ -455,7 +557,7 @@ struct HomeVividHero: View {
             .padding(.trailing, 30)
         }
         .frame(maxWidth: .infinity)
-        .frame(height: 246)
+        .frame(height: HomeVividTokens.widgetRegularHeight)
         .clipShape(RoundedRectangle(cornerRadius: HomeVividTokens.largeCardRadius, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: HomeVividTokens.largeCardRadius, style: .continuous))
         .onTapGesture(perform: onSelect)
@@ -560,11 +662,11 @@ struct HomeVividStatsGrid: View {
     let tiles: [HomeVividStatTile]
 
     var body: some View {
-        let columns = [GridItem(.adaptive(minimum: 182), spacing: 16)]
-        LazyVGrid(columns: columns, spacing: 16) {
+        HStack(alignment: .top, spacing: 16) {
             ForEach(Array(tiles.prefix(4).enumerated()), id: \.element.id) { index, tile in
                 let accent = HomeVividTokens.accentPair(seed: index)
                 HomeVividStatCard(tile: tile, pair: (tile.tint, accent.1))
+                    .frame(maxWidth: .infinity)
             }
         }
     }
@@ -609,7 +711,8 @@ private struct HomeVividStatCard: View {
             Spacer(minLength: 0)
         }
         .padding(18)
-        .frame(maxWidth: .infinity, minHeight: 78, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: HomeVividTokens.statCardHeight, alignment: .leading)
         .background(Color.white, in: RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous)
@@ -697,9 +800,11 @@ struct HomeVividPosterRow: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var autoScrollIndex = 0
     @State private var hovering = false
+    @State private var dragging = false
 
     private var displayItems: [MediaItem] { Array(items.prefix(12)) }
     private var autoScrollKey: String { displayItems.map(\.id).joined(separator: "|") }
+    private var pageStep: Int { variant == .landscape ? 2 : 3 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -731,15 +836,26 @@ struct HomeVividPosterRow: View {
                         .padding(.top, 8)
                     }
                     .verticalScrollPassthroughFromNestedHorizontal()
-                    .homeVividHorizontalMouseDragScroll()
+                    .homeVividHorizontalMouseDragScroll { dragging = $0 }
                     .homeVividAllowsOverflowShadow()
                     .onHover { hovering = $0 }
+                    .overlay {
+                        HomeVividSidePagerControls(
+                            hovering: $hovering,
+                            canGoPrevious: autoScrollIndex > 0,
+                            canGoNext: autoScrollIndex < displayItems.count - 1,
+                            onPrevious: { scrollByPage(-1, proxy: proxy) },
+                            onNext: { scrollByPage(1, proxy: proxy) },
+                            itemCount: displayItems.count
+                        )
+                        .padding(.horizontal, -24)
+                    }
                     .task(id: autoScrollKey) {
                         autoScrollIndex = 0
                         guard displayItems.count > 1, !reduceMotion else { return }
                         while !Task.isCancelled {
                             do { try await Task.sleep(nanoseconds: 4_800_000_000) } catch { return }
-                            guard !Task.isCancelled, !hovering, scenePhase == .active, displayItems.count > 1 else { continue }
+                            guard !Task.isCancelled, !hovering, !dragging, scenePhase == .active, displayItems.count > 1 else { continue }
                             autoScrollIndex = (autoScrollIndex + 1) % displayItems.count
                             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.55)) {
                                 proxy.scrollTo(displayItems[autoScrollIndex].id, anchor: .leading)
@@ -756,6 +872,16 @@ struct HomeVividPosterRow: View {
     private func notifyRestoreIfNeeded() {
         guard let restoreAnchorID, items.contains(where: { $0.id == restoreAnchorID }) else { return }
         onDidRestoreAnchor?()
+    }
+
+    private func scrollByPage(_ direction: Int, proxy: ScrollViewProxy) {
+        guard !displayItems.isEmpty else { return }
+        let target = min(max(autoScrollIndex + direction * pageStep, 0), displayItems.count - 1)
+        guard target != autoScrollIndex else { return }
+        autoScrollIndex = target
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.36)) {
+            proxy.scrollTo(displayItems[target].id, anchor: .leading)
+        }
     }
 }
 
@@ -825,7 +951,7 @@ struct HomeVividPosterCollectionPage: View {
     }
 }
 
-enum HomeVividPosterVariant {
+enum HomeVividPosterVariant: Equatable {
     case poster
     case progress
     case landscape
@@ -1344,12 +1470,20 @@ struct HomeVividMusicRecommendation: View {
                 actionTint: HomeVividTokens.pink,
                 action: onOpenMusic
             )
-            HStack(alignment: .top, spacing: 16) {
-                trackList
-                    .frame(maxWidth: .infinity)
-                playlistStack
-                    .frame(width: 246)
+            GeometryReader { geo in
+                let gap: CGFloat = 16
+                let available = max(0, geo.size.width - gap)
+                let railWidth = min(max(210, available / 3), max(210, available * 0.38))
+                let listWidth = max(0, available - railWidth)
+                HStack(alignment: .top, spacing: gap) {
+                    trackList
+                        .frame(width: listWidth)
+                    playlistStack
+                        .frame(width: railWidth)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(height: HomeVividTokens.musicRecommendationContentHeight)
         }
     }
 
@@ -1381,7 +1515,7 @@ struct HomeVividMusicRecommendation: View {
                 }
                 .padding(.trailing, 8)
             }
-            .frame(height: 286)
+            .frame(maxHeight: .infinity)
             .homeVividDelayedScrollUnlock()
         }
         .padding(8)
@@ -1558,21 +1692,27 @@ private struct HomeVividPlaylistCard: View {
     }
 
     private var cardBackground: some View {
-        ZStack {
+        let swatch = MediaPlaceholderPalette.posterSwatch(for: "\(summary.id)|\(summary.title)", mediaType: .music)
+        return ZStack {
             LinearGradient(
                 colors: [
-                    HomeVividTokens.color("3A1A4A"),
-                    HomeVividTokens.color("5B214F"),
-                    HomeVividTokens.color("1A1030")
+                    swatch.base,
+                    swatch.depth
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
             RadialGradient(
-                colors: [HomeVividTokens.pink.opacity(0.35), .clear],
+                colors: [swatch.accent.opacity(0.38), .clear],
                 center: UnitPoint(x: 0.82, y: 0.12),
                 startRadius: 0,
                 endRadius: 220
+            )
+            RadialGradient(
+                colors: [.white.opacity(0.12), .clear],
+                center: UnitPoint(x: 0.18, y: 0.18),
+                startRadius: 0,
+                endRadius: 170
             )
             Text(summary.id.contains("synthetic.recommend") || summary.title.contains("推荐") ? "30" : String(summary.title.prefix(1)))
                 .font(.system(size: 108, weight: .black, design: .rounded))
@@ -1662,8 +1802,10 @@ private extension View {
         modifier(HomeVividHoverLiftModifier(cornerRadius: cornerRadius))
     }
 
-    func homeVividHorizontalMouseDragScroll() -> some View {
-        modifier(HomeVividHorizontalMouseDragModifier())
+    func homeVividHorizontalMouseDragScroll(
+        onDraggingChanged: @escaping (Bool) -> Void = { _ in }
+    ) -> some View {
+        horizontalMouseDragScroll(onDraggingChanged: onDraggingChanged)
     }
 
     func homeVividDelayedScrollUnlock(delay: UInt64 = 520_000_000) -> some View {
@@ -1710,39 +1852,6 @@ private struct HomeVividDelayedScrollUnlockModifier: ViewModifier {
     }
 }
 
-private struct HomeVividHorizontalMouseDragModifier: ViewModifier {
-    @State private var scrollView: NSScrollView?
-    @State private var lastTranslation: CGFloat = 0
-
-    func body(content: Content) -> some View {
-        content
-            .background(HomeVividScrollViewResolver { scrollView = $0 })
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 8, coordinateSpace: .local)
-                    .onChanged { value in
-                        guard let scrollView else { return }
-                        let delta = value.translation.width - lastTranslation
-                        lastTranslation = value.translation.width
-                        scroll(scrollView, by: -delta)
-                    }
-                    .onEnded { _ in
-                        lastTranslation = 0
-                    }
-            )
-    }
-
-    private func scroll(_ scrollView: NSScrollView, by delta: CGFloat) {
-        guard let documentView = scrollView.documentView else { return }
-        let clipView = scrollView.contentView
-        let maxX = max(documentView.bounds.width - clipView.bounds.width, 0)
-        guard maxX > 0 else { return }
-        let nextX = min(max(clipView.bounds.origin.x + delta, 0), maxX)
-        guard nextX != clipView.bounds.origin.x else { return }
-        clipView.scroll(to: NSPoint(x: nextX, y: clipView.bounds.origin.y))
-        scrollView.reflectScrolledClipView(clipView)
-    }
-}
-
 private struct HomeVividScrollViewResolver: NSViewRepresentable {
     let onResolve: (NSScrollView?) -> Void
 
@@ -1766,6 +1875,7 @@ struct HomeVividContinueListening: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var autoScrollIndex = 0
     @State private var hovering = false
+    @State private var dragging = false
 
     private var displayTracks: [MediaItem] { Array(tracks.prefix(8)) }
     private var autoScrollKey: String { displayTracks.map(\.id).joined(separator: "|") }
@@ -1795,14 +1905,25 @@ struct HomeVividContinueListening: View {
                     .padding(.vertical, 6)
                 }
                 .verticalScrollPassthroughFromNestedHorizontal()
-                .homeVividHorizontalMouseDragScroll()
+                .homeVividHorizontalMouseDragScroll { dragging = $0 }
                 .onHover { hovering = $0 }
+                .overlay {
+                    HomeVividSidePagerControls(
+                        hovering: $hovering,
+                        canGoPrevious: autoScrollIndex > 0,
+                        canGoNext: autoScrollIndex < displayTracks.count - 1,
+                        onPrevious: { scrollByPage(-1, proxy: proxy) },
+                        onNext: { scrollByPage(1, proxy: proxy) },
+                        itemCount: displayTracks.count
+                    )
+                    .padding(.horizontal, -24)
+                }
                 .task(id: autoScrollKey) {
                     autoScrollIndex = 0
                     guard displayTracks.count > 1, !reduceMotion else { return }
                     while !Task.isCancelled {
                         do { try await Task.sleep(nanoseconds: 4_800_000_000) } catch { return }
-                        guard !Task.isCancelled, !hovering, scenePhase == .active, displayTracks.count > 1 else { continue }
+                        guard !Task.isCancelled, !hovering, !dragging, scenePhase == .active, displayTracks.count > 1 else { continue }
                         autoScrollIndex = (autoScrollIndex + 1) % displayTracks.count
                         withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.55)) {
                             proxy.scrollTo(displayTracks[autoScrollIndex].id, anchor: .leading)
@@ -1810,6 +1931,16 @@ struct HomeVividContinueListening: View {
                     }
                 }
             }
+        }
+    }
+
+    private func scrollByPage(_ direction: Int, proxy: ScrollViewProxy) {
+        guard !displayTracks.isEmpty else { return }
+        let target = min(max(autoScrollIndex + direction * 3, 0), displayTracks.count - 1)
+        guard target != autoScrollIndex else { return }
+        autoScrollIndex = target
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.36)) {
+            proxy.scrollTo(displayTracks[target].id, anchor: .leading)
         }
     }
 }
@@ -1903,7 +2034,7 @@ struct HomeVividPhotoWall: View {
     }
 
     private var photoWallHeight: CGFloat {
-        items.count <= 4 ? 188 : 430
+        items.count <= 4 ? HomeVividTokens.widgetCompactHeight : HomeVividTokens.widgetTallHeight
     }
 
     @ViewBuilder
@@ -1923,31 +2054,35 @@ struct HomeVividPhotoWall: View {
             let focusWidth = min(252, max(208, size.width * 0.22))
             let midWidth = max(128, (size.width - tallWidth - focusWidth - spacing * 4) / 3)
             let bottomWidth = max(120, (size.width - spacing * 3) / 4)
+            let hasBottomRow = items.count > 8
+            let topRowHeight = hasBottomRow ? max(220, (size.height - spacing) * 0.72) : size.height
+            let bottomRowHeight = hasBottomRow ? max(86, size.height - topRowHeight - spacing) : 0
+            let stackItemHeight = max(96, (topRowHeight - spacing) / 2)
             let visible = arrangedItems(for: [
-                tallWidth / 304,
-                midWidth / 146,
-                midWidth / 146,
-                midWidth / 146,
-                midWidth / 146,
-                focusWidth / 304,
-                midWidth / 146,
-                midWidth / 146,
-                bottomWidth / 112,
-                bottomWidth / 112,
-                bottomWidth / 112,
-                bottomWidth / 112
+                tallWidth / topRowHeight,
+                midWidth / stackItemHeight,
+                midWidth / stackItemHeight,
+                midWidth / stackItemHeight,
+                midWidth / stackItemHeight,
+                focusWidth / topRowHeight,
+                midWidth / stackItemHeight,
+                midWidth / stackItemHeight,
+                bottomRowHeight > 0 ? bottomWidth / bottomRowHeight : 1,
+                bottomRowHeight > 0 ? bottomWidth / bottomRowHeight : 1,
+                bottomRowHeight > 0 ? bottomWidth / bottomRowHeight : 1,
+                bottomRowHeight > 0 ? bottomWidth / bottomRowHeight : 1
             ])
             VStack(spacing: spacing) {
                 HStack(alignment: .top, spacing: spacing) {
                     if visible.indices.contains(0) {
-                        photoButton(item: visible[0], index: 0, width: tallWidth, height: 304)
+                        photoButton(item: visible[0], index: 0, width: tallWidth, height: topRowHeight)
                     }
-                    photoStack(items: visible, indices: [1, 2], width: midWidth, height: 146)
-                    photoStack(items: visible, indices: [3, 4], width: midWidth, height: 146)
+                    photoStack(items: visible, indices: [1, 2], width: midWidth, height: stackItemHeight)
+                    photoStack(items: visible, indices: [3, 4], width: midWidth, height: stackItemHeight)
                     if visible.indices.contains(5) {
-                        photoButton(item: visible[5], index: 5, width: focusWidth, height: 304)
+                        photoButton(item: visible[5], index: 5, width: focusWidth, height: topRowHeight)
                     }
-                    photoStack(items: visible, indices: [6, 7], width: midWidth, height: 146)
+                    photoStack(items: visible, indices: [6, 7], width: midWidth, height: stackItemHeight)
                 }
                 if visible.count > 8 {
                     HStack(spacing: spacing) {
@@ -1956,12 +2091,13 @@ struct HomeVividPhotoWall: View {
                                 item: item,
                                 index: offset + 8,
                                 width: bottomWidth,
-                                height: 112
+                                height: bottomRowHeight
                             )
                         }
                     }
                 }
             }
+            .frame(height: size.height, alignment: .top)
         }
     }
 

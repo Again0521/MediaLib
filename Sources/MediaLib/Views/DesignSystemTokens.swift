@@ -8,8 +8,8 @@ enum AppSpacing {
     static let pageHeaderIconToText: CGFloat = 8
     static let pageHeaderIconSafeSlot: CGFloat = 62
     static let pageHeaderIconSafeHeight: CGFloat = 68
-    /// 右侧操作区按副标题底边而不是图标安全槽底边对齐；仅在页头存在副标题时使用。
-    static let pageHeaderActionSubtitleBottomLift: CGFloat = 17
+    /// 右侧操作区优先按副标题真实底边测量对齐；该值只作为首次测量前的短暂 fallback。
+    static let pageHeaderActionSubtitleBottomFallbackLift: CGFloat = 6
     static let pageHeaderActionGap: CGFloat = 10
     static let card: CGFloat = 14
     static let settingsSectionHeaderToCard: CGFloat = 12

@@ -248,7 +248,7 @@ struct PersonDetailView: View {
                         }
                     }
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 11, horizontalPadding: 12, minHeight: 32))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 32))
             }
         }
         .padding(18)

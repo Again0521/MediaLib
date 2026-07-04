@@ -40,7 +40,8 @@ enum VividIconGridDebugTool {
         ("保险库", "lock.rectangle.stack"),
         ("正在观看", "play.circle"), ("想看", "bookmark"), ("喜欢", "heart"),
         ("未观看", "eye"), ("已观看", "checkmark.circle"), ("未匹配", "questionmark.circle"),
-        ("同步", "arrow.triangle.2.circlepath"), ("主题", "paintbrush")
+        ("同步", "arrow.triangle.2.circlepath"), ("主题", "paintbrush"),
+        ("智能集合", "sparkles.rectangle.stack")
     ]
 
     static func runAndExitIfRequested() {

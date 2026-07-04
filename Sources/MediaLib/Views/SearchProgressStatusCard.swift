@@ -10,10 +10,10 @@ struct SearchProgressStatusCard: View {
     var body: some View {
         HStack(spacing: 14) {
             ZStack {
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(AppColors.selectedGlassTint.opacity(0.18))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
                             .strokeBorder(.white.opacity(0.42), lineWidth: 0.8)
                     }
                 Image(systemName: systemImage)

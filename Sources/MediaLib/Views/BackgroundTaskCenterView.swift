@@ -108,7 +108,7 @@ struct BackgroundTaskCenterView: View {
         .appInteractiveSurface(
             active: active,
             selected: task.state.isActive,
-            cornerRadius: 15,
+            cornerRadius: 16,
             tint: taskStateTint(task.state),
             intensity: task.state.isActive ? 0.84 : 0.62,
             scale: 1.003,

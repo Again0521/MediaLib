@@ -3,7 +3,6 @@ import SwiftUI
 /// 首次启动引导（Phase 4）：分步介绍核心能力，结束后写入 hasCompletedOnboarding 不再弹出。
 /// 最后一步可直接「开始使用」或「现在添加媒体源」（跳转到媒体源页）。
 struct OnboardingView: View {
-    @Environment(\.colorScheme) private var colorScheme
     /// goToSources = true 表示用户希望立即去添加媒体源。
     let onFinish: (_ goToSources: Bool) -> Void
 
@@ -18,7 +17,7 @@ struct OnboardingView: View {
 
     private let pages: [Page] = [
         Page(
-            systemImage: "play.rectangle.on.rectangle",
+            systemImage: "play.rectangle",
             title: "你好，欢迎使用 MediaLIB",
             subtitle: "你的电影、剧集、动漫和音乐，从此有一个家。",
             bullets: [
@@ -38,7 +37,7 @@ struct OnboardingView: View {
             ]
         ),
         Page(
-            systemImage: "sparkles.rectangle.stack",
+            systemImage: "tag",
             title: "让海报墙好看起来",
             subtitle: "封面、简介、评分和歌词，一键帮你补全。",
             bullets: [
@@ -48,7 +47,7 @@ struct OnboardingView: View {
             ]
         ),
         Page(
-            systemImage: "film.stack",
+            systemImage: "play.circle",
             title: "想怎么看，就怎么看",
             subtitle: "内置播放器很能打，不输你熟悉的桌面播放器。",
             bullets: [
@@ -87,14 +86,15 @@ struct OnboardingView: View {
             controls
         }
         .frame(width: 560, height: 520)
-        .background(AppPageBackground())
+        .background(AppPageBackground(includeDirectionalLight: false))
     }
 
     private var content: some View {
         let page = pages[step]
         return VStack(spacing: 20) {
-            PlayfulSymbolIcon(systemImage: page.systemImage, size: 84)
-                .padding(.top, 44)
+            VividPageIcon(systemImage: page.systemImage, chip: 92, glyph: 56, tint: AppColors.referenceBlue)
+                .frame(width: 92, height: 92)
+                .padding(.top, 40)
 
             VStack(spacing: 8) {
                 Text(page.title)
@@ -109,7 +109,7 @@ struct OnboardingView: View {
 
             // 要点块：对勾位于每行开头，文字左对齐（首字竖向对齐）；
             // 块宽收缩到最长一行（fixedSize），整块居中后左右留白自然相等，
-            // 同时避免短句被拉得太开。
+            // 同时避免短句被拉得太开。改用与弹窗系统统一的扁平白卡（refCardBg+单层柔光）。
             VStack(alignment: .leading, spacing: 12) {
                 ForEach(page.bullets, id: \.self) { bullet in
                     HStack(alignment: .firstTextBaseline, spacing: 14) {
@@ -124,7 +124,6 @@ struct OnboardingView: View {
             }
             .padding(16)
             .staticSurfaceBackground(cornerRadius: 18, thickness: 0.96)
-            .repeatedCardChrome(false, cornerRadius: 18)
             .frame(maxWidth: 440, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.top, 4)
@@ -148,7 +147,7 @@ struct OnboardingView: View {
 
             HStack {
                 Button("跳过") { onFinish(false) }
-                    .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 34, thickness: 0.94))
+                    .buttonStyle(AppSheetSecondaryButtonStyle())
 
                 Spacer()
 
@@ -156,43 +155,29 @@ struct OnboardingView: View {
                     Button("上一步") {
                         withAnimation(AppMotion.standard) { step -= 1 }
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 16, minHeight: 36))
+                    .buttonStyle(AppSheetSecondaryButtonStyle())
                 }
 
                 if isLastStep {
                     Button("现在添加媒体源") { onFinish(true) }
-                        .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 16, minHeight: 36))
+                        .buttonStyle(AppSheetSecondaryButtonStyle())
                     Button("开始使用") { onFinish(false) }
-                        .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 18, minHeight: 36, prominent: true))
+                        .buttonStyle(AppSheetPrimaryButtonStyle())
                         .keyboardShortcut(.defaultAction)
                 } else {
                     Button("下一步") {
                         withAnimation(AppMotion.standard) { step += 1 }
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 18, minHeight: 36, prominent: true))
+                    .buttonStyle(AppSheetPrimaryButtonStyle())
                     .keyboardShortcut(.defaultAction)
                 }
             }
         }
         .padding(20)
-        .background {
-            LinearGradient(
-                colors: [
-                    AppColors.cleanPanelFill.opacity(colorScheme == .dark ? 0.54 : 0.74),
-                    AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.34 : 0.52)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
         .overlay(alignment: .top) {
-            LinearGradient(
-                colors: [.clear, AppColors.cleanPanelBorder.opacity(0.72), .clear],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(height: 0.8)
-            .padding(.horizontal, 20)
+            Rectangle()
+                .fill(AppColors.refRowDivider)
+                .frame(height: 1)
         }
     }
 }

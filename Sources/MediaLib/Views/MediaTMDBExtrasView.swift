@@ -123,7 +123,7 @@ struct MediaTMDBExtrasView: View {
                                     Label(link.title, systemImage: link.systemImage)
                                 }
                                 .buttonStyle(LiquidGlassButtonStyle(
-                                    cornerRadius: 11,
+                                    cornerRadius: 12,
                                     horizontalPadding: 13,
                                     minHeight: 32
                                 ))

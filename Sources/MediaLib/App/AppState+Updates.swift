@@ -38,8 +38,12 @@ extension AppState {
             }
                 self.markUpdateCheckSucceeded()
                 if !manual {
-                    guard !self.settings.updateRemindersDisabled,
-                          self.settings.updateSkippedVersion != info.tagName else { return }
+                    if self.settings.updateSkippedVersion != nil,
+                       self.settings.updateSkippedVersion != info.tagName {
+                        self.settings.updateSkippedVersion = nil
+                        self.saveSettings()
+                    }
+                    guard self.settings.updateSkippedVersion != info.tagName else { return }
                 }
                 self.availableUpdate = info
         } catch {
@@ -56,7 +60,6 @@ extension AppState {
 
     /// 每天第一次启动时静默检查一次更新；失败时保留重试机会，但用短间隔节流避免反复打 GitHub。
     func checkForUpdatesDailyIfNeeded() {
-        guard !settings.updateRemindersDisabled else { return }
         let defaults = UserDefaults.standard
         let now = Date()
         if let lastAttempt = defaults.object(forKey: "MediaLib.update.lastBackgroundAttempt") as? Date,

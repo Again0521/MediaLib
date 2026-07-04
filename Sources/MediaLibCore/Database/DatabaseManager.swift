@@ -1,7 +1,9 @@
 import Foundation
 import SQLite3
 
-public final class DatabaseManager {
+// 内部所有可变状态（db 句柄）只通过私有串行 queue 访问，线程安全由队列约束保证，
+// 编译器无法静态验证这一点，因此显式标注 @unchecked Sendable（而非让调用处到处 @Sendable 警告）。
+public final class DatabaseManager: @unchecked Sendable {
     public static let currentSchemaVersion = 20
 
     private var db: OpaquePointer?
@@ -201,7 +203,13 @@ public final class DatabaseManager {
             case .null:
                 result = sqlite3_bind_null(statement, index)
             case .text(let text):
-                result = sqlite3_bind_text(statement, index, text, -1, SQLITE_TRANSIENT)
+                // 用显式 UTF-8 字节长度绑定，而非 `-1`(strlen)：后者遇到字符串内嵌的 \0 会截断
+                // （且 Swift String→C 字符串桥接本身也在 \0 处截断），导致含 NUL 的文本落库时丢数据。
+                // withUnsafeBufferPointer + SQLITE_TRANSIENT：SQLite 会立刻拷贝这段字节，指针出作用域后失效也安全。
+                let utf8 = Array(text.utf8)
+                result = utf8.withUnsafeBufferPointer { buffer in
+                    sqlite3_bind_text(statement, index, buffer.baseAddress.map { UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self) }, Int32(buffer.count), SQLITE_TRANSIENT)
+                }
             case .int(let int):
                 result = sqlite3_bind_int64(statement, index, int)
             case .double(let double):
@@ -1168,7 +1176,11 @@ public struct SQLiteRow {
     public func string(_ index: Int32) -> String? {
         guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
         guard let cString = sqlite3_column_text(statement, index) else { return nil }
-        return String(cString: cString)
+        // 用 sqlite3_column_bytes 拿到真实字节数按长度读取，而非 String(cString:)——后者遇到内嵌 \0
+        // 会在此截断（与绑定端 strlen 截断相对应）。按字节长度构造才能无损还原含 NUL 的文本。
+        let byteCount = Int(sqlite3_column_bytes(statement, index))
+        let buffer = UnsafeRawBufferPointer(start: cString, count: byteCount)
+        return String(decoding: buffer, as: UTF8.self)
     }
 
     public func int(_ index: Int32) -> Int? {

@@ -40,7 +40,7 @@ public final class FilenameParser {
             #"(?:^|\D)(19\d{2}|20\d{2})(?:\D|$)"#,
             #"\[[^\]]*\]|\([^\)]*\)|【[^】]*】"#,
             #"\s*[\(\[]?(19\d{2}|20\d{2})[\)\]]?\s*$"#,
-            #"(?i)[\s._-]*[\(\[]?(19\d{2}|20\d{2})[\)\]]?"#,
+            #"(?i)[\s._-]*[\(\[]?(?<![\p{L}\d])(19\d{2}|20\d{2})(?![\p{L}\d])[\)\]]?"#,
             #"^\d{3,4}p$"#
         ]
         return Dictionary(uniqueKeysWithValues: patterns.compactMap { pattern in
@@ -195,7 +195,9 @@ public final class FilenameParser {
     private func parseMovie(filename: String, parentName: String) -> ParsedMediaFile {
         let normalized = normalizeSeparators(filename)
         let year = year(from: normalized) ?? year(from: parentName)
-        let movieYearPattern = #"(?i)[\s._-]*[\(\[]?(19\d{2}|20\d{2})[\)\]]?"#
+        // 只剥离「独立的」年份（两侧不紧贴字母/数字）：括号里的发行年、空格分隔的年份会被清掉，
+        // 而与标题文字粘在一起的年份（如「2001太空漫游」的 2001）保留，避免把标题里的数字误删。
+        let movieYearPattern = #"(?i)[\s._-]*[\(\[]?(?<![\p{L}\d])(19\d{2}|20\d{2})(?![\p{L}\d])[\)\]]?"#
         let titleWithoutYear: String
         if let regex = Self.compiledPatterns[movieYearPattern] {
             let ns = normalized as NSString
@@ -209,7 +211,10 @@ public final class FilenameParser {
         }
         var title = cleanedTitle(titleWithoutYear)
         if title.isEmpty || title.count <= 2 {
-            title = cleanedTitle(parentName)
+            // 标题本身就是一个年份数字（《1984》《2001》《1917》）时，剥离年份会把它清空——
+            // 退回到「保留年份、只清括号/噪声」的清洗结果，避免误用目录名当标题。
+            let titleKeepingYear = cleanedTitle(normalized)
+            title = titleKeepingYear.isEmpty ? cleanedTitle(parentName) : titleKeepingYear
         }
         return ParsedMediaFile(kind: .movie, title: title, year: year)
     }
@@ -239,7 +244,9 @@ public final class FilenameParser {
         let tokens = bracketless
             .replacingOccurrences(of: "-", with: " ")
             .split { $0.isWhitespace || $0 == "." || $0 == "_" }
+            .map { Self.strippingEmoji(String($0)) }        // 去掉压制组爱加的装饰性 emoji（🔥✨ 等），媒体标题不含 emoji
             .filter { token in
+                if token.isEmpty { return false }
                 let lower = token.lowercased()
                 if noiseTokens.contains(lower) { return false }
                 if let regex = resolutionRegex {
@@ -249,6 +256,12 @@ public final class FilenameParser {
                 return true
             }
         return tokens.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 移除字符串里的 emoji 展示字符（如 🔥✨），保留普通文字/数字/标点。
+    /// 只按 `isEmojiPresentation` 过滤：ASCII 数字、`#`、`*` 等虽然 `isEmoji`=true 但不是 emoji 展示，会被保留。
+    private static func strippingEmoji(_ value: String) -> String {
+        String(String.UnicodeScalarView(value.unicodeScalars.filter { !$0.properties.isEmojiPresentation }))
     }
 
     private func seriesName(parentName: String, grandParentName: String) -> String {
@@ -269,9 +282,15 @@ public final class FilenameParser {
     }
 
     private func year(from value: String) -> Int? {
-        guard let match = firstMatch(pattern: #"(?:^|\D)(19\d{2}|20\d{2})(?:\D|$)"#, in: value),
-              match.count >= 2 else { return nil }
-        return Int(match[1])
+        // 取**最后**一个年份而非第一个：发行年惯例上跟在标题后面/写在括号里，标题本身却常含年份数字
+        // （如《银翼杀手 2049》《2012》《1917》）。取第一个会把标题里的数字误当发行年；取最后一个能
+        // 正确落到真正的发行年（"Blade Runner 2049 (2017)" → 2017；"2001太空漫游…1968…" → 1968）。
+        guard let regex = Self.compiledPatterns[#"(?:^|\D)(19\d{2}|20\d{2})(?:\D|$)"#] else { return nil }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        let matches = regex.matches(in: value, range: range)
+        guard let last = matches.last, last.numberOfRanges >= 2,
+              let captured = Range(last.range(at: 1), in: value) else { return nil }
+        return Int(value[captured])
     }
 
     private func firstMatch(pattern: String, in value: String) -> [String]? {

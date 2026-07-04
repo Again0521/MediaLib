@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import MediaLibCore
 import SwiftUI
 
@@ -3069,7 +3070,7 @@ private struct HomeMusicMiniRow: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
-        .staticSurfaceBackground(cornerRadius: 15, thickness: 0.92)
+        .staticSurfaceBackground(cornerRadius: 16, thickness: 0.92)
         .accessibilityElement(children: .combine)
     }
 }

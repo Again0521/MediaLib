@@ -197,7 +197,9 @@ struct MusicTagScraperSheet: View {
     }
 
     private var controlDeck: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
+            // 筛选与选项：范围/搜索/开关一组，与下方「进度+操作」用发丝线隔开，
+            // 避免两组不相关的控件挤在同一行里显得杂乱。
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .center, spacing: 12) {
                     scopePicker
@@ -217,6 +219,11 @@ struct MusicTagScraperSheet: View {
                 }
             }
 
+            Rectangle()
+                .fill(AppColors.refRowDivider)
+                .frame(height: 1)
+
+            // 进度与操作：三个按钮统一同一高度对齐成一排，主操作用强调色区分，不再靠高度不一致来分主次。
             HStack(spacing: 10) {
                 Label(progressText, systemImage: isWorking ? "hourglass" : "waveform")
                     .font(.caption)
@@ -230,7 +237,7 @@ struct MusicTagScraperSheet: View {
                 } label: {
                     Label("全选", systemImage: "checkmark.circle")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 11, horizontalPadding: 10, minHeight: 30))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
                 .disabled(candidates.isEmpty || isWorking)
 
                 Button {
@@ -238,7 +245,7 @@ struct MusicTagScraperSheet: View {
                 } label: {
                     Label("清空", systemImage: "circle")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 11, horizontalPadding: 10, minHeight: 30))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
                 .disabled(candidates.isEmpty || isWorking)
 
                 Button {
@@ -308,7 +315,10 @@ struct MusicTagScraperSheet: View {
                             .padding(.horizontal, 3)
                         }
                     }
-                    .padding(.vertical, 5)
+                    // 每行都是独立投影卡片(selected 态阴影更重)，ScrollView 默认按自身边界硬裁切内容，
+                    // 净空太小会把首尾行的柔光切成直角硬边——上下各留够净空。
+                    .padding(.top, 8)
+                    .padding(.bottom, 18)
                 }
                 .transaction { transaction in
                     transaction.animation = nil
@@ -343,7 +353,7 @@ struct MusicTagScraperSheet: View {
                 } label: {
                     Label("停止", systemImage: "stop.circle")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 34))
+                .buttonStyle(AppSheetSecondaryButtonStyle())
             }
 
             Button {
@@ -351,12 +361,12 @@ struct MusicTagScraperSheet: View {
             } label: {
                 Label(writeFileTags ? "写入所选" : "更新所选", systemImage: writeFileTags ? "square.and.arrow.down" : "checkmark.seal")
             }
-            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 13, horizontalPadding: 16, minHeight: 36, prominent: true))
+            .buttonStyle(AppSheetPrimaryButtonStyle())
             .disabled(isWorking || selectedCount == 0)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .staticSurfaceBackground(cornerRadius: 17, thickness: 1.02)
+        .staticSurfaceBackground(cornerRadius: 16, thickness: 1.02)
     }
 
     private func selectAll(_ selected: Bool) {
@@ -633,7 +643,7 @@ private struct MusicTagCandidateRow: View {
                         .foregroundStyle(.orange)
                         .padding(.horizontal, 9)
                         .frame(height: 26)
-                        .staticSurfaceBackground(cornerRadius: 13, thickness: 0.88)
+                        .staticSurfaceBackground(cornerRadius: 12, thickness: 0.88)
                 }
 
                 MusicTagStatusPill(status: candidate.status)
@@ -725,7 +735,7 @@ private struct MusicTagDraftEditor: View {
                     .scrollContentBackground(.hidden)
                     .padding(8)
                     .frame(minHeight: 76, maxHeight: 112)
-                    .staticSurfaceBackground(cornerRadius: 11, thickness: 0.9)
+                    .staticSurfaceBackground(cornerRadius: 12, thickness: 0.9)
             }
         }
         .padding(12)

@@ -304,6 +304,10 @@ public enum VideoFramePreviewGenerator {
         cache.totalCostLimit = 32 * 1024 * 1024
     }
 
+    /// 故事板抽帧的绝对分桶上限：无论视频多长，总帧数都不超过这个数。
+    /// 防止百小时级的监控/直播流按固定 120s 间隔算出数千帧抽帧请求，撑爆内存与线程池。
+    private static let storyboardMaxBuckets = 1200.0
+
     private static func segmentInterval(duration: Double, preferCoarse: Bool) -> Double {
         guard duration.isFinite, duration > 0 else {
             return preferCoarse ? 18 : 12
@@ -311,7 +315,10 @@ public enum VideoFramePreviewGenerator {
         let targetSegments = preferCoarse ? 84.0 : 96.0
         let minimum = preferCoarse ? 12.0 : 8.0
         let maximum = preferCoarse ? 120.0 : 90.0
-        return min(max(duration / targetSegments, minimum), maximum)
+        let base = min(max(duration / targetSegments, minimum), maximum)
+        // 超长视频：把间隔进一步拉大到「至少 duration / 上限」，让总分桶数封顶在 storyboardMaxBuckets。
+        // 普通时长下 base 远大于这个值，不受影响；只有极长时长才会触发步长递增。
+        return max(base, duration / storyboardMaxBuckets)
     }
 
     private static func avFoundationImage(filePath: String, seconds: Double) -> NSImage? {

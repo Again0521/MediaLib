@@ -73,7 +73,7 @@ struct VideoManualCollectionSheet: View {
 
             AppSheetActionFooter {
                 Button("取消", action: onCancel)
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight))
+                    .buttonStyle(AppSheetSecondaryButtonStyle())
                     .keyboardShortcut(.cancelAction)
                 Button {
                     var collection = request.collection
@@ -83,7 +83,7 @@ struct VideoManualCollectionSheet: View {
                 } label: {
                     Label("保存", systemImage: "checkmark")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: AppControlMetrics.defaultButtonHeight, prominent: true))
+                .buttonStyle(AppSheetPrimaryButtonStyle())
                 .disabled(trimmedName.isEmpty)
                 .keyboardShortcut(.defaultAction)
             }

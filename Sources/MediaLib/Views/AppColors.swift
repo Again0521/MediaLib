@@ -301,11 +301,14 @@ enum AppMotion {
     }
 
     static var musicPlayerExpansion: AnyTransition {
-        // 顶部白条根因之一：插入时用 opacity 渐入，半透明的那几帧会露出底下的 AppKit 标题栏（白条）。
-        // 改为插入瞬间出现（identity）——不透明专辑底色第一帧就盖住整窗含标题栏区域，层次变化交给内部入场动画；
-        // 收起仍用 opacity 渐出，避免突兀。
-        .asymmetric(
-            insertion: .identity,
+        // 全屏专辑底板必须从第一帧就占满窗口；几何焦点交给封面 matchedGeometryEffect
+        // 和展开页内部 entrance 动画表达，外层只做透明度过渡。
+        // 白条安全性依据：expand/minimize 全程由 musicTransitionShieldActive 的不透明专辑底色盾
+        // 先行盖住整窗（含标题栏），因此插入/移除阶段的半透明帧只会与同色系盾底混合，
+        // 不会露出 AppKit 标题栏或桌面。不要在这里 scale 整个播放器：SwiftUI overlay 的
+        // 布局边界是内容区，整页缩放/裁剪会重新露出标题栏或产生矩形幕布感。
+        return .asymmetric(
+            insertion: .opacity,
             removal: .opacity
         )
     }
@@ -1678,11 +1681,14 @@ extension View {
     func staticSurfaceBackground(
         selected: Bool = false,
         cornerRadius: CGFloat = AppRadius.control,
-        thickness: Double = AppGlassMetrics.Thickness.surface
+        thickness: Double = AppGlassMetrics.Thickness.surface,
+        shadowed: Bool = true
     ) -> some View {
         // 系统页面 1:1：通用卡片统一为白底 + #EDF0F5 卡边，常态不投影。
+        // shadowed=false：嵌套在另一张已经投影的外层卡片内时使用，避免行/子卡片各自投影
+        // 密集堆叠、彼此的柔和阴影相互重叠成一片「发闷发硬」的色块（本应是单层柔光）。
         background {
-            ReferenceCardSurface(selected: selected, cornerRadius: cornerRadius)
+            ReferenceCardSurface(selected: selected, cornerRadius: cornerRadius, shadowed: shadowed)
         }
         .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
     }
@@ -1715,6 +1721,12 @@ extension View {
             lift: lift,
             castsHoverShadow: castsHoverShadow
         ))
+    }
+
+    /// 与首页卡片同款的悬停动效：轻微上浮(-4pt) + 渐显投影，`.easeOut(0.24)`。
+    /// 供仪表盘等非首页卡片补上一致的鼠标响应（此前只有列表行有 hover 高亮，卡片本身是静态的）。
+    func hoverLiftEffect(cornerRadius: CGFloat) -> some View {
+        modifier(HoverLiftEffectModifier(cornerRadius: cornerRadius))
     }
 
     func liquidGlass(
@@ -1785,6 +1797,7 @@ struct ReferenceCardSurface: View {
     @Environment(\.colorScheme) private var colorScheme
     var selected: Bool = false
     var cornerRadius: CGFloat = AppRadius.card
+    var shadowed: Bool = true
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -1803,15 +1816,38 @@ struct ReferenceCardSurface: View {
         }
         .clipShape(shape)
         .shadow(
-            color: AppColors.refCardShadow.opacity(colorScheme == .dark ? 0.18 : 0.10),
-            radius: 15,
+            color: shadowed ? AppColors.refCardShadow.opacity(colorScheme == .dark ? 0.18 : 0.10) : .clear,
+            radius: shadowed ? 15 : 0,
             x: 0,
-            y: 6
+            y: shadowed ? 6 : 0
         )
     }
 }
 
 /// 普通页面统一交互表面：常态白卡，悬停时只做绘制层高光、轻微 transform 与圆角柔影。
+/// 首页卡片同款的独立悬停上浮效果（与 `AppInteractiveSurfaceModifier` 不同：不改背景/选中态，
+/// 只负责"轻微上浮 + 渐显投影"这一层动效，方便直接叠加到已有卡片背景之上）。
+struct HoverLiftEffectModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
+    let cornerRadius: CGFloat
+    @State private var hovering = false
+
+    private var active: Bool { hovering && !suppressHoverDuringScroll }
+
+    func body(content: Content) -> some View {
+        content
+            .shadow(color: Color.black.opacity(active ? 0.18 : 0), radius: active ? 22 : 0, y: active ? 8 : 0)
+            .offset(y: active && !reduceMotion ? -4 : 0)
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: active)
+            .onHover { hovering = $0 }
+            .onChange(of: suppressHoverDuringScroll) { suppressing in
+                if suppressing { hovering = false }
+            }
+    }
+}
+
 struct AppInteractiveSurfaceModifier: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let active: Bool
@@ -1901,6 +1937,33 @@ private struct GlassFocusRingModifier: ViewModifier {
                     .allowsHitTesting(false)
                 }
             }
+    }
+}
+
+/// 弹窗页脚「主操作」按钮：蓝色实心、统一 41 高、留足内距。作为主次层级中的**主**。
+struct AppSheetPrimaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        LiquidGlassButtonStyle(
+            cornerRadius: 12,
+            horizontalPadding: 20,
+            minHeight: AppControlMetrics.prominentButtonHeight,
+            prominent: true
+        )
+        .makeBody(configuration: configuration)
+    }
+}
+
+/// 弹窗页脚「次操作」按钮（如取消）：白底描边、同 41 高。作为主次层级中的**次**，
+/// 与蓝色实心主按钮形成清晰的上下级关系（系统原生 sheet 的 bordered + default 组合）。
+struct AppSheetSecondaryButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        LiquidGlassButtonStyle(
+            cornerRadius: 12,
+            horizontalPadding: 18,
+            minHeight: AppControlMetrics.prominentButtonHeight,
+            outlined: true
+        )
+        .makeBody(configuration: configuration)
     }
 }
 
@@ -2361,6 +2424,7 @@ struct GlassCapsuleControl<Content: View>: View {
 
     var body: some View {
         // 系统页面网页筛选胶囊：激活白底深字，非激活透明 slate 字。
+        let shape = RoundedRectangle(cornerRadius: min(AppRadius.controlGroup, height / 2), style: .continuous)
         let textColor: Color = isSelected
             ? AppColors.refPillActiveText
             : (isHovering && isEnabled ? AppColors.refMenuText : AppColors.refPillIdleText)
@@ -2371,12 +2435,14 @@ struct GlassCapsuleControl<Content: View>: View {
         return content
             .font(font)
             .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
             .foregroundStyle(textColor)
             .padding(.horizontal, horizontalPadding)
             .frame(height: height)
-            .background(Capsule().fill(fill))
+            .layoutPriority(isSelected ? 1 : 0)
+            .background(shape.fill(fill))
             .shadow(color: AppColors.refCardShadow.opacity(isSelected ? 0.08 : 0), radius: 3, y: 1)
-            .contentShape(Capsule())
+            .contentShape(shape)
             .onHover { hovering in
                 isHovering = hovering
             }
@@ -2475,6 +2541,20 @@ private struct PageHeaderActionsWidthPreferenceKey: PreferenceKey {
     }
 }
 
+private struct PageHeaderSubtitleBottomPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat?
+
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        if let next = nextValue() {
+            value = next
+        }
+    }
+}
+
+private enum PageHeaderCoordinateSpace {
+    static let name = "MediaLIB.PageHeader"
+}
+
 struct PageHeader<Actions: View>: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var measuredActionsContentWidth: CGFloat = 0
@@ -2545,7 +2625,27 @@ struct PageHeader<Actions: View>: View {
     }
 
     private var titleCluster: some View {
-        HStack(alignment: .center, spacing: AppSpacing.pageHeaderIconToText) {
+        // 图标放到「文字列」的 overlay 里（不参与布局高度），因此标题簇的高度 == 标题+副标题文字高度，
+        // 其底边就是副标题底边。外层再用 .bottom 对齐按钮，即可让「标题簇底边」与「按钮底边」精确对齐，
+        // 不依赖任何像素测量或固定尺寸，改窗口大小也不会错位。
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.system(size: AppDesignStandard.pageHeaderTitleSize, weight: .black))
+                .foregroundStyle(AppColors.refTitleText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.86)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(AppColors.refSubtle)
+                    .lineLimit(2)
+                    .lineSpacing(1)
+                    .frame(maxWidth: AppDesignStandard.pageHeaderSubtitleMaxWidth, alignment: .leading)
+            }
+        }
+        .padding(.leading, systemImage == nil ? 0 : AppSpacing.pageHeaderIconSafeSlot + AppSpacing.pageHeaderIconToText)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .leading) {
             if let systemImage {
                 VividPageIcon(systemImage: systemImage)
                     .frame(
@@ -2554,76 +2654,34 @@ struct PageHeader<Actions: View>: View {
                         alignment: .leading
                     )
                     .fixedSize(horizontal: true, vertical: false)
+                    .allowsHitTesting(false)
             }
-
-            VStack(alignment: .leading, spacing: 5) {
-                Text(title)
-                    .font(.system(size: AppDesignStandard.pageHeaderTitleSize, weight: .black))
-                    .foregroundStyle(AppColors.refTitleText)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.86)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 13.5, weight: .medium))
-                        .foregroundStyle(AppColors.refSubtle)
-                        .lineLimit(2)
-                        .lineSpacing(1)
-                        .frame(maxWidth: AppDesignStandard.pageHeaderSubtitleMaxWidth, alignment: .leading)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var actionsCluster: some View {
-        ScrollViewReader { proxy in
-            GeometryReader { viewport in
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 0) {
-                        Spacer(minLength: 0)
-
-                        HStack(spacing: AppSpacing.pageHeaderActionGap) {
-                            actions
-                        }
-                        // 滚动定位锚点放成 trailing 叠层，不占布局空间——否则它与按钮之间的
-                        // pageHeaderActionGap 会把最右按钮整体往左挤约 10pt，导致按钮右缘与下方卡片不齐。
-                        .overlay(alignment: .trailing) {
-                            Color.clear
-                                .frame(width: 1, height: 1)
-                                .id("page-header-actions-trailing-anchor")
-                        }
-                        .buttonStyle(HeaderActionGlassButtonStyle(
-                            cornerRadius: 12,
-                            horizontalPadding: 15,
-                            minHeight: 36
-                        ))
-                        .fixedSize(horizontal: true, vertical: false)
-                        .background {
-                            GeometryReader { contentProxy in
-                                Color.clear.preference(
-                                    key: PageHeaderActionsWidthPreferenceKey.self,
-                                    value: contentProxy.size.width
-                                )
-                            }
-                        }
-                    }
-                    .frame(
-                        minWidth: max(
-                            viewport.size.width - AppGlassMetrics.Focus.outerPadding * 2,
-                            0
-                        ),
-                        alignment: .trailing
+        // 真机 DEBUG 实证：之前包在横向 ScrollView(+GeometryReader) 里，GeometryReader 把按钮定位到
+        // 36pt 框「顶部」、加上传统滚动条底部预留，导致按钮底边比 actionsCluster 框底高一截
+        // （.scrollIndicators(.hidden) 在嵌套上下文里也没释放预留）。改为**纯 HStack**：按钮直接
+        // 底对齐到 36pt 框底，与标题簇底边（副标题底边）严格齐平。动作按钮很少、正文最小宽足够，
+        // 不需要横向滚动。宽度仍通过 background GeometryReader 量出，供上层做「标题/动作」宽度分配。
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            HStack(spacing: AppSpacing.pageHeaderActionGap) {
+                actions
+            }
+            .buttonStyle(HeaderActionGlassButtonStyle(
+                cornerRadius: 12,
+                horizontalPadding: 15,
+                minHeight: AppControlMetrics.headerButtonHeight
+            ))
+            .fixedSize(horizontal: true, vertical: false)
+            .background {
+                GeometryReader { contentProxy in
+                    Color.clear.preference(
+                        key: PageHeaderActionsWidthPreferenceKey.self,
+                        value: contentProxy.size.width
                     )
-                    .padding(.horizontal, AppGlassMetrics.Focus.outerPadding)
-                    .padding(.vertical, 0)
-                }
-                .verticalScrollPassthroughFromNestedHorizontal()
-                .onAppear {
-                    scrollActionsToTrailingEdge(proxy)
-                }
-                .onChange(of: viewport.size.width) { _ in
-                    scrollActionsToTrailingEdge(proxy)
                 }
             }
         }
@@ -2631,7 +2689,7 @@ struct PageHeader<Actions: View>: View {
             guard width > 0, abs(measuredActionsContentWidth - width) > 0.5 else { return }
             measuredActionsContentWidth = width
         }
-        .frame(height: 36, alignment: .bottomTrailing)
+        .frame(height: AppControlMetrics.headerButtonHeight, alignment: .bottomTrailing)
         .accessibilityElement(children: .contain)
     }
 
@@ -2651,6 +2709,7 @@ struct PageHeader<Actions: View>: View {
             )
             let actionsWidth = min(preferredActionsWidth, maximumActionsWidth)
 
+            // 标题簇底边（=副标题底边）与按钮底边在同一 68pt 高度框内一起 .bottom 对齐，天然齐平。
             HStack(alignment: .bottom, spacing: 20) {
                 titleCluster
                     .frame(
@@ -2659,18 +2718,11 @@ struct PageHeader<Actions: View>: View {
                     )
 
                 actionsCluster
-                    .frame(width: actionsWidth, height: 36, alignment: .bottomTrailing)
-                    .offset(y: subtitle == nil ? 0 : -AppSpacing.pageHeaderActionSubtitleBottomLift)
+                    .frame(width: actionsWidth, height: AppControlMetrics.headerButtonHeight, alignment: .bottomTrailing)
             }
             .frame(width: availableWidth, height: AppSpacing.pageHeaderIconSafeHeight, alignment: .bottomLeading)
         }
         .frame(height: AppSpacing.pageHeaderIconSafeHeight)
-    }
-
-    private func scrollActionsToTrailingEdge(_ proxy: ScrollViewProxy) {
-        DispatchQueue.main.async {
-            proxy.scrollTo("page-header-actions-trailing-anchor", anchor: .trailing)
-        }
     }
 }
 
@@ -2747,6 +2799,8 @@ struct AppInfoNote: View {
     @Environment(\.colorScheme) private var colorScheme
     let text: String
     var systemImage: String?
+    /// 嵌套在另一张已投影卡片下方（尤其紧贴 ScrollView 底边）时传 false，避免叠加阴影。
+    var shadowed: Bool = true
 
     var body: some View {
         HStack(alignment: .center, spacing: 9) {
@@ -2768,7 +2822,7 @@ struct AppInfoNote: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .staticSurfaceBackground(cornerRadius: AppRadius.informationNote, thickness: 0.86)
+        .staticSurfaceBackground(cornerRadius: AppRadius.informationNote, thickness: 0.86, shadowed: shadowed)
     }
 }
 
@@ -2792,18 +2846,21 @@ struct AppSheetSection<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack(alignment: .center, spacing: 14) {
-                VividPageIcon(
-                    systemImage: systemImage,
-                    chip: 52,
-                    glyph: 25,
-                    tint: vividReferenceTint(forSystemImage: systemImage)
-                )
-                    .fixedSize()
+        // 系统风格分组：扁平白卡 + 细边框；卡头改用与设置行同款「浅蓝芯片 + 蓝色线条」小图标，
+        // 取代此前 52pt 彩色插画（与行内小图标不成一列、观感偏重、不像系统表单）。
+        let shape = RoundedRectangle(cornerRadius: AppSheetMetrics.sectionCornerRadius, style: .continuous)
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(AppColors.refIconChipBg)
+                    .frame(width: 36, height: 36)
+                    .overlay {
+                        AppGlyph(systemImage: systemImage, size: 17, lineWidth: 2)
+                            .foregroundStyle(AppColors.refIconGlyph)
+                    }
                     .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.headline.weight(.semibold))
                     if let subtitle {
@@ -2821,22 +2878,10 @@ struct AppSheetSection<Content: View>: View {
         }
         .padding(AppSheetMetrics.sectionContentPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .staticSurfaceBackground(cornerRadius: AppSheetMetrics.sectionCornerRadius)
-        .repeatedCardChrome(false, cornerRadius: AppSheetMetrics.sectionCornerRadius)
-        .overlay(alignment: .topLeading) {
-            LinearGradient(
-                colors: [
-                    AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.11 : 0.18),
-                    .clear
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: 96, height: 1)
-            .padding(.leading, 16)
-            .padding(.top, 1.5)
-            .allowsHitTesting(false)
-        }
+        .background(shape.fill(AppColors.refCardBg))
+        .overlay(shape.strokeBorder(AppColors.refCardBorder, lineWidth: 1))
+        .clipShape(shape)
+        .shadow(color: AppColors.refCardShadow.opacity(colorScheme == .dark ? 0.10 : 0.05), radius: 14, y: 6)
     }
 }
 
@@ -3113,17 +3158,18 @@ private struct AppControlSegmentedShell<Content: View>: View {
     }
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: AppRadius.controlGroup, style: .continuous)
         HStack(spacing: 8) {
             content
         }
         .padding(5)
         .frame(minHeight: 44)
         .background {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            shape
                 .fill(colorScheme == .dark ? Color.white.opacity(0.065) : Color(red: 238 / 255, green: 243 / 255, blue: 249 / 255))
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            shape
                 .strokeBorder(
                     colorScheme == .dark ? Color.white.opacity(0.08) : Color(red: 221 / 255, green: 231 / 255, blue: 243 / 255).opacity(0.95),
                     lineWidth: 1
@@ -3142,11 +3188,11 @@ struct AppSheetActionFooter<Content: View>: View {
     }
 
     var body: some View {
-        HStack(spacing: AppSpacing.sheetFooter) {
+        HStack(spacing: 12) {
             Spacer(minLength: 0)
             content
         }
-        .padding(.top, 10)
+        .padding(.top, 15)
         .overlay(alignment: .top) {
             LinearGradient(
                 colors: [
@@ -3250,7 +3296,8 @@ private struct AppSheetChromeModifier: ViewModifier {
             .padding(.vertical, AppSpacing.sheetVertical)
             .frame(width: width)
             .frame(minHeight: minHeight, maxHeight: maxHeight)
-            .background(AppPageBackground())
+            // 弹窗底改用不含方向光的平静页底：更接近系统原生 sheet，不与内部白卡抢光。
+            .background(AppPageBackground(includeDirectionalLight: false))
     }
 }
 
@@ -3970,7 +4017,9 @@ struct GlassMenuButton<MenuItems: View>: View {
             menuItems
         } label: {
             // 系统页面网页下拉：白底 + #CBD5E1 描边 + #334155 字。
-            let shape = RoundedRectangle(cornerRadius: 11, style: .continuous)
+            // 圆角改用 AppRadius.control（其它同高度 38~41 控件/按钮统一用这个半径），
+            // 之前的 11 与相邻筛选胶囊组(AppRadius.controlGroup=16)、其它按钮(12)都不一致。
+            let shape = RoundedRectangle(cornerRadius: AppRadius.control, style: .continuous)
             HStack(spacing: 8) {
                 Text(title)
                     .lineLimit(1)

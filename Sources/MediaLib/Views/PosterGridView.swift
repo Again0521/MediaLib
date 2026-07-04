@@ -160,7 +160,7 @@ struct PosterGridList<Leading: View>: View {
 
     private let interItemSpacing: CGFloat = 20
     private let rowSpacing: CGFloat = 30
-    private let prewarmRowsAhead = 10
+    private let prewarmRowsAhead = 5
 
     var body: some View {
         GeometryReader { proxy in
@@ -196,7 +196,7 @@ struct PosterGridList<Leading: View>: View {
                                     detailSourceDestinationID: detailSourceDestinationID,
                                     detailSourceSearchText: detailSourceSearchText,
                                     currentManualCollectionID: currentManualCollectionID,
-                                    prewarmPosterPaths: index.isMultiple(of: max(columns, 1))
+                                    prewarmPosterPaths: index.isMultiple(of: max(columns * 2, 1))
                                         ? prewarmPosterPaths(around: index, columns: columns)
                                         : [],
                                     isSelectionModeActive: appState.isSelectionModeActive,

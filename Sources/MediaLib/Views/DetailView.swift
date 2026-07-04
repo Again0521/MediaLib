@@ -5,7 +5,6 @@ import UniformTypeIdentifiers
 
 struct DetailView: View {
     @EnvironmentObject private var appState: AppState
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let item: MediaItem
     let sourceTitle: String
     let sourceSystemImage: String
@@ -73,75 +72,86 @@ struct DetailView: View {
     var body: some View {
         let episodes = appState.children(for: item)
 
-        // 原生 List 让超长剧集列表逐行回收；顶栏、主信息和剧集表头作为普通行保持同一滚动语义。
-        List {
-            detailRow(top: 28, bottom: 8) { topBar }
-            detailRow(top: 8, bottom: 8) { hero }
+        // ★滚动抽搐/滑过底部露白的真正根因：把「头部变高内容(hero/extras/artist/表头)」和「剧集行」
+        // 都塞进同一个 LazyVStack。LazyVStack 会回收滚出视口的行、并用「估算高度」占位；hero 和
+        // TMDB 详情区是变高元素，一旦被回收再复现，高度从真实值退回估算值，整个内容总高度随之变化，
+        // 表现为「滚动条一伸一缩、画面跳、快速上滑时漏掉一截、滑到底再滑露白」。
+        // 修法：头部区块放进**非懒加载的普通 VStack**（永远布局、永不回收，高度恒为真实值）；
+        // 只有「等高的剧集行」留在 LazyVStack 里（可能上千集需要懒加载），此时估算=真实，滚动稳定。
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                detailRow(top: 28, bottom: 8) { topBar }
+                detailRow(top: 8, bottom: 8) { hero }
 
-            if let detailSnapshot {
-                detailRow(top: 8, bottom: 8) {
-                    MediaTMDBExtrasView(
-                        item: item,
-                        snapshot: detailSnapshot
-                    ) { entries, index in
-                            artworkEntries = entries
-                            artworkIndex = index
+                if let detailSnapshot {
+                    detailRow(top: 8, bottom: 8) {
+                        MediaTMDBExtrasView(
+                            item: item,
+                            snapshot: detailSnapshot
+                        ) { entries, index in
+                                artworkEntries = entries
+                                artworkIndex = index
+                            }
+                        .environmentObject(appState)
+                    }
+                } else if appState.supportsDetailExtras(item), isLoadingDetailSnapshot {
+                    detailRow(top: 8, bottom: 8) {
+                        HStack(spacing: 8) {
+                            ProgressView().controlSize(.small)
+                            Text("正在整理演职人员、艺术照和相关作品…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                    .environmentObject(appState)
-                }
-            } else if appState.supportsDetailExtras(item), isLoadingDetailSnapshot {
-                detailRow(top: 8, bottom: 8) {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("正在整理演职人员、艺术照和相关作品…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                 }
-            }
 
-            if item.type == .music, let artist = item.artist, !artist.trimmingCharacters(in: .whitespaces).isEmpty {
-                detailRow(top: 8, bottom: 8) {
-                    MusicArtistInfoView(artistName: artist)
-                        .environmentObject(appState)
+                if item.type == .music, let artist = item.artist, !artist.trimmingCharacters(in: .whitespaces).isEmpty {
+                    detailRow(top: 8, bottom: 8) {
+                        MusicArtistInfoView(artistName: artist)
+                            .environmentObject(appState)
+                    }
                 }
-            }
 
-            if !episodes.isEmpty {
-                detailRow(top: 12, bottom: 6) { episodeHeader(episodes) }
-                let groups = cachedSeasonGroups(for: episodes)
-                if groups.count > 1 {
-                    // 多季：按季分组、可折叠；进入详情默认全部折叠。
-                    ForEach(groups) { group in
-                        detailRow(top: 5, bottom: 5) { seasonHeader(group) }
-                        if expandedSeasonIDs.contains(group.id) {
-                            ForEach(group.episodes) { episode in
+                if !episodes.isEmpty {
+                    detailRow(top: 12, bottom: 6) { episodeHeader(episodes) }
+                    let groups = cachedSeasonGroups(for: episodes)
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if groups.count > 1 {
+                            // 多季：按季分组、可折叠；进入详情默认全部折叠。
+                            ForEach(groups) { group in
+                                detailRow(top: 5, bottom: 5) { seasonHeader(group) }
+                                    .id("season-header-\(group.id)")
+                                if expandedSeasonIDs.contains(group.id) {
+                                    ForEach(group.episodes) { episode in
+                                        episodeRow(episode)
+                                            .id("episode-\(episode.id)")
+                                            .padding(.top, 5)
+                                            .padding(.bottom, 5)
+                                            .padding(.horizontal, AppSpacing.pageHorizontal)
+                                    }
+                                }
+                            }
+                        } else {
+                            // 单季（或没有季信息）：直接平铺，不显示季分组。
+                            ForEach(episodes) { episode in
                                 episodeRow(episode)
-                                    .listRowInsets(EdgeInsets(top: 5, leading: AppSpacing.pageHorizontal, bottom: 5, trailing: AppSpacing.pageHorizontal))
-                                    .listRowBackground(Color.clear)
-                                    .listRowSeparator(.hidden)
+                                    .id("episode-\(episode.id)")
+                                    .padding(.top, 5)
+                                    .padding(.bottom, 5)
+                                    .padding(.horizontal, AppSpacing.pageHorizontal)
                             }
                         }
                     }
+                    detailRow(top: 6, bottom: 28) { Color.clear.frame(height: 1) }
                 } else {
-                    // 单季（或没有季信息）：直接平铺，不显示季分组。
-                    ForEach(episodes) { episode in
-                        episodeRow(episode)
-                            .listRowInsets(EdgeInsets(top: 5, leading: AppSpacing.pageHorizontal, bottom: 5, trailing: AppSpacing.pageHorizontal))
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                    }
+                    detailRow(top: 12, bottom: 28) { fileStatus }
                 }
-                detailRow(top: 6, bottom: 28) { Color.clear.frame(height: 1) }
-            } else {
-                detailRow(top: 12, bottom: 28) { fileStatus }
             }
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
-        .environment(\.defaultMinListRowHeight, 0)
+        .transaction { transaction in
+            transaction.animation = nil
+        }
         .suppressHoverEffectsDuringScroll()
-        .suppressListHighlight()
         .background(AppPageBackground())
         .overlay {
             if let index = artworkIndex, !artworkEntries.isEmpty {
@@ -211,9 +221,10 @@ struct DetailView: View {
     @ViewBuilder
     private func detailRow<Content: View>(top: CGFloat, bottom: CGFloat, @ViewBuilder _ content: () -> Content) -> some View {
         content()
-            .listRowInsets(EdgeInsets(top: top, leading: AppSpacing.pageHorizontal, bottom: bottom, trailing: AppSpacing.pageHorizontal))
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, top)
+            .padding(.bottom, bottom)
+            .padding(.horizontal, AppSpacing.pageHorizontal)
     }
 
     private func episodeHeader(_ episodes: [MediaItem]) -> some View {
@@ -242,7 +253,9 @@ struct DetailView: View {
         let watchedThreshold = appState.settings.watchedThreshold
         let watchedCount = group.episodes.filter { $0.watched || $0.playProgress >= watchedThreshold }.count
         return Button {
-            withAnimation(reduceMotion ? nil : AppMotion.standard) {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
                 if expanded {
                     expandedSeasonIDs.remove(group.id)
                 } else {
@@ -387,11 +400,12 @@ struct DetailView: View {
                 }
 
             VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .firstTextBaseline) {
+                // 收藏/想看按钮与标题文字垂直居中对齐（firstTextBaseline 会让胶囊按钮相对 34pt 大标题偏低）。
+                HStack(alignment: .center, spacing: 8) {
                     Text(item.title)
                         .font(.system(size: 34, weight: .semibold))
                         .lineLimit(2)
-                    Spacer()
+                    Spacer(minLength: 12)
                     Button {
                         appState.toggleWatchlist(item)
                     } label: {
@@ -618,7 +632,7 @@ struct DetailView: View {
                     }
                 }
                 .foregroundStyle(exists ? Color.secondary : Color.orange)
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 11, horizontalPadding: 10, minHeight: 30))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 10, minHeight: 30))
             } else {
                 Text("路径未记录。")
                     .foregroundStyle(.secondary)

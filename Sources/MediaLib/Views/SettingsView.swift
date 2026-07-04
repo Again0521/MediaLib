@@ -990,10 +990,9 @@ struct SettingsView: View {
                 .disabled(appState.isCheckingForUpdates)
             }
 
-            if appState.settings.updateRemindersDisabled || appState.settings.updateSkippedVersion != nil {
+            if appState.settings.updateSkippedVersion != nil {
                 SettingsRow(title: "更新提醒", systemImage: "bell.badge") {
                     Button {
-                        appState.settings.updateRemindersDisabled = false
                         appState.settings.updateSkippedVersion = nil
                         appState.saveSettings()
                     } label: {
@@ -1179,7 +1178,7 @@ private struct AboutMediaLIBSheet: View {
                 Button {
                     dismiss()
                 } label: {
-                    Label(appState.localized("关闭按钮"), systemImage: "xmark")
+                    Label(appState.localized("关闭"), systemImage: "xmark")
                 }
                 .settingsActionButton(width: 104, prominent: true)
             }
@@ -1211,7 +1210,7 @@ private struct AboutAppLogoView: View {
                     .resizable()
                     .interpolation(.high)
                     .scaledToFit()
-                    .clipShape(RoundedRectangle(cornerRadius: 17, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .shadow(color: Color.black.opacity(0.08), radius: 8, y: 3)
             } else {
                 PlayfulSymbolIcon(systemImage: "play.rectangle.on.rectangle", size: 62)
@@ -1919,15 +1918,16 @@ struct SettingsDescription: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.leading, 60)
+        // 与设置行标题文字左缘对齐：图标芯片 34 + 间距 14 = 48。
+        .padding(.leading, 48)
         .padding(.trailing, 12)
         .padding(.vertical, 10)
         .background(
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(AppColors.cleanFieldFill.opacity(colorScheme == .dark ? 0.42 : 0.62))
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(AppColors.refCardBorder.opacity(colorScheme == .dark ? 0.12 : 0.30), lineWidth: 0.45)
         }
         .accessibilityElement(children: .combine)

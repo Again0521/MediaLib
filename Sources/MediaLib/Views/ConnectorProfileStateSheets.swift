@@ -248,9 +248,16 @@ private struct ConnectorEmptyState: View {
 }
 
 private extension View {
+    // 弹窗页脚单一「完成」按钮：与主/次操作同一 41 高标准，观感与其它弹窗一致。
     func sheetUtilityButton(width: CGFloat, prominent: Bool = false) -> some View {
-        buttonStyle(LiquidGlassButtonStyle(cornerRadius: 11, horizontalPadding: 9, minHeight: 30, prominent: prominent))
-            .frame(width: width)
+        Group {
+            if prominent {
+                buttonStyle(AppSheetPrimaryButtonStyle())
+            } else {
+                buttonStyle(AppSheetSecondaryButtonStyle())
+            }
+        }
+        .frame(minWidth: width)
     }
 }
 

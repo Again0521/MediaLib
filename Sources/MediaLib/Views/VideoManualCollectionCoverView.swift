@@ -131,7 +131,7 @@ struct VideoManualCollectionPageHeader<Actions: View>: View {
                     items: previewItems,
                     title: title,
                     size: 76,
-                    cornerRadius: 17,
+                    cornerRadius: 16,
                     maxTiles: 4
                 )
 
@@ -154,7 +154,7 @@ struct VideoManualCollectionPageHeader<Actions: View>: View {
             HStack(spacing: 10) {
                 actions
             }
-            .buttonStyle(HeaderActionGlassButtonStyle(cornerRadius: 13, horizontalPadding: 12, minHeight: 34))
+            .buttonStyle(HeaderActionGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 34))
             .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, 4)

@@ -57,7 +57,11 @@ public final class LoggingService {
     /// 当现有日志加上即将写入的内容超过上限时，把当前日志滚动为 `medialib.log.1`
     /// （覆盖旧备份），随后从空文件继续。任何失败都静默忽略，绝不影响主流程。
     private static func rotateIfNeeded(at url: URL, incomingBytes: Int, maxFileBytes: Int) {
-        let currentSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        // ★不能用 `url.resourceValues(forKeys: [.fileSizeKey])`：URL 会把资源值缓存在自身对象上，
+        // 而这里每条日志都复用同一个 logFileURL，首次读到的大小会被缓存，之后即便文件已经涨大，
+        // 读回来的仍是那个陈旧的小值——判断永远达不到上限，滚动从不触发，日志无限增长（撑爆磁盘）。
+        // 改用 FileManager.attributesOfItem（不缓存），每次拿到的都是文件当前真实大小。
+        let currentSize = ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int) ?? 0
         guard currentSize + incomingBytes > maxFileBytes, currentSize > 0 else { return }
         let backupURL = url.appendingPathExtension("1")
         try? FileManager.default.removeItem(at: backupURL)

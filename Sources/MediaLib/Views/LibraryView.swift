@@ -294,6 +294,9 @@ struct LibraryView: View {
                             .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
                 }
+                // 进入/退出多选模式的状态可能来自右键菜单等非 withAnimation 路径，
+                // 在容器上补显式动画绑定，保证浮栏始终以滑入/滑出过渡而不是硬切。
+                .animation(AppMotion.panel, value: appState.isSelectionModeActive)
             }
         }
         .suppressListHighlight()

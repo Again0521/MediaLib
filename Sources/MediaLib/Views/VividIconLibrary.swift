@@ -415,7 +415,9 @@ private enum VividTitleIconNameMapper {
         if key.contains("questionmark") || key.contains("unmatched") { return "unmatched" }
         if key.contains("tag") || key.contains("captions") || key.contains("info") { return "tag" }
         if key.contains("arrow.triangle") || key.contains("refresh") || key.contains("sync") { return "sync" }
-        if key.contains("paintbrush") || key.contains("sparkles.rectangle") { return "theme" }
+        // 智能集合：sparkles.rectangle.stack —— 之前误落到「theme」画成调色盘，语义错。
+        if key.contains("sparkles.rectangle") || key.contains("smart.collection") || key.contains("wand.and.rectangle") { return "smart" }
+        if key.contains("paintbrush") || key.contains("paintpalette") { return "theme" }
         return "video_other"
     }
 }
@@ -456,7 +458,7 @@ private struct VividTitleIcon: View {
         case "sources": return (c("#38BDF8"), c("#2563EB"), c("#0EA5E9"))
         case "source_on": return (c("#38BDF8"), c("#2563EB"), c("#10B981"))
         case "source_off": return (c("#94A3B8"), c("#64748B"), c("#F97316"))
-        case "gear": return (c("#8B9AAF"), c("#475569"), c("#64748B"))
+        case "gear": return (c("#38BDF8"), c("#2563EB"), c("#0EA5E9"))
         case "dashboard", "health": return (c("#34D399"), c("#059669"), c("#10B981"))
         case "vault": return (c("#64748B"), c("#334155"), c("#F59E0B"))
         case "tasks": return (c("#FFAE6B"), c("#FF5C8A"), c("#FF5C8A"))
@@ -470,6 +472,7 @@ private struct VividTitleIcon: View {
         case "tag": return (c("#38BDF8"), c("#6366F1"), c("#0EA5E9"))
         case "sync": return (c("#3B82F6"), c("#1D4ED8"), c("#3B82F6"))
         case "theme": return (c("#F43F5E"), c("#8B5CF6"), c("#F43F5E"))
+        case "smart": return (c("#A855F7"), c("#6366F1"), c("#8B5CF6"))
         default: return (c("#2E90FA"), c("#36BFFA"), c("#2E90FA"))
         }
     }
@@ -521,6 +524,7 @@ private struct VividTitleIcon: View {
         case "tag": tagObj
         case "sync": syncObj
         case "theme": themeObj
+        case "smart": smartObj
         default: defaultObj
         }
     }
@@ -589,6 +593,24 @@ private struct VividTitleIcon: View {
             VividTitleCircle(cx: 14, cy: 34, r: 5).fill(lg("#C084FC", "#A855F7"))
             VividTitleCircle(cx: 32, cy: 30, r: 5).fill(lg("#EC4899", "#DB2777"))
             VividTitleCircle(cx: 40, cy: 10, r: 2).fill(k("#FDE047"))
+        }
+    }
+
+    /// 智能集合：扇形叠放的内容卡（=集合）+ 右上魔法星（=按规则自动更新）。
+    private var smartObj: some View {
+        ZStack {
+            // 背卡（左倾）
+            VividTitleRect(x: 11, y: 13, width: 22, height: 25, radius: 5).fill(lg("#818CF8", "#6366F1", true))
+                .rotationEffect(.degrees(-11), anchor: UnitPoint(x: 24.0 / 48, y: 26.0 / 48))
+            // 中卡（右倾）
+            VividTitleRect(x: 15, y: 13, width: 22, height: 25, radius: 5).fill(lg("#C084FC", "#8B5CF6", true))
+                .rotationEffect(.degrees(11), anchor: UnitPoint(x: 24.0 / 48, y: 26.0 / 48))
+            // 前卡（正立）+ 规则行
+            VividTitleRect(x: 13, y: 15, width: 22, height: 25, radius: 5).fill(lg("#A855F7", "#6366F1", true))
+            VividTitlePath(d: "M18 23 H30 M18 28 H28 M18 33 H25").stroke(.white.opacity(0.9), style: ws(2.1))
+            // 魔法星（智能/自动）
+            VividTitlePolygon(points: "37,5 38.7,9.6 43.3,11.3 38.7,13 37,17.6 35.3,13 30.7,11.3 35.3,9.6").fill(k("#FDE047"))
+            VividTitleCircle(cx: 30.5, cy: 7.5, r: 1.7).fill(.white)
         }
     }
 
@@ -712,12 +734,12 @@ private struct VividTitleIcon: View {
     private var gearObj: some View {
         ZStack {
             ForEach(0..<8, id: \.self) { i in
-                VividTitleRect(x: 21, y: 5, width: 6, height: 10, radius: 2).fill(lg("#8B9AAF", "#475569"))
+                VividTitleRect(x: 21, y: 5, width: 6, height: 10, radius: 2).fill(lg("#38BDF8", "#2563EB"))
                     .rotationEffect(.degrees(Double(i) * 45), anchor: UnitPoint(x: 24.0 / 48, y: 24.0 / 48))
             }
-            VividTitleCircle(cx: 24, cy: 24, r: 13).fill(lg("#8B9AAF", "#475569"))
+            VividTitleCircle(cx: 24, cy: 24, r: 13).fill(lg("#38BDF8", "#2563EB"))
             VividTitleCircle(cx: 24, cy: 24, r: 5.5).fill(.white)
-            VividTitleCircle(cx: 24, cy: 24, r: 2.4).fill(lg("#8B9AAF", "#475569"))
+            VividTitleCircle(cx: 24, cy: 24, r: 2.4).fill(lg("#38BDF8", "#2563EB"))
         }
     }
 
@@ -1063,7 +1085,7 @@ private enum VividSemanticPageIconKind {
         case .tasks, .storage:
             return (Color(red: 1.0, green: 0.36, blue: 0.54), Color(red: 1.0, green: 0.62, blue: 0.27), Color(red: 1.0, green: 0.36, blue: 0.54).opacity(0.50))
         case .settings:
-            return (Color(red: 0.28, green: 0.33, blue: 0.41), Color(red: 0.39, green: 0.45, blue: 0.55), Color(red: 0.28, green: 0.33, blue: 0.41).opacity(0.45))
+            return (AppColors.referenceBlue, AppColors.referenceCyan, AppColors.referenceBlue.opacity(0.50))
         case .privacy, .tag:
             return (Color(red: 1.0, green: 0.36, blue: 0.54), Color(red: 1.0, green: 0.62, blue: 0.27), Color(red: 1.0, green: 0.36, blue: 0.54).opacity(0.50))
         case .collection, .person, .metadata, .subtitles, .appearance, .info, .home:

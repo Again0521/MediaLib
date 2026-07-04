@@ -10,26 +10,38 @@ struct PrivacyLockView: View {
     @State private var failedAttempt = 0
 
     var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 26 / 255, green: 34 / 255, blue: 54 / 255),
-                    Color(red: 14 / 255, green: 19 / 255, blue: 34 / 255)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+        // 用滚动容器承载居中面板：与其它详情页（都含 ScrollView）保持一致的顶部安全区/标题栏预留，
+        // 这样 NavigationSplitView 不会因为「静态详情页不预留标题栏」而收掉共享顶部安全区、把左侧栏顶上去。
+        // 深色渐变背景单独 ignoresSafeArea 铺满（含标题栏后方），但内容仍在安全区内布局。
+        GeometryReader { proxy in
+            ScrollView(.vertical) {
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    lockPanel
+                        .padding(.horizontal, 40)
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: proxy.size.height)
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            lockPanel
-                .padding(.horizontal, 40)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .overlay(alignment: .topLeading) {
-            VaultKeyboardCaptureView(onKeyDown: handleKeyDown)
-                .frame(width: 1, height: 1)
-                .opacity(0.01)
-                .accessibilityHidden(true)
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color(red: 26 / 255, green: 34 / 255, blue: 54 / 255),
+                        Color(red: 14 / 255, green: 19 / 255, blue: 34 / 255)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+            )
+            .overlay(alignment: .topLeading) {
+                VaultKeyboardCaptureView(onKeyDown: handleKeyDown)
+                    .frame(width: 1, height: 1)
+                    .opacity(0.01)
+                    .accessibilityHidden(true)
+            }
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -48,7 +60,7 @@ struct PrivacyLockView: View {
     private var lockPanel: some View {
         VStack(alignment: .center, spacing: 0) {
             ZStack {
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(AppColors.refProminentGradient)
                     .shadow(color: AppColors.refProminentStart.opacity(0.60), radius: 25, x: 0, y: 14)
                 VividIcon(name: "lock", size: 38, lineWidth: 2.2)

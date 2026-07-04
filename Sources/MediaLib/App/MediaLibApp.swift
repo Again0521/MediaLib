@@ -117,7 +117,7 @@ struct MediaLibApp: App {
                 // 不在 SwiftUI 层用 .frame(minWidth/minHeight) 限制最小尺寸：它会与音乐展开覆盖层的
                 // ignoresSafeArea 叠加，导致每次展开把窗口最小内容尺寸顶大、收起又不缩回（窗口被撑大）。
                 // 改为在 MainWindowToolbarVisibilityGuard 里用 AppKit 的 contentMinSize 固定最小尺寸。
-                .onAppear {
+                .onAppear { [appState] in
                     appState.applyAppearance()
                     LiveTitleIconDebugTool.scheduleWindowCaptureIfRequested()
                     SystemMediaCommandCenter.shared.configure(appState: appState)
@@ -128,6 +128,14 @@ struct MediaLibApp: App {
                         let pending = appDelegate.pendingOpenFileURLs
                         appDelegate.pendingOpenFileURLs = []
                         appState.playExternalFiles(pending)
+                    }
+                    if ProcessInfo.processInfo.arguments.contains("--debug-show-notice-preview") {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            appState.showFloatingNotice(title: "已是最新版本", message: "当前版本 1.5.0。", kind: .info)
+                            appState.showFloatingNotice(title: "已复制链接", message: "https://example.com/video.mp4", kind: .success)
+                            appState.showFloatingNotice(title: "写入会修改本地音频文件", message: "远程或不支持格式会逐条跳过。", kind: .warning)
+                            appState.showFloatingNotice(title: "扫描失败", message: "无法访问媒体源路径。", kind: .error)
+                        }
                     }
                 }
                 .onChange(of: appState.settings.theme) { _ in

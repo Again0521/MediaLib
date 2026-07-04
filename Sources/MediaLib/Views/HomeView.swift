@@ -831,10 +831,12 @@ private enum HomeModuleKind: String, CaseIterable, Identifiable {
     static let vividVisibleOrder: [HomeModuleKind] = defaultOrder
 }
 
-private enum HomeVividFocusedCollection {
+private enum HomeVividFocusedCollection: String {
     case seriesRecommendations
     case recentSeries
     case highRated
+
+    var id: String { rawValue }
 }
 
 struct HomeView: View {
@@ -935,10 +937,15 @@ struct HomeView: View {
                     }
                 }
                 .opacity(inlineReturnContentReady ? 1 : 0)
+            } else if isShowingFocusedVividCollection, let focusedVividCollection {
+                focusedVividCollectionPage(focusedVividCollection)
+                    .id("focused-vivid-\(focusedVividCollection.id)")
+                    .opacity(inlineReturnContentReady ? 1 : 0)
             } else {
                 ScrollViewReader { scrollProxy in
                     ScrollView {
                         VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
+                            Color.clear.frame(height: 0).id("home-scroll-top")
                             if !isShowingFocusedVividCollection {
                                 header
                             }
@@ -948,7 +955,14 @@ struct HomeView: View {
                             }
 
                             if appState.sources.isEmpty {
-                                EmptyLibraryView(onOpenSources: onOpenSources)
+                                // 启动时媒体库正在异步读取(约120ms+)：此时 sources 还是空数组，但
+                                // 磁盘上实际可能已有媒体源——不能直接判"待添加"，否则会闪一次
+                                // 误导性的"请添加媒体源"提示。用 isLibraryReloading 区分"真空"与"加载中"。
+                                if appState.isLibraryReloading {
+                                    HomeLibraryLoadingView()
+                                } else {
+                                    EmptyLibraryView(onOpenSources: onOpenSources)
+                                }
                             } else if isSearching {
                                 GlobalSearchView(query: activeSearchText) { item in
                                     if item.type == .music {
@@ -983,6 +997,15 @@ struct HomeView: View {
                     }
                     .onChange(of: activeReturnContext?.anchorID) { anchorID in
                         restoreHomeInlineAnchorIfNeeded(anchorID, isSearching: isSearching, scrollProxy: scrollProxy)
+                    }
+                    .onChange(of: focusedVividCollection?.id) { focusedID in
+                        guard focusedID != nil else { return }
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        transaction.animation = nil
+                        withTransaction(transaction) {
+                            scrollProxy.scrollTo("home-scroll-top", anchor: .top)
+                        }
                     }
                 }
             }
@@ -1173,15 +1196,15 @@ struct HomeView: View {
     private func homeContent(for tab: HomeTab) -> some View {
         switch tab {
         case .overview:
-            if let focusedVividCollection {
-                focusedVividCollectionPage(focusedVividCollection)
-            } else {
+            if focusedVividCollection == nil {
                 VStack(alignment: .leading, spacing: HomeVividTokens.moduleSpacing) {
                     ForEach(orderedHomeModules) { module in
                         vividOverviewModuleContent(module)
                             .id("home-module-\(module.rawValue)")
                     }
                 }
+            } else {
+                EmptyView()
             }
         case .privacy where !appState.privacyPINConfigured || !appState.privacyUnlocked:
             PrivacyLockView()
@@ -1348,35 +1371,79 @@ struct HomeView: View {
     private func focusedVividCollectionPage(_ collection: HomeVividFocusedCollection) -> some View {
         switch collection {
         case .seriesRecommendations:
-            HomeVividPosterCollectionPage(
+            focusedCollectionPosterGrid(
                 title: appState.localized("剧集推荐"),
                 subtitle: appState.localized("根据你的观看、想看和评分信号整理。"),
                 barColors: [HomeVividTokens.orange, HomeVividTokens.pink],
-                items: seriesRecommendationItems,
-                metadata: overviewMetadata(for:),
-                onBack: { focusedVividCollection = nil },
-                onSelect: openHomeItem
+                items: seriesRecommendationItems
             )
         case .recentSeries:
-            HomeVividPosterCollectionPage(
+            focusedCollectionPosterGrid(
                 title: appState.localized("最近添加 · 剧集"),
                 subtitle: appState.localized("按入库时间整理最近加入的剧集。"),
                 barColors: [HomeVividTokens.indigo, HomeVividTokens.blue],
-                items: recentSeriesItems,
-                metadata: overviewMetadata(for:),
-                onBack: { focusedVividCollection = nil },
-                onSelect: openHomeItem
+                items: recentSeriesItems
             )
         case .highRated:
-            HomeVividPosterCollectionPage(
+            focusedCollectionPosterGrid(
                 title: appState.localized("高分精选"),
                 subtitle: appState.localized("从高评分和偏好信号中挑选。"),
                 barColors: [HomeVividTokens.orange, HomeVividTokens.violet],
-                items: highRatedFeaturedItems,
-                metadata: overviewMetadata(for:),
-                onBack: { focusedVividCollection = nil },
-                onSelect: openHomeItem
+                items: highRatedFeaturedItems
             )
+        }
+    }
+
+    private func focusedCollectionPosterGrid(
+        title: String,
+        subtitle: String,
+        barColors: [Color],
+        items: [MediaItem]
+    ) -> some View {
+        PosterGridList(
+            items: items,
+            bottomInset: gridBottomInset,
+            detailSourceDestinationID: SidebarDestination.home.id
+        ) {
+            focusedCollectionHeader(title: title, subtitle: subtitle, barColors: barColors)
+        }
+    }
+
+    private func focusedCollectionHeader(title: String, subtitle: String, barColors: [Color]) -> some View {
+        HStack(alignment: .center, spacing: 18) {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 10) {
+                    Capsule()
+                        .fill(HomeVividTokens.gradient(barColors))
+                        .frame(width: 6, height: 32)
+                    Text(title)
+                        .font(.system(size: 29, weight: .black))
+                        .foregroundStyle(HomeVividTokens.textPrimary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                }
+                Text(subtitle)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(HomeVividTokens.textSecondary)
+                    .padding(.leading, 16)
+            }
+            Spacer()
+            Button {
+                focusedVividCollection = nil
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .black))
+                    Text("返回首页")
+                }
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(HomeVividTokens.textPrimary)
+                .padding(.horizontal, 14)
+                .frame(height: 34)
+                .background(Color.white, in: Capsule())
+                .overlay(Capsule().strokeBorder(HomeVividTokens.border, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -1882,8 +1949,14 @@ struct HomeView: View {
             (item.favorite ? 1.05 : 0) +
             stableDailyValue(forID: item.id, daySeed: refreshSeed, salt: "photo-wall") * 2.7
         }
-        let items = diversifiedPhotoWallItems(ranked, limit: 12, seed: refreshSeed)
-        return HomePhotoWallTheme(title: selected.title, badge: "\(selected.badge) · \(items.count) 张", items: items)
+        // 供排布挑选的候选池比实际展示格数(12)多一倍：HomeVividPhotoWall.arrangedItems
+        // 本就按"每个格子目标宽高比 × 2"的候选量去挑最贴近的图（横向格配横向图、纵向格配纵向图），
+        // 但如果这里只给刚好 12 张，候选量恒等于格数，算法没有任何"挑"的余地，退化成按原顺序摆放。
+        // 展示数量与角标文案仍按 12 张收口，只是给排布算法更大的原始素材池。
+        let displayLimit = 12
+        let pool = diversifiedPhotoWallItems(ranked, limit: displayLimit * 2, seed: refreshSeed)
+        let displayCount = min(pool.count, displayLimit)
+        return HomePhotoWallTheme(title: selected.title, badge: "\(selected.badge) · \(displayCount) 张", items: pool)
     }
 
     private func diversifiedPhotoWallItems(_ candidates: [MediaItem], limit: Int, seed: Int) -> [MediaItem] {
@@ -3699,6 +3772,23 @@ struct LibraryHealthView: View {
     }
 }
 
+/// 启动时媒体库仍在异步读取（约120ms+，见 AppState.scheduleLibraryReload）的过渡态。
+/// 与"待添加媒体源"的真空态严格区分，避免磁盘上明明已有媒体源却先误闪一次"请添加"提示。
+struct HomeLibraryLoadingView: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.regular)
+            Text("正在整理媒体库…")
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, minHeight: 480, alignment: .center)
+        .padding(32)
+        .staticSurfaceBackground(cornerRadius: 22)
+    }
+}
+
 struct EmptyLibraryView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -3728,26 +3818,10 @@ struct EmptyLibraryView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 380)
             Button(action: onOpenSources) {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.right.circle.fill")
-                        .font(.callout.weight(.semibold))
-                    Text(appState.localized("前往媒体源添加"))
-                        .font(.callout.weight(.semibold))
-                }
-                .foregroundStyle(AppColors.selectedGlassTint)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .background(
-                    Capsule()
-                        .fill(AppColors.selectedGlassTint.opacity(0.10))
-                        .overlay(
-                            Capsule()
-                                .stroke(AppColors.selectedGlassTint.opacity(0.28), lineWidth: 1)
-                        )
-                )
-                .contentShape(Capsule())
+                Label(appState.localized("前往媒体源添加"), systemImage: "arrow.right.circle.fill")
             }
-            .buttonStyle(.plain)
+            // 与全局按钮系统统一(圆角矩形12+蓝色实心)，不再用独立的胶囊描边样式。
+            .buttonStyle(AppSheetPrimaryButtonStyle())
             .help(appState.localized("前往媒体源添加"))
             .padding(.top, 4)
             }

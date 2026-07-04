@@ -1,8 +1,8 @@
 import MediaLibCore
 import SwiftUI
 
-// 剧集列表由 DetailView 的原生 List 直接承载并逐行回收，避免超长列表常驻视图。
-// 此文件现仅保留单行视图 EpisodeRowView 供 List 行复用。
+// 剧集列表由 DetailView 的 ScrollView + LazyVStack 承载（原生 List/NSTableView 快速滚动到底会
+// 抽搐，已改用与本项目其它长列表一致的方案）；此文件仅保留单行视图 EpisodeRowView 供逐行复用。
 
 struct EpisodeRowView: View {
     @EnvironmentObject private var appState: AppState
@@ -63,13 +63,27 @@ struct EpisodeRowView: View {
                 .foregroundStyle(.secondary)
 
                 // 单集简介：让剧集列表本身就承载“详情”，无需逐集点开。
-                if let overview = episode.overview?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !overview.isEmpty {
-                    Text(overview)
+                // ★行高统一：简介是否存在（以及存在时 1 行还是 2 行）曾让每行的实际高度各不相同。
+                // ScrollView+LazyVStack 靠"预估高度→滚到时再量出真实高度"来排布，一旦真实高度和
+                // 预估的不一样，就要在滚动中途纠正内容总高度——正是"划到底再用力上滑，滚动条一伸
+                // 一缩、画面跳一下、看起来漏掉一截"的根因（越往下滚，累积误差越大，越容易在快速滑动
+                // 时暴露）。用一个不可见的两行占位文字撑出固定高度（ZStack 叠放，占位只决定尺寸不
+                // 参与绘制），真正的简介（0/1/2 行、或没有）盖在上面——每一行的高度就完全一致了，
+                // 不依赖任何猜出来的像素数字，字号变化（如动态字体）也能一起适配。
+                ZStack(alignment: .topLeading) {
+                    // 占位必须撑满整行宽度（不能只按占位字符本身的窄宽度算），
+                    // 否则真正的简介文字会被这个占位的宽度提前挤到只剩两三个字就换行。
+                    Text("占位占位占位占位占位占位占位占位占位占位占位占位占位占位占位占位占位占位占位占位")
                         .font(.caption)
-                        .foregroundStyle(.secondary.opacity(0.85))
                         .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .hidden()
+                    if let overviewText {
+                        Text(overviewText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary.opacity(0.85))
+                            .lineLimit(2)
+                    }
                 }
             }
 
@@ -78,6 +92,9 @@ struct EpisodeRowView: View {
             Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                 .foregroundStyle(selected ? AppColors.selectedGlassTint.opacity(0.92) : Color.secondary)
         }
+        // List 行以前会自动拉伸到整行宽度；换成 LazyVStack 后需要显式撑满，
+        // 否则右侧 Spacer 撑不到真正的行尾，选中态描边/底色也只会包住内容本身的宽度。
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
         .appInteractiveSurface(
             active: active,
@@ -163,6 +180,13 @@ struct EpisodeRowView: View {
                 shape.strokeBorder(.white.opacity(0.18), lineWidth: 0.7)
             }
             .pointerInspectTilt(enabled: true, cornerRadius: 6)
+    }
+
+    private var overviewText: String? {
+        guard let overview = episode.overview?.trimmingCharacters(in: .whitespacesAndNewlines), !overview.isEmpty else {
+            return nil
+        }
+        return overview
     }
 
     /// “剩余 xx 分钟”：基于时长与已播进度估算，给半途观看的集一个明确预期。

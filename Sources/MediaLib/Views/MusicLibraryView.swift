@@ -518,6 +518,33 @@ private enum MusicLibrarySnapshotBuilder {
     }
 }
 
+private struct MusicCollectionGridMetrics {
+    let minimumItemWidth: CGFloat
+    let minimumColumns: Int
+    let maximumColumns: Int
+    let columnSpacing: CGFloat
+    let firstRowTopInset: CGFloat
+    let rowBottomInset: CGFloat
+
+    static let album = MusicCollectionGridMetrics(
+        minimumItemWidth: 220,
+        minimumColumns: 1,
+        maximumColumns: 4,
+        columnSpacing: 20,
+        firstRowTopInset: 6,
+        rowBottomInset: 22
+    )
+
+    static let artist = MusicCollectionGridMetrics(
+        minimumItemWidth: 128,
+        minimumColumns: 2,
+        maximumColumns: 6,
+        columnSpacing: 18,
+        firstRowTopInset: 2,
+        rowBottomInset: 24
+    )
+}
+
 struct MusicLibraryView: View {
     @EnvironmentObject private var appState: AppState
     let section: MusicLibrarySection
@@ -541,6 +568,8 @@ struct MusicLibraryView: View {
     @State private var contentRefreshTask: Task<Void, Never>?
     @State private var searchRefreshTask: Task<Void, Never>?
     @State private var lyricsRefreshTask: Task<Void, Never>?
+    @State private var collectionReturnAnchorID: String?
+    @State private var collectionAnchorRestoreTask: Task<Void, Never>?
 
     var body: some View {
         Group {
@@ -782,8 +811,8 @@ struct MusicLibraryView: View {
     private var scrollableCollectionListBody: some View {
         GeometryReader { proxy in
             let availableWidth = max(proxy.size.width - AppSpacing.pageHorizontal * 2, 1)
-            let albumColumns = musicAlbumColumnCount(for: availableWidth)
-            let artistColumns = musicArtistColumnCount(for: availableWidth)
+            let albumColumns = musicCollectionColumnCount(for: availableWidth, metrics: .album)
+            let artistColumns = musicCollectionColumnCount(for: availableWidth, metrics: .artist)
 
             ScrollViewReader { scrollProxy in
                 ScrollView {
@@ -815,6 +844,20 @@ struct MusicLibraryView: View {
                         }
                     }
                 }
+                .onChange(of: drilldown?.id) { drilldownID in
+                    guard drilldownID == nil, let anchorID = collectionReturnAnchorID else { return }
+                    restoreCollectionAnchor(anchorID, scrollProxy: scrollProxy)
+                }
+                // ★根因：`usesScrollableCollectionList` 为 false 时（drilldown 非 nil），这整个
+                // view（连同它的 ScrollViewReader/.onChange）会被 `if` 分支整个卸载；从专辑/艺术家
+                // 详情"返回"那一刻，drilldown 变 nil 触发的正是 usesScrollableCollectionList 重新
+                // 变 true、本 view 重新创建——但 .onChange 只能捕捉"自己已经挂载期间"发生的变化，
+                // 这次变化恰好发生在它被卸载的空档，永远等不到，所以之前"返回"必定跳回顶部。
+                // 改为在 view 重新出现时（.onAppear）主动检查有没有待恢复的锚点，不依赖"捕捉到变化"。
+                .onAppear {
+                    guard let anchorID = collectionReturnAnchorID else { return }
+                    restoreCollectionAnchor(anchorID, scrollProxy: scrollProxy)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -839,7 +882,7 @@ struct MusicLibraryView: View {
                 } label: {
                     Label("新建歌单", systemImage: "plus")
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 13, horizontalPadding: 12, minHeight: 34, prominent: true))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 34, prominent: true))
             } else {
                 Button {
                     appState.scanSources(for: .music(section))
@@ -913,7 +956,7 @@ struct MusicLibraryView: View {
                         .padding(.bottom, AppSpacing.headerToControls)
                 } else {
                     ForEach(0..<musicAlbumRowCount(columns: albumColumns), id: \.self) { rowIndex in
-                        HStack(alignment: .top, spacing: 20) {
+                        HStack(alignment: .top, spacing: MusicCollectionGridMetrics.album.columnSpacing) {
                             ForEach(0..<albumColumns, id: \.self) { columnIndex in
                                 let index = rowIndex * albumColumns + columnIndex
                                 if index < displayedAlbumGroups.count {
@@ -921,13 +964,16 @@ struct MusicLibraryView: View {
                                     MusicAlbumCard(
                                         album: album,
                                         showsResetPlayCountAction: sortMode == .mostPlayed,
-                                        onOpen: { drilldown = .album(album, tracks(for: album)) },
+                                        onOpen: {
+                                            openAlbumDrilldown(album, anchorID: collectionRowAnchorID(prefix: "music-album-row", rowIndex: rowIndex))
+                                        },
                                         onPlay: { appState.replaceMusicQueueAndPlay(tracks(for: album)) },
                                         onCreatePlaylist: { playlistCreationRequest = $0 },
                                         onResetPlayCounts: { appState.resetMusicPlayCounts(tracks(for: album)) },
                                         tracksProvider: { appState.musicTracks(inAlbum: album.summary) }
                                     )
                                     .frame(maxWidth: .infinity, alignment: .top)
+                                    .id(collectionAnchorID(for: album))
                                 } else {
                                     Color.clear
                                         .frame(maxWidth: .infinity)
@@ -935,8 +981,9 @@ struct MusicLibraryView: View {
                             }
                         }
                         .padding(.horizontal, AppSpacing.pageHorizontal)
-                        .padding(.top, rowIndex == 0 ? 6 : 0)
-                        .padding(.bottom, 22)
+                        .padding(.top, rowIndex == 0 ? MusicCollectionGridMetrics.album.firstRowTopInset : 0)
+                        .padding(.bottom, MusicCollectionGridMetrics.album.rowBottomInset)
+                        .id(collectionRowAnchorID(prefix: "music-album-row", rowIndex: rowIndex))
                     }
                 }
             case .artists:
@@ -947,7 +994,7 @@ struct MusicLibraryView: View {
                         .padding(.bottom, AppSpacing.headerToControls)
                 } else {
                     ForEach(0..<musicArtistRowCount(columns: artistColumns), id: \.self) { rowIndex in
-                        HStack(alignment: .top, spacing: 18) {
+                        HStack(alignment: .top, spacing: MusicCollectionGridMetrics.artist.columnSpacing) {
                             ForEach(0..<artistColumns, id: \.self) { columnIndex in
                                 let index = rowIndex * artistColumns + columnIndex
                                 if index < displayedArtistGroups.count {
@@ -955,13 +1002,16 @@ struct MusicLibraryView: View {
                                     MusicArtistRow(
                                         artist: artist,
                                         showsResetPlayCountAction: sortMode == .mostPlayed,
-                                        onOpen: { drilldown = .artist(artist, tracks(for: artist)) },
+                                        onOpen: {
+                                            openArtistDrilldown(artist, anchorID: collectionRowAnchorID(prefix: "music-artist-row", rowIndex: rowIndex))
+                                        },
                                         onPlay: { appState.replaceMusicQueueAndPlay(tracks(for: artist)) },
                                         onCreatePlaylist: { playlistCreationRequest = $0 },
                                         onResetPlayCounts: { appState.resetMusicPlayCounts(tracks(for: artist)) },
                                         tracksProvider: { appState.musicTracks(inArtist: artist.summary) }
                                     )
                                     .frame(maxWidth: .infinity, alignment: .top)
+                                    .id(collectionAnchorID(for: artist))
                                 } else {
                                     Color.clear
                                         .frame(maxWidth: .infinity)
@@ -969,8 +1019,9 @@ struct MusicLibraryView: View {
                             }
                         }
                         .padding(.horizontal, AppSpacing.pageHorizontal)
-                        .padding(.top, rowIndex == 0 ? 2 : 0)
-                        .padding(.bottom, 24)
+                        .padding(.top, rowIndex == 0 ? MusicCollectionGridMetrics.artist.firstRowTopInset : 0)
+                        .padding(.bottom, MusicCollectionGridMetrics.artist.rowBottomInset)
+                        .id(collectionRowAnchorID(prefix: "music-artist-row", rowIndex: rowIndex))
                     }
                 }
             default:
@@ -979,18 +1030,10 @@ struct MusicLibraryView: View {
         }
     }
 
-    private func musicAlbumColumnCount(for width: CGFloat) -> Int {
-        let spacing: CGFloat = 20
-        let minimumCardWidth: CGFloat = 220
-        let availableWidth = max(width - 20, minimumCardWidth)
-        return min(4, max(1, Int((availableWidth + spacing) / (minimumCardWidth + spacing))))
-    }
-
-    private func musicArtistColumnCount(for width: CGFloat) -> Int {
-        let spacing: CGFloat = 18
-        let minimumCardWidth: CGFloat = 128
-        let availableWidth = max(width - 20, minimumCardWidth)
-        return min(6, max(2, Int((availableWidth + spacing) / (minimumCardWidth + spacing))))
+    private func musicCollectionColumnCount(for width: CGFloat, metrics: MusicCollectionGridMetrics) -> Int {
+        let availableWidth = max(width, metrics.minimumItemWidth)
+        let rawCount = Int((availableWidth + metrics.columnSpacing) / (metrics.minimumItemWidth + metrics.columnSpacing))
+        return min(metrics.maximumColumns, max(metrics.minimumColumns, rawCount))
     }
 
     private func musicAlbumRowCount(columns: Int) -> Int {
@@ -1370,7 +1413,7 @@ struct MusicLibraryView: View {
                         .staticSurfaceBackground(cornerRadius: 22)
                 } else {
                     ProgressiveMusicAlbumGrid(albums: displayedAlbumGroups, showsResetPlayCountAction: sortMode == .mostPlayed) { album in
-                        drilldown = .album(album, tracks(for: album))
+                        openAlbumDrilldown(album)
                     } onPlay: { album in
                         appState.replaceMusicQueueAndPlay(tracks(for: album))
                     } onCreatePlaylist: { request in
@@ -1385,7 +1428,7 @@ struct MusicLibraryView: View {
                         .staticSurfaceBackground(cornerRadius: 22)
                 } else {
                     ProgressiveMusicArtistList(artists: displayedArtistGroups, showsResetPlayCountAction: sortMode == .mostPlayed) { artist in
-                        drilldown = .artist(artist, tracks(for: artist))
+                        openArtistDrilldown(artist)
                     } onPlay: { artist in
                         appState.replaceMusicQueueAndPlay(tracks(for: artist))
                     } onCreatePlaylist: { request in
@@ -1446,6 +1489,51 @@ struct MusicLibraryView: View {
 
     private func rowModels(from tracks: [MediaItem]) -> [MusicTrackRowModel] {
         MusicLibrarySnapshotBuilder.rowModels(from: tracks)
+    }
+
+    private func openAlbumDrilldown(_ album: MusicAlbumGroup, anchorID: String? = nil) {
+        collectionReturnAnchorID = anchorID ?? collectionAnchorID(for: album)
+        drilldown = .album(album, tracks(for: album))
+    }
+
+    private func openArtistDrilldown(_ artist: MusicArtistGroup, anchorID: String? = nil) {
+        collectionReturnAnchorID = anchorID ?? collectionAnchorID(for: artist)
+        drilldown = .artist(artist, tracks(for: artist))
+    }
+
+    private func collectionRowAnchorID(prefix: String, rowIndex: Int) -> String {
+        "\(prefix)-\(rowIndex)"
+    }
+
+    private func collectionAnchorID(for album: MusicAlbumGroup) -> String {
+        "music-album-\(album.id)"
+    }
+
+    private func collectionAnchorID(for artist: MusicArtistGroup) -> String {
+        "music-artist-\(artist.id)"
+    }
+
+    private func restoreCollectionAnchor(_ anchorID: String, scrollProxy: ScrollViewProxy) {
+        // ★为什么上一版 onAppear + 单次 Task.yield 仍然跳回顶部：目标专辑/艺术家卡片在 LazyVStack
+        // 里是懒加载的，返回那一刻列表刚重建、只渲染了顶部几行，`scrollTo` 找不到还没被创建的目标
+        // 行就被丢弃了。改为连续多帧重试：每一帧都发一次 scrollTo，直到 LazyVStack 逐步把目标行
+        // 排布出来、滚动真正落位。重试期间正好是用户刚点「返回」、不会立刻手动滚动的窗口，安全。
+        collectionAnchorRestoreTask?.cancel()
+        collectionAnchorRestoreTask = Task { @MainActor in
+            for _ in 0..<16 {
+                if Task.isCancelled { return }
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                transaction.animation = nil
+                withTransaction(transaction) {
+                    scrollProxy.scrollTo(anchorID, anchor: .center)
+                }
+                try? await Task.sleep(nanoseconds: 32_000_000)
+            }
+            // 恢复完成后清掉锚点：collectionReturnAnchorID 每次进入 drilldown 都会重设，
+            // 清掉可避免后续无关的 onAppear（切窗口/主题刷新等）又把列表拽回旧位置。
+            collectionReturnAnchorID = nil
+        }
     }
 }
 
@@ -1628,7 +1716,7 @@ private struct MusicCollectionTrackList: View {
                     Image(systemName: "chevron.left")
                         .frame(width: 30, height: 30)
                 }
-                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 11, horizontalPadding: 8, minHeight: 30))
+                .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 8, minHeight: 30))
                 .help("返回")
 
                 PlayfulSymbolIcon(systemImage: collection.systemImage, size: 30)
@@ -1770,7 +1858,7 @@ private struct MusicPlaylistTrackListView: View {
 
     var body: some View {
         List {
-            MusicSongHeader()
+            MusicSongHeader(trailingActionColumns: 2)
                 .padding(.horizontal, 6)
                 .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 4, trailing: 0))
                 .listRowBackground(Color.clear)
@@ -1988,6 +2076,9 @@ private struct MusicFilterModeCapsules: View {
 
 private struct MusicSongHeader: View {
     @Environment(\.colorScheme) private var colorScheme
+    /// 行尾动作按钮列数：普通歌曲列表 1（获取信息），歌单明细 2（获取信息 + 移出歌单）。
+    /// 列头按同宽预留，保证「时长」列与行内完全对齐。
+    var trailingActionColumns: Int = 1
 
     var body: some View {
         HStack(spacing: 12) {
@@ -2002,15 +2093,16 @@ private struct MusicSongHeader: View {
                 .frame(width: 48, alignment: .center)
             headerLabel("时长", systemImage: "clock")
                 .frame(width: 58, alignment: .trailing)
-            Color.clear.frame(width: 30)
+            Color.clear.frame(width: CGFloat(trailingActionColumns) * 30 + CGFloat(max(0, trailingActionColumns - 1)) * 12)
         }
         .font(.caption2.weight(.bold))
         .foregroundStyle(AppColors.textSecondary)
-        .padding(.horizontal, 10)
+        // 与 MusicSongRow 的 .padding(.horizontal, 8) 对齐，列头与行内容零偏移。
+        .padding(.horizontal, 8)
         .frame(height: 34)
-        .staticSurfaceBackground(cornerRadius: 13, thickness: 0.88)
+        .staticSurfaceBackground(cornerRadius: 12, thickness: 0.88)
         .overlay(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(
                     LinearGradient(
                         colors: [
@@ -2120,11 +2212,16 @@ private struct MusicSongRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            // 次要列用次级色，与标题列拉开层级（首页榜单同款主次结构）。
             Text(row.artistText)
+                .font(.callout)
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .frame(width: 150, alignment: .leading)
 
             Text(row.albumText)
+                .font(.callout)
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .frame(width: 170, alignment: .leading)
 
@@ -2157,6 +2254,8 @@ private struct MusicSongRow: View {
                     lineWidth: 1
                 )
             }
+            // 首页风格：行内动作 hover 浮现，静态列表不铺满每行的按钮噪声（透明度渐显，不改布局）。
+            .opacity(hoverActive ? 1 : 0)
             .help("立即获取音乐信息")
 
             if let onRemoveFromPlaylist {
@@ -2177,24 +2276,27 @@ private struct MusicSongRow: View {
                 .overlay {
                     Circle().stroke(Color.red.opacity(hoverActive ? 0.28 : 0.12), lineWidth: 1)
                 }
+                .opacity(hoverActive ? 1 : 0)
                 .help("从歌单移出")
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
         .frame(height: AppCardMetrics.musicRowHeight)
+        // 「播放中」只用标题旁的徽标提示，行背景/描边/发光/左侧强调条不再随当前播放曲目
+        // 常驻高亮（那是「选中」的视觉语言，容易被误读成多选/选中态）；只保留悬停反馈。
         .background {
-            if hoverActive || isCurrent {
+            if hoverActive {
                 ReferenceCardSurface(selected: true, cornerRadius: 12)
             } else {
                 rowShape.fill(Color.clear)
             }
         }
-        .repeatedCardChrome(hoverActive || isCurrent, cornerRadius: 12)
-        .repeatedSurfaceHover(hoverActive || isCurrent, cornerRadius: 12, tint: AppColors.pointerLightTint, intensity: isCurrent ? 0.78 : 0.62)
+        .repeatedCardChrome(hoverActive, cornerRadius: 12)
+        .repeatedSurfaceHover(hoverActive, cornerRadius: 12, tint: AppColors.pointerLightTint, intensity: 0.62)
         .overlay(alignment: .leading) {
             Capsule()
-                .fill(AppColors.solarEdgeTint.opacity((hoverActive || isCurrent) ? (colorScheme == .dark ? 0.22 : 0.28) : 0))
+                .fill(AppColors.solarEdgeTint.opacity(hoverActive ? (colorScheme == .dark ? 0.22 : 0.28) : 0))
                 .frame(width: 3, height: 28)
                 .padding(.leading, 2)
         }
@@ -2211,7 +2313,6 @@ private struct MusicSongRow: View {
         .contentShape(rowShape)
         .scaleEffect(!reduceMotion && hoverActive ? 1.002 : 1, anchor: .center)
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hoverActive)
-        .animation(reduceMotion ? nil : AppMotion.listHover, value: isCurrent)
         .onHover { hovering in
             guard !suppressHoverDuringScroll else {
                 isHovering = false
@@ -2808,6 +2909,7 @@ private struct MusicPlaylistsOverview: View {
 private struct MusicPlaylistCard: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
+    @Environment(\.colorScheme) private var colorScheme
     let playlist: MusicPlaylist
     let tracks: [MediaItem]
     let onOpen: () -> Void
@@ -2820,34 +2922,16 @@ private struct MusicPlaylistCard: View {
         let isPinnedFavorite = MusicFavoritePlaylist.isFavorite(playlist)
         let hoverActive = isHovering && !suppressHoverDuringScroll
 
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(AppColors.accentGradient)
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [.white.opacity(0.28), .clear, AppColors.pointerLightTint.opacity(0.10)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                Image(systemName: isPinnedFavorite ? "heart.fill" : "music.note.list")
-                    .font(.title2)
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 54, height: 54)
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(.white.opacity(hoverActive ? 0.54 : 0.30), lineWidth: 0.9)
-            }
+        HStack(spacing: 16) {
+            playlistIcon(isPinnedFavorite: isPinnedFavorite)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 5) {
                 MarqueeText(text: playlist.name, font: .headline)
                     .frame(height: 21, alignment: .leading)
-                Text("\(tracks.count) 首歌曲")
+                Text(playlistSubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
                 HStack(spacing: 6) {
                     if isPinnedFavorite {
                         MusicCompactStatusBadge(
@@ -2865,15 +2949,14 @@ private struct MusicPlaylistCard: View {
                     }
                 }
             }
-
-            Spacer()
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Button {
                 onPlay()
             } label: {
                 Label("播放", systemImage: "play.fill")
             }
-            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
+            .buttonStyle(RepeatedGlassButtonStyle(cornerRadius: AppRadius.control, horizontalPadding: 12, minHeight: AppControlMetrics.defaultButtonHeight))
             .disabled(tracks.isEmpty)
 
             if !isPinnedFavorite {
@@ -2898,17 +2981,18 @@ private struct MusicPlaylistCard: View {
                 .help("歌单管理")
             }
         }
-        .padding(AppCardMetrics.repeatedContentPadding)
-        .appInteractiveSurface(
-            active: hoverActive,
-            selected: isPinnedFavorite,
-            cornerRadius: AppCardMetrics.repeatedCornerRadius,
-            tint: isPinnedFavorite ? .red : AppColors.pointerLightTint,
-            intensity: 0.86,
-            scale: 1.006,
-            lift: 2
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .trailing)
+        .staticSurfaceBackground(selected: hoverActive, cornerRadius: AppRadius.card)
+        .shadow(
+            color: AppColors.refCardShadow.opacity(hoverActive ? 0.16 : 0),
+            radius: hoverActive ? 20 : 0,
+            x: 0,
+            y: hoverActive ? 8 : 0
         )
-        .contentShape(RoundedRectangle(cornerRadius: AppCardMetrics.repeatedCornerRadius, style: .continuous))
+        .offset(y: !reduceMotion && hoverActive ? -3 : 0)
+        .contentShape(RoundedRectangle(cornerRadius: AppRadius.card, style: .continuous))
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hoverActive)
         .onHover { hovering in
             guard !suppressHoverDuringScroll else {
@@ -2950,6 +3034,76 @@ private struct MusicPlaylistCard: View {
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func playlistIcon(isPinnedFavorite: Bool) -> some View {
+        let accent = playlistAccent
+        if isPinnedFavorite {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [accent, accent.opacity(0.76)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(.white.opacity(colorScheme == .dark ? 0.24 : 0.42), lineWidth: 1)
+                Image(systemName: "heart.fill")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 52, height: 52)
+            .compositingGroup()
+            .shadow(color: accent.opacity(0.30), radius: 16, x: -5, y: 8)
+            .shadow(color: AppColors.refCardShadow.opacity(0.10), radius: 10, x: 4, y: -3)
+        } else if let latestTrack = tracks.last, latestTrack.posterPath != nil {
+            PosterImage(
+                path: latestTrack.posterPath,
+                title: latestTrack.title,
+                mediaType: .music,
+                cacheTargetSize: CGSize(width: 104, height: 104)
+            )
+            .frame(width: 52, height: 52)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(.white.opacity(colorScheme == .dark ? 0.20 : 0.42), lineWidth: 1)
+            }
+            .shadow(color: AppColors.refCardShadow.opacity(0.14), radius: 14, y: 6)
+        } else {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [accent.opacity(0.96), accent.opacity(0.70)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                AppGlyph(systemImage: "music.note.list", size: 24)
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 52, height: 52)
+            .shadow(color: accent.opacity(0.24), radius: 14, x: -4, y: 7)
+        }
+    }
+
+    private var playlistSubtitle: String {
+        if let latestTrack = tracks.last, !tracks.isEmpty {
+            return "\(tracks.count) 首歌曲 · 最新添加 \(latestTrack.title)"
+        }
+        return "\(tracks.count) 首歌曲"
+    }
+
+    private var playlistAccent: Color {
+        let seed = playlist.id.unicodeScalars.reduce(0) { partial, scalar in
+            (partial &* 31 &+ Int(scalar.value)) & 0x7fffffff
+        }
+        let hue = Double(seed % 360) / 360.0
+        return Color(hue: hue, saturation: 0.66, brightness: 0.96)
     }
 }
 
@@ -3017,7 +3171,7 @@ struct MusicSmartPlaylistDetailView: View {
                     } label: {
                         Label("播放全部", systemImage: "play.fill")
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 13, horizontalPadding: 12, minHeight: 34, prominent: true))
+                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 34, prominent: true))
                     .disabled(tracks.isEmpty)
 
                     Button {

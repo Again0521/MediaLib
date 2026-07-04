@@ -20,7 +20,7 @@ struct AppUpdateInfo: Identifiable, Equatable {
 enum AppVersion {
     /// 打包版从 Info.plist 读取；swift run 裸二进制兜底用当前发布版本。
     static var current: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.2.6"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.5.0"
     }
 
     /// 从任意文本里提取版本号：抓出第一段「点分数字」，如 v1.1.1 / MediaLIB_V1.1.8 / 标题里的 1.1.11。
@@ -71,6 +71,20 @@ enum AppUpdateChecker {
         return formatter
     }()
 
+    enum CheckerError: LocalizedError {
+        case httpStatus(Int, URL)
+        case noReachableReleaseSource
+
+        var errorDescription: String? {
+            switch self {
+            case .httpStatus(let status, let url):
+                return "更新源返回 HTTP \(status)：\(url.host ?? url.absoluteString)。"
+            case .noReachableReleaseSource:
+                return "未能连接到可用的更新源，请稍后重试。"
+            }
+        }
+    }
+
     /// 拉取 releases 列表，从 tag/title/body/assets 中提取版本号，
     /// 并在可安装资产中选出版本号最大的发布。
     static func fetchLatestRelease() async throws -> AppUpdateInfo? {
@@ -100,6 +114,9 @@ enum AppUpdateChecker {
         if let best {
             return best.info
         }
+        if let fallback = try await fetchLatestReleaseFromReleasePage() {
+            return fallback
+        }
         if let lastError {
             throw lastError
         }
@@ -116,6 +133,9 @@ enum AppUpdateChecker {
               (200..<300).contains(http.statusCode) else {
             if (response as? HTTPURLResponse)?.statusCode == 404 {
                 return nil
+            }
+            if let http = response as? HTTPURLResponse {
+                throw CheckerError.httpStatus(http.statusCode, source.apiURL)
             }
             throw URLError(.badServerResponse)
         }
@@ -154,6 +174,60 @@ enum AppUpdateChecker {
             }
         }
         return best?.info
+    }
+
+    /// GitHub API 偶发 403/5xx 或被代理改写时，页面仍可能可访问。
+    /// 兜底只提取 tag / release 链接 / dmg 链接，不依赖页面结构里的脚本状态。
+    private static func fetchLatestReleaseFromReleasePage() async throws -> AppUpdateInfo? {
+        var request = URLRequest(url: repositoryPage)
+        request.setValue("MediaLIB/\(AppVersion.current)", forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 15
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              (200..<300).contains(http.statusCode) else {
+            if let http = response as? HTTPURLResponse {
+                throw CheckerError.httpStatus(http.statusCode, repositoryPage)
+            }
+            throw CheckerError.noReachableReleaseSource
+        }
+        guard let html = String(data: data, encoding: .utf8) else { return nil }
+        var seen = Set<String>()
+        let tags = regexCaptures(pattern: #"/Again0521/MediaLib/releases/tag/([^"?#<]+)"#, in: html).compactMap { raw -> String? in
+            let tag = raw.removingPercentEncoding ?? raw
+            guard !tag.isEmpty, seen.insert(tag).inserted else { return nil }
+            return tag
+        }
+        for tag in tags {
+            guard let version = AppVersion.extractVersion(from: tag) else { continue }
+            let releaseURL = URL(string: "https://github.com/Again0521/MediaLib/releases/tag/\(tag)") ?? repositoryPage
+            let assetPattern = #"/Again0521/MediaLib/releases/download/\#(NSRegularExpression.escapedPattern(for: tag))/([^"?#<]+?\.(?:dmg|zip))"#
+            let rawAssetName = regexCaptures(pattern: assetPattern, in: html).first
+            let assetName = rawAssetName.map { $0.removingPercentEncoding ?? $0 }
+            let downloadURL = rawAssetName.flatMap { URL(string: "https://github.com/Again0521/MediaLib/releases/download/\(tag)/\($0)") }
+            return AppUpdateInfo(
+                version: version,
+                tagName: tag,
+                title: "MediaLIB \(version)",
+                releaseNotes: "",
+                releaseURL: releaseURL,
+                downloadURL: downloadURL,
+                assetName: assetName,
+                assetSize: nil,
+                publishedAt: nil,
+                prerelease: tag.localizedCaseInsensitiveContains("beta")
+            )
+        }
+        return nil
+    }
+
+    private static func regexCaptures(pattern: String, in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.matches(in: text, range: range).compactMap { match in
+            guard match.numberOfRanges > 1,
+                  let captureRange = Range(match.range(at: 1), in: text) else { return nil }
+            return String(text[captureRange])
+        }
     }
 
     private static func version(for release: GitHubRelease) -> String? {
