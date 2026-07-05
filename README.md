@@ -58,7 +58,7 @@
 - **认得出来** — 通过 TMDB 补齐海报、简介、演职人员、剧照、相似推荐和人物档案。
 <table>
   <tr>
-    <td width="50%"><img src="asset/library-anime.png" alt="首页音海报墙乐推荐"></td>
+    <td width="50%"><img src="asset/library-anime.png" alt="海报墙"></td>
     <td width="50%"><img src="asset/videodetail.png" alt="剧集详情"></td>
   </tr>
 </table>
