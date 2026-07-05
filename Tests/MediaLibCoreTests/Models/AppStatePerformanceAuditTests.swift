@@ -58,24 +58,28 @@ final class AppStatePerformanceAuditTests: XCTestCase {
         
         let startTime = CFAbsoluteTimeGetCurrent()
         
-        // 模拟 AppState.rebuildDerivedItemCaches 的 Pass 1：私密树向子级传播
+        // 模拟 AppState.rebuildDerivedItemCaches 的 Pass 1：私密树向子级传播。
+        // 这里只需要子级 id 做 BFS，不需要整份 MediaItem（50 个字段的大 struct），
+        // 存 id 而非整个 item 能显著减少 40,000 条剧集在 dictionary 里的拷贝开销。
         let privateCollectionIDs = Set(items.lazy.filter { $0.type == .privateCollection }.map(\.id))
-        var childrenByParentID: [String: [MediaItem]] = [:]
+        var childIDsByParentID: [String: [String]] = [:]
         for item in items {
             if let parentID = item.parentID {
-                childrenByParentID[parentID, default: []].append(item)
+                childIDsByParentID[parentID, default: []].append(item.id)
             }
         }
-        
+
         var privateItemIDs = privateCollectionIDs
+        privateItemIDs.reserveCapacity(items.count)
         var privateQueue = Array(privateCollectionIDs)
+        privateQueue.reserveCapacity(items.count)
         var privateQueueIndex = 0
         while privateQueueIndex < privateQueue.count {
             let parentID = privateQueue[privateQueueIndex]
             privateQueueIndex += 1
-            for child in childrenByParentID[parentID] ?? [] {
-                if privateItemIDs.insert(child.id).inserted {
-                    privateQueue.append(child.id)
+            for childID in childIDsByParentID[parentID] ?? [] {
+                if privateItemIDs.insert(childID).inserted {
+                    privateQueue.append(childID)
                 }
             }
         }

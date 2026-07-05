@@ -297,9 +297,10 @@ struct ContentView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// 侧边栏底部状态卡片轮换间隔：原 18s 太慢，容易让人觉得"一直在显示同一条"
-    /// （尤其是 ambient 池里内容本就不多时）。缩短到 6s 让轮换观感更明显。
-    static let sidebarStatusRotationInterval: TimeInterval = 6
+    /// 侧边栏底部状态卡片轮换间隔：曾从 18s 缩短到 6s 想让轮换更明显，
+    /// 实机使用反馈是切换过于频繁、来不及看清就跳到下一条。改为 30s，
+    /// 给每条状态足够的停留时间，仍能感知到轮换在发生。
+    static let sidebarStatusRotationInterval: TimeInterval = 30
     @State private var selection: SidebarDestination? = .home
     @State private var isVideoExpanded = true
     @State private var isAlbumExpanded = true
@@ -919,15 +920,26 @@ struct ContentView: View {
             ))
         }
 
-        ambient.append(SidebarStatusContent(
-            kind: .sponsor,
-            title: appState.localized("软件不错？"),
-            subtitle: appState.localized("点击投喂作者"),
-            systemImage: "heart.fill",
-            colors: [SidebarReferenceTokens.pink, SidebarReferenceTokens.orange]
-        ))
+        if sidebarSponsorNudgeEligibleNow {
+            ambient.append(SidebarStatusContent(
+                kind: .sponsor,
+                title: appState.localized("软件不错？"),
+                subtitle: appState.localized("点击投喂作者"),
+                systemImage: "heart.fill",
+                colors: [SidebarReferenceTokens.pink, SidebarReferenceTokens.orange]
+            ))
+        }
         ambient.append(sidebarSourceSummaryStatus)
         return [attention, ambient]
+    }
+
+    /// 赞赏提示曾作为 ambient 池的常驻成员，在健康度 100%、无继续观看、无最近任务的
+    /// 常见状态下会和媒体源摘要各占一半轮换份额，导致"太频繁"。改为按时间片决定候选资格：
+    /// 每 6 个轮换周期只有 1 个周期把它加入候选池，出场频率降到约六分之一，
+    /// 且不引入额外持久化状态（纯按当前时间计算，无副作用）。
+    private var sidebarSponsorNudgeEligibleNow: Bool {
+        let slot = Int(Date().timeIntervalSinceReferenceDate / Self.sidebarStatusRotationInterval)
+        return slot % 6 == 0
     }
 
     private var sidebarSourceSummaryStatus: SidebarStatusContent {
