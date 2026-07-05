@@ -1,168 +1,206 @@
 <div align="center">
 
-<h1>
-  <img src="./assets/icon.png" width="38" alt="MediaLIB icon" />
-  MediaLIB
-</h1>
+[简体中文](README.md) ·
+**English** ·
+[日本語](README.ja.md)
 
-<p><strong>A clean, natural local media library made for macOS.</strong></p>
+# MediaLIB
 
-<p>
-  <img src="https://img.shields.io/badge/macOS-13%2B-000000?logo=apple&logoColor=white" alt="macOS 13+" />
-  <img src="https://img.shields.io/badge/Media-Library-blue" alt="Media Library" />
-  <img src="https://img.shields.io/badge/Local%20First-Privacy%20Friendly-green" alt="Local First" />
-</p>
+### Your movies, shows, anime, music, and photos — finally under one roof.
 
-</div>
+A native macOS home media library. It gathers everything scattered across local drives, external disks, NAS, and Emby, Jellyfin, and Plex into one clean, beautiful, effortless app — to browse, search, and play, all in one place.
 
-<p align="center">
-  <a href="./README.md">中文</a> ·
-  <a href="./README.en.md">English</a> ·
-  <a href="./README.ja.md">日本語</a>
-</p>
-<div align="center">
+<br>
 
-<a href="https://www.patreon.com/c/feiniaoqianshan/membership">Buy Me a Coffee！</a>
+![Platform](https://img.shields.io/badge/Platform-macOS%2013+-000000?style=flat-square&logo=apple&logoColor=white)
+![Built with](https://img.shields.io/badge/Built%20with-SwiftUI-0A84FF?style=flat-square)
+![Playback](https://img.shields.io/badge/Playback-libmpv-8E44AD?style=flat-square)
+![Version](https://img.shields.io/badge/Version-1.5.0-34C759?style=flat-square)
+
+<br>
+
+![MediaLIB Home](asset/home-overview.png)
 
 </div>
-MediaLIB brings together movies, TV shows, anime, documentaries, variety shows, and music scattered across your local drive, external drives, NAS, SMB/FTP folders, and Emby, Jellyfin, or Plex servers. You can browse, search, favorite, continue watching, and play everything from one unified place.
 
-It does not take over your folders, and it will not move or change your media files without permission. Think of MediaLIB as a polished “media index center”: your files stay exactly where they are, while categories, artwork, watch history, favorites, playlists, offline cache, and metadata fixes are stored locally inside the app.
+<br>
 
-<div align="center">
-  <img src="./assets/home-overview.png" alt="MediaLIB home overview" width="86%" />
-</div>
+## First, the thing that matters most
 
-## Who it is for
+> **MediaLIB manages an *index* and a *cache* — never your files themselves.**
 
-- Your videos or music are spread across a Mac, external drive, NAS, or home server, and you usually dig through Finder folder by folder.
-- You want movies, TV shows, anime, and music in one app instead of several separate places.
-- You already use Emby, Jellyfin, or Plex, but still keep plenty of local files.
-- You prefer a quiet, clean media library that feels at home on macOS.
-- You have private folders that should stay locked, with paths, file names, and playback traces hidden.
+Scans, categories, likes, watchlist, ratings, play history, playlists, artwork, and metadata fixes all live inside MediaLIB's own data by default. It **never moves, deletes, or renames** a single one of your media files.
 
-## Main features
+The only exception is when you deliberately turn on **"Write to file"** in the music tag workbench — only then does it touch an audio file's tags. Otherwise, your original collection stays exactly as it is.
 
-### Manage all your media in one place
+<br>
 
-MediaLIB supports local folders, network devices, Emby, Jellyfin, and Plex. To add a media source, choose where it comes from, finish the connection, then confirm the category and scan mode.
+## One home screen, your whole library at a glance
 
-<div align="center">
-  <img src="./assets/add-source.png" alt="Add media source" width="78%" />
-</div>
+Open it, and you're home. The home screen curates a picks-of-the-day lineup from your library, laying out Continue Watching, Continue Listening, Recently Added, Today's Music, and a live photo wall together. Looking for something? Search up top — movies, shows, anime, and music are searched in parallel, and whichever category has results shows first, so you never sit and wait.
 
-Local folders and mounted network folders can be categorized as movies, TV shows, anime, documentaries, variety shows, music, other, or vault. When you are not sure, you can use auto detection. Remote media servers appear as separate entries, so they will not be mixed directly into your local videos or music.
+<table>
+  <tr>
+    <td width="50%"><img src="asset/home-music.png" alt="Home music picks"></td>
+    <td width="50%"><img src="asset/home-photowall.png" alt="Home photo wall and status"></td>
+  </tr>
+</table>
 
-### Movies, shows, and anime
+<br>
 
-MediaLIB scans folders recursively, recognizes common video files, and tries to understand the content type from file names and folder structure. Episodes are grouped by series, then sorted by season and episode number. Common naming styles such as `S01E01`, `第01季 第02集`, and `EP01` are supported.
+## Films and series, neatly in order
 
-<div align="center">
-  <img src="./assets/movie-library.png" alt="Video library" width="86%" />
-</div>
+Movies, TV, anime, documentaries, variety — each in its place. Series are grouped automatically by show, season, and episode; whatever's already processed appears first, and the rest fills in as it goes.
 
-You can mark items as favorite, want to watch, watched, unwatched, or currently watching, and add your own 1 to 5 star rating. MediaLIB lets you browse by title, year, score, personal rating, recently added, play count, and more.
+- **Easy on the eyes** — an even poster wall that lifts on hover, with rating badges you can read at a glance.
+- **Easy to manage** — like, watchlist, watched / unwatched / watching, and five-star ratings, all a right-click away.
+- **Easy to organize** — manual collections, smart collections, and pin your favorites to the home screen.
+- **Easy to recognize** — posters, synopses, cast and crew, stills, similar picks, and people profiles filled in via TMDB.
 
-For content you want to organize by hand, you can create manual collections. If you want the app to do the filtering for you, smart collections can build lists by type, watch status, year, score, source, and other rules. Frequently used collections can also be shown on the home page.
+![Anime library](asset/library-anime.png)
 
-<div align="center">
-  <img src="./assets/series-detail.png" alt="Series detail" width="86%" />
-</div>
+<br>
 
-### Music library and playlists
+## Music, treated with care
 
-Music has its own library alongside video. MediaLIB reads audio tags and tries to identify the title, artist, album, track number, year, duration, embedded artwork, and lyrics.
+Songs, albums, artists, playlists, recently played — all here. Scanning reads audio tags to recover title, artist, album, year, artwork, lyrics, and loudness as best it can. Queue, play next, drag to reorder, shuffle, repeat, and favorites are all within reach.
 
-<div align="center">
-  <img src="./assets/music-library.png" alt="Music library" width="86%" />
-</div>
+<table>
+  <tr>
+    <td width="50%"><img src="asset/music-songs.png" alt="Song list"></td>
+    <td width="50%"><img src="asset/music-artists.png" alt="Artists"></td>
+  </tr>
+</table>
 
-You can browse by songs, albums, artists, playlists, and recently played items. Favorited songs appear in a pinned favorites playlist. You can also create your own playlists or save the current play queue as a playlist. Playlists only store MediaLIB’s internal index and order; they do not move, copy, or rename your music files.
+### Two immersive players, switch as you please
 
-### A more immersive music player
+Not just playable — a pleasure to hear and to look at. The expanded player offers two themes, each with its own character:
 
-The music player has two states: a bottom mini player and a full expanded view. Double-clicking a song opens the mini player first. Clicking the track information expands it into the full player. The expanded page draws colors from the album cover and presents the cover, controls, queue, and lyrics card together.
+<table>
+  <tr>
+    <td width="50%">
+      <img src="asset/player-liuli.png" alt="Liuli theme"><br>
+      <b>Liuli</b> — an immersive glass backdrop tinted from the album art, with word-by-word lyrics. Quiet and focused.
+    </td>
+    <td width="50%">
+      <img src="asset/player-huguang.png" alt="Huguang theme"><br>
+      <b>Huguang</b> — a cover-flow wall of artwork, near-large and far-small over a lake-like reflection, like flipping through a shelf of vinyl.
+    </td>
+  </tr>
+</table>
 
-<div align="center">
-  <img src="./assets/music-player.png" alt="Music player" width="78%" />
-</div>
+Scroll a long list and the player tucks into a small cover in the bottom-right corner, a progress ring spinning around it. One tap, and the full player is back.
 
-Lyrics are loaded first from embedded lyrics or matching `.lrc` / `.txt` files. Timestamped LRC lyrics can scroll automatically, and enhanced LRC supports per-word or segmented highlighting. When exact word timing is unavailable, MediaLIB estimates in-line progress from the rhythm of the lyrics, so the text still follows the music in a more natural way.
+<br>
 
-### Built-in video player
+## Photos, local and system side by side
 
-Videos can be played with the built-in player, or with the system player when you prefer. The built-in player supports common video containers, subtitle and audio track switching, external subtitles, playback speed, volume, full screen, always-on-top window mode, resume playback, screenshots, chapters, bookmarks, A-B loop, and skipping intros or outros.
+The Photos section puts local videos, photos, and the macOS **System Photos** library on one page. System Photos are read live through PhotoKit and are **never copied into MediaLIB**. You get date grouping, continuous swiping, pinch-to-zoom, and two-finger pan — and when an iCloud original needs downloading, you see the progress.
 
-<div align="center">
-  <img src="./assets/video-player.png" alt="Video player" width="86%" />
-</div>
+![Photos](asset/photos.png)
 
-For remote videos, MediaLIB also supports quality selection and local caching. It is useful when the network is unstable, or when you want to prepare something for temporary offline viewing.
+<br>
 
-### Vault
+## One lock, for what's private
 
-The vault is designed for private content. The first time you enter, you can set a 4 to 8 digit passcode. After that, it can be unlocked with Touch ID or the passcode.
+The **Vault** is where you keep what you'd rather not have seen. While locked, its paths, filenames, sources, and counts never leak, and none of it shows up in Home, Watched, Likes, or people's filmographies — as if it were never there. On first entry it walks you through setting a 4–8 digit PIN; after that, Touch ID unlocks it in a tap.
 
-<div align="center">
-  <img src="./assets/vault.png" alt="Vault" width="86%" />
-</div>
+![Vault](asset/vault-locked.png)
 
-When locked, MediaLIB will not show vault content, media source paths, private file names during scans, or vault items on the home page, continue watching, watched, favorites, or want-to-watch sections. Once unlocked, vault content can be browsed, played, favorited, marked, and cleared from watch history like normal.
+<br>
 
-### Library health and task center
+## Your media, from wherever it lives
 
-Library health can check for offline media sources, invalid local paths, missing remote playback paths, possible duplicates, missing artwork, missing years, and similar issues. Every cleanup action asks for confirmation, and it only removes MediaLIB’s internal index. Your original media files are not deleted.
+In **Media Sources**, local folders, external drives, mounted NAS, and Emby, Jellyfin, and Plex servers are all managed in one place. Remote servers appear as their own directories, never mixed in with local content — and when they go offline, files aren't mistaken for deleted.
 
-<div align="center">
-  <img src="./assets/task-center.png" alt="Task center" width="86%" />
-</div>
+![Media sources](asset/media-sources.png)
 
-The task center records background tasks such as scans, incremental scans, remote sync, artwork preheating, metadata updates, video caching, chapter thumbnails, and one-click cleanup. When a failed task can be rebuilt, a retry button will be shown.
+<br>
 
-## Quick start
+## A dashboard that keeps you in the know
 
-1. Open `MediaLIB.app`.
-2. Go to “Media Sources” and click “Add Media Source…”.
-3. Choose a local folder, network device, Emby, Jellyfin, or Plex.
-4. For local or network folders, choose a category; use “Auto Detect” when unsure.
-5. Click “Scan All”, or scan one media source.
-6. After scanning, open “Home”, “Video”, or “Music” from the sidebar.
-7. To enrich information online, configure the related data sources in “Settings > Metadata & Matching”.
+The **Dashboard** brings library health, background tasks, and anything that needs attention into a single view: which sources are online, whether any files have gone missing, whether artwork and metadata are complete, and how much offline cache is in use. One-tap cleanup keeps things tidy.
 
-For first-time use, it is better to try a small folder first. Once the category and artwork results look right, add your full media library.
+![Dashboard](asset/dashboard.png)
 
-## Installation
+<br>
 
-If you received `MediaLib.dmg`:
+## A player that's more than enough
 
-1. Open the DMG.
-2. Drag `MediaLIB.app` into “Applications”.
-3. On first launch, macOS may block unsigned builds. Right-click `MediaLIB.app`, choose “Open”, then confirm once more.
+The built-in video player is powered by **libmpv**, bundled with the app and rendered in a native window — red-yellow-green buttons and system corners intact:
 
-Requirements:
+| Playback | Subtitles & audio | Advanced |
+| :-- | :-- | :-- |
+| Common containers and MKV | Embedded / same-folder external subs | Chapters, bookmarks, intro/outro markers |
+| Speed, volume, fullscreen, pin | Multiple audio tracks | A-B loop, single-file loop, auto next episode |
+| Snapshot, frame preview, time left | Online subtitle search & download | Remote quality selection, offline cache |
 
-- macOS 13 Ventura or later.
-- Local scanning and playback do not require an account.
-- TMDB, music metadata, remote servers, subtitle downloads, Trakt, Last.fm, and similar features require a network connection and the corresponding account or API key.
+Prefer not to use it? You can switch back to the system default player anytime in Settings.
 
-## Data safety
+<br>
 
-MediaLIB follows one basic rule: it does not change your media files on its own.
+## Getting started
 
-- Scanning only creates an index.
-- Re-categorizing only changes MediaLIB’s internal category.
-- Favorites, want-to-watch, ratings, watch history, and playlists are stored in the local index.
-- Cleaning invalid indexes does not delete original files.
-- Deleting offline cache only removes cache copies created by MediaLIB.
-- When the vault is locked, paths, file names, and content are hidden.
-- Database backup and restore only handle MediaLIB’s own internal data. They do not copy or replace files in your media sources.
+**Requirements**: macOS 13 Ventura or later. Local scanning and playback need **no account**. Networked features — TMDB scraping, music metadata, remote servers, subtitle downloads — require the relevant service account or API key.
 
-## Project status
+Once you have `MediaLib.dmg`:
 
-MediaLIB is still being polished. The current focus is making the library, players, remote sync, music experience, offline cache, and interface performance more stable and easier to use.
+1. Open the DMG;
+2. Drag `MediaLIB.app` into Applications;
+3. On first launch of a local build, macOS may block it — right-click the app, choose **Open**, and confirm once.
 
-If you run into problems, feel free to report them through Issues. It helps a lot if you include the page, steps, screenshots, and logs, so the problem can be found more quickly.
+<br>
+
+## Build from source
+
+```bash
+brew install mpv ffmpeg
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run MediaLibChecks
+scripts/package_dmg.sh
+```
+
+The outputs are `dist/MediaLIB.app` and `dist/MediaLib.dmg`.
+
+<br>
+
+## Data safety principles
+
+<details>
+<summary><b>MediaLIB's seven promises about your data</b></summary>
+
+<br>
+
+- Scanning only creates or updates the internal index; it never changes media files.
+- Reclassifying only edits MediaLIB's internal categories.
+- Likes, watchlist, ratings, play history, collections, and playlists live in the local index.
+- Clearing stale index entries requires confirmation — it deletes index entries only, never files.
+- Offline cache only manages the cache copies MediaLIB generated itself.
+- Database backup and restore only replace internal data; they never touch source media files.
+- While the Vault is locked, no private path, name, or count is ever leaked.
+
+</details>
+
+<br>
+
+## Documentation
+
+| Document | Contents |
+| :-- | :-- |
+| [User Guide](doc/用户使用说明.md) | Full feature guide for everyday users |
+| [Developer Notes](doc/开发说明.md) | Architecture, constraints, and verification |
+| [Design System](doc/MediaLIB_设计系统标准.md) | Visual standards for pages and the music player |
+| [ROADMAP](doc/ROADMAP.md) | What's next |
+| [CHANGELOG](doc/CHANGELOG.md) | Change history |
+
+<br>
 
 ## License
 
-This repository is currently for personal learning and use. Third-party components shipped with or used by the app, such as libmpv and ffmpeg, follow their own open-source licenses. If you plan to redistribute or use it commercially, please check the relevant license requirements first.
+This repository is currently for personal study and use. Third-party components bundled or distributed with the app, such as libmpv and ffmpeg, are governed by their own open-source licenses; please confirm those requirements before redistributing or using commercially.
+
+<br>
+
+<div align="center">
+<sub>Made for the home media library · Crafted with SwiftUI and ❤️</sub>
+</div>

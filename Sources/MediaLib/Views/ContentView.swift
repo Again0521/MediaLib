@@ -297,10 +297,14 @@ struct ContentView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// 侧边栏底部状态卡片轮换间隔：曾从 18s 缩短到 6s 想让轮换更明显，
-    /// 实机使用反馈是切换过于频繁、来不及看清就跳到下一条。改为 30s，
-    /// 给每条状态足够的停留时间，仍能感知到轮换在发生。
-    static let sidebarStatusRotationInterval: TimeInterval = 30
+    /// 侧边栏底部状态卡片轮换间隔：曾从 18s 缩短到 6s、又调到 30s，
+    /// 反馈仍嫌切换偏快。降到 60s，让每条状态有足够的停留时间。
+    static let sidebarStatusRotationInterval: TimeInterval = 60
+    /// 打断层的独立巡检节奏：比主轮换快得多，用来及时发现"任务刚完成"
+    /// 这类值得立刻被看到的事件，不需要等到下一次主轮换才有机会出现。
+    static let sidebarInterruptWatchInterval: TimeInterval = 12
+    /// 打断层单条内容展示时长：够读完一行标题+副标题，又不会喧宾夺主。
+    static let sidebarInterruptDisplayDuration: TimeInterval = 6
     @State private var selection: SidebarDestination? = .home
     @State private var isVideoExpanded = true
     @State private var isAlbumExpanded = true
@@ -326,6 +330,15 @@ struct ContentView: View {
     @State private var mainLayoutTransitionActive = false
     @State private var mainLayoutTransitionResetTask: Task<Void, Never>?
     @State private var sidebarStatusRotationTick = Int(Date().timeIntervalSinceReferenceDate / Self.sidebarStatusRotationInterval)
+    /// 打断层：任务完成/任务进度这类高优先级瞬时事件的展示位，非 nil 时无条件盖过
+    /// 下面的常态优先级（含音乐播放、保险库解锁），展示 `sidebarInterruptDisplayDuration`
+    /// 后自动清空、回退到常态显示。跟主轮换是两套独立机制，互不影响彼此的状态。
+    @State private var sidebarInterruptContent: SidebarStatusContent?
+    @State private var sidebarInterruptDismissTask: Task<Void, Never>?
+    /// 上一次巡检时仍处于活跃态的任务 id：与本次巡检结果做差集，
+    /// 差集里"上次活跃、这次不活跃了"的任务即为刚完成/刚终止的任务。
+    @State private var sidebarLastActiveTaskIDs: Set<UUID> = []
+    @State private var sidebarLastProgressPeekAt: Date = .distantPast
     @State private var smartCollectionEditor: VideoSmartCollectionEditorRequest?
     @State private var manualCollectionEditor: VideoManualCollectionEditorRequest?
     @State private var musicSmartPlaylistEditor: MusicSmartPlaylistEditorRequest?
@@ -790,6 +803,12 @@ struct ContentView: View {
     }
 
     private var sidebarStatusContent: SidebarStatusContent {
+        // 打断层优先级最高：任务完成/任务进度这类值得被立刻看到的事件，
+        // 短暂盖过音乐播放、保险库解锁这类原本"绝对优先"的常态显示。
+        if let sidebarInterruptContent {
+            return sidebarInterruptContent
+        }
+
         if let priorityContent = sidebarPriorityStatusContent {
             return priorityContent
         }
@@ -872,6 +891,30 @@ struct ContentView: View {
             ))
         }
 
+        // 健康度只给一个抽象分数，这里把权重较高的两类问题单独露出，
+        // 让轮换内容更丰富，也让用户不用点进仪表盘就知道具体是什么问题。
+        let missingFileCount = appState.missingFileItems.count
+        if missingFileCount > 0 {
+            attention.append(SidebarStatusContent(
+                kind: .missingFiles(count: missingFileCount),
+                title: "\(missingFileCount) 个文件已失效",
+                subtitle: "点击查看详情",
+                systemImage: "questionmark.folder",
+                colors: [Color(red: 1.0, green: 0.48, blue: 0.35), Color(red: 1.0, green: 0.72, blue: 0.34)]
+            ))
+        }
+
+        let duplicateGroupCount = appState.duplicateTitleGroups.count
+        if duplicateGroupCount > 0 {
+            attention.append(SidebarStatusContent(
+                kind: .duplicates(groupCount: duplicateGroupCount),
+                title: "发现 \(duplicateGroupCount) 组疑似重复",
+                subtitle: "点击查看详情",
+                systemImage: "square.on.square",
+                colors: [Color(red: 1.0, green: 0.48, blue: 0.35), Color(red: 1.0, green: 0.72, blue: 0.34)]
+            ))
+        }
+
         if appState.privacyPINConfigured, appState.privacyUnlocked {
             attention.append(SidebarStatusContent(
                 kind: .vaultUnlocked,
@@ -917,6 +960,17 @@ struct ContentView: View {
                 systemImage: lastTask.kind.systemImage,
                 colors: [SidebarReferenceTokens.blue, Color(red: 0.55, green: 0.55, blue: 0.93)],
                 progress: lastTask.progress
+            ))
+        }
+
+        let cacheSummary = appState.videoCacheStorageSummary
+        if cacheSummary.entryCount > 0 {
+            ambient.append(SidebarStatusContent(
+                kind: .cacheUsage(cacheSummary),
+                title: "已缓存 \(cacheSummary.entryCount) 项离线内容",
+                subtitle: ByteCountFormatter.string(fromByteCount: cacheSummary.totalBytes, countStyle: .file),
+                systemImage: "arrow.down.circle",
+                colors: [SidebarReferenceTokens.blue, Color(red: 0.33, green: 0.82, blue: 0.74)]
             ))
         }
 
@@ -1011,6 +1065,75 @@ struct ContentView: View {
         }
     }
 
+    /// 打断层巡检：独立于主轮换的更快节奏，负责发现"任务刚完成"这类瞬时事件，
+    /// 以及在音乐播放/保险库解锁长期霸占展示位时偶尔让任务进度露面。
+    @MainActor
+    private func sidebarInterruptWatchLoop() async {
+        // 先记录启动时已经在跑的任务，避免刚进入页面就把"本来就在跑的任务"误判成刚完成。
+        sidebarLastActiveTaskIDs = Set(appState.backgroundTasks.filter { $0.state.isActive }.map(\.id))
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: UInt64(Self.sidebarInterruptWatchInterval * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            evaluateSidebarInterruptOpportunity()
+        }
+    }
+
+    private func evaluateSidebarInterruptOpportunity() {
+        let currentActiveIDs = Set(appState.backgroundTasks.filter { $0.state.isActive }.map(\.id))
+        let justFinishedIDs = sidebarLastActiveTaskIDs.subtracting(currentActiveIDs)
+        sidebarLastActiveTaskIDs = currentActiveIDs
+
+        // 优先级 1：任务刚完成——不管当前显示的是什么（含音乐播放/保险库），立刻打断一次。
+        if let finishedTask = justFinishedIDs
+            .compactMap({ id in appState.backgroundTasks.first { $0.id == id } })
+            .first(where: { $0.state == .completed }) {
+            presentSidebarInterrupt(SidebarStatusContent(
+                kind: .lastTask(finishedTask),
+                title: finishedTask.title,
+                subtitle: "刚刚完成",
+                systemImage: "checkmark.circle.fill",
+                colors: [Color(red: 0.25, green: 0.81, blue: 0.68), SidebarReferenceTokens.blue]
+            ))
+            return
+        }
+
+        // 优先级 2：没有完成事件时，只在当前显示位被音乐播放/保险库这类"绝对优先"内容
+        // 长期占据、任务进度原本完全没有机会露出时，才偶尔打断展示一次进度。
+        guard sidebarInterruptContent == nil,
+              sidebarPriorityStatusContent != nil,
+              Date().timeIntervalSince(sidebarLastProgressPeekAt) >= Self.sidebarStatusRotationInterval,
+              let activeTask = appState.backgroundTasks.first(where: { $0.state.isActive }) else {
+            return
+        }
+        sidebarLastProgressPeekAt = Date()
+        presentSidebarInterrupt(SidebarStatusContent(
+            kind: .activeTask(activeTask),
+            title: activeTask.title,
+            subtitle: sidebarTaskSubtitle(activeTask),
+            systemImage: activeTask.kind.systemImage,
+            colors: [SidebarReferenceTokens.blue, Color(red: 0.33, green: 0.82, blue: 0.74)],
+            progress: activeTask.progress
+        ))
+    }
+
+    private func presentSidebarInterrupt(_ content: SidebarStatusContent) {
+        sidebarInterruptDismissTask?.cancel()
+        withAnimation(AppMotion.fast) {
+            sidebarInterruptContent = content
+        }
+        sidebarInterruptDismissTask = Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(Self.sidebarInterruptDisplayDuration * 1_000_000_000))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            withAnimation(AppMotion.fast) {
+                sidebarInterruptContent = nil
+            }
+        }
+    }
+
     private func handleSidebarStatusPrimaryAction(_ status: SidebarStatusContent) {
         switch status.kind {
         case .music:
@@ -1018,7 +1141,7 @@ struct ContentView: View {
         case .update(let update):
             NSWorkspace.shared.open(update.downloadURL ?? update.releaseURL)
             appState.availableUpdate = nil
-        case .checkingUpdate, .activeTask, .failedTask, .lastTask, .health:
+        case .checkingUpdate, .activeTask, .failedTask, .lastTask, .health, .missingFiles, .duplicates, .cacheUsage:
             selection = .health
         case .vaultUnlocked:
             appState.lockPrivacy()
@@ -1225,6 +1348,9 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: SidebarMetrics.columnMin, ideal: SidebarMetrics.columnIdeal, max: SidebarMetrics.columnMax)
             .task {
                 await sidebarStatusRotationLoop()
+            }
+            .task {
+                await sidebarInterruptWatchLoop()
             }
             .onAppear {
                 selection = SidebarDestination(storedID: storedSelectionID) ?? .home
@@ -2135,6 +2261,9 @@ private struct SidebarStatusContent {
         case continueWatching(MediaItem)
         case sourceSummary(count: Int, hidesPrivateSources: Bool)
         case sponsor
+        case missingFiles(count: Int)
+        case duplicates(groupCount: Int)
+        case cacheUsage(VideoCacheStorageSummary)
     }
 
     let kind: Kind
