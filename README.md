@@ -58,7 +58,6 @@
 - **认得出来** — 通过 TMDB 补齐海报、简介、演职人员、剧照、相似推荐和人物档案。
 
 ![动漫库](asset/library-anime.png)
-![详情库](asset/videodetail.png)
 <br>
 
 ## 音乐，值得被认真对待
