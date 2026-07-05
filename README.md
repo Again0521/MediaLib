@@ -1,179 +1,202 @@
 <div align="center">
 
-<h1>
-  <img src="./assets/icon.png" width="38" alt="MediaLIB icon" />
-  MediaLIB
-</h1>
+# MediaLIB
 
-<p><strong>一个干净、自然、适合 macOS 的本地影音库。</strong></p>
+### 你的电影、剧集、动漫、音乐和照片，终于住进了同一个家。
 
-<p>
-  <img src="https://img.shields.io/badge/macOS-13%2B-000000?logo=apple&logoColor=white" alt="macOS 13+" />
-  <img src="https://img.shields.io/badge/Media-Library-blue" alt="Media Library" />
-  <img src="https://img.shields.io/badge/Local%20First-Privacy%20Friendly-green" alt="Local First" />
-</p>
+一款 macOS 原生的家庭影音库。把散落在本地硬盘、移动硬盘、NAS，以及 Emby、Jellyfin、Plex 里的内容，收进一个清爽、好看、好用的应用里——统一浏览、统一搜索、统一播放。
 
-</div>
+<br>
 
-<p align="center">
-  <a href="./README.md">中文</a> ·
-  <a href="./README.en.md">English</a> ·
-  <a href="./README.ja.md">日本語</a>
-</p>
-<div align="center">
+![平台](https://img.shields.io/badge/平台-macOS%2013+-000000?style=flat-square&logo=apple&logoColor=white)
+![界面](https://img.shields.io/badge/构建-SwiftUI-0A84FF?style=flat-square)
+![播放内核](https://img.shields.io/badge/播放-libmpv-8E44AD?style=flat-square)
+![版本](https://img.shields.io/badge/版本-1.5.0-34C759?style=flat-square)
 
-<a href="https://ifdian.net/a/0521zn/plan">点击投喂！</a>
+<br>
+
+![MediaLIB 首页](asset/home-overview.png)
 
 </div>
-MediaLIB 可以把散落在本地硬盘、移动硬盘、NAS、SMB/FTP 网络目录，以及 Emby、Jellyfin、Plex 里的电影、剧集、动漫、纪录片、综艺和音乐整理到一起。你可以在一个统一的界面里浏览、搜索、收藏、继续观看和直接播放。
 
-它不会替你接管文件夹，也不会擅自移动或修改你的媒体文件。MediaLIB 更像是一个漂亮的“媒体索引中心”：你的文件继续留在原来的位置，分类、封面、播放记录、收藏、歌单、离线缓存和元数据修正都保存在 App 自己的本机数据里。
+<br>
 
-<div align="center">
-  <img src="./assets/home-overview.png" alt="MediaLIB 首页总览" width="86%" />
-</div>
+## 先说最重要的一件事
 
-## 适合谁
+> **MediaLIB 管理的是「索引」和「缓存」，不是你的文件本身。**
 
-- 影音文件分散在 Mac、移动硬盘、NAS 或家庭服务器里，平时靠 Finder 一层层翻。
-- 电影、电视剧、动漫和音乐都想放在一个 App 里统一浏览。
-- 已经在用 Emby、Jellyfin 或 Plex，但本地文件也很多。
-- 喜欢简洁、安静、偏 macOS 原生风格的媒体库。
-- 有一些私密目录，希望锁起来后不显示路径、文件名和播放痕迹。
+扫描、分类、喜欢、想看、评分、播放记录、歌单、封面和元数据修正，默认都只保存在 MediaLIB 自己的数据里。它**不会移动、不会删除、也不会改名**你的任何一个媒体文件。
 
-## 主要功能
+唯一的例外，是你在音乐标签工作台里**亲手打开「写入文件」**——只有那时，它才会去动音频文件的标签。除此之外，你的原始收藏永远保持原样。
 
-### 统一管理你的影音内容
+<br>
 
-MediaLIB 支持接入本地目录、网络设备、Emby、Jellyfin 和 Plex。添加媒体源时，只需要选择来源、完成连接，再确认分类和扫描方式即可。
+## 一个首页，看见你的全部
 
-<div align="center">
-  <img src="./assets/add-source.png" alt="添加媒体源" width="78%" />
-</div>
+打开就是家。首页会根据你的媒体库，为你精选一份今日片单，把「继续观看」「继续听」「最近添加」「今日推荐音乐」和实时的照片墙铺在一起。想找什么，右上角搜索一下——电影、剧集、动漫、音乐会各自穿透查找，哪一类先有结果就先出现，不用干等。
 
-本地目录和网络挂载目录可以归类为电影、电视剧、动漫、纪录片、综艺、音乐、其他或保险库；不确定时也可以使用自动识别。远程媒体服务器会作为独立入口显示，不会和本地视频、音乐混在一起。
+<table>
+  <tr>
+    <td width="50%"><img src="asset/home-music.png" alt="首页音乐推荐"></td>
+    <td width="50%"><img src="asset/home-photowall.png" alt="首页照片墙与运行状态"></td>
+  </tr>
+</table>
 
-### 电影、剧集和动漫
+<br>
 
-MediaLIB 会递归扫描目录，识别常见视频文件，并尽量从文件名和文件夹结构里判断内容类型。剧集会按系列聚合，按季和集数排序，支持 `S01E01`、`第01季 第02集`、`EP01` 等常见命名方式。
+## 影视与剧集，整理得明明白白
 
-<div align="center">
-  <img src="./assets/movie-library.png" alt="影视库" width="86%" />
-</div>
+电影、电视剧、动漫、纪录片、综艺，各归各位。剧集会自动按系列、季、集聚合，扫描时已经整理好的部分会先出现，剩下的再慢慢补齐。
 
-你可以给条目标记喜欢、想看、已观看、未观看、正在观看，也可以添加 1 到 5 星个人评级。MediaLIB 支持按标题、年份、评分、评级、最近添加、播放次数等方式浏览。
+- **看得舒服** — 海报墙均匀铺排，鼠标划过就浮起，评分角标一眼可见。
+- **管得顺手** — 喜欢、想看、已看 / 未看 / 在看、五星评分，右键即可标记。
+- **归得清楚** — 手动集合、智能集合，还能把喜欢的合集发布到首页。
+- **认得出来** — 通过 TMDB 补齐海报、简介、演职人员、剧照、相似推荐和人物档案。
 
-对于想自己整理的内容，可以创建手动集合；如果想让 App 自动筛选，也可以使用智能集合，比如按类型、观看状态、年份、评分、来源等规则生成片单，并把常用集合发布到首页。
+![动漫库](asset/library-anime.png)
 
-<div align="center">
-  <img src="./assets/series-detail.png" alt="剧集详情" width="86%" />
-</div>
+<br>
 
-### 音乐库和歌单
+## 音乐，值得被认真对待
 
-音乐是和视频并列的一套媒体库。MediaLIB 会读取音频标签，尽量识别标题、艺术家、专辑、曲目号、年份、时长、内嵌封面和歌词。
+歌曲、专辑、艺术家、歌单、最近播放，一应俱全。扫描会读取音频标签，尽力还原标题、艺术家、专辑、年份、封面、歌词和响度信息。队列、下一首、拖动排序、随机播放、循环、收藏，都在手边。
 
-<div align="center">
-  <img src="./assets/music-library.png" alt="音乐库" width="86%" />
-</div>
+<table>
+  <tr>
+    <td width="50%"><img src="asset/music-songs.png" alt="歌曲列表"></td>
+    <td width="50%"><img src="asset/music-artists.png" alt="艺术家"></td>
+  </tr>
+</table>
 
-你可以按歌曲、专辑、艺术家、歌单和最近播放浏览。收藏歌曲会出现在置顶收藏歌单里，也可以创建自己的歌单，或把当前播放队列保存成歌单。歌单只记录 MediaLIB 内部索引和顺序，不会移动、复制或重命名音乐文件。
+### 两种沉浸播放，随心切换
 
-### 更沉浸的音乐播放
+不只是能听，更是好听、好看。展开播放页提供两款各具气质的主题：
 
-音乐播放器有底部迷你播放器和展开页两种状态。双击歌曲后会先出现底部迷你播放器，点击曲目信息后可以展开完整播放界面。展开页会从专辑封面取色，展示封面、控制栏、队列和歌词卡片。
+<table>
+  <tr>
+    <td width="50%">
+      <img src="asset/player-liuli.png" alt="琉璃主题"><br>
+      <b>琉璃</b> — 专辑取色的沉浸玻璃背景，逐字点亮的歌词，安静而专注。
+    </td>
+    <td width="50%">
+      <img src="asset/player-huguang.png" alt="湖光主题"><br>
+      <b>湖光</b> — 唱片墙式封面流，近大远小、湖面倒影，像在翻看一架黑胶。
+    </td>
+  </tr>
+</table>
 
-<div align="center">
-  <img src="./assets/music-player.png" alt="音乐播放页" width="86%" />
-</div>
-歌词会优先使用音频内嵌歌词或同名 `.lrc` / `.txt` 文件。带时间戳的 LRC 可以自动滚动；增强 LRC 支持逐字或分词高亮。没有逐字时间戳时，MediaLIB 会根据歌词节奏估算行内进度，让歌词跟随播放更自然。
-<p align="center">
-  <img src="./assets/music-player2.png" alt="音乐播放页" width="86%" />
-</p>
-### 内置视频播放器
+滚动长列表时，播放器会收成右下角一枚小小的封面，上面转着进度环；点一下，又是完整的展开页。
 
-视频可以使用内置播放器，也可以按需改用系统播放器。内置播放器支持常见视频容器、字幕和音轨切换、外挂字幕、倍速、音量、全屏、窗口置顶、恢复播放、截图、章节、书签、A-B 循环、跳过片头片尾等常用能力。
+<br>
 
-<div align="center">
-  <img src="./assets/video-player.png" alt="视频播放器" width="86%" />
-</div>
+## 照片，本地与系统一起看
 
-对于远程视频，MediaLIB 也支持播放清晰度选择和本地缓存，适合网络不稳定时提前准备，或者临时离线观看。
+相册把本地录像、照片和 macOS「系统照片」放在同一个页面。系统照片通过 PhotoKit 实时读取，**不会复制进 MediaLIB**。支持按日期分组、连续切图、捏合缩放、双指平移，iCloud 原图需要下载时也会显示进度。
 
-### 保险库
+![相册](asset/photos.png)
 
-保险库适合放私密内容。第一次进入时可以设置 4 到 8 位数字密码，之后可用 Touch ID 或密码解锁。
+<br>
 
-<div align="center">
-  <img src="./assets/vault.png" alt="保险库" width="86%" />
-</div>
+## 一把锁，守住私密内容
 
-锁定后，MediaLIB 不会显示保险库内容、媒体源路径、扫描中的私密文件名，也不会在首页、继续观看、已观看、喜欢或想看里暴露保险库条目。解锁后，保险库内容可以正常浏览、播放、收藏、标记和清除播放记录。
+**保险库**用来存放不想被看到的内容。锁定时，它的路径、文件名、来源、数量都不会泄露，也不会出现在首页、已看、喜欢或人物作品里——就像它从不存在。首次进入引导设置 4–8 位 PIN，之后可用 Touch ID 一触解锁。
 
-### 片库健康和任务中心
+![保险库](asset/vault-locked.png)
 
-片库健康可以检查媒体源离线、本地路径失效、远程播放路径缺失、疑似重复、缺少封面或年份等问题。所有清理动作都会要求确认，并且只会移除 MediaLIB 内部索引，不会删除你的原始媒体文件。
+<br>
 
-<div align="center">
-  <img src="./assets/task-center.png" alt="任务中心" width="86%" />
-</div>
+## 你的媒体，从哪来都行
 
-任务中心会记录扫描、增量扫描、远程同步、封面预热、元数据补充、视频缓存、章节图和一键清理等后台任务。失败任务在可以重建目标时会显示重试按钮。
+在「媒体源」里，本地文件夹、移动硬盘、已挂载的 NAS，以及 Emby、Jellyfin、Plex 服务器，都能一处管理。远程服务器会显示为独立目录，不和本地内容混在一起；离线时也不会把文件误判成已删除。
 
-## 快速开始
+![媒体源](asset/media-sources.png)
 
-1. 打开 `MediaLIB.app`。
-2. 进入“媒体源”，点击“添加媒体源…”。
-3. 选择本地目录、网络设备、Emby、Jellyfin 或 Plex。
-4. 本地或网络目录选择分类；不确定时使用“自动识别”。
-5. 点击“扫描全部”，或扫描单个媒体源。
-6. 扫描完成后，在左侧栏进入“首页”“视频”或“音乐”浏览。
-7. 如需联网补充信息，在“设置 > 元数据与匹配”里配置对应数据源。
+<br>
 
-首次使用时，建议先添加一个较小的目录试扫，确认分类和封面效果符合预期后，再添加完整媒体库。
+## 心里有数的仪表盘
 
-## 安装
+**仪表盘**把片库健康、后台任务和需要处理的事项汇成一屏：媒体源在不在线、有没有失效文件、封面和元数据齐不齐、离线缓存用了多少。一键清理，随手保持干净。
 
-如果你拿到的是 `MediaLib.dmg`：
+![仪表盘](asset/dashboard.png)
 
-1. 打开 DMG。
-2. 将 `MediaLIB.app` 拖到“应用程序”。
-3. 首次打开未签名版本时，macOS 可能会拦截。右键 `MediaLIB.app`，选择“打开”，再确认一次即可。
+<br>
 
-运行要求：
+## 一台够用的播放器
 
-- macOS 13 Ventura 或更高版本。
-- 本地扫描和播放不需要账号。
-- TMDB、音乐元数据、远程服务器、字幕下载、Trakt、Last.fm 等功能需要网络和对应服务的账号或 API Key。
+内置视频播放器基于随应用分发的 **libmpv**，在原生窗口里渲染，红黄绿按钮和系统圆角都在：
 
-## 数据安全
+| 播放 | 字幕与音轨 | 进阶 |
+| :-- | :-- | :-- |
+| 常见容器与 MKV | 内嵌 / 同目录外挂字幕 | 章节、书签、片头片尾标记 |
+| 倍速、音量、全屏、置顶 | 多音轨切换 | A-B 循环、单片循环、自动下一集 |
+| 截图、帧预览、剩余时间 | 在线字幕搜索下载 | 远程清晰度选择、离线缓存 |
 
-MediaLIB 的基本原则是：不擅自改动你的媒体文件。
+不想用内置？在设置里可以随时切回系统默认播放器。
 
-- 扫描只建立索引。
+<br>
+
+## 开始使用
+
+**系统要求**：macOS 13 Ventura 或更高版本。本地扫描和播放**无需账号**。TMDB 刮削、音乐元数据、远程服务器、字幕下载等联网功能，需要对应服务的账号或 API Key。
+
+拿到 `MediaLib.dmg` 后：
+
+1. 打开 DMG；
+2. 把 `MediaLIB.app` 拖进「应用程序」；
+3. 首次打开本地构建版本时 macOS 可能拦截，右键 App 选择「打开」，再确认一次即可。
+
+<br>
+
+## 从源码构建
+
+```bash
+brew install mpv ffmpeg
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build
+env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run MediaLibChecks
+scripts/package_dmg.sh
+```
+
+产物为 `dist/MediaLIB.app` 与 `dist/MediaLib.dmg`。
+
+<br>
+
+## 数据安全原则
+
+<details>
+<summary><b>展开查看 MediaLIB 对你数据的七条承诺</b></summary>
+
+<br>
+
+- 扫描只建立或更新内部索引，不改动媒体文件。
 - 重分类只修改 MediaLIB 内部分类。
-- 喜欢、想看、评级、播放记录和歌单都保存在本机索引里。
-- 清理失效索引不会删除原始文件。
-- 删除离线缓存只删除 MediaLIB 自己生成的缓存副本。
-- 保险库锁定时会隐藏路径、文件名和内容。
-- 数据库备份和恢复只处理 MediaLIB 内部数据，不复制或替换媒体源里的文件。
+- 喜欢、想看、评级、播放记录、集合、歌单都保存在本机索引。
+- 清理失效索引需要确认，只删索引、不删文件。
+- 离线缓存只管理 MediaLIB 自己生成的缓存副本。
+- 数据库备份与恢复只替换内部数据，不触碰媒体源文件。
+- 保险库锁定时不泄露任何私密路径、名称或数量。
 
-## 项目状态
+</details>
 
-MediaLIB 仍在持续打磨中。当前重点是让媒体库、播放器、远程同步、音乐体验、离线缓存和界面性能变得更稳定、更顺手。
+<br>
 
-使用过程中遇到问题，欢迎通过 Issue 反馈。最好附上页面、操作步骤、截图和日志信息，这样更容易定位问题。
+## 文档
 
-## 相关链接
+| 文档 | 内容 |
+| :-- | :-- |
+| [用户使用说明](doc/用户使用说明.md) | 面向普通用户的完整功能说明 |
+| [开发说明](doc/开发说明.md) | 架构、约束与验证 |
+| [设计系统标准](doc/MediaLIB_设计系统标准.md) | 页面与音乐展开页的视觉规范 |
+| [ROADMAP](doc/ROADMAP.md) | 后续计划 |
+| [CHANGELOG](doc/CHANGELOG.md) | 历史变更记录 |
 
-<div>
-<a href="https://github.com/mpv-player/mpv">mpv-player</a><br>
-<a href="https://gitee.com/xzy1102/home-emby-tv/releases">HomeEmby For Andorid TV</a><br>
-<a href="https://github.com/MediaBrowser/Emby">emby</a><br>
-<a href="https://github.com/jellyfin/jellyfin">jellyfin</a><br>
-<a href="https://linux.do">Linux.do</a>
-</div>
+<br>
 
 ## 许可
 
-当前仓库供个人学习与使用。随 App 使用或打包的 libmpv、ffmpeg 等第三方组件遵循各自的开源许可；如果你计划再分发或商用，请先确认相关许可要求。
+本仓库当前供个人学习与使用。随应用分发或打包的 libmpv、ffmpeg 等第三方组件遵循各自的开源许可；再分发或商用前，请先确认相关许可要求。
+
+<br>
+
+<div align="center">
+<sub>为家庭影音库而生 · 用 SwiftUI 与 ❤️ 打磨</sub>
+</div>
