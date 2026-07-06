@@ -377,6 +377,10 @@ struct ContentView: View {
         return false
     }
 
+    private var musicPlayerEffectiveColorScheme: ColorScheme {
+        appState.settings.musicPlayerVisualScheme == .liuli ? .light : colorScheme
+    }
+
     // body 拆成「根布局 + 4 段连续修饰符」分别由独立函数装配：修饰符顺序逐字保持不变（仅
     // 切成连续片段，SwiftUI 语义不变），但让每段在各自函数里独立类型检查，避免整个 body 作为
     // 单一巨型表达式触发旧编译器「unable to type-check in reasonable time」。
@@ -424,6 +428,7 @@ struct ContentView: View {
                             onRequestClose: closeMusicPlayer
                         )
                         .environmentObject(appState)
+                        .environment(\.colorScheme, musicPlayerEffectiveColorScheme)
                         .frame(width: musicMiniPlayerFrameWidth(for: geometry.size.width), alignment: .bottomLeading)
                         .padding(.leading, musicMiniPlayerCollapsed ? 0 : musicMiniPlayerLeadingInset + musicMiniPlayerOuterInset)
                         .padding(.trailing, musicMiniPlayerCollapsed ? musicMiniPlayerOuterInset : 0)
@@ -469,7 +474,7 @@ struct ContentView: View {
         .overlay {
             ZStack {
                 if musicTransitionShieldActive {
-                    Color(nsColor: musicWindowPalette.backdropBaseNSColor(for: colorScheme))
+                    Color(nsColor: musicWindowPalette.backdropBaseNSColor(for: musicPlayerEffectiveColorScheme))
                         .ignoresSafeArea()
                         .transition(.identity)
                         .zIndex(18)
@@ -483,6 +488,7 @@ struct ContentView: View {
                         onRequestMinimize: minimizeMusicPlayer
                     )
                     .environmentObject(appState)
+                    .environment(\.colorScheme, musicPlayerEffectiveColorScheme)
                     .transition(AppMotion.musicPlayerExpansion)
                     .ignoresSafeArea()
                     .zIndex(20)
@@ -690,7 +696,7 @@ struct ContentView: View {
         .background {
             MusicExpansionWindowBackdropGuard(
                 active: musicWindowBackdropShouldBeActive,
-                color: musicWindowPalette.backdropBaseNSColor(for: colorScheme)
+                color: musicWindowPalette.backdropBaseNSColor(for: musicPlayerEffectiveColorScheme)
             )
             .frame(width: 0, height: 0)
         }
@@ -2086,22 +2092,22 @@ private struct SidebarGlassIconTile: View {
 }
 
 private enum SidebarReferenceTokens {
-    static let blue = color("2E90FA")
-    static let cyan = color("36BFFA")
+    static var blue: Color { AppColors.referenceBlue }
+    static var cyan: Color { AppColors.referenceCyan }
     static let pink = color("FF5C8A")
     static let orange = color("FF9F45")
-    static let backgroundTop = color("FBFCFE")
-    static let backgroundBottom = color("F3F6FB")
-    static let divider = color("E9EDF4")
-    static let hoverFill = color("EEF2F8")
-    static let itemText = color("5A6478")
-    static let groupText = color("3A4252")
-    static let selectedText = color("1F6FE0")
-    static let titleText = color("1D2433")
-    static let bodyText = color("2B3445")
-    static let mutedText = color("9AA3B4")
-    static let labelText = color("A7AFBE")
-    static let cardShadow = Color.black.opacity(0.11)
+    static var backgroundTop: Color { AppColors.pageBackground }
+    static var backgroundBottom: Color { AppColors.background }
+    static var divider: Color { AppColors.border }
+    static var hoverFill: Color { AppColors.refScanFill }
+    static var itemText: Color { AppColors.refSecondaryText }
+    static var groupText: Color { AppColors.refMenuText }
+    static var selectedText: Color { AppColors.refIconGlyph }
+    static var titleText: Color { AppColors.refTitleText }
+    static var bodyText: Color { AppColors.refMenuText }
+    static var mutedText: Color { AppColors.refSubtle }
+    static var labelText: Color { AppColors.refSearchPlaceholder }
+    static var cardShadow: Color { AppColors.refCardShadow.opacity(0.11) }
 
     static func color(_ hex: String) -> Color {
         Color(nsColor: NSColor(appThemeHex: hex) ?? .labelColor)
@@ -2406,7 +2412,7 @@ private struct SidebarStatusCenterCard: View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: emphasized ? 14 : 12, weight: .bold))
-                .foregroundStyle(Color.black.opacity(0.82))
+                .foregroundStyle(SidebarReferenceTokens.bodyText.opacity(0.82))
                 .frame(width: emphasized ? 29 : 25, height: emphasized ? 29 : 25)
                 .contentShape(Circle())
         }

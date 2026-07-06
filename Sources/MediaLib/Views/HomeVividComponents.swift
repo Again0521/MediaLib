@@ -4,21 +4,23 @@ import MediaLibCore
 import SwiftUI
 
 enum HomeVividTokens {
-    static let blue = color("2E90FA")
-    static let cyan = color("36BFFA")
+    static var blue: Color { AppColors.referenceBlue }
+    static var cyan: Color { AppColors.referenceCyan }
     static let mint = color("22D3A8")
     static let orange = color("FF9F45")
     static let pink = color("FF5C8A")
     static let violet = color("D946EF")
     static let indigo = color("5B6CFF")
 
-    static let textPrimary = color("1B2230")
-    static let textSecondary = color("8A93A6")
-    static let textTertiary = color("9AA3B4")
-    static let border = color("EEF1F6")
-    static let controlBorder = color("E6EAF1")
-    static let sidebarBackground = color("DFE4EC")
-    static let pageBackground = Color.white
+    static var textPrimary: Color { AppColors.refTitleText }
+    static var textSecondary: Color { AppColors.refSecondaryText }
+    static var textTertiary: Color { AppColors.refSubtle }
+    static var success: Color { AppColors.success }
+    static var mutedData: Color { AppColors.refRowDivider }
+    static var border: Color { AppColors.refCardBorder }
+    static var controlBorder: Color { AppColors.refOutlineBorder }
+    static var sidebarBackground: Color { AppColors.background }
+    static var pageBackground: Color { AppColors.pageBackground }
 
     static let pageHorizontal: CGFloat = 36
     static let pageVertical: CGFloat = 28
@@ -437,7 +439,7 @@ private struct HomeVividSearchControl: View {
         }
         .padding(.horizontal, 15)
         .frame(height: 41)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .background(AppColors.refCardBg, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
                 .strokeBorder(HomeVividTokens.controlBorder, lineWidth: 1)
@@ -713,7 +715,7 @@ private struct HomeVividStatCard: View {
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: HomeVividTokens.statCardHeight, alignment: .leading)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous))
+        .background(AppColors.refCardBg, in: RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous)
                 .strokeBorder(HomeVividTokens.border, lineWidth: 1)
@@ -763,7 +765,7 @@ struct HomeVividSectionHeader<Trailing: View>: View {
             if let badgeText {
                 Text(badgeText)
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(HomeVividTokens.color("0F9B78"))
+                    .foregroundStyle(HomeVividTokens.success)
                     .padding(.horizontal, 9)
                     .padding(.vertical, 3)
                     .background(HomeVividTokens.mint.opacity(0.14), in: Capsule())
@@ -804,7 +806,7 @@ struct HomeVividPosterRow: View {
 
     private var displayItems: [MediaItem] { Array(items.prefix(12)) }
     private var autoScrollKey: String { displayItems.map(\.id).joined(separator: "|") }
-    private var pageStep: Int { variant == .landscape ? 2 : 3 }
+    private var pageStep: Int { variant.isLandscapeLike ? 2 : 3 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -928,7 +930,7 @@ struct HomeVividPosterCollectionPage: View {
                     .foregroundStyle(HomeVividTokens.textPrimary)
                     .padding(.horizontal, 14)
                     .frame(height: 34)
-                    .background(Color.white, in: Capsule())
+                    .background(AppColors.refCardBg, in: Capsule())
                     .overlay(Capsule().strokeBorder(HomeVividTokens.border, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
@@ -961,10 +963,14 @@ enum HomeVividPosterVariant: Equatable {
         case .poster:
             return CGSize(width: HomeVividTokens.posterWidth, height: HomeVividTokens.posterHeight)
         case .progress:
-                return CGSize(width: HomeVividTokens.posterWidth, height: HomeVividTokens.compactPosterHeight)
+            return CGSize(width: 236, height: 138)
         case .landscape:
             return CGSize(width: 236, height: 138)
         }
+    }
+
+    var isLandscapeLike: Bool {
+        self == .progress || self == .landscape
     }
 }
 
@@ -991,7 +997,7 @@ private struct HomeVividPosterCard: View {
                 )
                 VStack(alignment: .leading, spacing: 5) {
                     Text(item.cardTitle)
-                        .font(.system(size: variant == .landscape ? 15 : 14, weight: .bold))
+                        .font(.system(size: variant.isLandscapeLike ? 15 : 14, weight: .bold))
                         .foregroundStyle(.white)
                         .lineLimit(1)
                     Text(metadata)
@@ -1032,11 +1038,12 @@ private struct HomeVividPosterCard: View {
 
     @ViewBuilder
     private var posterLayer: some View {
-        if item.posterPath == nil {
+        let artworkPath = variant.isLandscapeLike ? (item.backdropPath ?? item.posterPath) : item.posterPath
+        if artworkPath == nil {
             glyphPlaceholder
         } else {
             PosterImage(
-                path: item.posterPath,
+                path: artworkPath,
                 title: item.title,
                 mediaType: item.type,
                 cacheTargetSize: CGSize(width: variant.size.width * 2, height: variant.size.height * 2),
@@ -1050,7 +1057,7 @@ private struct HomeVividPosterCard: View {
         return ZStack {
             HomeVividTokens.gradient([pair.0.opacity(0.92), pair.1.opacity(0.76)])
             Text(String(item.title.prefix(1)))
-                .font(.system(size: variant == .landscape ? 72 : 96, weight: .black))
+                .font(.system(size: variant.isLandscapeLike ? 72 : 96, weight: .black))
                 .foregroundStyle(.white.opacity(0.24))
         }
     }
@@ -1126,7 +1133,7 @@ struct HomeVividDashboard: View {
         var cursor = 0.0
         return sourceGroups.map { group in
             let size = max(Double(group.count), 1) / Double(total)
-            let segment = (start: cursor, end: min(cursor + size, 1), tint: group.isOnline ? group.tint : HomeVividTokens.color("D5DAE3"))
+            let segment = (start: cursor, end: min(cursor + size, 1), tint: group.isOnline ? group.tint : HomeVividTokens.mutedData)
             cursor = segment.end
             return segment
         }
@@ -1258,7 +1265,7 @@ struct HomeVividDashboard: View {
                 .frame(width: compact ? 16 : 18, height: compact ? 16 : 18)
                 .overlay {
                     Circle()
-                        .fill(group.isOnline ? group.tint : HomeVividTokens.color("C9D0DB"))
+                        .fill(group.isOnline ? group.tint : HomeVividTokens.textTertiary.opacity(0.68))
                         .frame(width: compact ? 8 : 9, height: compact ? 8 : 9)
                 }
             Text(group.title)
@@ -1330,7 +1337,7 @@ struct HomeVividDashboard: View {
                     if tasks.contains(where: \.isActive) {
                         Text("\(tasks.filter(\.isActive).count) 进行中")
                             .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(HomeVividTokens.color("0F9B78"))
+                            .foregroundStyle(HomeVividTokens.success)
                             .padding(.horizontal, 9)
                             .padding(.vertical, 4)
                             .background(HomeVividTokens.mint.opacity(0.15), in: Capsule())
@@ -1391,7 +1398,7 @@ struct HomeVividDashboard: View {
                 Spacer()
                 Text(task.stateTitle)
                     .font(.system(size: 11.5, weight: .black))
-                    .foregroundStyle(task.isActive ? HomeVividTokens.color("0F9B78") : HomeVividTokens.textTertiary)
+                    .foregroundStyle(task.isActive ? HomeVividTokens.success : HomeVividTokens.textTertiary)
             }
             Text(task.detail)
                 .font(.system(size: 11.5, weight: .medium))
@@ -1419,7 +1426,7 @@ private extension View {
             .padding(20)
             .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
             .frame(height: height, alignment: .topLeading)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous))
+            .background(AppColors.refCardBg, in: RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous)
                     .strokeBorder(HomeVividTokens.border, lineWidth: 1)
@@ -1442,7 +1449,7 @@ private struct HomeVividInteractivePanelModifier: ViewModifier {
             .padding(20)
             .frame(maxWidth: .infinity, minHeight: minHeight, alignment: .topLeading)
             .frame(height: height, alignment: .topLeading)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous))
+            .background(AppColors.refCardBg, in: RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous)
                     .strokeBorder(HomeVividTokens.border, lineWidth: 1)
@@ -1520,7 +1527,7 @@ struct HomeVividMusicRecommendation: View {
         }
         .padding(8)
         .frame(height: HomeVividTokens.musicRecommendationContentHeight)
-        .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .background(AppColors.refCardBg, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(HomeVividTokens.border, lineWidth: 1)
@@ -1582,7 +1589,7 @@ private struct HomeVividTrackRow: View {
         HStack(spacing: 13) {
             Text("\(index)")
                 .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(HomeVividTokens.color("C2CAD7"))
+                .foregroundStyle(HomeVividTokens.textTertiary)
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
@@ -1609,7 +1616,7 @@ private struct HomeVividTrackRow: View {
             Spacer()
             Text(durationText(for: track))
                 .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(HomeVividTokens.color("AAB2C0"))
+                .foregroundStyle(HomeVividTokens.textTertiary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
@@ -1770,15 +1777,22 @@ private struct HomeVividPlaylistCard: View {
 }
 
 private struct HomeVividRowHoverModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
     @State private var hovering = false
 
     let cornerRadius: CGFloat
 
     func body(content: Content) -> some View {
         content
-            .background(hovering ? HomeVividTokens.color("F6F9FD") : Color.clear, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .background(hovering ? hoverFill : Color.clear, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .onHover { hovering = $0 }
             .animation(.easeOut(duration: 0.16), value: hovering)
+    }
+
+    private var hoverFill: Color {
+        colorScheme == .dark
+            ? AppColors.refSearchFill.opacity(0.86)
+            : HomeVividTokens.color("F6F9FD")
     }
 }
 
@@ -2229,7 +2243,7 @@ private struct HomeVividEmptyCard: View {
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(HomeVividTokens.textSecondary)
             .frame(maxWidth: .infinity, minHeight: 96)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous))
+            .background(AppColors.refCardBg, in: RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: HomeVividTokens.cardRadius, style: .continuous)
                     .strokeBorder(HomeVividTokens.border, lineWidth: 1)

@@ -67,12 +67,30 @@ final class PlayerControllerProjection<Value: Equatable>: ObservableObject {
     private let map: @MainActor (MpvPlayerController) -> Value
     private var cancellable: AnyCancellable?
     private var refreshScheduled = false
+    private var isActive = true
 
     init(controller: MpvPlayerController, map: @escaping @MainActor (MpvPlayerController) -> Value) {
         self.controller = controller
         self.map = map
         self.value = map(controller)
-        self.cancellable = controller.objectWillChange.sink { [weak self] _ in
+        subscribe()
+    }
+
+    func setActive(_ active: Bool) {
+        guard active != isActive else { return }
+        isActive = active
+        if active {
+            subscribe()
+            refresh()
+        } else {
+            cancellable = nil
+            refreshScheduled = false
+        }
+    }
+
+    private func subscribe() {
+        guard cancellable == nil, let controller else { return }
+        cancellable = controller.objectWillChange.sink { [weak self] _ in
             Task { @MainActor in
                 self?.scheduleRefresh()
             }

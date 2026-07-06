@@ -131,7 +131,7 @@ struct MediaLibApp: App {
                     }
                     if ProcessInfo.processInfo.arguments.contains("--debug-show-notice-preview") {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            appState.showFloatingNotice(title: "已是最新版本", message: "当前版本 1.5.0。", kind: .info)
+                            appState.showFloatingNotice(title: "已是最新版本", message: "当前版本 1.5.1。", kind: .info)
                             appState.showFloatingNotice(title: "已复制链接", message: "https://example.com/video.mp4", kind: .success)
                             appState.showFloatingNotice(title: "写入会修改本地音频文件", message: "远程或不支持格式会逐条跳过。", kind: .warning)
                             appState.showFloatingNotice(title: "扫描失败", message: "无法访问媒体源路径。", kind: .error)

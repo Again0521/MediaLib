@@ -23,11 +23,36 @@ private struct MpvOpenGLFBO {
 
 /// 渲染更新回调的上下文载体（见 `LibMpvClient.renderSink` 注释）。
 /// 不持有对 `LibMpvClient` 的引用，故被 C 回调 `passRetained` 不会形成保留环。
-/// `onUpdate` 仅在 MainActor 上读写（回调先 hop 到 MainActor 再读取）。
+/// `onUpdate` 仅在 MainActor 上读写；mpv 线程只负责合并并投递一次 MainActor 回调。
 private final class RenderUpdateSink {
+    private let lock = NSLock()
+    private var updateEnqueued = false
     var onUpdate: (() -> Void)?
+
     init(onUpdate: (() -> Void)?) {
         self.onUpdate = onUpdate
+    }
+
+    func enqueueUpdate() {
+        lock.lock()
+        if updateEnqueued {
+            lock.unlock()
+            return
+        }
+        updateEnqueued = true
+        lock.unlock()
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.markUpdateDequeued()
+            self.onUpdate?()
+        }
+    }
+
+    private func markUpdateDequeued() {
+        lock.lock()
+        updateEnqueued = false
+        lock.unlock()
     }
 }
 
@@ -62,14 +87,16 @@ final class LibMpvClient {
     private typealias Destroy = @convention(c) (OpaquePointer?) -> Void
     private typealias TerminateDestroy = @convention(c) (OpaquePointer?) -> Void
     private typealias Command = @convention(c) (OpaquePointer?, UnsafeMutablePointer<UnsafePointer<CChar>?>?) -> Int32
-    private typealias GetProperty = @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Int32
+    fileprivate typealias GetProperty = @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Int32
     private typealias SetProperty = @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, Int32, UnsafeRawPointer?) -> Int32
     private typealias SetOptionString = @convention(c) (OpaquePointer?, UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> Int32
-    private typealias Free = @convention(c) (UnsafeMutableRawPointer?) -> Void
+    fileprivate typealias Free = @convention(c) (UnsafeMutableRawPointer?) -> Void
     private typealias RenderContextCreate = @convention(c) (UnsafeMutablePointer<OpaquePointer?>?, OpaquePointer?, UnsafeMutableRawPointer?) -> Int32
     private typealias RenderContextSetUpdateCallback = @convention(c) (OpaquePointer?, (@convention(c) (UnsafeMutableRawPointer?) -> Void)?, UnsafeMutableRawPointer?) -> Void
-    private typealias RenderContextRender = @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void
-    private typealias RenderContextReportSwap = @convention(c) (OpaquePointer?) -> Void
+    /// fileprivate（非 private）：`RenderCallHandle.renderFunction`/`reportSwapFunction`
+    /// 需要用这两个类型作 `fileprivate` 属性，属性可见性不能超过其类型可见性。
+    fileprivate typealias RenderContextRender = @convention(c) (OpaquePointer?, UnsafeMutableRawPointer?) -> Void
+    fileprivate typealias RenderContextReportSwap = @convention(c) (OpaquePointer?) -> Void
     private typealias RenderContextFree = @convention(c) (OpaquePointer?) -> Void
 
     private let libraryHandle: UnsafeMutableRawPointer
@@ -88,6 +115,99 @@ final class LibMpvClient {
     private let renderContextReportSwapFunction: RenderContextReportSwap?
     private let renderContextFreeFunction: RenderContextFree
     private var renderContext: OpaquePointer?
+
+    /// 渲染调用的可跨线程句柄：只含裸函数指针与 mpv 渲染上下文指针，不持有 `LibMpvClient`
+    /// 本身、不触发其 `@MainActor` 隔离。mpv 文档保证 `mpv_render_context_render` 可以在
+    /// 持有对应 GL 上下文 current 的任意线程调用，与其他 client API（get/set_property 等）
+    /// 线程安全、互不冲突——真正需要小心的只是「渲染上下文本身的生命周期」：
+    /// 调用方必须保证 `LibMpvClient` 释放渲染上下文（`deinit`）之前，通过某种同步点确认所有
+    /// 已派发到独立渲染队列的调用均已完成（见 `MpvMetalRenderer.installRenderHandle`，
+    /// 传 `nil` 时用 `renderQueue.sync` 排空）。此类型的存在就是为了把 `mpv_render_context_render`
+    /// 这个同步阻塞调用从主线程搬走（Metal 路径专用，见 `project_player_popover_scroll_stutter`
+    /// 记忆：主线程被 draw() 同步占用 95-98%，是弹窗滚动几乎卡死的第一性根因）。
+    struct RenderCallHandle: @unchecked Sendable {
+        fileprivate let renderContext: OpaquePointer
+        fileprivate let renderFunction: RenderContextRender
+        fileprivate let reportSwapFunction: RenderContextReportSwap?
+
+        func render(fbo fboID: Int, width: Int, height: Int, flipY flipYEnabled: Bool) {
+            var fbo = MpvOpenGLFBO(fbo: Int32(fboID), width: Int32(width), height: Int32(height), internalFormat: 0)
+            var flipY: Int32 = flipYEnabled ? 1 : 0
+            withUnsafeMutablePointer(to: &fbo) { fboPointer in
+                withUnsafeMutablePointer(to: &flipY) { flipPointer in
+                    var params = [
+                        MpvRenderParam(type: RenderParam.openGLFBO, data: UnsafeMutableRawPointer(fboPointer)),
+                        MpvRenderParam(type: RenderParam.flipY, data: UnsafeMutableRawPointer(flipPointer)),
+                        MpvRenderParam(type: RenderParam.invalid, data: nil)
+                    ]
+                    params.withUnsafeMutableBufferPointer { buffer in
+                        renderFunction(renderContext, UnsafeMutableRawPointer(buffer.baseAddress))
+                    }
+                }
+            }
+            reportSwapFunction?(renderContext)
+        }
+    }
+
+    /// 供后台状态轮询队列使用；只读 mpv 属性，不持有 `LibMpvClient` 本身。
+    /// 控制器必须在释放 `LibMpvClient` 前排空对应队列，保证裸 `handle` 不会越过生命周期。
+    struct PropertyReadHandle: @unchecked Sendable {
+        fileprivate let handle: OpaquePointer
+        fileprivate let getPropertyFunction: GetProperty
+        fileprivate let freeFunction: Free
+
+        func getDouble(_ name: String) -> Double? {
+            var value = 0.0
+            let result = name.withCString { pointer in
+                getPropertyFunction(handle, pointer, Format.double, &value)
+            }
+            return result >= 0 && value.isFinite ? value : nil
+        }
+
+        func getFlag(_ name: String) -> Bool? {
+            var value: Int32 = 0
+            let result = name.withCString { pointer in
+                getPropertyFunction(handle, pointer, Format.flag, &value)
+            }
+            return result >= 0 ? value != 0 : nil
+        }
+
+        func getInt64(_ name: String) -> Int64? {
+            var value: Int64 = 0
+            let result = name.withCString { pointer in
+                getPropertyFunction(handle, pointer, Format.int64, &value)
+            }
+            return result >= 0 ? value : nil
+        }
+
+        func getString(_ name: String) -> String? {
+            var value: UnsafeMutablePointer<CChar>?
+            let result = name.withCString { pointer in
+                getPropertyFunction(handle, pointer, Format.string, &value)
+            }
+            guard result >= 0, let value else { return nil }
+            defer { freeFunction(UnsafeMutableRawPointer(value)) }
+            return String(cString: value)
+        }
+    }
+
+    /// 供 Metal 离屏渲染队列使用；OpenGL 屏上路径不需要（仍走 `render(width:height:fbo:flipY:)`）。
+    func makeRenderCallHandle() -> RenderCallHandle? {
+        guard let renderContext else { return nil }
+        return RenderCallHandle(
+            renderContext: renderContext,
+            renderFunction: renderContextRenderFunction,
+            reportSwapFunction: renderContextReportSwapFunction
+        )
+    }
+
+    func makePropertyReadHandle() -> PropertyReadHandle {
+        PropertyReadHandle(
+            handle: handle,
+            getPropertyFunction: getPropertyFunction,
+            freeFunction: freeFunction
+        )
+    }
     /// 渲染更新回调的上下文载体。mpv 在其内部线程触发回调；为避免「正在回调」与「对象释放」
     /// 交错导致的 use-after-free，回调上下文持有的是这个独立 sink（而非 `self`）：
     /// C 侧对 sink 做 `passRetained` +1，sink 不反向引用 `LibMpvClient`（不构成保留环），
@@ -267,10 +387,10 @@ final class LibMpvClient {
         }
     }
 
-    func render(width: Int, height: Int) {
+    func render(width: Int, height: Int, fbo fboID: Int = 0, flipY flipYEnabled: Bool = true) {
         guard let renderContext, width > 0, height > 0 else { return }
-        var fbo = MpvOpenGLFBO(fbo: 0, width: Int32(width), height: Int32(height), internalFormat: 0)
-        var flipY: Int32 = 1
+        var fbo = MpvOpenGLFBO(fbo: Int32(fboID), width: Int32(width), height: Int32(height), internalFormat: 0)
+        var flipY: Int32 = flipYEnabled ? 1 : 0
         withUnsafeMutablePointer(to: &fbo) { fboPointer in
             withUnsafeMutablePointer(to: &flipY) { flipPointer in
                 var params = [
@@ -357,11 +477,9 @@ final class LibMpvClient {
     private static let renderUpdateCallback: @convention(c) (UnsafeMutableRawPointer?) -> Void = { context in
         guard let context else { return }
         // 在 mpv 线程仅做指针 +0 取值（sink 由 C 侧 +1 持有，存活有保证），
-        // 真正读取闭包并执行放到 MainActor，与 deinit/stopPlayback 对 sink 的写入串行化。
+        // 再由 sink 合并重复信号并 hop 到 MainActor。
         let sink = Unmanaged<RenderUpdateSink>.fromOpaque(context).takeUnretainedValue()
-        Task { @MainActor in
-            sink.onUpdate?()
-        }
+        sink.enqueueUpdate()
     }
 
     private static let getOpenGLProcAddress: @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> UnsafeMutableRawPointer? = { _, name in

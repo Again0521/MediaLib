@@ -35,8 +35,8 @@ enum PlayerWindowActions {
         window.isMiniMode = true
 
         let safeAspect = max(aspect, 0.01)
-        let contentSize = NSSize(width: 380, height: (380 / safeAspect).rounded())
-        let miniMinimum = NSSize(width: 240, height: (240 / safeAspect).rounded())
+        let contentSize = VideoWindowSizing.miniModePreferredContentSize(aspect: safeAspect)
+        let miniMinimum = VideoWindowSizing.miniModeMinimumContentSize(aspect: safeAspect)
         window.contentMinSize = miniMinimum
         window.minSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: miniMinimum)).size
         window.contentAspectRatio = contentSize
@@ -80,9 +80,10 @@ enum PlayerWindowActions {
               !window.styleMask.contains(.fullScreen) else { return }
         let safeAspect = max(aspect, 0.01)
         let currentContent = window.contentLayoutRect.size
+        let minimumContent = VideoWindowSizing.miniModeMinimumContentSize(aspect: safeAspect)
         let targetContent = NSSize(
-            width: max(currentContent.width, 240),
-            height: (max(currentContent.width, 240) / safeAspect).rounded()
+            width: max(currentContent.width, minimumContent.width),
+            height: (max(currentContent.width, minimumContent.width) / safeAspect).rounded()
         )
         guard abs(currentContent.width - targetContent.width) > 1 ||
                 abs(currentContent.height - targetContent.height) > 1 else {
@@ -92,7 +93,7 @@ enum PlayerWindowActions {
         let oldFrame = window.frame
         let targetFrameSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: targetContent)).size
         window.contentAspectRatio = targetContent
-        window.contentMinSize = NSSize(width: 240, height: (240 / safeAspect).rounded())
+        window.contentMinSize = minimumContent
         window.minSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: window.contentMinSize)).size
         window.setFrame(
             NSRect(

@@ -11,6 +11,8 @@ enum VideoWindowSizing {
     static let minimumPreferredWidth: CGFloat = 680
     static let minimumControlSafeWidth: CGFloat = 680
     static let minimumControlSafeHeight: CGFloat = 382
+    static let minimumMiniModeWidth: CGFloat = 280
+    static let minimumMiniModeHeight: CGFloat = 168
     static let minimumScreenWidthRatio: Double = 0.45
     static let maximumScreenWidthRatio: Double = 1.0
 
@@ -40,6 +42,19 @@ enum VideoWindowSizing {
 
     static func usesFullScreenWidth(_ preferredWidth: Double, on screen: NSScreen? = nil) -> Bool {
         screenWidthRatio(for: preferredWidth, on: screen) >= maximumScreenWidthRatio - 0.001
+    }
+
+    static func miniModeMinimumContentSize(aspect: CGFloat) -> NSSize {
+        let safeAspect = max(aspect, 0.01)
+        let width = max(minimumMiniModeWidth, (minimumMiniModeHeight * safeAspect).rounded(.up))
+        return NSSize(width: width, height: (width / safeAspect).rounded(.up))
+    }
+
+    static func miniModePreferredContentSize(aspect: CGFloat) -> NSSize {
+        let safeAspect = max(aspect, 0.01)
+        let minimum = miniModeMinimumContentSize(aspect: safeAspect)
+        let width = max(CGFloat(380), minimum.width)
+        return NSSize(width: width, height: (width / safeAspect).rounded())
     }
 }
 
@@ -714,15 +729,37 @@ struct PlayerView: View {
     @State private var holdFastForwardPreviousRate: Float?
     /// 迷你悬浮窗模式下保存的原窗口 frame；非 nil 即处于迷你模式。
     @State private var miniModeRestoreFrame: NSRect?
+    @State private var playerPopoverActive = false
 
     private var isMiniMode: Bool {
         miniModeRestoreFrame != nil
+    }
+
+    private var minimumPlayerContentSize: CGSize {
+        if isMiniMode {
+            let aspect = controller.videoAspectRatio ?? videoAspectRatio
+            return VideoWindowSizing.miniModeMinimumContentSize(aspect: aspect)
+        }
+        return CGSize(
+            width: VideoWindowSizing.minimumControlSafeWidth,
+            height: VideoWindowSizing.minimumControlSafeHeight
+        )
+    }
+
+    private var shouldInstallMarkerSkipLayer: Bool {
+        appState.settings.videoMarkerSkipBehavior != .off &&
+            playbackMarkers.contains {
+                ($0.kind == .intro || $0.kind == .credits) &&
+                    $0.isAcceptedForPlayback &&
+                    $0.endTime != nil
+            }
     }
 
     private var shouldHidePlayerCursor: Bool {
         !controlsVisible &&
         !controlsLocked &&
         !isMiniMode &&
+        !playerPopoverActive &&
         controller.isPlaying &&
         controller.errorMessage == nil &&
         contextMenuState == nil &&
@@ -730,12 +767,22 @@ struct PlayerView: View {
         !showingPlaybackInfo
     }
 
+    @ViewBuilder
+    private var videoSurface: some View {
+        if VideoRenderBackend.useMetal {
+            MpvMetalPlayerView(controller: controller)
+                .ignoresSafeArea()
+        } else {
+            MpvPlayerView(controller: controller)
+                .ignoresSafeArea()
+        }
+    }
+
     var body: some View {
         ZStack {
             playerBackdrop
 
-            MpvPlayerView(controller: controller)
-                .ignoresSafeArea()
+            videoSurface
 
             PlayerInteractionOverlay {
                 if contextMenuState != nil {
@@ -760,12 +807,14 @@ struct PlayerView: View {
 
             PlayerPlaybackStatusLayer(controller: controller, item: item, palette: controlPalette)
 
-            PlayerMarkerSkipLayer(
-                controller: controller,
-                markers: playbackMarkers,
-                skipBehavior: appState.settings.videoMarkerSkipBehavior,
-                palette: controlPalette
-            )
+            if shouldInstallMarkerSkipLayer {
+                PlayerMarkerSkipLayer(
+                    controller: controller,
+                    markers: playbackMarkers,
+                    skipBehavior: appState.settings.videoMarkerSkipBehavior,
+                    palette: controlPalette
+                )
+            }
 
             if !isMiniMode {
                 VStack(spacing: 0) {
@@ -773,6 +822,7 @@ struct PlayerView: View {
                     PlayerControlsBar(
                         controller: controller,
                         item: item,
+                        active: controlsVisible,
                         sidecarSubtitles: sidecarSubtitles,
                         qualityOptions: qualityOptions,
                         selectedQualityID: $selectedQualityID,
@@ -792,7 +842,8 @@ struct PlayerView: View {
                         onPlayAdjacent: playAdjacentVideo,
                         onPlayEpisode: playEpisodeFromList,
                         onEnterMiniMode: enterMiniMode,
-                        onOpenAdvancedSettings: showAdvancedSettings
+                        onOpenAdvancedSettings: showAdvancedSettings,
+                        onPopoverActiveChange: handleControlsPopoverActiveChange
                     )
                     .onHover { hovering in
                         controlsHovered = hovering
@@ -916,10 +967,10 @@ struct PlayerView: View {
             }
         }
         .frame(
-            minWidth: VideoWindowSizing.minimumControlSafeWidth,
+            minWidth: minimumPlayerContentSize.width,
             idealWidth: preferredSize.width,
             maxWidth: .infinity,
-            minHeight: VideoWindowSizing.minimumControlSafeHeight,
+            minHeight: minimumPlayerContentSize.height,
             idealHeight: preferredSize.height,
             maxHeight: .infinity
         )
@@ -1131,6 +1182,7 @@ struct PlayerView: View {
         withAnimation(AppMotion.fast) {
             controlsVisible = true
         }
+        requestVideoSurfaceRedraws()
         scheduleControlsAutoHide()
     }
 
@@ -1141,7 +1193,21 @@ struct PlayerView: View {
             restoring: previousFrame,
             alwaysOnTop: appState.settings.videoPlayerAlwaysOnTop
         )
+        requestVideoSurfaceRedraws()
         showControlsTemporarily()
+    }
+
+    private func requestVideoSurfaceRedraws() {
+        controller.requestVideoSurfaceRedraw()
+        let playerController = controller
+        Task { @MainActor in
+            do {
+                try await Task.sleep(nanoseconds: 80_000_000)
+            } catch {
+                return
+            }
+            playerController.requestVideoSurfaceRedraw()
+        }
     }
 
     /// 按住「快进」键：临时 3x 速览，松开恢复原倍速（不写入倍速记忆）。
@@ -1339,6 +1405,7 @@ struct PlayerView: View {
     /// （锁定时不隐藏、弹层打开时不响应，放行给原有右键逻辑）。
     private func hideControlsBySecondaryClick() -> Bool {
         guard controlsVisible, !controlsLocked,
+              !playerPopoverActive,
               contextMenuState == nil, !showingAdvancedSettings, !showingPlaybackInfo else {
             return false
         }
@@ -1438,7 +1505,7 @@ struct PlayerView: View {
 
     private func hideControlsImmediately() {
         controlsAutoHide.cancel()
-        guard !controlsHovered else { return }
+        guard !controlsHovered, !playerPopoverActive else { return }
         withAnimation(AppMotion.immediate) {
             controlsVisible = false
         }
@@ -1453,10 +1520,28 @@ struct PlayerView: View {
                 return
             }
             guard !Task.isCancelled else { return }
-            guard controller.isPlaying, controller.errorMessage == nil, !controlsHovered else { return }
+            guard controller.isPlaying,
+                  controller.errorMessage == nil,
+                  !controlsHovered,
+                  !playerPopoverActive else { return }
             withAnimation(AppMotion.standard) {
                 controlsVisible = false
             }
+        }
+    }
+
+    private func handleControlsPopoverActiveChange(_ active: Bool) {
+        guard playerPopoverActive != active else { return }
+        playerPopoverActive = active
+        if active {
+            controlsAutoHide.cancel()
+            if !controlsVisible {
+                withAnimation(AppMotion.fast) {
+                    controlsVisible = true
+                }
+            }
+        } else {
+            scheduleControlsAutoHide()
         }
     }
 
@@ -2030,6 +2115,17 @@ private struct PlayerTimelineState: Equatable {
     }
 }
 
+private struct PlayerTimelineClockState: Equatable {
+    let currentTime: Double
+    let duration: Double
+
+    @MainActor
+    init(controller: MpvPlayerController) {
+        self.currentTime = controller.currentTime
+        self.duration = controller.duration
+    }
+}
+
 private struct PlayerTransportState: Equatable {
     let canControl: Bool
     let isPlaying: Bool
@@ -2115,12 +2211,14 @@ private struct PlayerSubtitleTrackListState: Equatable {
     let subtitleTracks: [MpvTrack]
     let subtitleAutoLoadEnabled: Bool
     let secondarySubtitleID: Int?
+    let subtitleDelay: Double
 
     @MainActor
     init(controller: MpvPlayerController) {
         self.subtitleTracks = controller.subtitleTracks
         self.subtitleAutoLoadEnabled = controller.subtitleAutoLoadEnabled
         self.secondarySubtitleID = controller.secondarySubtitleID
+        self.subtitleDelay = controller.subtitleDelay
     }
 
     /// 主字幕选中判定要排除第二字幕：mpv 的 track-list 里两者 selected 都为 true。
@@ -2281,6 +2379,7 @@ private struct PlayerControlsBar: View {
     @EnvironmentObject private var appState: AppState
     let controller: MpvPlayerController
     let item: MediaItem
+    let active: Bool
     let sidecarSubtitles: [SidecarSubtitleFile]
     let qualityOptions: [VideoStreamQualityOption]
     @Binding var selectedQualityID: String?
@@ -2301,20 +2400,31 @@ private struct PlayerControlsBar: View {
     let onPlayEpisode: (MediaItem) -> Void
     let onEnterMiniMode: () -> Void
     let onOpenAdvancedSettings: () -> Void
-    @StateObject private var timeline: PlayerControllerProjection<PlayerTimelineState>
+    let onPopoverActiveChange: (Bool) -> Void
     @StateObject private var transport: PlayerControllerProjection<PlayerTransportState>
     @State private var showingVolumePopover = false
     @State private var showingSubtitlePopover = false
     @State private var showingAudioPopover = false
     @State private var showingQualityPopover = false
-    @State private var showingMarkerPopover = false
     @State private var showingSettingsPopover = false
     @State private var showingEpisodeListPopover = false
+    @State private var showingMarkerPopover = false
     @State private var isWindowFullscreen = false
+
+    private var isAnyPopoverPresented: Bool {
+        showingVolumePopover ||
+            showingSubtitlePopover ||
+            showingAudioPopover ||
+            showingQualityPopover ||
+            showingSettingsPopover ||
+            showingEpisodeListPopover ||
+            showingMarkerPopover
+    }
 
     init(
         controller: MpvPlayerController,
         item: MediaItem,
+        active: Bool,
         sidecarSubtitles: [SidecarSubtitleFile],
         qualityOptions: [VideoStreamQualityOption],
         selectedQualityID: Binding<String?>,
@@ -2334,10 +2444,12 @@ private struct PlayerControlsBar: View {
         onPlayAdjacent: @escaping (Int) -> Void,
         onPlayEpisode: @escaping (MediaItem) -> Void,
         onEnterMiniMode: @escaping () -> Void,
-        onOpenAdvancedSettings: @escaping () -> Void
+        onOpenAdvancedSettings: @escaping () -> Void,
+        onPopoverActiveChange: @escaping (Bool) -> Void
     ) {
         self.controller = controller
         self.item = item
+        self.active = active
         self.sidecarSubtitles = sidecarSubtitles
         self.qualityOptions = qualityOptions
         _selectedQualityID = selectedQualityID
@@ -2358,48 +2470,24 @@ private struct PlayerControlsBar: View {
         self.onPlayEpisode = onPlayEpisode
         self.onEnterMiniMode = onEnterMiniMode
         self.onOpenAdvancedSettings = onOpenAdvancedSettings
-        _timeline = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTimelineState.init))
+        self.onPopoverActiveChange = onPopoverActiveChange
         _transport = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTransportState.init))
     }
 
     var body: some View {
-        let timelineState = timeline.value
         let transportState = transport.value
         VStack(spacing: 6) {
-            HStack(spacing: 7) {
-                Text(timelineState.formattedCurrentTime)
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(palette.secondary)
-                    .frame(width: 42, alignment: .trailing)
-
-                VideoProgressScrubber(
-                    currentTime: timelineState.currentTime,
-                    duration: timelineState.duration,
-                    enabled: timelineState.canControl && timelineState.duration > 0,
-                    previewMode: previewMode,
-                    coarsePreviewBuckets: previewUsesCoarseBuckets,
-                    preview: $scrubberPreview,
-                    previewImage: previewImage,
-                    previewIsLoading: previewIsLoading,
-                    markers: markers,
-                    palette: palette,
-                    onSeek: { controller.seek(to: $0) }
-                )
-
-                // 点击时长直接切换剩余/总时长（IINA/QuickTime 习惯），不必进设置。
-                Button {
-                    appState.settings.videoShowRemainingTime.toggle()
-                    appState.saveSettings()
-                } label: {
-                    Text(trailingTimelineText(timelineState))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(palette.secondary)
-                        .frame(width: 50, alignment: .leading)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("点击切换剩余 / 总时长")
-            }
+            PlayerTimelineControlsRow(
+                controller: controller,
+                active: active,
+                previewMode: previewMode,
+                previewUsesCoarseBuckets: previewUsesCoarseBuckets,
+                scrubberPreview: $scrubberPreview,
+                previewImage: previewImage,
+                previewIsLoading: previewIsLoading,
+                markers: markers,
+                palette: palette
+            )
 
             HStack(spacing: 0) {
                 HStack(spacing: 5) {
@@ -2417,7 +2505,18 @@ private struct PlayerControlsBar: View {
                         qualityButton
                             .disabled(!transportState.canControl)
                     }
-                    markerButton(currentTime: timelineState.currentTime, duration: timelineState.duration)
+                    PlayerMarkerButton(
+                        controller: controller,
+                        showingMarkerPopover: $showingMarkerPopover,
+                        markers: markers,
+                        palette: palette,
+                        onSetMarkerBoundary: onSetMarkerBoundary,
+                        onAddChapter: onAddChapter,
+                        onAddBookmark: onAddBookmark,
+                        onDeleteMarker: onDeleteMarker,
+                        onAcceptMarker: onAcceptMarker,
+                        onRejectMarker: onRejectMarker
+                    )
                         .disabled(!transportState.canControl)
                 }
                 .frame(width: 200, alignment: .leading)
@@ -2491,10 +2590,24 @@ private struct PlayerControlsBar: View {
             PlayerWindowFullscreenReader(isFullscreen: $isWindowFullscreen)
                 .frame(width: 0, height: 0)
         }
+        .onAppear {
+            transport.setActive(active)
+            onPopoverActiveChange(isAnyPopoverPresented)
+        }
+        .onChange(of: active) { isActive in
+            transport.setActive(isActive)
+        }
+        .onChange(of: isAnyPopoverPresented) { presented in
+            onPopoverActiveChange(presented)
+        }
+        .onDisappear {
+            onPopoverActiveChange(false)
+        }
     }
 
     private var subtitleButton: some View {
         Button {
+            controller.refreshVideoTrackMetadata()
             togglePopover {
                 showingSubtitlePopover.toggle()
             }
@@ -2516,6 +2629,7 @@ private struct PlayerControlsBar: View {
 
     private var audioButton: some View {
         Button {
+            controller.refreshVideoTrackMetadata()
             togglePopover {
                 showingAudioPopover.toggle()
             }
@@ -2587,26 +2701,6 @@ private struct PlayerControlsBar: View {
         .help("播放器设置")
     }
 
-    private func trailingTimelineText(_ state: PlayerTimelineState) -> String {
-        guard appState.settings.videoShowRemainingTime,
-              state.duration > 0,
-              state.currentTime.isFinite else {
-            return state.formattedDuration
-        }
-        return "-\(formatTimelineTime(max(state.duration - state.currentTime, 0)))"
-    }
-
-    private func formatTimelineTime(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
-        let total = Int(seconds.rounded())
-        let hours = total / 3_600
-        let minutes = (total % 3_600) / 60
-        let seconds = total % 60
-        return hours > 0
-            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
-            : String(format: "%d:%02d", minutes, seconds)
-    }
-
     private var qualityButton: some View {
         Button {
             togglePopover {
@@ -2641,7 +2735,153 @@ private struct PlayerControlsBar: View {
         .help("画质")
     }
 
-    private func markerButton(currentTime: Double, duration: Double) -> some View {
+    private func togglePopover(_ action: () -> Void) {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            action()
+        }
+    }
+
+}
+
+private struct PlayerTimelineControlsRow: View {
+    @EnvironmentObject private var appState: AppState
+    let controller: MpvPlayerController
+    let active: Bool
+    let previewMode: VideoScrubberPreviewMode
+    let previewUsesCoarseBuckets: Bool
+    @Binding var scrubberPreview: VideoScrubberPreview?
+    let previewImage: NSImage?
+    let previewIsLoading: Bool
+    let markers: [PlaybackMarker]
+    let palette: VideoControlPalette
+    @StateObject private var timeline: PlayerControllerProjection<PlayerTimelineState>
+
+    init(
+        controller: MpvPlayerController,
+        active: Bool,
+        previewMode: VideoScrubberPreviewMode,
+        previewUsesCoarseBuckets: Bool,
+        scrubberPreview: Binding<VideoScrubberPreview?>,
+        previewImage: NSImage?,
+        previewIsLoading: Bool,
+        markers: [PlaybackMarker],
+        palette: VideoControlPalette
+    ) {
+        self.controller = controller
+        self.active = active
+        self.previewMode = previewMode
+        self.previewUsesCoarseBuckets = previewUsesCoarseBuckets
+        _scrubberPreview = scrubberPreview
+        self.previewImage = previewImage
+        self.previewIsLoading = previewIsLoading
+        self.markers = markers
+        self.palette = palette
+        _timeline = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTimelineState.init))
+    }
+
+    var body: some View {
+        let state = timeline.value
+        HStack(spacing: 7) {
+            Text(state.formattedCurrentTime)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(palette.secondary)
+                .frame(width: 42, alignment: .trailing)
+
+            VideoProgressScrubber(
+                currentTime: state.currentTime,
+                duration: state.duration,
+                enabled: state.canControl && state.duration > 0,
+                previewMode: previewMode,
+                coarsePreviewBuckets: previewUsesCoarseBuckets,
+                preview: $scrubberPreview,
+                previewImage: previewImage,
+                previewIsLoading: previewIsLoading,
+                markers: markers,
+                palette: palette,
+                onSeek: { controller.seek(to: $0) }
+            )
+
+            Button {
+                appState.settings.videoShowRemainingTime.toggle()
+                appState.saveSettings()
+            } label: {
+                Text(trailingTimelineText(state))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(palette.secondary)
+                    .frame(width: 50, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("点击切换剩余 / 总时长")
+        }
+        .onAppear {
+            timeline.setActive(active)
+        }
+        .onChange(of: active) { isActive in
+            timeline.setActive(isActive)
+        }
+    }
+
+    private func trailingTimelineText(_ state: PlayerTimelineState) -> String {
+        guard appState.settings.videoShowRemainingTime,
+              state.duration > 0,
+              state.currentTime.isFinite else {
+            return state.formattedDuration
+        }
+        return "-\(formatTimelineTime(max(state.duration - state.currentTime, 0)))"
+    }
+
+    private func formatTimelineTime(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
+        let total = Int(seconds.rounded())
+        let hours = total / 3_600
+        let minutes = (total % 3_600) / 60
+        let seconds = total % 60
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, seconds)
+            : String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+private struct PlayerMarkerButton: View {
+    let controller: MpvPlayerController
+    @Binding var showingMarkerPopover: Bool
+    let markers: [PlaybackMarker]
+    let palette: VideoControlPalette
+    let onSetMarkerBoundary: (PlaybackMarker.Kind, Bool, Double) -> Void
+    let onAddChapter: (Double) -> Void
+    let onAddBookmark: (Double) -> Void
+    let onDeleteMarker: (PlaybackMarker) -> Void
+    let onAcceptMarker: (PlaybackMarker) -> Void
+    let onRejectMarker: (PlaybackMarker) -> Void
+
+    init(
+        controller: MpvPlayerController,
+        showingMarkerPopover: Binding<Bool>,
+        markers: [PlaybackMarker],
+        palette: VideoControlPalette,
+        onSetMarkerBoundary: @escaping (PlaybackMarker.Kind, Bool, Double) -> Void,
+        onAddChapter: @escaping (Double) -> Void,
+        onAddBookmark: @escaping (Double) -> Void,
+        onDeleteMarker: @escaping (PlaybackMarker) -> Void,
+        onAcceptMarker: @escaping (PlaybackMarker) -> Void,
+        onRejectMarker: @escaping (PlaybackMarker) -> Void
+    ) {
+        self.controller = controller
+        _showingMarkerPopover = showingMarkerPopover
+        self.markers = markers
+        self.palette = palette
+        self.onSetMarkerBoundary = onSetMarkerBoundary
+        self.onAddChapter = onAddChapter
+        self.onAddBookmark = onAddBookmark
+        self.onDeleteMarker = onDeleteMarker
+        self.onAcceptMarker = onAcceptMarker
+        self.onRejectMarker = onRejectMarker
+    }
+
+    var body: some View {
         Button {
             togglePopover {
                 showingMarkerPopover.toggle()
@@ -2652,12 +2892,10 @@ private struct PlayerControlsBar: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingMarkerPopover, arrowEdge: .bottom) {
-            PlayerMarkerPopover(
-                currentTime: currentTime,
-                duration: duration,
+            PlayerMarkerPopoverHost(
+                controller: controller,
                 markers: markers,
                 palette: palette,
-                onSeek: { controller.seek(to: $0) },
                 onSetBoundary: onSetMarkerBoundary,
                 onAddChapter: onAddChapter,
                 onAddBookmark: onAddBookmark,
@@ -2676,7 +2914,6 @@ private struct PlayerControlsBar: View {
             action()
         }
     }
-
 }
 
 private struct PlayerWindowChromeVisibility: NSViewRepresentable {
@@ -5872,7 +6109,7 @@ private struct PlayerMarkerSkipLayer: View {
     let skipBehavior: VideoMarkerSkipBehavior
     let palette: VideoControlPalette
     @State private var autoSkippedMarkerID: String?
-    @StateObject private var timeline: PlayerControllerProjection<PlayerTimelineState>
+    @StateObject private var clock: PlayerControllerProjection<PlayerTimelineClockState>
 
     init(
         controller: MpvPlayerController,
@@ -5884,7 +6121,7 @@ private struct PlayerMarkerSkipLayer: View {
         self.markers = markers
         self.skipBehavior = skipBehavior
         self.palette = palette
-        _timeline = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTimelineState.init))
+        _clock = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTimelineClockState.init))
     }
 
     var body: some View {
@@ -5919,7 +6156,7 @@ private struct PlayerMarkerSkipLayer: View {
         markers.first {
             ($0.kind == .intro || $0.kind == .credits) &&
                 $0.isAcceptedForPlayback &&
-                $0.contains(timeline.value.currentTime)
+                $0.contains(clock.value.currentTime)
         }
     }
 
@@ -5928,7 +6165,7 @@ private struct PlayerMarkerSkipLayer: View {
               let marker,
               autoSkippedMarkerID != marker.id,
               let endTime = marker.endTime,
-              endTime > timeline.value.currentTime else {
+              endTime > clock.value.currentTime else {
             if marker == nil {
                 autoSkippedMarkerID = nil
             }
@@ -5936,6 +6173,58 @@ private struct PlayerMarkerSkipLayer: View {
         }
         autoSkippedMarkerID = marker.id
         controller.seek(to: endTime)
+    }
+}
+
+private struct PlayerMarkerPopoverHost: View {
+    let controller: MpvPlayerController
+    let markers: [PlaybackMarker]
+    let palette: VideoControlPalette
+    let onSetBoundary: (PlaybackMarker.Kind, Bool, Double) -> Void
+    let onAddChapter: (Double) -> Void
+    let onAddBookmark: (Double) -> Void
+    let onDeleteMarker: (PlaybackMarker) -> Void
+    let onAcceptMarker: (PlaybackMarker) -> Void
+    let onRejectMarker: (PlaybackMarker) -> Void
+    @StateObject private var clock: PlayerControllerProjection<PlayerTimelineClockState>
+
+    init(
+        controller: MpvPlayerController,
+        markers: [PlaybackMarker],
+        palette: VideoControlPalette,
+        onSetBoundary: @escaping (PlaybackMarker.Kind, Bool, Double) -> Void,
+        onAddChapter: @escaping (Double) -> Void,
+        onAddBookmark: @escaping (Double) -> Void,
+        onDeleteMarker: @escaping (PlaybackMarker) -> Void,
+        onAcceptMarker: @escaping (PlaybackMarker) -> Void,
+        onRejectMarker: @escaping (PlaybackMarker) -> Void
+    ) {
+        self.controller = controller
+        self.markers = markers
+        self.palette = palette
+        self.onSetBoundary = onSetBoundary
+        self.onAddChapter = onAddChapter
+        self.onAddBookmark = onAddBookmark
+        self.onDeleteMarker = onDeleteMarker
+        self.onAcceptMarker = onAcceptMarker
+        self.onRejectMarker = onRejectMarker
+        _clock = StateObject(wrappedValue: PlayerControllerProjection(controller: controller, map: PlayerTimelineClockState.init))
+    }
+
+    var body: some View {
+        PlayerMarkerPopover(
+            currentTime: clock.value.currentTime,
+            duration: clock.value.duration,
+            markers: markers,
+            palette: palette,
+            onSeek: { controller.seek(to: $0) },
+            onSetBoundary: onSetBoundary,
+            onAddChapter: onAddChapter,
+            onAddBookmark: onAddBookmark,
+            onDeleteMarker: onDeleteMarker,
+            onAcceptMarker: onAcceptMarker,
+            onRejectMarker: onRejectMarker
+        )
     }
 }
 
@@ -6368,8 +6657,28 @@ private struct PlayerSubtitlePopover: View {
                 }
                 .buttonStyle(.plain)
 
+                Divider()
+                    .background(palette.divider)
+
+                HStack(spacing: 10) {
+                    Label("字幕快慢", systemImage: "timer")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(palette.secondary)
+                    Spacer(minLength: 8)
+                    PlayerAdjustmentControls(
+                        valueText: subtitleDelayText(trackState.subtitleDelay),
+                        palette: palette,
+                        onDecrement: { setSubtitleDelay(trackState.subtitleDelay - 0.1) },
+                        onReset: { setSubtitleDelay(0) },
+                        onIncrement: { setSubtitleDelay(trackState.subtitleDelay + 0.1) }
+                    )
+                    .frame(width: 186)
+                }
+
                 // Embedded tracks
                 if !embeddedSubtitleTracks.isEmpty {
+                    Divider()
+                        .background(palette.divider)
                     playerPopoverSectionHeader("内嵌字幕")
                     ForEach(embeddedSubtitleTracks) { track in
                         Button {
@@ -6516,6 +6825,18 @@ private struct PlayerSubtitlePopover: View {
         if panel.runModal() == .OK, let url = panel.url {
             controller.addExternalSubtitle(path: url.path)
         }
+    }
+
+    private func setSubtitleDelay(_ value: Double) {
+        let clamped = AppSettings.clampedVideoSyncDelay(value)
+        appState.settings.videoDefaultSubtitleDelay = clamped
+        appState.saveSettings()
+        controller.setSubtitleDelay(clamped)
+    }
+
+    private func subtitleDelayText(_ value: Double) -> String {
+        if abs(value) < 0.001 { return "0.0 秒" }
+        return String(format: "%+.1f 秒", value)
     }
 
     // MARK: - Online search
@@ -7074,59 +7395,65 @@ private extension View {
     /// `liveMaterial: false` 用于设置类大弹层：实时 material 叠在逐帧重绘的
     /// 视频 OpenGL 画面上会让 WindowServer 每帧重算模糊（设置页卡顿/掉帧根因），
     /// 改为不透明底色 + 同样的渐变面，观感接近但合成成本固定。
+    ///
+    /// ★背景填充/描边/投影全部收进一个静态 `.background{}` 闭包，不再直接包裹
+    /// `self`（字幕/音轨等弹窗里 `self` 是内含 `ScrollView` 的可滚动内容）：
+    /// `.shadow()` 的光栅化成本取决于它所附着的那棵子树，若直接包裹可滚动内容，
+    /// 滚动时内容每帧变化会让阴影/模糊跟着每帧重新合成，正是字幕、音轨等多行
+    /// 弹窗滑动卡顿的根因。背景层是仅由 `palette`/`liveMaterial` 决定的静态形状，
+    /// 与滚动偏移无关，可被稳定缓存，不再随内容滚动重算。内容各处已有 12pt 内边距，
+    /// 描边永远不会与滚动内容重叠，移到背景层不改变外观。
     @ViewBuilder
     func playerPopoverGlass(palette: VideoControlPalette = .lightContent, liveMaterial: Bool = true) -> some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-        let base = self
+        self
             .foregroundStyle(palette.primary)
             .tint(palette.primary)
             .environment(\.colorScheme, palette.systemColorScheme)
-        let filled = Group {
-            if liveMaterial {
-                base
-                    .background(.thinMaterial, in: shape)
-                    .background(
-                        shape.fill(
-                            LinearGradient(
-                                colors: palette.popoverFill,
-                                startPoint: .top,
-                                endPoint: .bottom
+            .background {
+                Group {
+                    if liveMaterial {
+                        shape.fill(.thinMaterial)
+                            .background(
+                                shape.fill(
+                                    LinearGradient(
+                                        colors: palette.popoverFill,
+                                        startPoint: .top,
+                                        endPoint: .bottom
+                                    )
+                                )
                             )
-                        )
-                    )
-            } else {
-                base
-                    .background(
-                        shape.fill(
-                            LinearGradient(
-                                colors: palette.popoverFill,
-                                startPoint: .top,
-                                endPoint: .bottom
+                    } else {
+                        shape
+                            .fill(
+                                LinearGradient(
+                                    colors: palette.popoverFill,
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
                             )
-                        )
+                            .background(shape.fill(palette.popoverOpaqueBase))
+                    }
+                }
+                .overlay(alignment: .topLeading) {
+                    shape
+                        .strokeBorder(.white.opacity(0.34), lineWidth: 0.9)
+                        .blur(radius: 0.5)
+                        .blendMode(.screen)
+                }
+                .overlay {
+                    shape.strokeBorder(
+                        LinearGradient(
+                            colors: palette.border,
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 0.9
                     )
-                    .background(shape.fill(palette.popoverOpaqueBase))
+                }
+                .shadow(color: palette.shadow, radius: 9, y: 4)
+                .shadow(color: .white.opacity(0.07), radius: 1, y: -0.5)
             }
-        }
-        filled
-            .overlay(alignment: .topLeading) {
-                shape
-                    .strokeBorder(.white.opacity(0.34), lineWidth: 0.9)
-                    .blur(radius: 0.5)
-                    .blendMode(.screen)
-            }
-            .overlay {
-                shape.strokeBorder(
-                    LinearGradient(
-                        colors: palette.border,
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 0.9
-                )
-            }
-            .shadow(color: palette.shadow, radius: 9, y: 4)
-            .shadow(color: .white.opacity(0.07), radius: 1, y: -0.5)
             .transaction { transaction in
                 transaction.animation = nil
             }
@@ -7245,8 +7572,15 @@ struct MpvPlayerView: NSViewRepresentable {
     }
 }
 
-final class MpvOpenGLView: NSOpenGLView {
+final class MpvOpenGLView: NSOpenGLView, MpvRenderSurface {
     weak var controller: MpvPlayerController?
+
+    // MARK: MpvRenderSurface
+    var mpvGLContext: NSOpenGLContext? { openGLContext }
+    var isSurfaceInWindow: Bool { window != nil }
+    func requestRedraw() { needsDisplay = true }
+    /// OpenGL 屏上路径仍走同步渲染（`draw(_:)` 里直接调用），不需要独立渲染队列。
+    func installRenderHandle(_ handle: LibMpvClient.RenderCallHandle?) {}
 
     init(controller: MpvPlayerController) {
         self.controller = controller
@@ -7355,8 +7689,8 @@ final class MpvOpenGLView: NSOpenGLView {
     }
 }
 
-struct MpvTrack: Identifiable, Hashable {
-    enum Kind: String, Hashable {
+struct MpvTrack: Identifiable, Hashable, Sendable {
+    enum Kind: String, Hashable, Sendable {
         case audio
         case subtitle = "sub"
         case unknown
@@ -7397,10 +7731,159 @@ struct MpvTrack: Identifiable, Hashable {
         }
         return parts.joined(separator: " · ")
     }
+
+    func withSelection(_ selected: Bool) -> MpvTrack {
+        MpvTrack(
+            id: id,
+            type: type,
+            title: title,
+            language: language,
+            codec: codec,
+            isSelected: selected,
+            isExternal: isExternal,
+            externalFilename: externalFilename
+        )
+    }
+}
+
+private enum TrackLanguageMatcher {
+    private struct LanguageIdentity: Equatable {
+        let base: String
+        let script: String?
+    }
+
+    static func bestTrack(in tracks: [MpvTrack], matching preferredLanguage: String) -> MpvTrack? {
+        let candidates = tracks.compactMap { track -> (track: MpvTrack, score: Int)? in
+            let score = score(track: track, preferredLanguage: preferredLanguage)
+            return score > 0 ? (track, score) : nil
+        }
+        return candidates
+            .sorted {
+                if $0.score != $1.score { return $0.score > $1.score }
+                if $0.track.isSelected != $1.track.isSelected { return $0.track.isSelected }
+                return $0.track.id < $1.track.id
+            }
+            .first?
+            .track
+    }
+
+    private static func score(track: MpvTrack, preferredLanguage: String) -> Int {
+        let languageScore = score(text: track.language, preferredLanguage: preferredLanguage)
+        let titleScore = max(
+            score(text: track.title, preferredLanguage: preferredLanguage) - 8,
+            score(text: track.externalFilename.map { URL(fileURLWithPath: $0).lastPathComponent }, preferredLanguage: preferredLanguage) - 10
+        )
+        return max(languageScore, titleScore)
+    }
+
+    private static func score(text: String?, preferredLanguage: String) -> Int {
+        guard let preferred = identity(for: preferredLanguage),
+              let text,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return 0
+        }
+        let normalizedText = normalized(text)
+        let normalizedPreferred = normalized(preferredLanguage)
+        let identities = identities(in: normalizedText)
+        guard !identities.isEmpty else { return 0 }
+        return identities.reduce(0) { best, candidate in
+            max(best, score(candidate: candidate, preferred: preferred, exact: normalizedText == normalizedPreferred))
+        }
+    }
+
+    private static func score(candidate: LanguageIdentity, preferred: LanguageIdentity, exact: Bool) -> Int {
+        guard candidate.base == preferred.base else { return 0 }
+        if exact { return 120 }
+        if let candidateScript = candidate.script,
+           let preferredScript = preferred.script {
+            return candidateScript == preferredScript ? 105 : (candidate.base == "zh" ? 62 : 0)
+        }
+        if candidate.script == nil || preferred.script == nil {
+            return 88
+        }
+        return 80
+    }
+
+    private static func identity(for text: String) -> LanguageIdentity? {
+        identities(in: normalized(text)).first
+    }
+
+    private static func identities(in normalizedText: String) -> [LanguageIdentity] {
+        var result: [LanguageIdentity] = []
+        func append(_ base: String, script: String? = nil) {
+            let identity = LanguageIdentity(base: base, script: script)
+            if !result.contains(identity) {
+                result.append(identity)
+            }
+        }
+
+        let tokens = Set(normalizedText.split { !$0.isLetter && !$0.isNumber }.map(String.init))
+        let hasToken: (String) -> Bool = { tokens.contains($0) }
+        let contains: (String) -> Bool = { normalizedText.contains($0) }
+
+        if contains("简") || contains("简体") || contains("simplified") ||
+            hasToken("chs") || hasToken("sc") || hasToken("cn") ||
+            contains("zh-cn") || contains("zh-hans") || contains("zh-sg") {
+            append("zh", script: "hans")
+        }
+        if contains("繁") || contains("繁體") || contains("traditional") ||
+            hasToken("cht") || hasToken("tc") || hasToken("tw") || hasToken("hk") ||
+            contains("zh-tw") || contains("zh-hk") || contains("zh-mo") || contains("zh-hant") {
+            append("zh", script: "hant")
+        }
+        if contains("中文") || contains("汉语") || contains("漢語") || contains("普通话") ||
+            contains("國語") || contains("国语") || contains("mandarin") ||
+            hasToken("zh") || hasToken("zho") || hasToken("chi") || hasToken("cmn") ||
+            hasToken("chinese") {
+            append("zh")
+        }
+
+        if hasToken("en") || hasToken("eng") || contains("english") { append("en") }
+        if hasToken("ja") || hasToken("jpn") || hasToken("jp") || contains("japanese") ||
+            contains("日本語") || contains("日语") || contains("日文") {
+            append("ja")
+        }
+        if hasToken("ko") || hasToken("kor") || hasToken("kr") || contains("korean") ||
+            contains("한국어") || contains("韩语") || contains("韓語") {
+            append("ko")
+        }
+
+        let iso3Aliases: [String: String] = [
+            "fre": "fr", "fra": "fr", "french": "fr",
+            "ger": "de", "deu": "de", "german": "de",
+            "spa": "es", "spanish": "es",
+            "por": "pt", "portuguese": "pt",
+            "ita": "it", "italian": "it",
+            "rus": "ru", "russian": "ru",
+            "vie": "vi", "vietnamese": "vi",
+            "tha": "th", "thai": "th",
+            "ind": "id", "indonesian": "id",
+            "msa": "ms", "may": "ms", "malay": "ms"
+        ]
+        for token in tokens {
+            if token.count == 2 {
+                append(token)
+            } else if let alias = iso3Aliases[token] {
+                append(alias)
+            }
+        }
+
+        return result
+    }
+
+    private static func normalized(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .replacingOccurrences(of: "_", with: "-")
+            .replacingOccurrences(of: ".", with: "-")
+            .replacingOccurrences(of: " ", with: "-")
+            .lowercased()
+    }
 }
 
 /// 音频输出设备（mpv `audio-device-list` 条目）。
-struct MpvAudioDevice: Identifiable, Hashable {
+struct MpvAudioDevice: Identifiable, Hashable, Sendable {
     let name: String
     let deviceDescription: String
 
@@ -7411,10 +7894,161 @@ struct MpvAudioDevice: Identifiable, Hashable {
     }
 }
 
-struct MpvChapter: Identifiable, Hashable {
+struct MpvChapter: Identifiable, Hashable, Sendable {
     let id: Int
     let title: String
     let time: Double
+}
+
+private struct MpvVideoSnapshotRequest: Sendable {
+    let includeDuration: Bool
+    let includeAspect: Bool
+    let includeBuffering: Bool
+    let includeTracks: Bool
+    let includeChapters: Bool
+}
+
+private struct MpvVideoAspectSnapshot: Sendable {
+    let displayWidth: Double?
+    let displayHeight: Double?
+    let codedWidth: Double?
+    let codedHeight: Double?
+    let sourceRotation: Int
+}
+
+private struct MpvVideoBufferingSnapshot: Sendable {
+    let pausedForCache: Bool
+    let cacheProgress: Double?
+}
+
+private struct MpvVideoSnapshot: Sendable {
+    let playbackTime: Double?
+    let duration: Double?
+    let paused: Bool?
+    let eofReached: Bool?
+    let aspect: MpvVideoAspectSnapshot?
+    let buffering: MpvVideoBufferingSnapshot?
+    let tracks: [MpvTrack]?
+    let secondarySubtitleID: Int?
+    let chapters: [MpvChapter]?
+}
+
+private final class MpvVideoSnapshotReader {
+    private let queue = DispatchQueue(label: "com.local.MediaLib.mpv-video-snapshot", qos: .utility)
+    private let handle: LibMpvClient.PropertyReadHandle
+    private var invalidated = false
+
+    init(handle: LibMpvClient.PropertyReadHandle) {
+        self.handle = handle
+    }
+
+    func read(
+        request: MpvVideoSnapshotRequest,
+        timelineOffset: Double,
+        completion: @escaping @MainActor (MpvVideoSnapshot) -> Void
+    ) {
+        queue.async { [weak self] in
+            guard let self, !self.invalidated else { return }
+            let snapshot = Self.makeSnapshot(
+                handle: self.handle,
+                request: request,
+                timelineOffset: timelineOffset
+            )
+            guard !self.invalidated else { return }
+            Task { @MainActor in
+                completion(snapshot)
+            }
+        }
+    }
+
+    func invalidateAndDrain() {
+        queue.sync {
+            invalidated = true
+        }
+    }
+
+    private static func makeSnapshot(
+        handle: LibMpvClient.PropertyReadHandle,
+        request: MpvVideoSnapshotRequest,
+        timelineOffset: Double
+    ) -> MpvVideoSnapshot {
+        let aspect = request.includeAspect
+            ? MpvVideoAspectSnapshot(
+                displayWidth: handle.getDouble("dwidth"),
+                displayHeight: handle.getDouble("dheight"),
+                codedWidth: handle.getDouble("video-params/w") ?? handle.getDouble("width"),
+                codedHeight: handle.getDouble("video-params/h") ?? handle.getDouble("height"),
+                sourceRotation: Int(handle.getInt64("video-params/rotate") ?? 0)
+            )
+            : nil
+        let buffering = request.includeBuffering
+            ? MpvVideoBufferingSnapshot(
+                pausedForCache: handle.getFlag("paused-for-cache") ?? false,
+                cacheProgress: handle.getDouble("cache-buffering-state")
+            )
+            : nil
+        return MpvVideoSnapshot(
+            playbackTime: handle.getDouble("time-pos").map { playerTimelineTime(for: $0, offset: timelineOffset) },
+            duration: request.includeDuration ? handle.getDouble("duration") : nil,
+            paused: handle.getFlag("pause"),
+            eofReached: handle.getFlag("eof-reached"),
+            aspect: aspect,
+            buffering: buffering,
+            tracks: request.includeTracks ? readTracks(handle: handle) : nil,
+            secondarySubtitleID: request.includeTracks ? handle.getInt64("secondary-sid").map(Int.init) : nil,
+            chapters: request.includeChapters ? readChapters(handle: handle, timelineOffset: timelineOffset) : nil
+        )
+    }
+
+    private static func playerTimelineTime(for playbackTime: Double, offset: Double) -> Double {
+        guard offset > 0 else { return playbackTime }
+        return offset + max(playbackTime, 0)
+    }
+
+    private static func readTracks(handle: LibMpvClient.PropertyReadHandle) -> [MpvTrack] {
+        guard let count = handle.getInt64("track-list/count"), count > 0 else { return [] }
+        var tracks: [MpvTrack] = []
+        tracks.reserveCapacity(Int(count))
+        for index in 0..<Int(count) {
+            guard let type = handle.getString("track-list/\(index)/type"),
+                  let id = handle.getInt64("track-list/\(index)/id") else { continue }
+            let kind = MpvTrack.Kind(rawValue: type) ?? .unknown
+            guard kind != .unknown else { continue }
+            tracks.append(
+                MpvTrack(
+                    id: Int(id),
+                    type: kind,
+                    title: handle.getString("track-list/\(index)/title"),
+                    language: handle.getString("track-list/\(index)/lang"),
+                    codec: handle.getString("track-list/\(index)/codec"),
+                    isSelected: handle.getFlag("track-list/\(index)/selected") ?? false,
+                    isExternal: handle.getFlag("track-list/\(index)/external") ?? false,
+                    externalFilename: handle.getString("track-list/\(index)/external-filename")
+                )
+            )
+        }
+        return tracks
+    }
+
+    private static func readChapters(handle: LibMpvClient.PropertyReadHandle, timelineOffset: Double) -> [MpvChapter] {
+        guard let count = handle.getInt64("chapter-list/count"), count > 0 else { return [] }
+        var chapters: [MpvChapter] = []
+        chapters.reserveCapacity(Int(count))
+        for index in 0..<Int(count) {
+            guard let playbackTime = handle.getDouble("chapter-list/\(index)/time") else { continue }
+            let title = handle.getString("chapter-list/\(index)/title")
+                .flatMap { $0.isEmpty ? nil : $0 }
+                ?? "章节 \(index + 1)"
+            chapters.append(
+                MpvChapter(
+                    id: index,
+                    title: title,
+                    time: playerTimelineTime(for: playbackTime, offset: timelineOffset)
+                )
+            )
+        }
+        return chapters
+    }
 }
 
 @MainActor
@@ -7561,6 +8195,11 @@ final class MpvPlayerController: ObservableObject {
     /// A7：当前条目是否已套用过剧集音轨/字幕偏好（每次 configure 重置，避免重复套用或覆盖用户手动选择）。
     private var didApplyTrackPreference = false
     private var libMpvClient: LibMpvClient?
+    private var mpvSnapshotReader: MpvVideoSnapshotReader?
+    private var mpvSnapshotReadInFlight = false
+    private var pendingForcedTrackSnapshot = false
+    private var trackSnapshotRefreshCount = 0
+    private var chapterSnapshotRefreshCount = 0
     private var audioPlayer: AVQueuePlayer?
     private var audioLocalMirrorPlayer: AVPlayer?
     private var audioRouteProxyPlayer: AVPlayer?
@@ -7574,7 +8213,7 @@ final class MpvPlayerController: ObservableObject {
     private var videoRouteProxyIsActive = false
     private var videoRouteProxyIsAudibleProbing = false
     private var audioEndObserver: NSObjectProtocol?
-    private weak var renderView: MpvOpenGLView?
+    private weak var renderView: (any MpvRenderSurface)?
     private var timer: Timer?
     private var securityScopedURL: URL?
     private var didSaveProgress = false
@@ -7591,7 +8230,13 @@ final class MpvPlayerController: ObservableObject {
     private var volumeBeforeMute: Float = 0.8
     private var playbackGeneration = 0
     private var keepLocalAudioWithAirPlay = false
+    private var preferredSubtitleLanguage = "zh-CN"
     private var lastTrackRefreshDate = Date.distantPast
+    private var lastDurationSnapshotDate = Date.distantPast
+    private var lastVideoAspectSnapshotDate = Date.distantPast
+    private var lastBufferingSnapshotDate = Date.distantPast
+    private var lastChapterSnapshotDate = Date.distantPast
+    private var deferredTrackRefreshTask: Task<Void, Never>?
     private var lastBufferingState: (active: Bool, progress: Double?) = (false, nil)
     private var playbackTimelineOffset: Double = 0
     private var activeVideoQualityOption: VideoStreamQualityOption?
@@ -7644,6 +8289,7 @@ final class MpvPlayerController: ObservableObject {
         clearVideoRouteProxy()
         self.item = item
         didApplyTrackPreference = false
+        preferredSubtitleLanguage = settings.subtitleLanguage.isEmpty ? "zh-CN" : settings.subtitleLanguage
         didSaveProgress = false
         didReportPlaybackStart = false
         didNotifyPlaybackEnd = false
@@ -7684,7 +8330,9 @@ final class MpvPlayerController: ObservableObject {
         baseVideoFilter = nil
         currentMemoryAudioAsset = nil
         updateBuffering(active: false, progress: nil)
-        lastTrackRefreshDate = .distantPast
+        resetVideoSnapshotDates()
+        deferredTrackRefreshTask?.cancel()
+        deferredTrackRefreshTask = nil
 
         guard let filePath = item.filePath,
               item.isRemoteResource || FileManager.default.fileExists(atPath: filePath) else {
@@ -7796,14 +8444,14 @@ final class MpvPlayerController: ObservableObject {
         }
     }
 
-    func attach(to view: MpvOpenGLView) {
+    func attach(to view: any MpvRenderSurface) {
         renderView = view
         if item?.type != .music, isPreparing, libMpvClient == nil {
             startMpv()
         }
     }
 
-    func detach(from view: MpvOpenGLView) {
+    func detach(from view: any MpvRenderSurface) {
         if renderView === view {
             renderView = nil
         }
@@ -7811,7 +8459,7 @@ final class MpvPlayerController: ObservableObject {
 
     private func startMpv() {
         guard libMpvClient == nil, let filePath else { return }
-        guard let renderView, renderView.window != nil, let openGLContext = renderView.openGLContext else {
+        guard let renderView, renderView.isSurfaceInWindow, let openGLContext = renderView.mpvGLContext else {
             videoStartRetryCount += 1
             if videoStartRetryCount <= 40 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
@@ -7832,11 +8480,15 @@ final class MpvPlayerController: ObservableObject {
                 hardwareDecodingMode: hardwareDecodingMode,
                 networkMemoryBufferingEnabled: videoMemoryBufferingEnabled
             ) { [weak renderView] in
-                renderView?.needsDisplay = true
+                renderView?.requestRedraw()
             }
             try client.loadFile(filePath)
             applyVideoAdjustments(to: client)
             libMpvClient = client
+            mpvSnapshotReader = MpvVideoSnapshotReader(handle: client.makePropertyReadHandle())
+            mpvSnapshotReadInFlight = false
+            pendingForcedTrackSnapshot = false
+            renderView.installRenderHandle(client.makeRenderCallHandle())
             isPreparing = false
             isReady = true
             isPlaying = true
@@ -7853,8 +8505,12 @@ final class MpvPlayerController: ObservableObject {
         }
     }
 
-    func render(width: Int, height: Int) {
-        libMpvClient?.render(width: width, height: height)
+    func render(width: Int, height: Int, fbo: Int = 0, flipY: Bool = true) {
+        libMpvClient?.render(width: width, height: height, fbo: fbo, flipY: flipY)
+    }
+
+    func requestVideoSurfaceRedraw() {
+        renderView?.requestRedraw()
     }
 
     private func startNativeAudio() {
@@ -9646,7 +10302,9 @@ final class MpvPlayerController: ObservableObject {
         subtitleTracks = []
         chapters = []
         subtitleAutoLoadEnabled = false
-        lastTrackRefreshDate = .distantPast
+        resetVideoSnapshotDates()
+        deferredTrackRefreshTask?.cancel()
+        deferredTrackRefreshTask = nil
         do {
             baseVideoFilter = nil
             rebuildVideoFilterChain(to: libMpvClient)
@@ -9686,7 +10344,9 @@ final class MpvPlayerController: ObservableObject {
         subtitleTracks = []
         chapters = []
         subtitleAutoLoadEnabled = false
-        lastTrackRefreshDate = .distantPast
+        resetVideoSnapshotDates()
+        deferredTrackRefreshTask?.cancel()
+        deferredTrackRefreshTask = nil
         do {
             try libMpvClient.command(["loadfile", targetURL, "replace"])
             libMpvClient.setDouble("volume", Double(volume * 100) * volumeBoost)
@@ -9741,7 +10401,7 @@ final class MpvPlayerController: ObservableObject {
             try? libMpvClient.command(["rescan_external_files"])
             try? libMpvClient.command(["set", "sub-visibility", "yes"])
             subtitleAutoLoadEnabled = true
-            refreshTrackLists(from: libMpvClient, force: true)
+            scheduleVideoSnapshotRead(forceTrackRefresh: true)
             return
         }
     }
@@ -9752,7 +10412,8 @@ final class MpvPlayerController: ObservableObject {
             try? libMpvClient.command(["set", "sid", "no"])
             didApplyTrackPreference = true
             if let item { TrackPreferenceStore.setSubtitle(.off, for: item) }
-            refreshTrackLists(from: libMpvClient, force: true)
+            markPrimarySubtitleSelection(nil)
+            scheduleDeferredTrackListRefresh(from: libMpvClient)
             return
         }
     }
@@ -9765,11 +10426,16 @@ final class MpvPlayerController: ObservableObject {
         }
     }
 
+    func refreshVideoTrackMetadata() {
+        guard libMpvClient != nil else { return }
+        scheduleVideoSnapshotRead(forceTrackRefresh: true)
+    }
+
     func cycleSubtitle() {
         if let libMpvClient {
             try? libMpvClient.command(["set", "sub-visibility", "yes"])
             try? libMpvClient.command(["cycle", "sub"])
-            refreshTrackLists(from: libMpvClient, force: true)
+            scheduleVideoSnapshotRead(forceTrackRefresh: true)
             return
         }
     }
@@ -9780,7 +10446,7 @@ final class MpvPlayerController: ObservableObject {
             try? libMpvClient.command(["sub-add", path, "select"])
             try? libMpvClient.command(["set", "sub-visibility", "yes"])
             subtitleAutoLoadEnabled = true
-            refreshTrackLists(from: libMpvClient, force: true)
+            scheduleVideoSnapshotRead(forceTrackRefresh: true)
             return
         }
     }
@@ -9815,7 +10481,8 @@ final class MpvPlayerController: ObservableObject {
             if let item, let language = subtitleTracks.first(where: { $0.id == id })?.language {
                 TrackPreferenceStore.setSubtitle(.language(language), for: item)
             }
-            refreshTrackLists(from: libMpvClient, force: true)
+            markPrimarySubtitleSelection(id)
+            scheduleDeferredTrackListRefresh(from: libMpvClient)
             return
         }
     }
@@ -9826,12 +10493,11 @@ final class MpvPlayerController: ObservableObject {
         if let id {
             try? libMpvClient.command(["set", "secondary-sid", "\(id)"])
             try? libMpvClient.command(["set", "secondary-sub-visibility", "yes"])
-            secondarySubtitleID = id
         } else {
             try? libMpvClient.command(["set", "secondary-sid", "no"])
-            secondarySubtitleID = nil
         }
-        refreshTrackLists(from: libMpvClient, force: true)
+        markSecondarySubtitleSelection(id)
+        scheduleDeferredTrackListRefresh(from: libMpvClient)
     }
 
     /// 刷新音频输出设备列表与当前选中设备（mpv `audio-device-list` / `audio-device`）。
@@ -9865,7 +10531,7 @@ final class MpvPlayerController: ObservableObject {
     func cycleAudioTrack() {
         if let libMpvClient {
             try? libMpvClient.command(["cycle", "audio"])
-            refreshTrackLists(from: libMpvClient, force: true)
+            scheduleVideoSnapshotRead(forceTrackRefresh: true)
             return
         }
     }
@@ -9873,7 +10539,8 @@ final class MpvPlayerController: ObservableObject {
     func selectDefaultAudioTrack() {
         if let libMpvClient {
             try? libMpvClient.command(["set", "aid", "auto"])
-            refreshTrackLists(from: libMpvClient, force: true)
+            markAudioTrackSelection(nil)
+            scheduleDeferredTrackListRefresh(from: libMpvClient)
             return
         }
     }
@@ -9885,7 +10552,8 @@ final class MpvPlayerController: ObservableObject {
             if let item, let language = audioTracks.first(where: { $0.id == id })?.language {
                 TrackPreferenceStore.setAudioLanguage(language, for: item)
             }
-            refreshTrackLists(from: libMpvClient, force: true)
+            markAudioTrackSelection(id)
+            scheduleDeferredTrackListRefresh(from: libMpvClient)
             return
         }
     }
@@ -9981,6 +10649,23 @@ final class MpvPlayerController: ObservableObject {
         return "\(safeTitle) \(formatter.string(from: Date())).png"
     }
 
+    private func stopMpvSnapshotReader() {
+        mpvSnapshotReadInFlight = false
+        pendingForcedTrackSnapshot = false
+        mpvSnapshotReader?.invalidateAndDrain()
+        mpvSnapshotReader = nil
+    }
+
+    private func resetVideoSnapshotDates() {
+        lastTrackRefreshDate = .distantPast
+        lastDurationSnapshotDate = .distantPast
+        lastVideoAspectSnapshotDate = .distantPast
+        lastBufferingSnapshotDate = .distantPast
+        lastChapterSnapshotDate = .distantPast
+        trackSnapshotRefreshCount = 0
+        chapterSnapshotRefreshCount = 0
+    }
+
     func teardown() {
         playbackGeneration += 1
         timer?.invalidate()
@@ -10013,7 +10698,11 @@ final class MpvPlayerController: ObservableObject {
         audioPlayer?.pause()
         audioPlayer = nil
         clearVideoRouteProxy()
+        stopMpvSnapshotReader()
         libMpvClient?.stopPlayback()
+        // 必须在 libMpvClient 释放（连带释放渲染上下文）之前排空 Metal 独立渲染队列，
+        // 否则队列里还在跑的渲染调用可能访问已释放的上下文（见 installRenderHandle 文档）。
+        renderView?.installRenderHandle(nil)
         libMpvClient = nil
         isPlaying = false
         isPreparing = false
@@ -10031,7 +10720,9 @@ final class MpvPlayerController: ObservableObject {
         activeVideoQualityOption = nil
         baseVideoFilter = nil
         updateBuffering(active: false, progress: nil)
-        lastTrackRefreshDate = .distantPast
+        resetVideoSnapshotDates()
+        deferredTrackRefreshTask?.cancel()
+        deferredTrackRefreshTask = nil
         stopSecurityScopedResource()
         SystemNowPlayingCenter.clear()
     }
@@ -10066,6 +10757,9 @@ final class MpvPlayerController: ObservableObject {
         audioPlayer?.pause()
         audioPlayer = nil
         clearVideoRouteProxy()
+        stopMpvSnapshotReader()
+        // 同上：先排空 Metal 独立渲染队列再释放 libMpvClient。
+        renderView?.installRenderHandle(nil)
         libMpvClient = nil
         isPreparing = false
         isReady = false
@@ -10083,7 +10777,9 @@ final class MpvPlayerController: ObservableObject {
         activeVideoQualityOption = nil
         baseVideoFilter = nil
         updateBuffering(active: false, progress: nil)
-        lastTrackRefreshDate = .distantPast
+        resetVideoSnapshotDates()
+        deferredTrackRefreshTask?.cancel()
+        deferredTrackRefreshTask = nil
         stopSecurityScopedResource()
         statusMessage = nil
         errorMessage = message
@@ -10134,6 +10830,176 @@ final class MpvPlayerController: ObservableObject {
         )
     }
 
+    private func scheduleVideoSnapshotRead(forceTrackRefresh: Bool = false) {
+        guard let reader = mpvSnapshotReader else { return }
+        if forceTrackRefresh {
+            pendingForcedTrackSnapshot = true
+        }
+        guard !mpvSnapshotReadInFlight else { return }
+
+        let now = Date()
+        let includeDuration = duration <= 0 ||
+            now.timeIntervalSince(lastDurationSnapshotDate) > 2.0
+        let includeAspect = !hasVideoFrame ||
+            now.timeIntervalSince(lastVideoAspectSnapshotDate) > 2.0
+        let includeBuffering = isBuffering ||
+            item?.isRemoteResource == true ||
+            statusMessage?.hasPrefix("正在切换到 ") == true ||
+            statusMessage?.hasPrefix("正在定位到 ") == true ||
+            now.timeIntervalSince(lastBufferingSnapshotDate) > 1.0
+        let forceTracks = pendingForcedTrackSnapshot
+        let includeTracks = forceTracks ||
+            now.timeIntervalSince(lastTrackRefreshDate) > periodicTrackRefreshInterval()
+        let includeChapters = includeTracks && shouldIncludeChapterSnapshot(now: now)
+        if includeDuration {
+            lastDurationSnapshotDate = now
+        }
+        if includeAspect {
+            lastVideoAspectSnapshotDate = now
+        }
+        if includeBuffering {
+            lastBufferingSnapshotDate = now
+        }
+        if includeTracks {
+            lastTrackRefreshDate = now
+            trackSnapshotRefreshCount += 1
+        }
+        if includeChapters {
+            lastChapterSnapshotDate = now
+            chapterSnapshotRefreshCount += 1
+        }
+        pendingForcedTrackSnapshot = false
+        mpvSnapshotReadInFlight = true
+        let request = MpvVideoSnapshotRequest(
+            includeDuration: includeDuration,
+            includeAspect: includeAspect,
+            includeBuffering: includeBuffering,
+            includeTracks: includeTracks,
+            includeChapters: includeChapters
+        )
+        let generation = playbackGeneration
+        let timelineOffset = playbackTimelineOffset
+        reader.read(request: request, timelineOffset: timelineOffset) { [weak self, weak reader] snapshot in
+            guard let self else { return }
+            self.mpvSnapshotReadInFlight = false
+            guard self.playbackGeneration == generation,
+                  let reader,
+                  self.mpvSnapshotReader === reader,
+                  self.libMpvClient != nil else { return }
+            self.applyVideoSnapshot(snapshot)
+            if self.pendingForcedTrackSnapshot {
+                self.scheduleVideoSnapshotRead()
+            }
+        }
+    }
+
+    private func applyVideoSnapshot(_ snapshot: MpvVideoSnapshot) {
+        if let time = snapshot.playbackTime {
+            _ = applyPlaybackClock(
+                time,
+                generation: playbackGeneration,
+                currentTolerance: 0.08,
+                lyricTolerance: 0.035
+            )
+        }
+        if let duration = snapshot.duration, duration > 0 {
+            let logicalDuration = logicalDuration(fromPlaybackDuration: duration)
+            if abs(self.duration - logicalDuration) > 0.05 {
+                self.duration = logicalDuration
+            }
+        }
+        if let paused = snapshot.paused, isPlaying == paused {
+            isPlaying = !paused
+        }
+        if let eofReached = snapshot.eofReached {
+            if eofReached, !didNotifyPlaybackEnd, duration > 0 {
+                didNotifyPlaybackEnd = true
+                onPlaybackFinished?()
+            } else if !eofReached, didNotifyPlaybackEnd {
+                didNotifyPlaybackEnd = false
+            }
+        }
+        if let aspect = snapshot.aspect,
+           applyVideoAspectSnapshot(aspect) {
+            hasVideoFrame = true
+        }
+        if let buffering = snapshot.buffering {
+            applyBufferingSnapshot(buffering)
+        }
+        if statusMessage?.hasPrefix("正在切换到 ") == true,
+           !isBuffering {
+            statusMessage = nil
+        }
+        if let chapters = snapshot.chapters, self.chapters != chapters {
+            self.chapters = chapters
+        }
+        if let tracks = snapshot.tracks {
+            applyTrackSnapshot(tracks: tracks, secondarySubtitleID: snapshot.secondarySubtitleID)
+        }
+        reportPlayback(.progress)
+    }
+
+    private func applyVideoAspectSnapshot(_ snapshot: MpvVideoAspectSnapshot) -> Bool {
+        let normalizedRotation = ((snapshot.sourceRotation % 360) + 360) % 360
+
+        let displayAspect = snapshot.displayWidth.flatMap { width in
+            snapshot.displayHeight.flatMap { height in
+                width > 0 && height > 0 ? CGFloat(width / height) : nil
+            }
+        }
+        let rotatedCodedAspect = snapshot.codedWidth.flatMap { width in
+            snapshot.codedHeight.flatMap { height -> CGFloat? in
+                guard width > 0, height > 0 else { return nil }
+                let swapsAxes = normalizedRotation == 90 || normalizedRotation == 270
+                return swapsAxes ? CGFloat(height / width) : CGFloat(width / height)
+            }
+        }
+        let aspect: CGFloat?
+        if let displayAspect, let rotatedCodedAspect,
+           normalizedRotation == 90 || normalizedRotation == 270,
+           abs(displayAspect - rotatedCodedAspect) > 0.04 {
+            aspect = rotatedCodedAspect
+        } else {
+            aspect = displayAspect ?? rotatedCodedAspect
+        }
+        guard let aspect, aspect.isFinite, aspect > 0 else { return false }
+        if let current = videoAspectRatio, abs(current - aspect) < 0.01 {
+            return true
+        }
+        videoAspectRatio = aspect
+        return true
+    }
+
+    private func applyBufferingSnapshot(_ snapshot: MpvVideoBufferingSnapshot) {
+        let isNetwork = item?.isRemoteResource == true
+        let loading = isNetwork && isReady && currentTime < 0.35 && ((snapshot.cacheProgress ?? 100) < 99)
+        let buffering = snapshot.pausedForCache || loading
+        let progress: Double?
+        if let cacheProgress = snapshot.cacheProgress, cacheProgress.isFinite {
+            progress = min(max(cacheProgress, 0), 100)
+        } else {
+            progress = buffering ? 0 : nil
+        }
+        updateBuffering(active: buffering, progress: progress)
+    }
+
+    private func applyTrackSnapshot(tracks: [MpvTrack], secondarySubtitleID: Int?) {
+        let audio = tracks.filter { $0.type == .audio }
+        let subtitles = tracks.filter { $0.type == .subtitle }
+        if audioTracks != audio {
+            audioTracks = audio
+        }
+        if subtitleTracks != subtitles {
+            subtitleTracks = subtitles
+        }
+        if self.secondarySubtitleID != secondarySubtitleID {
+            self.secondarySubtitleID = secondarySubtitleID
+        }
+        if let client = libMpvClient {
+            applyTrackPreferenceIfNeeded(client: client)
+        }
+    }
+
     private func startTimer() {
         timer?.invalidate()
         let interval = item?.type == .music ? 0.18 : 0.25
@@ -10165,45 +11031,8 @@ final class MpvPlayerController: ObservableObject {
                     self.reportPlayback(.progress)
                     return
                 }
-                if let libMpvClient = self.libMpvClient {
-                    if let time = libMpvClient.getDouble("time-pos") {
-                        let timelineTime = self.playerTimelineTime(for: time)
-                        _ = self.applyPlaybackClock(
-                            timelineTime,
-                            generation: self.playbackGeneration,
-                            currentTolerance: 0.08,
-                            lyricTolerance: 0.035
-                        )
-                    }
-                    if let duration = libMpvClient.getDouble("duration"), duration > 0 {
-                        let logicalDuration = self.logicalDuration(fromPlaybackDuration: duration)
-                        if abs(self.duration - logicalDuration) > 0.05 {
-                            self.duration = logicalDuration
-                        }
-                    }
-                    if let paused = libMpvClient.getFlag("pause"), self.isPlaying == paused {
-                        self.isPlaying = !paused
-                    }
-                    // keep-open=yes：EOF 停在最后一帧并置 eof-reached，由播放结束行为接管；
-                    // 用户回拖后 eof-reached 复位，可再次触发。
-                    if let eofReached = libMpvClient.getFlag("eof-reached") {
-                        if eofReached, !self.didNotifyPlaybackEnd, self.duration > 0 {
-                            self.didNotifyPlaybackEnd = true
-                            self.onPlaybackFinished?()
-                        } else if !eofReached, self.didNotifyPlaybackEnd {
-                            self.didNotifyPlaybackEnd = false
-                        }
-                    }
-                    if self.updateVideoAspectRatio(from: libMpvClient) {
-                        self.hasVideoFrame = true
-                    }
-                    self.updateBufferingState(from: libMpvClient)
-                    if self.statusMessage?.hasPrefix("正在切换到 ") == true,
-                       !self.isBuffering {
-                        self.statusMessage = nil
-                    }
-                    self.refreshTrackLists(from: libMpvClient)
-                    self.reportPlayback(.progress)
+                if self.libMpvClient != nil {
+                    self.scheduleVideoSnapshotRead()
                     return
                 }
             }
@@ -10271,7 +11100,7 @@ final class MpvPlayerController: ObservableObject {
                       self.playbackGeneration == generation,
                       self.libMpvClient != nil,
                       !self.hasVideoFrame else { return }
-                self.renderView?.needsDisplay = true
+                self.renderView?.requestRedraw()
                 do {
                     try await Task.sleep(nanoseconds: 80_000_000)
                 } catch {
@@ -10283,62 +11112,8 @@ final class MpvPlayerController: ObservableObject {
                   self.libMpvClient != nil,
                   !self.hasVideoFrame else { return }
             self.statusMessage = "正在等待视频首帧。"
-            self.renderView?.needsDisplay = true
+            self.renderView?.requestRedraw()
         }
-    }
-
-    private func updateVideoAspectRatio(from client: LibMpvClient) -> Bool {
-        let displayWidth = client.getDouble("dwidth")
-        let displayHeight = client.getDouble("dheight")
-        let codedWidth = client.getDouble("video-params/w") ?? client.getDouble("width")
-        let codedHeight = client.getDouble("video-params/h") ?? client.getDouble("height")
-        let sourceRotation = Int(client.getInt64("video-params/rotate") ?? 0)
-        let normalizedRotation = ((sourceRotation % 360) + 360) % 360
-
-        let displayAspect = displayWidth.flatMap { width in
-            displayHeight.flatMap { height in
-                width > 0 && height > 0 ? CGFloat(width / height) : nil
-            }
-        }
-        let rotatedCodedAspect = codedWidth.flatMap { width in
-            codedHeight.flatMap { height -> CGFloat? in
-                guard width > 0, height > 0 else { return nil }
-                let swapsAxes = normalizedRotation == 90 || normalizedRotation == 270
-                return swapsAxes ? CGFloat(height / width) : CGFloat(width / height)
-            }
-        }
-        // 部分 libmpv 构建的 dwidth/dheight 仍返回编码尺寸，未把手机视频的旋转矩阵算进去。
-        // 当源旋转为 90/270 度时，以旋转后的编码比例兜底；若 dwidth/dheight 已正确则两者本就接近。
-        let aspect: CGFloat?
-        if let displayAspect, let rotatedCodedAspect,
-           normalizedRotation == 90 || normalizedRotation == 270,
-           abs(displayAspect - rotatedCodedAspect) > 0.04 {
-            aspect = rotatedCodedAspect
-        } else {
-            aspect = displayAspect ?? rotatedCodedAspect
-        }
-        guard let aspect else { return false }
-        guard aspect.isFinite, aspect > 0 else { return false }
-        if let current = videoAspectRatio, abs(current - aspect) < 0.01 {
-            return true
-        }
-        videoAspectRatio = aspect
-        return true
-    }
-
-    private func updateBufferingState(from client: LibMpvClient) {
-        let pausedForCache = client.getFlag("paused-for-cache") ?? false
-        let cacheProgress = client.getDouble("cache-buffering-state")
-        let isNetwork = item?.isRemoteResource == true
-        let loading = isNetwork && isReady && currentTime < 0.35 && ((cacheProgress ?? 100) < 99)
-        let buffering = pausedForCache || loading
-        let progress: Double?
-        if let cacheProgress, cacheProgress.isFinite {
-            progress = min(max(cacheProgress, 0), 100)
-        } else {
-            progress = buffering ? 0 : nil
-        }
-        updateBuffering(active: buffering, progress: progress)
     }
 
     private func updateBuffering(active: Bool, progress: Double?) {
@@ -10360,52 +11135,74 @@ final class MpvPlayerController: ObservableObject {
         }
     }
 
-    private func refreshTrackLists(from client: LibMpvClient, force: Bool = false) {
-        let now = Date()
-        guard force || now.timeIntervalSince(lastTrackRefreshDate) > 1.0 else { return }
-        lastTrackRefreshDate = now
-        refreshChapterList(from: client)
-        guard let count = client.getInt64("track-list/count"), count > 0 else {
-            if !audioTracks.isEmpty { audioTracks = [] }
-            if !subtitleTracks.isEmpty { subtitleTracks = [] }
-            return
+    private func periodicTrackRefreshInterval() -> TimeInterval {
+        if trackSnapshotRefreshCount < 12 {
+            return 0.5
         }
+        if !didApplyTrackPreference {
+            return 10.0
+        }
+        return 30.0
+    }
 
-        var audio: [MpvTrack] = []
-        var subtitles: [MpvTrack] = []
-        for index in 0..<Int(count) {
-            guard let type = client.getString("track-list/\(index)/type"),
-                  let id = client.getInt64("track-list/\(index)/id") else { continue }
-            let track = MpvTrack(
-                id: Int(id),
-                type: MpvTrack.Kind(rawValue: type) ?? .unknown,
-                title: client.getString("track-list/\(index)/title"),
-                language: client.getString("track-list/\(index)/lang"),
-                codec: client.getString("track-list/\(index)/codec"),
-                isSelected: client.getFlag("track-list/\(index)/selected") ?? false,
-                isExternal: client.getFlag("track-list/\(index)/external") ?? false,
-                externalFilename: client.getString("track-list/\(index)/external-filename")
-            )
-            switch track.type {
-            case .audio:
-                audio.append(track)
-            case .subtitle:
-                subtitles.append(track)
-            case .unknown:
-                break
+    private func shouldIncludeChapterSnapshot(now: Date) -> Bool {
+        if chapterSnapshotRefreshCount < 3 {
+            return true
+        }
+        return now.timeIntervalSince(lastChapterSnapshotDate) > 30.0
+    }
+
+    private func scheduleDeferredTrackListRefresh(from client: LibMpvClient) {
+        deferredTrackRefreshTask?.cancel()
+        let generation = playbackGeneration
+        deferredTrackRefreshTask = Task { @MainActor [weak self, weak client] in
+            do {
+                try await Task.sleep(nanoseconds: 350_000_000)
+            } catch {
+                return
             }
+            guard let self,
+                  let client,
+                  self.playbackGeneration == generation,
+                  self.libMpvClient === client else { return }
+            self.scheduleVideoSnapshotRead(forceTrackRefresh: true)
+            self.deferredTrackRefreshTask = nil
         }
-        if audioTracks != audio {
-            audioTracks = audio
+    }
+
+    private func markAudioTrackSelection(_ id: Int?) {
+        let next = audioTracks.map { track in
+            track.withSelection(track.id == id)
         }
-        if subtitleTracks != subtitles {
-            subtitleTracks = subtitles
+        if next != audioTracks {
+            audioTracks = next
         }
-        let secondary = client.getInt64("secondary-sid").map(Int.init)
-        if secondarySubtitleID != secondary {
-            secondarySubtitleID = secondary
+    }
+
+    private func markPrimarySubtitleSelection(_ id: Int?) {
+        if secondarySubtitleID == id {
+            secondarySubtitleID = nil
         }
-        applyTrackPreferenceIfNeeded(client: client)
+        let next = subtitleTracks.map { track in
+            let selected = track.id == id || track.id == secondarySubtitleID
+            return track.withSelection(selected)
+        }
+        if next != subtitleTracks {
+            subtitleTracks = next
+        }
+    }
+
+    private func markSecondarySubtitleSelection(_ id: Int?) {
+        let previousSecondaryID = secondarySubtitleID
+        secondarySubtitleID = id
+        let next = subtitleTracks.map { track in
+            let wasPreviousSecondary = track.id == previousSecondaryID
+            let selected = (track.isSelected && !wasPreviousSecondary) || track.id == id
+            return track.withSelection(selected)
+        }
+        if next != subtitleTracks {
+            subtitleTracks = next
+        }
     }
 
     /// A7：轨道列表就绪后，套用同剧集记忆的音轨/字幕语言（仅一次，且不覆盖用户手动选择）。
@@ -10413,11 +11210,14 @@ final class MpvPlayerController: ObservableObject {
         guard !didApplyTrackPreference, let item else { return }
         guard !audioTracks.isEmpty || !subtitleTracks.isEmpty else { return }
         didApplyTrackPreference = true
+        var didIssueTrackCommand = false
 
         if let language = TrackPreferenceStore.audioLanguage(for: item),
-           let track = audioTracks.first(where: { ($0.language ?? "") == language }),
+           let track = TrackLanguageMatcher.bestTrack(in: audioTracks, matching: language),
            !track.isSelected {
             try? client.command(["set", "aid", "\(track.id)"])
+            markAudioTrackSelection(track.id)
+            didIssueTrackCommand = true
         }
 
         if let preference = TrackPreferenceStore.subtitle(for: item) {
@@ -10425,38 +11225,27 @@ final class MpvPlayerController: ObservableObject {
             case .off:
                 try? client.command(["set", "sub-visibility", "no"])
                 try? client.command(["set", "sid", "no"])
+                markPrimarySubtitleSelection(nil)
+                didIssueTrackCommand = true
             case .language(let language):
-                if let track = subtitleTracks.first(where: { ($0.language ?? "") == language }),
+                if let track = TrackLanguageMatcher.bestTrack(in: subtitleTracks, matching: language),
                    !track.isSelected {
                     try? client.command(["set", "sid", "\(track.id)"])
                     try? client.command(["set", "sub-visibility", "yes"])
+                    markPrimarySubtitleSelection(track.id)
+                    didIssueTrackCommand = true
                 }
             }
+        } else if let track = TrackLanguageMatcher.bestTrack(in: subtitleTracks, matching: preferredSubtitleLanguage),
+                  !track.isSelected {
+            try? client.command(["set", "sid", "\(track.id)"])
+            try? client.command(["set", "sub-visibility", "yes"])
+            markPrimarySubtitleSelection(track.id)
+            didIssueTrackCommand = true
         }
-    }
 
-    private func refreshChapterList(from client: LibMpvClient) {
-        guard let count = client.getInt64("chapter-list/count"), count > 0 else {
-            if !chapters.isEmpty { chapters = [] }
-            return
-        }
-        var next: [MpvChapter] = []
-        next.reserveCapacity(Int(count))
-        for index in 0..<Int(count) {
-            guard let playbackTime = client.getDouble("chapter-list/\(index)/time") else { continue }
-            let title = client.getString("chapter-list/\(index)/title")
-                .flatMap { $0.isEmpty ? nil : $0 }
-                ?? "章节 \(index + 1)"
-            next.append(
-                MpvChapter(
-                    id: index,
-                    title: title,
-                    time: playerTimelineTime(for: playbackTime)
-                )
-            )
-        }
-        if chapters != next {
-            chapters = next
+        if didIssueTrackCommand {
+            scheduleDeferredTrackListRefresh(from: client)
         }
     }
 

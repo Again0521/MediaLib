@@ -1440,7 +1440,7 @@ struct HomeView: View {
                 .foregroundStyle(HomeVividTokens.textPrimary)
                 .padding(.horizontal, 14)
                 .frame(height: 34)
-                .background(Color.white, in: Capsule())
+                .background(AppColors.refCardBg, in: Capsule())
                 .overlay(Capsule().strokeBorder(HomeVividTokens.border, lineWidth: 1))
             }
             .buttonStyle(.plain)

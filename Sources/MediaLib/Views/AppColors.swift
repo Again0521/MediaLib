@@ -50,38 +50,37 @@ enum AppColors {
     static var accentFamily: [Color] { AuroraPalette.family }
     static var heroSurface: Color { AuroraPalette.heroSurface }
     static var heroOnColor: Color { AuroraPalette.heroOn }
-    static let referenceBlue = Color(red: 46 / 255, green: 144 / 255, blue: 250 / 255)
-    static let referenceCyan = Color(red: 54 / 255, green: 191 / 255, blue: 250 / 255)
-    static let referenceControlFill = Color(red: 243 / 255, green: 246 / 255, blue: 251 / 255)
+    static var referenceBlue: Color { Color(nsColor: resolved.referenceBlue) }
+    static var referenceCyan: Color { Color(nsColor: resolved.referenceCyan) }
+    static var referenceControlFill: Color { refScanFill }
 
-    // MARK: - 系统页面 1:1 复刻常量（硬编码，主题派生已废弃）
-    // 取值来自 `MediaLIB 系统页面.html` 歌曲页/设置页 getComputedStyle 实测。
-    static let refCardBg = Color(red: 1, green: 1, blue: 1)                                  // #FFFFFF 卡片底
-    static let refCardBorder = Color(red: 237 / 255, green: 240 / 255, blue: 245 / 255)      // #EDF0F5 卡边
-    static let refCardShadow = Color(red: 40 / 255, green: 60 / 255, blue: 100 / 255)        // rgba(40,60,100,*) 卡片软阴影
-    static let refRowDivider = Color(red: 241 / 255, green: 244 / 255, blue: 248 / 255)      // #F1F4F8 行内分隔线
-    static let refIconChipBg = Color(red: 231 / 255, green: 240 / 255, blue: 253 / 255)      // #E7F0FD 设置图标芯片底
-    static let refIconGlyph = Color(red: 46 / 255, green: 144 / 255, blue: 250 / 255)        // #2E90FA 设置图标线条
-    static let refSubtle = Color(red: 154 / 255, green: 163 / 255, blue: 180 / 255)          // #9AA3B4 副文字/分组标签
-    static let refScanFill = Color(red: 241 / 255, green: 243 / 255, blue: 247 / 255)        // #F1F3F7 次级实心胶囊底（扫描）
-    static let refSecondaryText = Color(red: 90 / 255, green: 100 / 255, blue: 120 / 255)    // #5A6478 次级按钮文字
-    static let refOutlineBg = Color(red: 1, green: 1, blue: 1)                               // #FFFFFF 白描边按钮底
-    static let refOutlineBorder = Color(red: 230 / 255, green: 234 / 255, blue: 241 / 255)   // #E6EAF1 白描边按钮边
-    static let refMenuBorder = Color(red: 203 / 255, green: 213 / 255, blue: 225 / 255)      // #CBD5E1 网页下拉边
-    static let refMenuText = Color(red: 51 / 255, green: 65 / 255, blue: 85 / 255)            // #334155 网页下拉字
-    static let refChipBarFill = Color(red: 241 / 255, green: 245 / 255, blue: 249 / 255)     // #F1F5F9 筛选胶囊组底
-    static let refChipBarBorder = Color(red: 226 / 255, green: 232 / 255, blue: 240 / 255)   // #E2E8F0 筛选胶囊组边
-    static let refSearchFill = Color(red: 238 / 255, green: 241 / 255, blue: 246 / 255)      // #EEF1F6 搜索框底
-    static let refSearchPlaceholder = Color(red: 170 / 255, green: 178 / 255, blue: 192 / 255) // #AAB2C0 搜索占位
-    static let refPillActiveBg = Color.white                                                 // #FFFFFF 网页激活胶囊底
-    static let refPillActiveText = Color(red: 15 / 255, green: 23 / 255, blue: 42 / 255)      // #0F172A 激活胶囊字
-    static let refPillIdleText = Color(red: 100 / 255, green: 116 / 255, blue: 139 / 255)     // #64748B 非激活胶囊字
-    static let refTitleText = Color(red: 29 / 255, green: 29 / 255, blue: 31 / 255)          // #1D1D1F 主标题
-    static let refProminentStart = Color(red: 46 / 255, green: 144 / 255, blue: 250 / 255)   // #2E90FA 主按钮渐变起
-    static let refProminentEnd = Color(red: 54 / 255, green: 191 / 255, blue: 250 / 255)     // #36BFFA 主按钮渐变止
-    static var refProminentGradient: LinearGradient {
-        LinearGradient(colors: [refProminentStart, refProminentEnd], startPoint: .topLeading, endPoint: .bottomTrailing)
-    }
+    // MARK: - 系统页面 1:1 复刻色板
+    // 浅色取值来自 `MediaLIB 系统页面.html` 歌曲页/设置页 getComputedStyle 实测；
+    // 深色分支跟随当前主题语义 token，让旧 reference 调用在暗色外观中不再漏白。
+    static var refCardBg: Color { Color(nsColor: resolved.refCardBg) }                                  // light #FFFFFF
+    static var refCardBorder: Color { Color(nsColor: resolved.refCardBorder) }                          // light #EDF0F5
+    static var refCardShadow: Color { Color(nsColor: resolved.refCardShadow) }                          // light rgba(40,60,100,*)
+    static var refRowDivider: Color { Color(nsColor: resolved.refRowDivider) }                          // light #F1F4F8
+    static var refIconChipBg: Color { Color(nsColor: resolved.refIconChipBg) }                          // light #E7F0FD
+    static var refIconGlyph: Color { Color(nsColor: resolved.refIconGlyph) }                            // light #2E90FA
+    static var refSubtle: Color { Color(nsColor: resolved.refSubtle) }                                  // light #9AA3B4
+    static var refScanFill: Color { Color(nsColor: resolved.refScanFill) }                              // light #F1F3F7
+    static var refSecondaryText: Color { Color(nsColor: resolved.refSecondaryText) }                    // light #5A6478
+    static var refOutlineBg: Color { Color(nsColor: resolved.refOutlineBg) }                            // light #FFFFFF
+    static var refOutlineBorder: Color { Color(nsColor: resolved.refOutlineBorder) }                    // light #E6EAF1
+    static var refMenuBorder: Color { Color(nsColor: resolved.refMenuBorder) }                          // light #CBD5E1
+    static var refMenuText: Color { Color(nsColor: resolved.refMenuText) }                              // light #334155
+    static var refChipBarFill: Color { Color(nsColor: resolved.refChipBarFill) }                        // light #F1F5F9
+    static var refChipBarBorder: Color { Color(nsColor: resolved.refChipBarBorder) }                    // light #E2E8F0
+    static var refSearchFill: Color { Color(nsColor: resolved.refSearchFill) }                          // light #EEF1F6
+    static var refSearchPlaceholder: Color { Color(nsColor: resolved.refSearchPlaceholder) }            // light #AAB2C0
+    static var refPillActiveBg: Color { Color(nsColor: resolved.refPillActiveBg) }                      // light #FFFFFF
+    static var refPillActiveText: Color { Color(nsColor: resolved.refPillActiveText) }                  // light #0F172A
+    static var refPillIdleText: Color { Color(nsColor: resolved.refPillIdleText) }                      // light #64748B
+    static var refTitleText: Color { Color(nsColor: resolved.refTitleText) }                            // light #1D1D1F
+    static var refProminentStart: Color { Color(nsColor: resolved.refProminentStart) }                  // light #2E90FA
+    static var refProminentEnd: Color { Color(nsColor: resolved.refProminentEnd) }                      // light #36BFFA
+    static var refProminentGradient: LinearGradient { resolved.refProminentGradient }
 
     /// 按稳定 seed（条目索引）从语义多色家族取一色：同一 seed 每次同色，相邻 seed 色相错开。
     static func accentFamilyColor(forSeed seed: Int) -> Color {
@@ -138,7 +137,33 @@ enum AppColors {
         let success: NSColor
         let warning: NSColor
         let error: NSColor
+        let refCardBg: NSColor
+        let refCardBorder: NSColor
+        let refCardShadow: NSColor
+        let refRowDivider: NSColor
+        let refIconChipBg: NSColor
+        let refIconGlyph: NSColor
+        let refSubtle: NSColor
+        let refScanFill: NSColor
+        let refSecondaryText: NSColor
+        let refOutlineBg: NSColor
+        let refOutlineBorder: NSColor
+        let refMenuBorder: NSColor
+        let refMenuText: NSColor
+        let refChipBarFill: NSColor
+        let refChipBarBorder: NSColor
+        let refSearchFill: NSColor
+        let refSearchPlaceholder: NSColor
+        let refPillActiveBg: NSColor
+        let refPillActiveText: NSColor
+        let refPillIdleText: NSColor
+        let refTitleText: NSColor
+        let referenceBlue: NSColor
+        let referenceCyan: NSColor
+        let refProminentStart: NSColor
+        let refProminentEnd: NSColor
         let accentGradient: LinearGradient
+        let refProminentGradient: LinearGradient
         /// 三段主题图标渐变色（由高亮锚点派生），供 PlayfulSymbolIcon 等图标跟随配色。
         let iconColors: [Color]
         /// 强调按钮（prominent）填充用的三段主题色（由高亮锚点按明度派生，自上而下加深）。
@@ -146,32 +171,42 @@ enum AppColors {
 
         init(theme: ResolvedAppTheme) {
             // 系统色预设保持 Apple 式中性底：页面大面积区域低饱和，强调色主要出现在选中态、按钮和局部边缘光。
+            let darkBackground = theme.tokens.background.dark
+                .appThemeBlended(toward: theme.baseDark, fraction: 0.36)
+                .appThemeSaturated(by: 0.92)
+            let darkSurface = theme.tokens.surface.dark
+                .appThemeBlended(toward: theme.baseDark, fraction: 0.10)
+            let darkSecondarySurface = theme.tokens.surface.dark
+                .appThemeBlended(toward: theme.tokens.elevatedSurface.dark, fraction: 0.36)
+            let darkElevatedSurface = theme.tokens.elevatedSurface.dark
+                .appThemeBlended(toward: theme.tokens.surface.dark, fraction: 0.18)
+
             pageBackground = AppColors.dynamic(
                 light: theme.baseLight.appThemeSaturated(by: 0.56).appThemeWithAlpha(0.97),
-                dark:  theme.baseDark.appThemeSaturated(by: 0.70).appThemeWithAlpha(0.95))
+                dark:  darkBackground.appThemeWithAlpha(0.98))
             surface = AppColors.dynamic(
                 light: theme.baseLight.appThemeLightened(by: 0.085).appThemeWithAlpha(0.86),
-                dark:  theme.baseDark.appThemeLightened(by: 0.15).appThemeWithAlpha(0.58))
+                dark:  darkSurface.appThemeWithAlpha(0.74))
             secondarySurface = AppColors.dynamic(
                 light: theme.baseLight.appThemeLightened(by: 0.072).appThemeWithAlpha(0.82),
-                dark:  theme.baseDark.appThemeLightened(by: 0.11).appThemeWithAlpha(0.64))
+                dark:  darkSecondarySurface.appThemeWithAlpha(0.76))
             glassTint = AppColors.dynamic(
                 light: theme.lightLight.appThemeWithAlpha(0.32),
-                dark:  theme.lightDark.appThemeWithAlpha(0.24))
+                dark:  theme.lightDark.appThemeSaturated(by: 0.82).appThemeWithAlpha(0.18))
             // 卡片底色：相对页面底色提亮更多、并提高不透明度，让卡片明确浮在背景之上，
             // 不再因半透明而与底色糊在一起（浅色 +0.085→+0.115 / α0.78→0.90，深色 +0.13→+0.16 / α0.78→0.88）。
             cleanPanelFill = AppColors.dynamic(
                 light: theme.baseLight.appThemeLightened(by: 0.115).appThemeWithAlpha(0.90),
-                dark:  theme.baseDark.appThemeLightened(by: 0.16).appThemeWithAlpha(0.88))
+                dark:  darkElevatedSurface.appThemeWithAlpha(0.94))
             cleanFieldFill = AppColors.dynamic(
                 light: theme.baseLight.appThemeLightened(by: 0.060).appThemeWithAlpha(0.58),
-                dark:  theme.baseDark.appThemeLightened(by: 0.18).appThemeWithAlpha(0.66))
+                dark:  darkSecondarySurface.appThemeWithAlpha(0.86))
             sidebarBlueWash = AppColors.dynamic(
                 light: theme.highlightLight.appThemeLightened(by: 0.50).appThemeWithAlpha(0.12),
-                dark:  theme.highlightDark.appThemeWithAlpha(0.18))
+                dark:  theme.highlightDark.appThemeSaturated(by: 0.86).appThemeWithAlpha(0.16))
             cardAquaWash = AppColors.dynamic(
                 light: theme.lightLight.appThemeWithAlpha(0.13),
-                dark:  theme.lightDark.appThemeAdjustingBrightness(by: 0.5).appThemeWithAlpha(0.16))
+                dark:  theme.lightDark.appThemeSaturated(by: 0.78).appThemeAdjustingBrightness(by: 0.72).appThemeWithAlpha(0.13))
             // Hover / pointer light is part of the selected theme, not a fixed blue wash.
             // Start from the user-controlled top-left light, then gently fold in the
             // highlight color so coral/lime/mica/sand-gold/sea-salt presets keep their own hover tone.
@@ -207,19 +242,97 @@ enum AppColors {
             success = AppColors.dynamic(light: theme.tokens.success.light, dark: theme.tokens.success.dark)
             warning = AppColors.dynamic(light: theme.tokens.warning.light, dark: theme.tokens.warning.dark)
             error = AppColors.dynamic(light: theme.tokens.error.light, dark: theme.tokens.error.dark)
+            let refSurfaceDark = darkElevatedSurface.appThemeLightened(by: 0.012)
+            let refControlDark = theme.tokens.surface.dark
+                .appThemeBlended(toward: theme.tokens.elevatedSurface.dark, fraction: 0.42)
+                .appThemeLightened(by: 0.012)
+            let refSubtleDark = theme.tokens.textSecondary.dark
+            let refAccentDark = theme.tokens.accent.dark
+            let refAccentButtonStartDark = theme.tokens.accent.dark
+                .appThemeSaturated(by: 1.02)
+                .appThemeAdjustingBrightness(by: 0.58)
+            let refAccentButtonEndDark = theme.tokens.secondary.dark
+                .appThemeBlended(toward: theme.tokens.accent.dark, fraction: 0.30)
+                .appThemeSaturated(by: 1.02)
+                .appThemeAdjustingBrightness(by: 0.50)
+            refCardBg = AppColors.dynamic(light: NSColor(appThemeHex: "FFFFFF") ?? .white, dark: refSurfaceDark)
+            refCardBorder = AppColors.dynamic(light: NSColor(appThemeHex: "EDF0F5") ?? .separatorColor, dark: theme.tokens.border.dark)
+            refCardShadow = AppColors.dynamic(light: NSColor(appThemeHex: "283C64") ?? .black, dark: .black)
+            refRowDivider = AppColors.dynamic(light: NSColor(appThemeHex: "F1F4F8") ?? .separatorColor, dark: theme.tokens.border.dark.appThemeWithAlpha(0.82))
+            refIconChipBg = AppColors.dynamic(light: NSColor(appThemeHex: "E7F0FD") ?? .controlBackgroundColor, dark: refAccentDark.appThemeBlended(toward: refSurfaceDark, fraction: 0.78))
+            referenceBlue = AppColors.dynamic(light: NSColor(appThemeHex: "2E90FA") ?? .controlAccentColor, dark: refAccentDark)
+            referenceCyan = AppColors.dynamic(light: NSColor(appThemeHex: "36BFFA") ?? .controlAccentColor, dark: theme.tokens.secondary.dark)
+            refIconGlyph = referenceBlue
+            refSubtle = AppColors.dynamic(light: NSColor(appThemeHex: "9AA3B4") ?? .secondaryLabelColor, dark: refSubtleDark.appThemeWithAlpha(0.88))
+            refScanFill = AppColors.dynamic(light: NSColor(appThemeHex: "F1F3F7") ?? .controlBackgroundColor, dark: refControlDark)
+            refSecondaryText = AppColors.dynamic(light: NSColor(appThemeHex: "5A6478") ?? .secondaryLabelColor, dark: refSubtleDark)
+            refOutlineBg = AppColors.dynamic(light: NSColor(appThemeHex: "FFFFFF") ?? .white, dark: refSurfaceDark)
+            refOutlineBorder = AppColors.dynamic(light: NSColor(appThemeHex: "E6EAF1") ?? .separatorColor, dark: theme.tokens.border.dark)
+            refMenuBorder = AppColors.dynamic(light: NSColor(appThemeHex: "CBD5E1") ?? .separatorColor, dark: theme.tokens.border.dark.appThemeLightened(by: 0.08))
+            refMenuText = AppColors.dynamic(light: NSColor(appThemeHex: "334155") ?? .labelColor, dark: theme.tokens.textPrimary.dark)
+            refChipBarFill = AppColors.dynamic(light: NSColor(appThemeHex: "F1F5F9") ?? .controlBackgroundColor, dark: refControlDark.appThemeBlended(toward: theme.tokens.background.dark, fraction: 0.20))
+            refChipBarBorder = AppColors.dynamic(light: NSColor(appThemeHex: "E2E8F0") ?? .separatorColor, dark: theme.tokens.border.dark)
+            refSearchFill = AppColors.dynamic(light: NSColor(appThemeHex: "EEF1F6") ?? .controlBackgroundColor, dark: refControlDark)
+            refSearchPlaceholder = AppColors.dynamic(light: NSColor(appThemeHex: "AAB2C0") ?? .placeholderTextColor, dark: refSubtleDark.appThemeWithAlpha(0.72))
+            refPillActiveBg = AppColors.dynamic(light: .white, dark: refSurfaceDark.appThemeLightened(by: 0.045))
+            refPillActiveText = AppColors.dynamic(light: NSColor(appThemeHex: "0F172A") ?? .labelColor, dark: theme.tokens.textPrimary.dark)
+            refPillIdleText = AppColors.dynamic(light: NSColor(appThemeHex: "64748B") ?? .secondaryLabelColor, dark: refSubtleDark.appThemeWithAlpha(0.86))
+            refTitleText = AppColors.dynamic(light: NSColor(appThemeHex: "1D1D1F") ?? .labelColor, dark: theme.tokens.textPrimary.dark)
+            refProminentStart = AppColors.dynamic(light: NSColor(appThemeHex: "2E90FA") ?? .controlAccentColor, dark: refAccentButtonStartDark)
+            refProminentEnd = AppColors.dynamic(light: NSColor(appThemeHex: "36BFFA") ?? .controlAccentColor, dark: refAccentButtonEndDark)
             let h = theme.highlightLight
+            let darkH = theme.highlightDark
+            func themedColor(light: NSColor, dark: NSColor) -> Color {
+                Color(nsColor: AppColors.dynamic(light: light, dark: dark))
+            }
             let stops = [
-                Color(nsColor: h.appThemeLightened(by: 0.07)),
-                Color(nsColor: h.appThemeAdjustingBrightness(by: 0.96)),
-                Color(nsColor: h.appThemeHueRotated(by: -0.035).appThemeAdjustingBrightness(by: 0.90))
+                themedColor(
+                    light: h.appThemeLightened(by: 0.07),
+                    dark: darkH.appThemeSaturated(by: 1.03).appThemeAdjustingBrightness(by: 0.58)
+                ),
+                themedColor(
+                    light: h.appThemeAdjustingBrightness(by: 0.96),
+                    dark: darkH.appThemeSaturated(by: 1.04).appThemeAdjustingBrightness(by: 0.52)
+                ),
+                themedColor(
+                    light: h.appThemeHueRotated(by: -0.035).appThemeAdjustingBrightness(by: 0.90),
+                    dark: darkH.appThemeHueRotated(by: -0.035).appThemeSaturated(by: 1.04).appThemeAdjustingBrightness(by: 0.46)
+                )
             ]
             accentGradient = LinearGradient(colors: stops, startPoint: .topLeading, endPoint: .bottomTrailing)
-            iconColors = stops
+            refProminentGradient = LinearGradient(
+                colors: [Color(nsColor: refProminentStart), Color(nsColor: refProminentEnd)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            iconColors = [
+                themedColor(
+                    light: h.appThemeLightened(by: 0.07),
+                    dark: darkH.appThemeLightened(by: 0.06).appThemeSaturated(by: 0.98)
+                ),
+                themedColor(
+                    light: h.appThemeAdjustingBrightness(by: 0.96),
+                    dark: darkH.appThemeAdjustingBrightness(by: 0.94).appThemeSaturated(by: 1.02)
+                ),
+                themedColor(
+                    light: h.appThemeHueRotated(by: -0.035).appThemeAdjustingBrightness(by: 0.90),
+                    dark: darkH.appThemeHueRotated(by: -0.035).appThemeAdjustingBrightness(by: 0.88).appThemeSaturated(by: 1.02)
+                )
+            ]
             // 强调按钮：上端接近系统强调色，下端压暗保证白字对比，避免粉/橙/石墨预设显得发灰或发飘。
             accentButtonColors = [
-                Color(nsColor: h.appThemeSaturated(by: 1.02).appThemeAdjustingBrightness(by: 0.98)),
-                Color(nsColor: h.appThemeSaturated(by: 1.03).appThemeAdjustingBrightness(by: 0.86)),
-                Color(nsColor: h.appThemeSaturated(by: 1.04).appThemeAdjustingBrightness(by: 0.72))
+                themedColor(
+                    light: h.appThemeSaturated(by: 1.02).appThemeAdjustingBrightness(by: 0.98),
+                    dark: darkH.appThemeSaturated(by: 1.03).appThemeAdjustingBrightness(by: 0.58)
+                ),
+                themedColor(
+                    light: h.appThemeSaturated(by: 1.03).appThemeAdjustingBrightness(by: 0.86),
+                    dark: darkH.appThemeSaturated(by: 1.04).appThemeAdjustingBrightness(by: 0.52)
+                ),
+                themedColor(
+                    light: h.appThemeSaturated(by: 1.04).appThemeAdjustingBrightness(by: 0.72),
+                    dark: darkH.appThemeHueRotated(by: -0.025).appThemeSaturated(by: 1.04).appThemeAdjustingBrightness(by: 0.46)
+                )
             ]
         }
     }
@@ -2430,7 +2543,7 @@ struct GlassCapsuleControl<Content: View>: View {
             : (isHovering && isEnabled ? AppColors.refMenuText : AppColors.refPillIdleText)
         let fill: Color = isSelected
             ? AppColors.refPillActiveBg
-            : (isHovering && isEnabled ? Color.white.opacity(0.46) : Color.clear)
+            : (isHovering && isEnabled ? capsuleHoverFill : Color.clear)
 
         return content
             .font(font)
@@ -2448,6 +2561,12 @@ struct GlassCapsuleControl<Content: View>: View {
             }
             .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
             .animation(reduceMotion ? nil : AppMotion.fast, value: isSelected)
+    }
+
+    private var capsuleHoverFill: Color {
+        colorScheme == .dark
+            ? AppColors.refSearchFill.opacity(0.92)
+            : Color.white.opacity(0.46)
     }
 }
 
@@ -2556,7 +2675,6 @@ private enum PageHeaderCoordinateSpace {
 }
 
 struct PageHeader<Actions: View>: View {
-    @Environment(\.colorScheme) private var colorScheme
     @State private var measuredActionsContentWidth: CGFloat = 0
     let title: String
     let subtitle: String?
@@ -2600,25 +2718,6 @@ struct PageHeader<Actions: View>: View {
         }
         .padding(.horizontal, AppSpacing.pageHeaderHorizontal)
         .padding(.vertical, AppSpacing.pageHeaderVertical)
-        .overlay(alignment: .bottomLeading) {
-            LinearGradient(
-                colors: [
-                    AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.22 : 0.30),
-                    AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.11 : 0.16),
-                    .clear
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: 168, height: 0.8)
-            .offset(
-                x: systemImage == nil
-                    ? 0
-                    : AppSpacing.pageHeaderIconSafeSlot + AppSpacing.pageHeaderIconToText,
-                y: 1
-            )
-            .allowsHitTesting(false)
-        }
         .transaction { transaction in
             transaction.animation = nil
         }
@@ -2777,21 +2876,6 @@ struct AppSheetHeader: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.bottom, 13)
-        .overlay(alignment: .bottomLeading) {
-            LinearGradient(
-                colors: [
-                    AppColors.solarEdgeTint.opacity(colorScheme == .dark ? 0.30 : 0.44),
-                    AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.12 : 0.20),
-                    AppColors.cleanPanelBorder.opacity(0.34),
-                    .clear
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: 210, height: 0.8)
-            .padding(.leading, AppSheetMetrics.headerIconContainerSize + 12)
-            .allowsHitTesting(false)
-        }
     }
 }
 
@@ -3166,12 +3250,12 @@ private struct AppControlSegmentedShell<Content: View>: View {
         .frame(minHeight: 44)
         .background {
             shape
-                .fill(colorScheme == .dark ? Color.white.opacity(0.065) : Color(red: 238 / 255, green: 243 / 255, blue: 249 / 255))
+                .fill(AppColors.refChipBarFill)
         }
         .overlay {
             shape
                 .strokeBorder(
-                    colorScheme == .dark ? Color.white.opacity(0.08) : Color(red: 221 / 255, green: 231 / 255, blue: 243 / 255).opacity(0.95),
+                    AppColors.refChipBarBorder.opacity(colorScheme == .dark ? 0.92 : 0.95),
                     lineWidth: 1
                 )
         }
@@ -4036,7 +4120,7 @@ struct GlassMenuButton<MenuItems: View>: View {
                 ZStack {
                     shape.fill(AppColors.refCardBg)
                     if isHovering {
-                        shape.fill(Color.black.opacity(0.025))
+                        shape.fill(colorScheme == .dark ? AppColors.refSearchFill.opacity(0.82) : Color.black.opacity(0.025))
                     }
                 }
             }

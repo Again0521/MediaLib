@@ -1324,17 +1324,6 @@ struct SettingsSubsectionHeader: View {
             Text(appState.localized(title))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-
-            LinearGradient(
-                colors: [
-                    AppColors.solarEdgeTint.opacity(0.22),
-                    Color.secondary.opacity(0.08),
-                    .clear
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(height: 0.8)
         }
             .padding(.top, 4)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1428,7 +1417,7 @@ private struct HomeTabSettingsTile: View {
                 shape.fill(
                     isEnabled
                         ? AppColors.referenceBlue.opacity(colorScheme == .dark ? 0.18 : 0.075)
-                        : Color.white.opacity(colorScheme == .dark ? 0.07 : 0.92)
+                        : (colorScheme == .dark ? AppColors.refCardBg.opacity(0.86) : Color.white.opacity(0.92))
                 )
             }
             .overlay {

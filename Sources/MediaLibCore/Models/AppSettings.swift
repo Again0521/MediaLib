@@ -1185,19 +1185,19 @@ public enum AppThemePreset: String, Codable, CaseIterable, Identifiable, Sendabl
     public var darkSeedHex: (base: String, highlight: String, light: String) {
         switch self {
         case .classic, .ocean, .indigo, .purple, .rose, .mint, .green, .frosted, .custom:
-            return ("121820", "5FA2EE", "1C2E40")
+            return ("101722", "78B7FF", "26394D")
         case .coral:
-            return ("1A1112", "EE766A", "412320")
+            return ("1B1214", "F28A7D", "452725")
         case .lime:
-            return ("10170F", "97CB5E", "293E18")
+            return ("10160F", "A8D96D", "2E431D")
         case .mistTeal:
-            return ("0C1413", "5BB5A7", "16322D")
+            return ("0C1515", "66BFB3", "183834")
         case .grape, .mica:
-            return ("111416", "91A6BC", "2A2D2B")
+            return ("101416", "9DB2C8", "283138")
         case .orange, .warm, .apricot, .sandGold:
-            return ("18150F", "D4AF6A", "3A2C17")
+            return ("181510", "DDBA74", "3C2F1A")
         case .graphite, .oled, .seaSalt, .duskViolet:
-            return ("15121C", "A491D8", "2B2440")
+            return ("14131B", "B5A6E8", "302A44")
         }
     }
 }
