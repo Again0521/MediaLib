@@ -2539,13 +2539,13 @@ private struct MusicAlbumCard: View {
             )
 
             MarqueeText(text: album.key.title, font: .system(size: 14.5, weight: .heavy))
-                .foregroundStyle(Color(red: 34 / 255, green: 41 / 255, blue: 54 / 255))
+                .foregroundStyle(AppColors.refTitleText)
                 .frame(height: 18, alignment: .leading)
 
             HStack(alignment: .center, spacing: 10) {
                 Text("\(album.key.artist) · \(album.trackCount) 首")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(AppColors.refSubtle)
+                    .foregroundStyle(AppColors.refTitleText.opacity(0.72))
                     .lineLimit(1)
 
                 Spacer(minLength: 8)
@@ -2665,13 +2665,13 @@ private struct MusicArtistRow: View {
             .shadow(color: seed.end.opacity(0.34), radius: 15, x: 0, y: 8)
 
             MarqueeText(text: artist.name, font: .system(size: 13.5, weight: .heavy), alignment: .center)
-                .foregroundStyle(Color(red: 34 / 255, green: 41 / 255, blue: 54 / 255))
+                .foregroundStyle(AppColors.refTitleText)
                 .frame(maxWidth: .infinity, minHeight: 17, maxHeight: 17, alignment: .center)
                 .padding(.top, 11)
 
             Text("\(artist.trackCount) 首")
                 .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(AppColors.refSubtle)
+                .foregroundStyle(AppColors.refTitleText.opacity(0.72))
                 .frame(maxWidth: .infinity, alignment: .center)
                 .padding(.top, 2)
 

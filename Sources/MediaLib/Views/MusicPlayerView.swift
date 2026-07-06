@@ -5297,10 +5297,11 @@ struct MusicMiniPlayerBar: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(item.title)
                             .font(.callout.weight(.semibold))
+                            .foregroundStyle(AppColors.refTitleText)
                             .lineLimit(1)
                         Text(item.artistAlbumLine ?? "未知艺人")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(AppColors.refSecondaryText)
                             .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -5309,8 +5310,8 @@ struct MusicMiniPlayerBar: View {
                     .background(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(0.20),
-                                AppColors.solarLightTint.opacity(0.08),
+                                AppColors.refSearchFill.opacity(0.72),
+                                AppColors.refCardBg.opacity(0.48),
                                 Color.clear
                             ],
                             startPoint: .leading,
@@ -5379,9 +5380,9 @@ private struct MusicMiniNeutralGlassLightLayer: View {
             ZStack(alignment: .leading) {
                 LinearGradient(
                     colors: [
-                        Color.white.opacity(colorScheme == .dark ? 0.18 : 0.34),
-                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.11 : 0.18),
-                        AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.055 : 0.075),
+                        Color.white.opacity(colorScheme == .dark ? 0.060 : 0.18),
+                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.045 : 0.12),
+                        AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.030 : 0.060),
                         .clear
                     ],
                     startPoint: .leading,
@@ -5392,8 +5393,8 @@ private struct MusicMiniNeutralGlassLightLayer: View {
                     .fill(
                         RadialGradient(
                             colors: [
-                                Color.white.opacity(colorScheme == .dark ? 0.22 : 0.38),
-                                AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.12 : 0.20),
+                                Color.white.opacity(colorScheme == .dark ? 0.075 : 0.24),
+                                AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.055 : 0.14),
                                 .clear
                             ],
                             center: UnitPoint(x: 0.07, y: 0.06),
@@ -5404,7 +5405,7 @@ private struct MusicMiniNeutralGlassLightLayer: View {
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
             .blendMode(.screen)
-            .opacity(colorScheme == .dark ? 0.42 : 0.50)
+            .opacity(colorScheme == .dark ? 0.36 : 0.48)
             .allowsHitTesting(false)
         }
     }
@@ -5428,64 +5429,68 @@ private struct MusicMiniPlayerGlassSurface: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        // 把动态不透明度与渐变预先算成显式类型的常量，避免编译器对整条 body 视图链
-        // 「unable to type-check in reasonable time」（CI 旧编译器复现）。数值与原逻辑完全一致。
+        // 底栏跟随首页卡片语义材质：真实窗口高斯模糊打底，上层用 refCardBg/refCardBorder
+        // 建立稳定层级，避免暗色模式出现亮白玻璃压过文字。
         let isDark = colorScheme == .dark
-        let baseFillOpacity: Double = isDark ? 0.18 : 0.54
-        let backgroundFillOpacity: Double = isDark ? 0.08 : 0.12
+        let material: NSVisualEffectView.Material = isDark ? .hudWindow : .popover
+        let cardOpacity: Double = isDark ? 0.88 : 0.76
+        let innerTintOpacity: Double = isDark ? 0.22 : 0.16
         let sheenGradient = LinearGradient(
             colors: [
-                .white.opacity(isDark ? 0.28 : 0.66),
-                palette.primary.color.opacity(isDark ? 0.038 : 0.030),
-                AppColors.solarLightTint.opacity(isDark ? 0.070 : 0.105),
-                .white.opacity(isDark ? 0.08 : 0.30)
+                .white.opacity(isDark ? 0.070 : 0.30),
+                AppColors.solarLightTint.opacity(isDark ? 0.040 : 0.095),
+                palette.primary.color.opacity(isDark ? 0.028 : 0.036),
+                .clear
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
         let strokeGradient = LinearGradient(
             colors: [
-                .white.opacity(isDark ? 0.36 : 0.82),
-                AppColors.solarLightTint.opacity(isDark ? 0.10 : 0.16),
-                palette.accent.color.opacity(isDark ? 0.10 : 0.075),
-                .white.opacity(isDark ? 0.10 : 0.28)
+                .white.opacity(isDark ? 0.18 : 0.62),
+                AppColors.refCardBorder.opacity(isDark ? 0.95 : 0.86),
+                palette.accent.color.opacity(isDark ? 0.10 : 0.12)
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
 
-        return AppKitVisualEffectBackground(material: .popover, blendingMode: .withinWindow)
+        return AppKitVisualEffectBackground(material: material, blendingMode: .withinWindow)
             .clipShape(shape)
             .overlay {
-                shape.fill(Color.white.opacity(baseFillOpacity))
+                shape.fill(AppColors.refCardBg.opacity(cardOpacity))
             }
-            .background(
-                shape.fill(Color.white.opacity(backgroundFillOpacity))
-            )
+            .overlay {
+                shape.fill(AppColors.refSearchFill.opacity(innerTintOpacity))
+                    .blendMode(isDark ? .normal : .screen)
+            }
             .overlay {
                 shape.fill(sheenGradient)
+                    .blendMode(.screen)
             }
             .overlay {
                 shape.strokeBorder(strokeGradient, lineWidth: 1)
             }
             .overlay {
-                LyricsCardEffectLayerView(
-                    cornerRadius: cornerRadius,
-                    intensity: 0.72,
-                    colorScheme: colorScheme,
-                    isEnabled: samplesPointer,
-                    edgeDepth: 0.42,
-                    tintColor: palette.primary.nsColor,
-                    role: .mini
-                )
-                .allowsHitTesting(false)
+                if samplesPointer {
+                    LyricsCardEffectLayerView(
+                        cornerRadius: cornerRadius,
+                        intensity: isDark ? 0.46 : 0.58,
+                        colorScheme: colorScheme,
+                        isEnabled: true,
+                        edgeDepth: isDark ? 0.30 : 0.38,
+                        tintColor: palette.primary.nsColor,
+                        role: .mini
+                    )
+                    .allowsHitTesting(false)
+                }
             }
             .background {
                 GlassPanelShadowLayer(
                     palette: palette,
                     colorScheme: colorScheme,
                     cornerRadius: cornerRadius,
-                    tintStrength: 0.48,
+                    tintStrength: isDark ? 0.32 : 0.42,
                     role: .mini
                 )
                 .allowsHitTesting(false)
@@ -5910,7 +5915,7 @@ private struct MusicMiniProgressTimeline: View {
         HStack(spacing: 7) {
             Text(state.formattedCurrentTime)
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppColors.refSecondaryText)
                 .frame(width: 38, alignment: .trailing)
 
             MusicMiniSeekSlider(
@@ -5928,7 +5933,7 @@ private struct MusicMiniProgressTimeline: View {
 
             Text(state.formattedDuration)
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(AppColors.refSecondaryText)
                 .frame(width: 38, alignment: .leading)
         }
     }
@@ -6655,7 +6660,7 @@ private struct MusicFavoriteButton: View {
         } label: {
             Image(systemName: item.favorite ? "heart.fill" : "heart")
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(item.favorite ? Color.red : Color.primary.opacity(0.66))
+                .foregroundStyle(item.favorite ? Color.red : AppColors.refSecondaryText)
                 .frame(width: size, height: size)
         }
         .buttonStyle(MusicIconButtonStyle(palette: palette, size: size, cornerRadius: size / 2, glowStrength: glowStrength))
@@ -6680,20 +6685,19 @@ private struct MusicIconButtonStyle: ButtonStyle {
             .frame(width: size, height: size)
             // 底栏和展开页有多枚图标按钮，逐个使用实时 material 会产生多块离屏 backdrop 模糊。
             // 这里改用实色磨砂底，保留接近的玻璃观感并避免额外离屏通道。
-            // 略降灰度：白底更实一点（亮 0.40→0.46，暗 0.10→0.12），减少灰背景透出的灰感。
             .background(
-                shape.fill(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.32))
+                shape.fill(AppColors.refSearchFill.opacity(colorScheme == .dark ? 0.82 : 0.96))
             )
             .background(
-                shape.fill(palette.albumGlassBaseColor(for: colorScheme).opacity((colorScheme == .dark ? 0.22 : 0.14) * glow))
+                shape.fill(palette.albumGlassBaseColor(for: colorScheme).opacity((colorScheme == .dark ? 0.16 : 0.12) * glow))
             )
             .background(
                 shape.fill(
                     LinearGradient(
                         colors: [
-                            .white.opacity(colorScheme == .dark ? 0.16 : 0.42),
-                            palette.primary.color.opacity((colorScheme == .dark ? 0.22 : 0.17) * glow),
-                            palette.accent.color.opacity((colorScheme == .dark ? 0.10 : 0.075) * glow)
+                            .white.opacity(colorScheme == .dark ? 0.055 : 0.28),
+                            palette.primary.color.opacity((colorScheme == .dark ? 0.13 : 0.14) * glow),
+                            palette.accent.color.opacity((colorScheme == .dark ? 0.075 : 0.070) * glow)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
@@ -6702,7 +6706,7 @@ private struct MusicIconButtonStyle: ButtonStyle {
             )
             .overlay(alignment: .topLeading) {
                 shape
-                    .strokeBorder(.white.opacity(colorScheme == .dark ? 0.18 : 0.58), lineWidth: 0.9)
+                    .strokeBorder(.white.opacity(colorScheme == .dark ? 0.10 : 0.46), lineWidth: 0.9)
                     .blur(radius: 0.5)
                     .blendMode(.screen)
             }
@@ -6710,8 +6714,8 @@ private struct MusicIconButtonStyle: ButtonStyle {
                 shape.strokeBorder(
                     LinearGradient(
                         colors: [
-                            .white.opacity(colorScheme == .dark ? 0.30 : 0.62),
-                            palette.primary.color.opacity((colorScheme == .dark ? 0.24 : 0.30) * glow),
+                            AppColors.refCardBorder.opacity(colorScheme == .dark ? 0.95 : 0.78),
+                            palette.primary.color.opacity((colorScheme == .dark ? 0.18 : 0.26) * glow),
                             palette.accent.color.opacity((colorScheme == .dark ? 0.16 : 0.18) * glow)
                         ],
                         startPoint: .topLeading,
@@ -6757,18 +6761,18 @@ private struct MusicModeIcon: View {
         let accent = palette?.accent.color ?? AppColors.selectedGlassTint
         Image(systemName: systemImage)
             .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(isActive ? accent : .secondary)
+            .foregroundStyle(isActive ? accent : AppColors.refSecondaryText)
             .frame(width: size, height: size)
             // 循环/随机图标在底栏也会出现，使用实色磨砂底避免重复创建实时 material。
-            .background(Circle().fill(Color.white.opacity(colorScheme == .dark ? 0.10 : 0.42)))
+            .background(Circle().fill(AppColors.refSearchFill.opacity(colorScheme == .dark ? 0.82 : 0.96)))
             .background(
                 Circle()
                     .fill(
                         LinearGradient(
                             colors: [
-                                .white.opacity(colorScheme == .dark ? 0.15 : 0.58),
-                                tint.opacity(colorScheme == .dark ? 0.15 : 0.12),
-                                .white.opacity(colorScheme == .dark ? 0.05 : 0.26)
+                                .white.opacity(colorScheme == .dark ? 0.055 : 0.34),
+                                tint.opacity(colorScheme == .dark ? 0.12 : 0.12),
+                                .white.opacity(colorScheme == .dark ? 0.025 : 0.18)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -6779,9 +6783,9 @@ private struct MusicModeIcon: View {
                 Circle().stroke(
                     LinearGradient(
                             colors: [
-                                .white.opacity(colorScheme == .dark ? 0.30 : 0.78),
+                                AppColors.refCardBorder.opacity(colorScheme == .dark ? 0.95 : 0.80),
                                 tint.opacity(colorScheme == .dark ? 0.12 : 0.22),
-                                AppColors.cleanPanelBorder
+                                AppColors.refOutlineBorder.opacity(colorScheme == .dark ? 0.72 : 1.0)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing

@@ -428,7 +428,8 @@ struct ContentView: View {
                             onRequestClose: closeMusicPlayer
                         )
                         .environmentObject(appState)
-                        .environment(\.colorScheme, musicPlayerEffectiveColorScheme)
+                        // 底栏是主界面的一部分：琉璃全屏播放器保持浅色，但底栏继续跟随应用深浅色。
+                        .environment(\.colorScheme, colorScheme)
                         .frame(width: musicMiniPlayerFrameWidth(for: geometry.size.width), alignment: .bottomLeading)
                         .padding(.leading, musicMiniPlayerCollapsed ? 0 : musicMiniPlayerLeadingInset + musicMiniPlayerOuterInset)
                         .padding(.trailing, musicMiniPlayerCollapsed ? musicMiniPlayerOuterInset : 0)
