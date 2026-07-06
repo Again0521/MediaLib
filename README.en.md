@@ -57,8 +57,12 @@ Movies, TV, anime, documentaries, variety — each in its place. Series are grou
 - **Easy to organize** — manual collections, smart collections, and pin your favorites to the home screen.
 - **Easy to recognize** — posters, synopses, cast and crew, stills, similar picks, and people profiles filled in via TMDB.
 
-![Anime library](asset/library-anime.png)
-
+<table>
+  <tr>
+    <td width="50%"><img src="asset/library-anime.png" alt="海报墙"></td>
+    <td width="50%"><img src="asset/videodetail.png" alt="剧集详情"></td>
+  </tr>
+</table>
 <br>
 
 ## Music, treated with care
@@ -135,6 +139,7 @@ The built-in video player is powered by **libmpv**, bundled with the app and ren
 | Speed, volume, fullscreen, pin | Multiple audio tracks | A-B loop, single-file loop, auto next episode |
 | Snapshot, frame preview, time left | Online subtitle search & download | Remote quality selection, offline cache |
 
+![播放器](asset/videoplayer.png)
 Prefer not to use it? You can switch back to the system default player anytime in Settings.
 
 <br>
