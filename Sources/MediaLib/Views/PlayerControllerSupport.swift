@@ -58,18 +58,24 @@ final class PlayerControlsAutoHideCoordinator: ObservableObject {
     }
 }
 
-/// 把 MpvPlayerController 的某个派生值投影成去重后的 @Published，合并 objectWillChange 风暴为单次刷新。
-/// 高频刷新隔离的通用机制（视频侧大量使用），只搬位置不改去重/合批语义。
+/// 可被只读投影观察的播放器状态源。
 @MainActor
-final class PlayerControllerProjection<Value: Equatable>: ObservableObject {
+protocol PlayerStateProjecting: ObservableObject where ObjectWillChangePublisher == ObservableObjectPublisher {}
+
+extension MpvPlayerController: PlayerStateProjecting {}
+
+/// 把播放器状态源的某个派生值投影成去重后的 @Published，合并 objectWillChange 风暴为单次刷新。
+/// 高频刷新隔离的通用机制（视频侧大量使用），只调整类型边界不改去重/合批语义。
+@MainActor
+final class PlayerStateProjection<Controller: PlayerStateProjecting, Value: Equatable>: ObservableObject {
     @Published private(set) var value: Value
-    private weak var controller: MpvPlayerController?
-    private let map: @MainActor (MpvPlayerController) -> Value
+    private weak var controller: Controller?
+    private let map: @MainActor (Controller) -> Value
     private var cancellable: AnyCancellable?
     private var refreshScheduled = false
     private var isActive = true
 
-    init(controller: MpvPlayerController, map: @escaping @MainActor (MpvPlayerController) -> Value) {
+    init(controller: Controller, map: @escaping @MainActor (Controller) -> Value) {
         self.controller = controller
         self.map = map
         self.value = map(controller)
@@ -114,3 +120,5 @@ final class PlayerControllerProjection<Value: Equatable>: ObservableObject {
         value = nextValue
     }
 }
+
+typealias PlayerControllerProjection<Value: Equatable> = PlayerStateProjection<MpvPlayerController, Value>

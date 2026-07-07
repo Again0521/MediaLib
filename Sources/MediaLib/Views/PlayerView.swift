@@ -2268,6 +2268,7 @@ private struct PlayerVolumeHUDLayer: View {
 private struct PlayerControlsBar: View {
     @EnvironmentObject private var appState: AppState
     let controller: MpvPlayerController
+    private let commands: VideoPlaybackControlling
     let item: MediaItem
     let active: Bool
     let sidecarSubtitles: [SidecarSubtitleFile]
@@ -2338,6 +2339,7 @@ private struct PlayerControlsBar: View {
         onPopoverActiveChange: @escaping (Bool) -> Void
     ) {
         self.controller = controller
+        self.commands = controller
         self.item = item
         self.active = active
         self.sidecarSubtitles = sidecarSubtitles
@@ -2423,7 +2425,7 @@ private struct PlayerControlsBar: View {
                     .help("上一集")
 
                     Button {
-                        controller.togglePlay()
+                        commands.togglePlay()
                     } label: {
                         Image(systemName: transportState.isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 17, weight: .bold))
@@ -2459,7 +2461,7 @@ private struct PlayerControlsBar: View {
                     }
                     .help("迷你悬浮窗")
                     Button {
-                        controller.toggleFullscreen()
+                        commands.toggleFullscreen()
                     } label: {
                         Image(systemName: isWindowFullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                             .playerControlIcon(palette: palette)
@@ -2619,7 +2621,7 @@ private struct PlayerControlsBar: View {
                     selectedQualityID = option.id
                     showingQualityPopover = false
                 }
-                controller.switchVideoQuality(to: option)
+                commands.switchVideoQuality(to: option)
             }
         }
         .help("画质")
@@ -2638,6 +2640,7 @@ private struct PlayerControlsBar: View {
 private struct PlayerTimelineControlsRow: View {
     @EnvironmentObject private var appState: AppState
     let controller: MpvPlayerController
+    private let commands: VideoPlaybackControlling
     let active: Bool
     let previewMode: VideoScrubberPreviewMode
     let previewUsesCoarseBuckets: Bool
@@ -2660,6 +2663,7 @@ private struct PlayerTimelineControlsRow: View {
         palette: VideoControlPalette
     ) {
         self.controller = controller
+        self.commands = controller
         self.active = active
         self.previewMode = previewMode
         self.previewUsesCoarseBuckets = previewUsesCoarseBuckets
@@ -2690,7 +2694,7 @@ private struct PlayerTimelineControlsRow: View {
                 previewIsLoading: previewIsLoading,
                 markers: markers,
                 palette: palette,
-                onSeek: { controller.seek(to: $0) }
+                onSeek: { commands.seek(to: $0) }
             )
 
             Button {
@@ -3113,6 +3117,7 @@ struct PlayerControlsBarSecondaryClickCatcher: NSViewRepresentable {
 /// 迷你悬浮窗的极简控制层：播放/暂停、还原、关闭，随控制可见性淡入淡出。
 private struct PlayerMiniModeOverlay: View {
     let controller: MpvPlayerController
+    private let commands: VideoPlaybackControlling
     let palette: VideoControlPalette
     let visible: Bool
     let onExit: () -> Void
@@ -3127,6 +3132,7 @@ private struct PlayerMiniModeOverlay: View {
         onClose: @escaping () -> Void
     ) {
         self.controller = controller
+        self.commands = controller
         self.palette = palette
         self.visible = visible
         self.onExit = onExit
@@ -3140,7 +3146,7 @@ private struct PlayerMiniModeOverlay: View {
             Spacer(minLength: 0)
             HStack(spacing: 8) {
                 Button {
-                    controller.togglePlay()
+                    commands.togglePlay()
                 } label: {
                     Image(systemName: transportState.isPlaying ? "pause.fill" : "play.fill")
                         .playerControlIcon(palette: palette)

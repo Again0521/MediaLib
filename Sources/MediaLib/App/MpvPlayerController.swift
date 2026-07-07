@@ -534,6 +534,7 @@ final class MpvPlayerController: ObservableObject {
     /// A7：当前条目是否已套用过剧集音轨/字幕偏好（每次 configure 重置，避免重复套用或覆盖用户手动选择）。
     private var didApplyTrackPreference = false
     private var libMpvClient: LibMpvClient?
+    private var videoPlaybackEngine: VideoPlaybackEngine?
     private var mpvSnapshotReader: MpvVideoSnapshotReader?
     private var mpvSnapshotReadInFlight = false
     private var pendingForcedTrackSnapshot = false
@@ -821,9 +822,11 @@ final class MpvPlayerController: ObservableObject {
             ) { [weak renderView] in
                 renderView?.requestRedraw()
             }
-            try client.loadFile(filePath)
+            let engine = MpvVideoPlaybackEngine(transport: client)
+            try engine.loadFile(filePath)
             applyVideoAdjustments(to: client)
             libMpvClient = client
+            videoPlaybackEngine = engine
             mpvSnapshotReader = MpvVideoSnapshotReader(handle: client.makePropertyReadHandle())
             mpvSnapshotReadInFlight = false
             pendingForcedTrackSnapshot = false
@@ -1465,9 +1468,9 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func applyVideoLocalVolumeForRouteState() {
-        guard item?.type != .music, let libMpvClient else { return }
+        guard item?.type != .music, let videoPlaybackEngine else { return }
         let localVolume = (videoRouteProxyIsActive || videoRouteProxyIsAudibleProbing) ? 0 : volume
-        libMpvClient.setDouble("volume", Double(localVolume * 100) * volumeBoost)
+        videoPlaybackEngine.setVolume(localVolume, boost: volumeBoost)
     }
 
     /// 设置视频音量增强倍率（1.0…2.0），立即作用到当前 libmpv 输出。
@@ -1729,10 +1732,10 @@ final class MpvPlayerController: ObservableObject {
             reportPlayback(.progress, force: true)
             return
         }
-        if let libMpvClient {
+        if let videoPlaybackEngine {
             let shouldPlay = !isPlaying
             isPlaying = shouldPlay
-            libMpvClient.setFlag("pause", !shouldPlay)
+            videoPlaybackEngine.setPaused(!shouldPlay)
             syncVideoRouteProxyPlayback()
             updateSystemNowPlaying()
             reportPlayback(.progress, force: true)
@@ -1808,33 +1811,51 @@ final class MpvPlayerController: ObservableObject {
                 Task { @MainActor in
                     guard let self,
                           let audioPlayer,
-                          self.audioPlayer === audioPlayer,
-                          self.playbackGeneration == generation,
-                          self.seekState?.revision == seekRevision else { return }
-                    guard finished else {
+                          self.audioPlayer === audioPlayer else { return }
+                    let actualTime = finished ? audioPlayer.currentTime().seconds : nil
+                    let decision = PlaybackSeekCommandPolicy.completionDecision(
+                        finished: finished,
+                        observedTime: actualTime,
+                        targetTime: target,
+                        expectedGeneration: generation,
+                        currentGeneration: self.playbackGeneration,
+                        expectedRevision: seekRevision,
+                        currentRevision: self.seekState?.revision,
+                        duration: self.duration,
+                        mediaKind: self.playbackTimelineMediaKind
+                    )
+                    switch decision {
+                    case .ignore:
+                        return
+                    case .scheduleCorrection:
                         self.scheduleSeekSyncCorrection(for: generation)
                         return
-                    }
-                    let actualTime = audioPlayer.currentTime().seconds
-                    guard self.isSeekClockSettled(actualTime, target: target) else {
-                        self.reissuePendingSeekIfNeeded(
-                            observedTime: actualTime,
+                    case .reissue:
+                        if let actualTime {
+                            self.reissuePendingSeekIfNeeded(
+                                observedTime: actualTime,
+                                generation: generation,
+                                audioPlayer: audioPlayer
+                            )
+                        }
+                        self.scheduleSeekSyncCorrection(for: generation)
+                        return
+                    case .settle:
+                        guard let actualTime else {
+                            self.scheduleSeekSyncCorrection(for: generation)
+                            return
+                        }
+                        if self.applyPlaybackClock(
+                            actualTime,
                             generation: generation,
-                            audioPlayer: audioPlayer
-                        )
+                            currentTolerance: 0.035,
+                            lyricTolerance: 0.020,
+                            force: true
+                        ) {
+                            self.seekSyncRevision &+= 1
+                        }
                         self.scheduleSeekSyncCorrection(for: generation)
-                        return
                     }
-                    if self.applyPlaybackClock(
-                        actualTime,
-                        generation: generation,
-                        currentTolerance: 0.035,
-                        lyricTolerance: 0.020,
-                        force: true
-                    ) {
-                        self.seekSyncRevision &+= 1
-                    }
-                    self.scheduleSeekSyncCorrection(for: generation)
                 }
             }
             syncAudioLocalMirrorPlayback(timelineTime: target)
@@ -1842,7 +1863,7 @@ final class MpvPlayerController: ObservableObject {
             updateSystemNowPlaying()
             return
         }
-        if let libMpvClient {
+        if let videoPlaybackEngine {
             if let activeVideoQualityOption,
                !activeVideoQualityOption.appliesInPlace,
                !activeVideoQualityOption.isOriginal,
@@ -1851,7 +1872,7 @@ final class MpvPlayerController: ObservableObject {
                 reloadRemoteQualityStream(activeVideoQualityOption, at: target, wasPlaying: isPlaying)
                 return
             }
-            try? libMpvClient.command(["seek", "\(mpvTimelineTime(for: target))", "absolute", "exact"])
+            try? videoPlaybackEngine.seek(toMpvTime: mpvTimelineTime(for: target), precision: .exact)
             syncVideoRouteProxyPlayback()
             updateSystemNowPlaying()
             scheduleSeekSyncCorrection(for: playbackGeneration)
@@ -1935,9 +1956,9 @@ final class MpvPlayerController: ObservableObject {
             }
             return
         }
-        if let libMpvClient {
-            try? libMpvClient.command(["seek", "0", "absolute", "exact"])
-            libMpvClient.setFlag("pause", false)
+        if let videoPlaybackEngine {
+            try? videoPlaybackEngine.seek(toMpvTime: 0, precision: .exact)
+            videoPlaybackEngine.setPaused(false)
             isPlaying = true
             syncVideoRouteProxyPlayback()
             updateSystemNowPlaying()
@@ -1966,8 +1987,8 @@ final class MpvPlayerController: ObservableObject {
             }
             return
         }
-        if let libMpvClient {
-            libMpvClient.setDouble("speed", Double(playbackRate))
+        if let videoPlaybackEngine {
+            videoPlaybackEngine.setPlaybackRate(playbackRate)
             if updateExternalState {
                 syncVideoRouteProxyPlayback()
                 updateSystemNowPlaying()
@@ -2378,9 +2399,9 @@ final class MpvPlayerController: ObservableObject {
         if audioPlayer != nil {
             applyAudioOutputVolume()
         }
-        if let libMpvClient {
+        if let videoPlaybackEngine {
             let localVolume = (videoRouteProxyIsActive || videoRouteProxyIsAudibleProbing) ? 0 : volume
-            libMpvClient.setDouble("volume", Double(localVolume * 100) * volumeBoost)
+            videoPlaybackEngine.setVolume(localVolume, boost: volumeBoost)
         }
         if let videoRouteProxyPlayer {
             videoRouteProxyPlayer.volume = videoRouteProxyIsActive ? volume : 0
@@ -2437,7 +2458,7 @@ final class MpvPlayerController: ObservableObject {
                         self.reissuePendingSeekIfNeeded(
                             observedTime: logicalTime,
                             generation: generation,
-                            libMpvClient: libMpvClient
+                            videoPlaybackEngine: self.videoPlaybackEngine
                         )
                     }
                 }
@@ -2477,24 +2498,25 @@ final class MpvPlayerController: ObservableObject {
         lyricTolerance: Double,
         force: Bool = false
     ) -> Bool {
-        guard time.isFinite, time >= 0 else { return false }
-        let pendingBeforeClockUpdate = pendingTimelineSeek
-        if !force, shouldHoldClockUpdateFromPendingSeek(time, generation: generation) {
-            return false
-        }
-        if force {
-            pendingTimelineSeek = nil
-        }
-
-        guard let update = PlaybackClockPolicy.update(
+        guard let decision = PlaybackClockSnapshotPolicy.decision(
             observedTime: time,
             currentTime: currentTime,
             lyricTime: lyricTime,
             currentTolerance: currentTolerance,
             lyricTolerance: lyricTolerance,
-            force: force
+            force: force,
+            pendingSeek: pendingTimelineSeek,
+            generation: generation,
+            now: Date(),
+            mediaKind: playbackTimelineMediaKind
         ) else { return false }
 
+        guard case let .apply(snapshot) = decision else {
+            return false
+        }
+
+        pendingTimelineSeek = snapshot.pendingSeek
+        let update = snapshot.clockUpdate
         var changed = false
         if update.didChangeCurrentTime {
             currentTime = update.currentTime
@@ -2504,16 +2526,9 @@ final class MpvPlayerController: ObservableObject {
             lyricTime = update.lyricTime
             changed = true
         }
-        if let pending = pendingBeforeClockUpdate,
-           pending.generation == generation,
-           (pendingTimelineSeek == nil || force) {
-            seekState = PlaybackSeekState.settled(
-                revision: pending.revision,
-                targetTime: pending.targetTime,
-                originTime: pending.originTime,
-                resolvedTime: time
-            )
-            scheduleSeekStateClear(revision: pending.revision)
+        if let settledState = snapshot.settledSeekState {
+            seekState = settledState
+            scheduleSeekStateClear(revision: settledState.revision)
             spectrumSuppressedDuringSeek = false
             changed = true
         }
@@ -2533,78 +2548,36 @@ final class MpvPlayerController: ObservableObject {
         }
     }
 
-    private func shouldHoldClockUpdateFromPendingSeek(_ time: Double, generation: Int) -> Bool {
-        guard let pending = pendingTimelineSeek else { return false }
-        guard pending.generation == generation else {
-            pendingTimelineSeek = nil
-            return false
-        }
-
-        let decision = PlaybackTimelinePolicy.pendingClockDecision(
-            observedTime: time,
-            targetTime: pending.targetTime,
-            originTime: pending.originTime,
-            elapsedSinceSeek: pending.elapsedTime(at: Date()),
-            mediaKind: playbackTimelineMediaKind
-        )
-        switch decision {
-        case .release:
-            pendingTimelineSeek = nil
-            return false
-        case .hold:
-            return true
-        case .expire:
-            pendingTimelineSeek = nil
-            return false
-        }
-    }
-
-    private func isSeekClockSettled(_ time: Double, target: Double) -> Bool {
-        PlaybackTimelinePolicy.isSeekClockSettled(
-            observedTime: time,
-            targetTime: target,
-            duration: duration,
-            mediaKind: playbackTimelineMediaKind
-        )
-    }
-
     private func reissuePendingSeekIfNeeded(
         observedTime: Double,
         generation: Int,
         audioPlayer: AVPlayer? = nil,
-        libMpvClient: LibMpvClient? = nil
+        videoPlaybackEngine: VideoPlaybackEngine? = nil
     ) {
-        guard observedTime.isFinite,
-              var pending = pendingTimelineSeek,
-              pending.generation == generation else { return }
-        let now = Date()
-        let secondsSinceLastReissue = pending.secondsSinceLastReissue(at: now)
-        guard PlaybackTimelinePolicy.shouldReissueSeek(
+        guard let intent = PlaybackSeekCommandPolicy.reissueIntent(
+            pending: pendingTimelineSeek,
             observedTime: observedTime,
-            targetTime: pending.targetTime,
-            originTime: pending.originTime,
-            reissueCount: pending.reissueCount,
-            secondsSinceLastReissue: secondsSinceLastReissue,
+            generation: generation,
+            now: Date(),
             mediaKind: playbackTimelineMediaKind
         ) else { return }
-
-        pending.markReissued(at: now)
-        pendingTimelineSeek = pending
+        pendingTimelineSeek = intent.pending
 
         if let audioPlayer {
             audioPlayer.seek(
-                to: CMTime(seconds: pending.targetTime, preferredTimescale: 600),
+                to: CMTime(seconds: intent.targetTime, preferredTimescale: 600),
                 toleranceBefore: .zero,
                 toleranceAfter: .zero
             )
-        } else if let libMpvClient {
-            try? libMpvClient.command(["seek", "\(mpvTimelineTime(for: pending.targetTime))", "absolute", "exact"])
+        } else if let videoPlaybackEngine {
+            try? videoPlaybackEngine.seek(toMpvTime: mpvTimelineTime(for: intent.targetTime), precision: .exact)
         }
     }
 
     func switchVideoQuality(to option: VideoStreamQualityOption) {
         guard item?.type != .music,
-              let libMpvClient else { return }
+              let libMpvClient,
+              let videoPlaybackEngine else { return }
         if option.appliesInPlace {
             baseVideoFilter = option.videoFilter
             rebuildVideoFilterChain(to: libMpvClient)
@@ -2636,18 +2609,17 @@ final class MpvPlayerController: ObservableObject {
         do {
             baseVideoFilter = nil
             rebuildVideoFilterChain(to: libMpvClient)
-            var loadCommand = ["loadfile", targetURL, "replace"]
-            if option.isOriginal, resumeTime > 1 {
-                loadCommand.append("start=\(String(format: "%.3f", resumeTime))")
-            }
-            try libMpvClient.command(loadCommand)
-            libMpvClient.setDouble("volume", Double(volume * 100) * volumeBoost)
-            libMpvClient.setDouble("speed", Double(playbackRate))
+            try videoPlaybackEngine.loadReplacing(
+                path: targetURL,
+                startTime: option.isOriginal && resumeTime > 1 ? resumeTime : nil
+            )
+            videoPlaybackEngine.setVolume(volume, boost: volumeBoost)
+            videoPlaybackEngine.setPlaybackRate(playbackRate)
             applyVideoAdjustments(to: libMpvClient)
             if option.isOriginal, resumeTime > 1 {
                 enforceQualityResumeTime(resumeTime, for: option)
             }
-            libMpvClient.setFlag("pause", !wasPlaying)
+            videoPlaybackEngine.setPaused(!wasPlaying)
             if let currentItem = item {
                 prepareVideoRouteProxy(for: currentItem, filePath: targetURL)
             }
@@ -2660,7 +2632,7 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func reloadRemoteQualityStream(_ option: VideoStreamQualityOption, at target: Double, wasPlaying: Bool) {
-        guard let libMpvClient else { return }
+        guard let libMpvClient, let videoPlaybackEngine else { return }
         let clampedTarget = PlaybackTimelinePolicy.clampedTime(target, duration: duration)
         let targetURL = option.playbackURLString(startTime: clampedTarget)
         filePath = targetURL
@@ -2676,11 +2648,11 @@ final class MpvPlayerController: ObservableObject {
         deferredTrackRefreshTask?.cancel()
         deferredTrackRefreshTask = nil
         do {
-            try libMpvClient.command(["loadfile", targetURL, "replace"])
-            libMpvClient.setDouble("volume", Double(volume * 100) * volumeBoost)
-            libMpvClient.setDouble("speed", Double(playbackRate))
+            try videoPlaybackEngine.loadReplacing(path: targetURL, startTime: nil)
+            videoPlaybackEngine.setVolume(volume, boost: volumeBoost)
+            videoPlaybackEngine.setPlaybackRate(playbackRate)
             applyVideoAdjustments(to: libMpvClient)
-            libMpvClient.setFlag("pause", !wasPlaying)
+            videoPlaybackEngine.setPaused(!wasPlaying)
             if let currentItem = item {
                 prepareVideoRouteProxy(for: currentItem, filePath: targetURL)
             }
@@ -2704,11 +2676,11 @@ final class MpvPlayerController: ObservableObject {
                 guard let self,
                       self.playbackGeneration == generation,
                       self.activeVideoQualityOption?.id == option.id,
-                      let libMpvClient = self.libMpvClient else { return }
+                      let videoPlaybackEngine = self.videoPlaybackEngine else { return }
                 if self.currentTime >= resumeTime - 0.75 {
                     return
                 }
-                try? libMpvClient.command(["seek", "\(resumeTime)", "absolute", "keyframes"])
+                try? videoPlaybackEngine.seek(toMpvTime: resumeTime, precision: .keyframes)
                 self.currentTime = resumeTime
             }
         }
@@ -2939,8 +2911,8 @@ final class MpvPlayerController: ObservableObject {
             updateSystemNowPlaying()
             return
         }
-        if let libMpvClient {
-            libMpvClient.setFlag("pause", true)
+        if let videoPlaybackEngine {
+            videoPlaybackEngine.setPaused(true)
             isPlaying = false
             videoRouteProxyPlayer?.pause()
             updateSystemNowPlaying()
@@ -3027,10 +2999,11 @@ final class MpvPlayerController: ObservableObject {
         audioPlayer = nil
         clearVideoRouteProxy()
         stopMpvSnapshotReader()
-        libMpvClient?.stopPlayback()
+        videoPlaybackEngine?.stopPlayback()
         // 必须在 libMpvClient 释放（连带释放渲染上下文）之前排空 Metal 独立渲染队列，
         // 否则队列里还在跑的渲染调用可能访问已释放的上下文（见 installRenderHandle 文档）。
         renderView?.installRenderHandle(nil)
+        videoPlaybackEngine = nil
         libMpvClient = nil
         isPlaying = false
         isPreparing = false
@@ -3088,6 +3061,7 @@ final class MpvPlayerController: ObservableObject {
         stopMpvSnapshotReader()
         // 同上：先排空 Metal 独立渲染队列再释放 libMpvClient。
         renderView?.installRenderHandle(nil)
+        videoPlaybackEngine = nil
         libMpvClient = nil
         isPreparing = false
         isReady = false

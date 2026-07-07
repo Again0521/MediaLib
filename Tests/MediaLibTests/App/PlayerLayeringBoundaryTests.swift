@@ -17,6 +17,57 @@ final class PlayerLayeringBoundaryTests: XCTestCase {
         XCTAssertFalse(controller.contains("struct PlayerView: View"))
     }
 
+    func testVideoPlaybackControllingCommandSurfaceLivesInAppLayer() throws {
+        let root = repositoryRoot()
+        let protocolFile = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/VideoPlaybackControlling.swift"),
+            encoding: .utf8
+        )
+        let playerView = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/Views/PlayerView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(protocolFile.contains("protocol VideoPlaybackControlling"))
+        XCTAssertTrue(protocolFile.contains("extension MpvPlayerController: VideoPlaybackControlling"))
+        XCTAssertTrue(playerView.contains("VideoPlaybackControlling"))
+        XCTAssertFalse(playerView.contains("protocol VideoPlaybackControlling"))
+    }
+
+    func testVideoPlaybackEngineAdapterLivesInAppLayerAndStaysNarrow() throws {
+        let root = repositoryRoot()
+        let engine = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/VideoPlaybackEngine.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(engine.contains("protocol VideoPlaybackEngine"))
+        XCTAssertTrue(engine.contains("final class MpvVideoPlaybackEngine"))
+        XCTAssertTrue(engine.contains("protocol MpvCommandTransport"))
+        XCTAssertTrue(engine.contains("extension LibMpvClient: MpvCommandTransport"))
+        XCTAssertFalse(engine.contains("import SwiftUI"))
+        XCTAssertFalse(engine.contains("import AppKit"))
+        XCTAssertFalse(engine.contains("import AVKit"))
+        XCTAssertFalse(engine.contains("subtitle"))
+        XCTAssertFalse(engine.contains("screenshot"))
+        XCTAssertFalse(engine.contains("render("))
+    }
+
+    func testPlayerStateProjectionIsGenericAndKeepsControllerCompatibilityAlias() throws {
+        let root = repositoryRoot()
+        let support = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/Views/PlayerControllerSupport.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(support.contains("protocol PlayerStateProjecting"))
+        XCTAssertTrue(support.contains("final class PlayerStateProjection<Controller: PlayerStateProjecting, Value: Equatable>"))
+        XCTAssertTrue(support.contains("typealias PlayerControllerProjection<Value: Equatable> = PlayerStateProjection<MpvPlayerController, Value>"))
+        XCTAssertFalse(support.contains("import AppKit"))
+        XCTAssertFalse(support.contains("import SwiftUI"))
+        XCTAssertFalse(support.contains("LibMpvClient"))
+    }
+
     func testPlaybackQueuePolicyStaysInCoreWithoutPlatformImports() throws {
         let root = repositoryRoot()
         let policy = try String(
@@ -111,6 +162,34 @@ final class PlayerLayeringBoundaryTests: XCTestCase {
         XCTAssertFalse(pending.contains("LibMpvClient"))
     }
 
+    func testPlaybackSeekCommandPolicyStaysInCoreWithoutPlatformImports() throws {
+        let root = repositoryRoot()
+        let policy = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLibCore/Models/PlaybackSeekCommandPolicy.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(policy.contains("enum PlaybackSeekCommandPolicy"))
+        XCTAssertFalse(policy.contains("import AppKit"))
+        XCTAssertFalse(policy.contains("import SwiftUI"))
+        XCTAssertFalse(policy.contains("import AVKit"))
+        XCTAssertFalse(policy.contains("LibMpvClient"))
+    }
+
+    func testPlaybackClockSnapshotPolicyStaysInCoreWithoutPlatformImports() throws {
+        let root = repositoryRoot()
+        let policy = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLibCore/Models/PlaybackClockSnapshotPolicy.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(policy.contains("enum PlaybackClockSnapshotPolicy"))
+        XCTAssertFalse(policy.contains("import AppKit"))
+        XCTAssertFalse(policy.contains("import SwiftUI"))
+        XCTAssertFalse(policy.contains("import AVKit"))
+        XCTAssertFalse(policy.contains("LibMpvClient"))
+    }
+
     func testAppStateLibraryRemoteSessionScanAndTaskCenterStateAreOwnedByDomainStores() throws {
         let root = repositoryRoot()
         let appState = try String(
@@ -170,6 +249,10 @@ final class PlayerLayeringBoundaryTests: XCTestCase {
         XCTAssertTrue(plan.contains("PlaybackClockPolicy"))
         XCTAssertTrue(plan.contains("PlaybackSeekCoordinator"))
         XCTAssertTrue(plan.contains("PendingPlaybackSeek"))
+        XCTAssertTrue(plan.contains("PlaybackSeekCommandPolicy"))
+        XCTAssertTrue(plan.contains("PlaybackClockSnapshot"))
+        XCTAssertTrue(plan.contains("VideoPlaybackControlling"))
+        XCTAssertTrue(plan.contains("VideoPlaybackStateProjecting"))
         XCTAssertTrue(plan.contains("VideoPlaybackEngine"))
         XCTAssertTrue(plan.contains("防 god object"))
     }

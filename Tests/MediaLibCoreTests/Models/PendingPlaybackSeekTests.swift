@@ -37,7 +37,7 @@ final class PendingPlaybackSeekTests: XCTestCase {
         )
     }
 
-    func testSecondsSinceLastReissueReturnsNilUntilMarked() {
+    func testSecondsSinceLastReissueReturnsNilUntilMarked() throws {
         var pending = PendingPlaybackSeek(
             revision: 1,
             generation: 2,
@@ -52,11 +52,10 @@ final class PendingPlaybackSeekTests: XCTestCase {
 
         XCTAssertEqual(pending.reissueCount, 1)
         XCTAssertEqual(pending.lastReissuedAt, Date(timeIntervalSince1970: 102))
-        XCTAssertEqual(
-            pending.secondsSinceLastReissue(at: Date(timeIntervalSince1970: 102.7)),
-            0.7,
-            accuracy: 0.0001
+        let secondsSinceLastReissue = try XCTUnwrap(
+            pending.secondsSinceLastReissue(at: Date(timeIntervalSince1970: 102.7))
         )
+        XCTAssertEqual(secondsSinceLastReissue, 0.7, accuracy: 0.0001)
     }
 
     func testMarkReissuedIncrementsExistingCount() {
