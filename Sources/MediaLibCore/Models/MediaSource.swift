@@ -22,7 +22,11 @@ public struct MediaSource: Identifiable, Codable, Hashable, Sendable {
     /// Emby 痕迹数据同步策略：控制播放记录、收藏和已观看状态是否与服务端互写。
     public var remoteTraceSyncMode: RemoteTraceSyncMode
     /// Emby 来源纳入 MediaLIB 的服务器媒体库 ID。空数组表示保持兼容的全库同步。
-    public var selectedEmbyLibraryIDs: [String]
+    public var selectedEmbyLibraryIDs: [String] {
+        didSet {
+            selectedEmbyLibraryIDs = Self.normalizedEmbyLibraryIDs(selectedEmbyLibraryIDs)
+        }
+    }
     public var createdAt: Date
     public var updatedAt: Date
 
@@ -63,7 +67,7 @@ public struct MediaSource: Identifiable, Codable, Hashable, Sendable {
         self.preferMetadataWriteToSource = preferMetadataWriteToSource
         self.includeInHealthCheck = includeInHealthCheck
         self.remoteTraceSyncMode = remoteTraceSyncMode
-        self.selectedEmbyLibraryIDs = selectedEmbyLibraryIDs
+        self.selectedEmbyLibraryIDs = Self.normalizedEmbyLibraryIDs(selectedEmbyLibraryIDs)
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -113,6 +117,17 @@ public struct MediaSource: Identifiable, Codable, Hashable, Sendable {
             createdAt: try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(),
             updatedAt: try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
         )
+    }
+
+    static func normalizedEmbyLibraryIDs(_ ids: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for id in ids {
+            let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
+            result.append(trimmed)
+        }
+        return result
     }
 
     public var url: URL {

@@ -213,4 +213,26 @@ final class VideoSmartCollectionTests: XCTestCase {
         XCTAssertFalse(localCollection.matches(mixedCaseRemote, watchedThreshold: 0.9))
         XCTAssertTrue(localCollection.matches(local, watchedThreshold: 0.9))
     }
+
+    func testRulesDecoderDefaultsOnlyInvalidEnumFieldsAndKeepsValidRules() throws {
+        let json = """
+        {
+          "matchMode": "future-mode",
+          "year": "since2020",
+          "providerRating": "future-rating",
+          "userRating": "rated",
+          "genreKeyword": "  科幻  ",
+          "source": "emby"
+        }
+        """
+
+        let rules = try JSONDecoder().decode(VideoSmartCollectionRules.self, from: Data(json.utf8))
+
+        XCTAssertEqual(rules.matchMode, .all)
+        XCTAssertEqual(rules.year, .since2020)
+        XCTAssertEqual(rules.providerRating, .any)
+        XCTAssertEqual(rules.userRating, .rated)
+        XCTAssertEqual(rules.genreKeyword, "科幻")
+        XCTAssertEqual(rules.source, .emby)
+    }
 }

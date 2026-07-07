@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 
 final class PackageDMGScriptPathTests: XCTestCase {
@@ -17,8 +18,8 @@ final class PackageDMGScriptPathTests: XCTestCase {
 
         let paths = try runPathProbe(script: root.appendingPathComponent("scripts/package_dmg.sh"))
 
-        XCTAssertEqual(paths["SCRIPT_DIR"], physicalPath(root.appendingPathComponent("scripts")))
-        XCTAssertEqual(paths["ROOT_DIR"], physicalPath(root))
+        XCTAssertEqual(canonicalPath(paths["SCRIPT_DIR"]), canonicalPath(root.appendingPathComponent("scripts")))
+        XCTAssertEqual(canonicalPath(paths["ROOT_DIR"]), canonicalPath(root))
         XCTAssertTrue(paths["BUILD_ROOT"]?.hasPrefix("/private/tmp/MediaLib-package-") == true)
         XCTAssertEqual(paths["SWIFT_BUILD_DIR"], paths["BUILD_ROOT"].map { "\($0)/swiftpm-build" })
         XCTAssertFalse(paths["SWIFT_BUILD_DIR"]?.hasPrefix(root.appendingPathComponent(".build").path) == true)
@@ -35,8 +36,8 @@ final class PackageDMGScriptPathTests: XCTestCase {
 
         let paths = try runPathProbe(script: linkURL)
 
-        XCTAssertEqual(paths["SCRIPT_DIR"], physicalPath(root.appendingPathComponent("scripts")))
-        XCTAssertEqual(paths["ROOT_DIR"], physicalPath(root))
+        XCTAssertEqual(canonicalPath(paths["SCRIPT_DIR"]), canonicalPath(root.appendingPathComponent("scripts")))
+        XCTAssertEqual(canonicalPath(paths["ROOT_DIR"]), canonicalPath(root))
     }
 
     func testPackageScriptUsesSourceSpecificTemporaryDirectories() throws {
@@ -108,8 +109,24 @@ final class PackageDMGScriptPathTests: XCTestCase {
             })
     }
 
-    private func physicalPath(_ url: URL) -> String {
-        url.resolvingSymlinksInPath().path
+    private func canonicalPath(_ path: String?) -> String? {
+        path.map { canonicalPath(URL(fileURLWithPath: $0)) }
+    }
+
+    private func canonicalPath(_ url: URL) -> String {
+        guard let resolvedPath = url.withUnsafeFileSystemRepresentation({ representation -> String? in
+            guard let representation, let resolved = realpath(representation, nil) else { return nil }
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }) else {
+            return normalizeMacOSTemporaryDirectoryAlias(url.resolvingSymlinksInPath().path)
+        }
+        return normalizeMacOSTemporaryDirectoryAlias(resolvedPath)
+    }
+
+    private func normalizeMacOSTemporaryDirectoryAlias(_ path: String) -> String {
+        guard path == "/var" || path.hasPrefix("/var/") else { return path }
+        return "/private\(path)"
     }
 
     private func repositoryPackageScriptURL() throws -> URL {

@@ -307,13 +307,50 @@ public struct VideoSmartCollectionRules: Codable, Hashable, Sendable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.init(
-            matchMode: try container.decodeIfPresent(VideoSmartCollectionRuleMatchMode.self, forKey: .matchMode) ?? .all,
-            year: try container.decodeIfPresent(VideoSmartCollectionYearRule.self, forKey: .year) ?? .any,
-            providerRating: try container.decodeIfPresent(VideoSmartCollectionProviderRatingRule.self, forKey: .providerRating) ?? .any,
-            userRating: try container.decodeIfPresent(VideoSmartCollectionUserRatingRule.self, forKey: .userRating) ?? .any,
-            genreKeyword: try container.decodeIfPresent(String.self, forKey: .genreKeyword) ?? "",
-            source: try container.decodeIfPresent(VideoSmartCollectionSourceRule.self, forKey: .source) ?? .any
+            matchMode: Self.decodeStringBackedEnum(
+                VideoSmartCollectionRuleMatchMode.self,
+                from: container,
+                forKey: .matchMode,
+                default: .all
+            ),
+            year: Self.decodeStringBackedEnum(
+                VideoSmartCollectionYearRule.self,
+                from: container,
+                forKey: .year,
+                default: .any
+            ),
+            providerRating: Self.decodeStringBackedEnum(
+                VideoSmartCollectionProviderRatingRule.self,
+                from: container,
+                forKey: .providerRating,
+                default: .any
+            ),
+            userRating: Self.decodeStringBackedEnum(
+                VideoSmartCollectionUserRatingRule.self,
+                from: container,
+                forKey: .userRating,
+                default: .any
+            ),
+            genreKeyword: (try? container.decodeIfPresent(String.self, forKey: .genreKeyword)) ?? "",
+            source: Self.decodeStringBackedEnum(
+                VideoSmartCollectionSourceRule.self,
+                from: container,
+                forKey: .source,
+                default: .any
+            )
         )
+    }
+
+    private static func decodeStringBackedEnum<T>(
+        _ type: T.Type,
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys,
+        default defaultValue: T
+    ) -> T where T: RawRepresentable, T.RawValue == String {
+        guard let rawValue = try? container.decodeIfPresent(String.self, forKey: key) else {
+            return defaultValue
+        }
+        return T(rawValue: rawValue) ?? defaultValue
     }
 
     public func encode(to encoder: Encoder) throws {

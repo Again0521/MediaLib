@@ -69,4 +69,27 @@ final class MediaSourceAuditTests: XCTestCase {
         XCTAssertEqual(MediaSource(name: "Test", path: "SMB://server/share").sourceKind, .smb)
         XCTAssertEqual(MediaSource(name: "Test", path: "FTPS://server/share").sourceKind, .ftp)
     }
+
+    func testSelectedEmbyLibraryIDsAreNormalizedOnInitializationDecodingAndMutation() throws {
+        let source = MediaSource(
+            name: "Emby",
+            path: "emby://server",
+            selectedEmbyLibraryIDs: [" movies ", "", "shows", "movies", "\n", " shows "]
+        )
+        XCTAssertEqual(source.selectedEmbyLibraryIDs, ["movies", "shows"])
+
+        let json = """
+        {
+          "name": "Decoded Emby",
+          "path": "emby://server",
+          "selectedEmbyLibraryIDs": [" kids ", "kids", " ", "music"]
+        }
+        """
+        let decoded = try JSONDecoder().decode(MediaSource.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.selectedEmbyLibraryIDs, ["kids", "music"])
+
+        var mutated = MediaSource(name: "Mutable Emby", path: "emby://server")
+        mutated.selectedEmbyLibraryIDs = ["  library-a", "library-b", "library-a ", "\t"]
+        XCTAssertEqual(mutated.selectedEmbyLibraryIDs, ["library-a", "library-b"])
+    }
 }
