@@ -149,6 +149,44 @@ final class PrivacyLockServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
     }
 
+    func testSyncAndAsyncRemovePINReportFailureWhenCredentialCannotBeDeleted() async throws {
+        struct TestRemoveError: Error {}
+
+        let directory = try makeTemporaryDirectory()
+        let fileURL = directory.appendingPathComponent("privacy-pin.json")
+        let service = PrivacyLockService(
+            directory: directory,
+            io: PrivacyLockService.IO(
+                fileURL: { directoryOverride in
+                    (directoryOverride ?? directory).appendingPathComponent("privacy-pin.json")
+                },
+                write: { data, url in
+                    try FileManager.default.createDirectory(
+                        at: url.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    try data.write(to: url, options: .atomic)
+                },
+                read: { url in
+                    try Data(contentsOf: url)
+                },
+                remove: { _ in
+                    throw TestRemoveError()
+                }
+            )
+        )
+
+        try service.setPIN("998877")
+
+        let syncRemoved = service.removePIN()
+        let asyncRemoved = await service.removePINAsync()
+
+        XCTAssertFalse(syncRemoved)
+        XCTAssertFalse(asyncRemoved)
+        XCTAssertTrue(service.hasPIN())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
     func testConcurrentAsyncSetPINOperationsLeaveReadableCredential() async throws {
         let directory = try makeTemporaryDirectory()
         let service = PrivacyLockService(directory: directory)

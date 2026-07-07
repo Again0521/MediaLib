@@ -17,8 +17,8 @@ final class PackageDMGScriptPathTests: XCTestCase {
 
         let paths = try runPathProbe(script: root.appendingPathComponent("scripts/package_dmg.sh"))
 
-        XCTAssertEqual(paths["SCRIPT_DIR"], root.appendingPathComponent("scripts").path)
-        XCTAssertEqual(paths["ROOT_DIR"], root.path)
+        XCTAssertEqual(paths["SCRIPT_DIR"], physicalPath(root.appendingPathComponent("scripts")))
+        XCTAssertEqual(paths["ROOT_DIR"], physicalPath(root))
         XCTAssertTrue(paths["BUILD_ROOT"]?.hasPrefix("/private/tmp/MediaLib-package-") == true)
         XCTAssertEqual(paths["SWIFT_BUILD_DIR"], paths["BUILD_ROOT"].map { "\($0)/swiftpm-build" })
         XCTAssertFalse(paths["SWIFT_BUILD_DIR"]?.hasPrefix(root.appendingPathComponent(".build").path) == true)
@@ -35,8 +35,8 @@ final class PackageDMGScriptPathTests: XCTestCase {
 
         let paths = try runPathProbe(script: linkURL)
 
-        XCTAssertEqual(paths["SCRIPT_DIR"], root.appendingPathComponent("scripts").path)
-        XCTAssertEqual(paths["ROOT_DIR"], root.path)
+        XCTAssertEqual(paths["SCRIPT_DIR"], physicalPath(root.appendingPathComponent("scripts")))
+        XCTAssertEqual(paths["ROOT_DIR"], physicalPath(root))
     }
 
     func testPackageScriptUsesSourceSpecificTemporaryDirectories() throws {
@@ -106,6 +106,10 @@ final class PackageDMGScriptPathTests: XCTestCase {
                 guard let separator = line.firstIndex(of: "=") else { return nil }
                 return (String(line[..<separator]), String(line[line.index(after: separator)...]))
             })
+    }
+
+    private func physicalPath(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().path
     }
 
     private func repositoryPackageScriptURL() throws -> URL {

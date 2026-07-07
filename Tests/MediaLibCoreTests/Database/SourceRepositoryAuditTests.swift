@@ -93,4 +93,58 @@ final class SourceRepositoryAuditTests: XCTestCase {
         try repo.delete(id: "src-to-delete")
         XCTAssertTrue(try repo.fetchAll().isEmpty, "执行删除后，该来源必须从库中彻底移除")
     }
+
+    func testSelectedEmbyLibraryIDsAreTrimmedDeduplicatedAndKeepFirstSeenOrder() throws {
+        let source = MediaSource(
+            id: "src-emby-libraries",
+            name: "Emby 分库",
+            path: "emby://media.example",
+            mediaType: .movie,
+            selectedEmbyLibraryIDs: [
+                " library-a ",
+                "\n",
+                "library-b",
+                "library-a",
+                "\tlibrary-c\n",
+                "library-b"
+            ]
+        )
+
+        try repo.save(source)
+
+        let fetched = try XCTUnwrap(try repo.fetchAll().first { $0.id == "src-emby-libraries" })
+        XCTAssertEqual(fetched.selectedEmbyLibraryIDs, ["library-a", "library-b", "library-c"])
+
+        let storedValues = try dbManager.query(
+            "SELECT selected_emby_library_ids FROM media_sources WHERE id = ?",
+            bindings: [.text("src-emby-libraries")]
+        ) { row in
+            row.string(0)
+        }
+        let stored = try XCTUnwrap(storedValues.first ?? nil)
+        let data = try XCTUnwrap(stored.data(using: .utf8))
+        let decoded = try JSONDecoder().decode([String].self, from: data)
+        XCTAssertEqual(decoded, ["library-a", "library-b", "library-c"])
+    }
+
+    func testSelectedEmbyLibraryIDsDecodeLegacyCommaAndNewlineValuesWithSameNormalization() throws {
+        let source = MediaSource(
+            id: "src-legacy-libraries",
+            name: "Emby 旧格式分库",
+            path: "emby://legacy.example",
+            mediaType: .tvShow
+        )
+        try repo.save(source)
+        try dbManager.execute(
+            "UPDATE media_sources SET selected_emby_library_ids = ? WHERE id = ?",
+            bindings: [
+                .text(" legacy-a,\nlegacy-b, legacy-a\n , legacy-c,\tlegacy-b "),
+                .text("src-legacy-libraries")
+            ]
+        )
+
+        let fetched = try XCTUnwrap(try repo.fetchAll().first { $0.id == "src-legacy-libraries" })
+
+        XCTAssertEqual(fetched.selectedEmbyLibraryIDs, ["legacy-a", "legacy-b", "legacy-c"])
+    }
 }

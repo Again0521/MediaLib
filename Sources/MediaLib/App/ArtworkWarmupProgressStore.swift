@@ -13,6 +13,19 @@ enum ArtworkWarmupProgressStore {
         let read: (URL) throws -> Data
         let write: (Data, URL) throws -> Void
         let remove: (URL) throws -> Void
+        let exists: (URL) -> Bool
+
+        init(
+            read: @escaping (URL) throws -> Data,
+            write: @escaping (Data, URL) throws -> Void,
+            remove: @escaping (URL) throws -> Void,
+            exists: @escaping (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }
+        ) {
+            self.read = read
+            self.write = write
+            self.remove = remove
+            self.exists = exists
+        }
 
         static let fileSystem = IO(
             read: { url in
@@ -23,6 +36,9 @@ enum ArtworkWarmupProgressStore {
             },
             remove: { url in
                 try FileManager.default.removeItem(at: url)
+            },
+            exists: { url in
+                FileManager.default.fileExists(atPath: url.path)
             }
         )
     }
@@ -96,14 +112,22 @@ enum ArtworkWarmupProgressStore {
         return true
     }
 
-    static func removeFile(at url: URL?) async {
+    @discardableResult
+    static func removeFile(at url: URL?) async -> Bool {
         await removeFile(at: url, io: .fileSystem)
     }
 
-    static func removeFile(at url: URL?, io: IO) async {
+    @discardableResult
+    static func removeFile(at url: URL?, io: IO) async -> Bool {
         await BlockingIOExecutor.run {
-            guard let url else { return }
-            try? io.remove(url)
+            guard let url else { return false }
+            guard io.exists(url) else { return true }
+            do {
+                try io.remove(url)
+                return true
+            } catch {
+                return false
+            }
         }
     }
 
@@ -122,7 +146,8 @@ enum ArtworkWarmupProgressStore {
         try await BlockingIOExecutor.run {
             guard let url else { return }
             if records.isEmpty {
-                try? io.remove(url)
+                guard io.exists(url) else { return }
+                try io.remove(url)
                 return
             }
             let encoder = JSONEncoder()

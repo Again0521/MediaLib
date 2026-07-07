@@ -105,9 +105,7 @@ public final class SourceRepository {
     }
 
     private static func encodeEmbyLibraryIDs(_ ids: [String]) -> SQLiteValue {
-        let cleaned = ids
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        let cleaned = normalizedEmbyLibraryIDs(ids)
         guard !cleaned.isEmpty else { return .null }
         guard let data = try? JSONEncoder().encode(cleaned),
               let value = String(data: data, encoding: .utf8) else {
@@ -121,13 +119,21 @@ public final class SourceRepository {
               !value.isEmpty else { return [] }
         if let data = value.data(using: .utf8),
            let ids = try? JSONDecoder().decode([String].self, from: data) {
-            return ids
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
+            return normalizedEmbyLibraryIDs(ids)
         }
-        return value
+        return normalizedEmbyLibraryIDs(value
             .split { $0 == "\n" || $0 == "," }
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+            .map(String.init))
+    }
+
+    private static func normalizedEmbyLibraryIDs(_ ids: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for id in ids {
+            let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
+            result.append(trimmed)
+        }
+        return result
     }
 }

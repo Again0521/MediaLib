@@ -89,14 +89,16 @@ struct PrivacyLockService {
         }
     }
 
-    func removePIN() {
+    @discardableResult
+    func removePIN() -> Bool {
         Self.removePIN(directoryOverride: directoryOverride, io: io)
     }
 
-    func removePINAsync() async {
+    @discardableResult
+    func removePINAsync() async -> Bool {
         let directoryOverride = directoryOverride
         let io = io
-        await BlockingIOExecutor.run {
+        return await BlockingIOExecutor.run {
             Self.removePIN(directoryOverride: directoryOverride, io: io)
         }
     }
@@ -126,9 +128,15 @@ struct PrivacyLockService {
         return digest(pin: pin, salt: payload.salt) == payload.digest
     }
 
-    private static func removePIN(directoryOverride: URL?, io: IO) {
-        if let url = io.fileURL(directoryOverride) {
-            try? io.remove(url)
+    private static func removePIN(directoryOverride: URL?, io: IO) -> Bool {
+        guard let url = io.fileURL(directoryOverride) else {
+            return false
+        }
+        do {
+            try io.remove(url)
+            return true
+        } catch {
+            return !FileManager.default.fileExists(atPath: url.path)
         }
     }
 

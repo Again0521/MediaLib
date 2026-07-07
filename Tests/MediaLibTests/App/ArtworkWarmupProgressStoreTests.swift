@@ -106,6 +106,69 @@ final class ArtworkWarmupProgressStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
     }
 
+    func testSaveEmptyRecordsPropagatesExistingFileRemoveFailure() async throws {
+        let fileURL = try makeTemporaryDirectory().appendingPathComponent("ArtworkWarmupProgress.json")
+        try await ArtworkWarmupProgressStore.persist(
+            sourceID: "source",
+            completedURLs: ["done"],
+            totalCount: 1,
+            to: fileURL
+        )
+        let failingIO = removeFailingIO(existingURL: fileURL)
+
+        do {
+            try await ArtworkWarmupProgressStore.save([:], to: fileURL, io: failingIO)
+            XCTFail("Expected removing an existing progress file to fail")
+        } catch TestIOError.removeFailed {
+        } catch {
+            XCTFail("Expected TestIOError.removeFailed, got \(error)")
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+        let records = await ArtworkWarmupProgressStore.load(from: fileURL)
+        XCTAssertEqual(records["source"]?.completedURLs, ["done"])
+    }
+
+    func testClearPropagatesRemoveFailureForLastRecord() async throws {
+        let fileURL = try makeTemporaryDirectory().appendingPathComponent("ArtworkWarmupProgress.json")
+        try await ArtworkWarmupProgressStore.persist(
+            sourceID: "source",
+            completedURLs: ["done"],
+            totalCount: 1,
+            to: fileURL
+        )
+        let failingIO = removeFailingIO(existingURL: fileURL)
+
+        do {
+            _ = try await ArtworkWarmupProgressStore.clear(sourceID: "source", from: fileURL, io: failingIO)
+            XCTFail("Expected clearing the last record to fail when the progress file cannot be removed")
+        } catch TestIOError.removeFailed {
+        } catch {
+            XCTFail("Expected TestIOError.removeFailed, got \(error)")
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+        let records = await ArtworkWarmupProgressStore.load(from: fileURL)
+        XCTAssertEqual(records["source"]?.completedURLs, ["done"])
+    }
+
+    func testRemoveFileReportsMissingSuccessAndRemoveFailure() async throws {
+        let directory = try makeTemporaryDirectory()
+        let missingURL = directory.appendingPathComponent("missing.json")
+        let existingURL = directory.appendingPathComponent("ArtworkWarmupProgress.json")
+        try Data("{}".utf8).write(to: existingURL)
+        let failingIO = removeFailingIO(existingURL: existingURL)
+
+        let missingRemoved = await ArtworkWarmupProgressStore.removeFile(at: missingURL, io: failingIO)
+        let existingRemoved = await ArtworkWarmupProgressStore.removeFile(at: existingURL, io: failingIO)
+        let nilRemoved = await ArtworkWarmupProgressStore.removeFile(at: nil, io: failingIO)
+
+        XCTAssertTrue(missingRemoved)
+        XCTAssertFalse(existingRemoved)
+        XCTAssertFalse(nilRemoved)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: existingURL.path))
+    }
+
     func testAsyncPersistenceOperationsRunThroughInjectedIOOnBlockingIOQueue() async throws {
         let fileURL = try makeTemporaryDirectory().appendingPathComponent("ArtworkWarmupProgress.json")
         let recorder = RecordingArtworkWarmupProgressIO()
@@ -135,6 +198,27 @@ final class ArtworkWarmupProgressStoreTests: XCTestCase {
         tempDirectory = directory
         return directory
     }
+
+    private func removeFailingIO(existingURL: URL) -> ArtworkWarmupProgressStore.IO {
+        ArtworkWarmupProgressStore.IO(
+            read: { url in
+                try Data(contentsOf: url)
+            },
+            write: { data, url in
+                try data.write(to: url, options: [.atomic])
+            },
+            remove: { _ in
+                throw TestIOError.removeFailed
+            },
+            exists: { url in
+                url == existingURL
+            }
+        )
+    }
+}
+
+private enum TestIOError: Error {
+    case removeFailed
 }
 
 private final class RecordingArtworkWarmupProgressIO: @unchecked Sendable {
