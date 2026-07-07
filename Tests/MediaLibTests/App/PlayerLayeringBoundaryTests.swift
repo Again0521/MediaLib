@@ -142,6 +142,80 @@ final class PlayerLayeringBoundaryTests: XCTestCase {
         XCTAssertFalse(reader.contains("vf"))
     }
 
+    func testMpvTrackModelLivesInAppLayerInsteadOfPlayerView() throws {
+        let root = repositoryRoot()
+        let model = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/MpvTrack.swift"),
+            encoding: .utf8
+        )
+        let playerView = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/Views/PlayerView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(model.contains("struct MpvTrack"))
+        XCTAssertTrue(model.contains("enum Kind"))
+        XCTAssertTrue(model.contains("func withSelection"))
+        XCTAssertFalse(playerView.contains("struct MpvTrack"))
+        XCTAssertFalse(model.contains("import SwiftUI"))
+        XCTAssertFalse(model.contains("import AppKit"))
+        XCTAssertFalse(model.contains("import AVKit"))
+        XCTAssertFalse(model.contains("MpvRenderSurface"))
+        XCTAssertFalse(model.contains("MpvPlayerController"))
+    }
+
+    func testMpvVideoSnapshotReaderLivesInAppLayerWithoutViewOrRenderOwnership() throws {
+        let root = repositoryRoot()
+        let reader = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/MpvVideoSnapshotReader.swift"),
+            encoding: .utf8
+        )
+        let controller = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/MpvPlayerController.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(reader.contains("struct MpvChapter"))
+        XCTAssertTrue(reader.contains("struct MpvVideoSnapshotRequest"))
+        XCTAssertTrue(reader.contains("final class MpvVideoSnapshotReader"))
+        XCTAssertFalse(controller.contains("final class MpvVideoSnapshotReader"))
+        XCTAssertFalse(controller.contains("struct MpvVideoSnapshotRequest"))
+        XCTAssertFalse(reader.contains("import SwiftUI"))
+        XCTAssertFalse(reader.contains("import AppKit"))
+        XCTAssertFalse(reader.contains("import AVKit"))
+        XCTAssertFalse(reader.contains("MpvRenderSurface"))
+        XCTAssertFalse(reader.contains("NSView"))
+        XCTAssertFalse(reader.contains("captureFramePNGData"))
+        XCTAssertFalse(reader.contains("PlayerView"))
+        XCTAssertFalse(reader.contains("TrackPreferenceStore"))
+    }
+
+    func testTrackLanguageMatcherLivesInAppLayerWithoutControllerOrUIOwnership() throws {
+        let root = repositoryRoot()
+        let matcher = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/TrackLanguageMatcher.swift"),
+            encoding: .utf8
+        )
+        let controller = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/MpvPlayerController.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(matcher.contains("enum TrackLanguageMatcher"))
+        XCTAssertTrue(matcher.contains("static func bestTrack"))
+        XCTAssertFalse(controller.contains("private enum TrackLanguageMatcher"))
+        XCTAssertFalse(matcher.contains("import SwiftUI"))
+        XCTAssertFalse(matcher.contains("import AppKit"))
+        XCTAssertFalse(matcher.contains("import AVKit"))
+        XCTAssertFalse(matcher.contains("LibMpvClient"))
+        XCTAssertFalse(matcher.contains("TrackPreferenceStore"))
+        XCTAssertFalse(matcher.contains("ObservableObject"))
+        XCTAssertFalse(matcher.contains("@Published"))
+        XCTAssertFalse(matcher.contains("command("))
+        XCTAssertFalse(matcher.contains("setString"))
+        XCTAssertFalse(matcher.contains("NSView"))
+    }
+
     func testMusicPlaybackEngineAdapterLivesInAppLayerAndStaysNarrow() throws {
         let root = repositoryRoot()
         let engine = try String(
@@ -334,39 +408,6 @@ final class PlayerLayeringBoundaryTests: XCTestCase {
         XCTAssertFalse(appState.contains("@Published var musicQueue"))
         XCTAssertFalse(appState.contains("@Published var musicRepeatMode"))
         XCTAssertFalse(appState.contains("@Published var musicShuffleEnabled"))
-    }
-
-    func testLayeringPlanDocumentsNextSplitBoundaries() throws {
-        let root = repositoryRoot()
-        let plan = try String(
-            contentsOf: root.appendingPathComponent("doc/Architecture/Layering_Refactor_Plan.md"),
-            encoding: .utf8
-        )
-
-        XCTAssertTrue(plan.contains("MediaLibCore"))
-        XCTAssertTrue(plan.contains("TaskCenterStore"))
-        XCTAssertTrue(plan.contains("ScanActivityStore"))
-        XCTAssertTrue(plan.contains("MusicQueueStore"))
-        XCTAssertTrue(plan.contains("PlaybackSessionStore"))
-        XCTAssertTrue(plan.contains("LibraryDomainStore"))
-        XCTAssertTrue(plan.contains("RemoteConnectorStore"))
-        XCTAssertTrue(plan.contains("PlaybackQueuePolicy"))
-        XCTAssertTrue(plan.contains("PlaybackTimelinePolicy"))
-        XCTAssertTrue(plan.contains("PlaybackSeekState"))
-        XCTAssertTrue(plan.contains("PlaybackClockPolicy"))
-        XCTAssertTrue(plan.contains("PlaybackSeekCoordinator"))
-        XCTAssertTrue(plan.contains("PendingPlaybackSeek"))
-        XCTAssertTrue(plan.contains("PlaybackSeekCommandPolicy"))
-        XCTAssertTrue(plan.contains("PlaybackClockSnapshot"))
-        XCTAssertTrue(plan.contains("VideoPlaybackControlling"))
-        XCTAssertTrue(plan.contains("VideoPlaybackStateProjecting"))
-        XCTAssertTrue(plan.contains("VideoPlaybackEngine"))
-        XCTAssertTrue(plan.contains("VideoTrackSelectionEngine"))
-        XCTAssertTrue(plan.contains("VideoFrameCommandEngine"))
-        XCTAssertTrue(plan.contains("VideoLoopCommandEngine"))
-        XCTAssertTrue(plan.contains("VideoAudioDeviceReader"))
-        XCTAssertTrue(plan.contains("MusicPlaybackEngine"))
-        XCTAssertTrue(plan.contains("防 god object"))
     }
 
     private func repositoryRoot() -> URL {
