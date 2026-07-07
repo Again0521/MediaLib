@@ -53,6 +53,113 @@ final class PlayerLayeringBoundaryTests: XCTestCase {
         XCTAssertFalse(engine.contains("render("))
     }
 
+    func testVideoTrackSelectionEngineAdapterLivesInAppLayerAndStaysNarrow() throws {
+        let root = repositoryRoot()
+        let engine = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/VideoTrackSelectionEngine.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(engine.contains("protocol VideoTrackSelectionEngine"))
+        XCTAssertTrue(engine.contains("final class MpvVideoTrackSelectionEngine"))
+        XCTAssertTrue(engine.contains("protocol MpvTrackSelectionTransport"))
+        XCTAssertTrue(engine.contains("extension LibMpvClient: MpvTrackSelectionTransport"))
+        XCTAssertFalse(engine.contains("import SwiftUI"))
+        XCTAssertFalse(engine.contains("import AppKit"))
+        XCTAssertFalse(engine.contains("TrackPreferenceStore"))
+        XCTAssertFalse(engine.contains("schedule"))
+        XCTAssertFalse(engine.contains("screenshot"))
+        XCTAssertFalse(engine.contains("vf"))
+    }
+
+    func testVideoFrameCommandEngineAdapterLivesInAppLayerAndStaysNarrow() throws {
+        let root = repositoryRoot()
+        let engine = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/VideoFrameCommandEngine.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(engine.contains("protocol VideoFrameCommandEngine"))
+        XCTAssertTrue(engine.contains("final class MpvVideoFrameCommandEngine"))
+        XCTAssertTrue(engine.contains("protocol MpvFrameCommandTransport"))
+        XCTAssertTrue(engine.contains("extension LibMpvClient: MpvFrameCommandTransport"))
+        XCTAssertFalse(engine.contains("import SwiftUI"))
+        XCTAssertFalse(engine.contains("import AppKit"))
+        XCTAssertFalse(engine.contains("import AVKit"))
+        XCTAssertFalse(engine.contains("MpvRenderSurface"))
+        XCTAssertFalse(engine.contains("captureFramePNGData"))
+        XCTAssertFalse(engine.contains("renderView"))
+        XCTAssertFalse(engine.contains("TrackPreferenceStore"))
+        XCTAssertFalse(engine.contains("FileManager"))
+    }
+
+    func testVideoLoopCommandEngineAdapterLivesInAppLayerAndStaysNarrow() throws {
+        let root = repositoryRoot()
+        let engine = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/VideoLoopCommandEngine.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(engine.contains("protocol VideoLoopCommandEngine"))
+        XCTAssertTrue(engine.contains("final class MpvVideoLoopCommandEngine"))
+        XCTAssertTrue(engine.contains("protocol MpvLoopCommandTransport"))
+        XCTAssertTrue(engine.contains("extension LibMpvClient: MpvLoopCommandTransport"))
+        XCTAssertFalse(engine.contains("import SwiftUI"))
+        XCTAssertFalse(engine.contains("import AppKit"))
+        XCTAssertFalse(engine.contains("import AVKit"))
+        XCTAssertFalse(engine.contains("MpvRenderSurface"))
+        XCTAssertFalse(engine.contains("PlayerABLoopSelection"))
+        XCTAssertFalse(engine.contains("currentTime"))
+        XCTAssertFalse(engine.contains("TrackPreferenceStore"))
+        XCTAssertFalse(engine.contains("FileManager"))
+        XCTAssertFalse(engine.contains("vf"))
+        XCTAssertFalse(engine.contains("screenshot"))
+    }
+
+    func testVideoAudioDeviceReaderLivesInAppLayerAndStaysReadOnly() throws {
+        let root = repositoryRoot()
+        let reader = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/VideoAudioDeviceReader.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(reader.contains("struct MpvAudioDevice"))
+        XCTAssertTrue(reader.contains("struct VideoAudioDeviceSnapshot"))
+        XCTAssertTrue(reader.contains("protocol VideoAudioDeviceReading"))
+        XCTAssertTrue(reader.contains("final class MpvVideoAudioDeviceReader"))
+        XCTAssertTrue(reader.contains("protocol MpvAudioDeviceReadTransport"))
+        XCTAssertTrue(reader.contains("extension LibMpvClient: MpvAudioDeviceReadTransport"))
+        XCTAssertFalse(reader.contains("import SwiftUI"))
+        XCTAssertFalse(reader.contains("import AppKit"))
+        XCTAssertFalse(reader.contains("import AVKit"))
+        XCTAssertFalse(reader.contains("command("))
+        XCTAssertFalse(reader.contains("setString"))
+        XCTAssertFalse(reader.contains("setDouble"))
+        XCTAssertFalse(reader.contains("TrackPreferenceStore"))
+        XCTAssertFalse(reader.contains("schedule"))
+        XCTAssertFalse(reader.contains("MpvRenderSurface"))
+        XCTAssertFalse(reader.contains("screenshot"))
+        XCTAssertFalse(reader.contains("vf"))
+    }
+
+    func testMusicPlaybackEngineAdapterLivesInAppLayerAndStaysNarrow() throws {
+        let root = repositoryRoot()
+        let engine = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/MusicPlaybackEngine.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(engine.contains("protocol MusicPlaybackEngine"))
+        XCTAssertTrue(engine.contains("final class AVQueueMusicPlaybackEngine"))
+        XCTAssertTrue(engine.contains("protocol MusicPlayerTransport"))
+        XCTAssertTrue(engine.contains("final class AVQueueMusicPlayerTransport"))
+        XCTAssertFalse(engine.contains("import SwiftUI"))
+        XCTAssertFalse(engine.contains("import AppKit"))
+        XCTAssertFalse(engine.contains("preload"))
+        XCTAssertFalse(engine.contains("RouteProxy"))
+        XCTAssertFalse(engine.contains("AirPlay"))
+    }
+
     func testPlayerStateProjectionIsGenericAndKeepsControllerCompatibilityAlias() throws {
         let root = repositoryRoot()
         let support = try String(
@@ -254,6 +361,11 @@ final class PlayerLayeringBoundaryTests: XCTestCase {
         XCTAssertTrue(plan.contains("VideoPlaybackControlling"))
         XCTAssertTrue(plan.contains("VideoPlaybackStateProjecting"))
         XCTAssertTrue(plan.contains("VideoPlaybackEngine"))
+        XCTAssertTrue(plan.contains("VideoTrackSelectionEngine"))
+        XCTAssertTrue(plan.contains("VideoFrameCommandEngine"))
+        XCTAssertTrue(plan.contains("VideoLoopCommandEngine"))
+        XCTAssertTrue(plan.contains("VideoAudioDeviceReader"))
+        XCTAssertTrue(plan.contains("MusicPlaybackEngine"))
         XCTAssertTrue(plan.contains("防 god object"))
     }
 

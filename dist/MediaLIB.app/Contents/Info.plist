@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>zh-Hans</string>
+  <key>CFBundleExecutable</key>
+  <string>MediaLib</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.local.MediaLib</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>MediaLIB</string>
+  <key>CFBundleDisplayName</key>
+  <string>MediaLIB</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.5.2</string>
+  <key>CFBundleVersion</key>
+  <string>77</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.video</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
+  <!-- 相册「系统照片」来源：读取 macOS 系统「照片」App 图库需要的用途说明。 -->
+  <key>NSPhotoLibraryUsageDescription</key>
+  <string>MediaLIB 需要访问你的照片图库，以在「相册」中浏览系统照片与录像。</string>
+  <!-- 声明可打开的媒体文档类型：作为「系统默认视频/音乐播放器」的前提，
+       设置页的「设为默认」按钮按这些声明向 LaunchServices 注册。 -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Video File</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Default</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.movie</string>
+        <string>public.video</string>
+        <string>public.mpeg-4</string>
+        <string>com.apple.quicktime-movie</string>
+        <string>public.avi</string>
+        <string>org.matroska.mkv</string>
+        <string>public.mpeg</string>
+        <string>public.mpeg-2-transport-stream</string>
+        <string>org.webmproject.webm</string>
+        <string>com.microsoft.windows-media-wmv</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Audio File</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Default</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.audio</string>
+        <string>public.mp3</string>
+        <string>public.mpeg-4-audio</string>
+        <string>org.xiph.flac</string>
+        <string>com.apple.m4a-audio</string>
+        <string>public.aiff-audio</string>
+        <string>com.microsoft.waveform-audio</string>
+        <string>org.xiph.ogg</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

@@ -221,18 +221,6 @@ private enum TrackLanguageMatcher {
     }
 }
 
-/// 音频输出设备（mpv `audio-device-list` 条目）。
-struct MpvAudioDevice: Identifiable, Hashable, Sendable {
-    let name: String
-    let deviceDescription: String
-
-    var id: String { name }
-
-    var displayName: String {
-        deviceDescription.isEmpty ? name : deviceDescription
-    }
-}
-
 struct MpvChapter: Identifiable, Hashable, Sendable {
     let id: Int
     let title: String
@@ -535,12 +523,17 @@ final class MpvPlayerController: ObservableObject {
     private var didApplyTrackPreference = false
     private var libMpvClient: LibMpvClient?
     private var videoPlaybackEngine: VideoPlaybackEngine?
+    private var videoTrackSelectionEngine: VideoTrackSelectionEngine?
+    private var videoFrameCommandEngine: VideoFrameCommandEngine?
+    private var videoLoopCommandEngine: VideoLoopCommandEngine?
+    private var videoAudioDeviceReader: VideoAudioDeviceReading?
     private var mpvSnapshotReader: MpvVideoSnapshotReader?
     private var mpvSnapshotReadInFlight = false
     private var pendingForcedTrackSnapshot = false
     private var trackSnapshotRefreshCount = 0
     private var chapterSnapshotRefreshCount = 0
     private var audioPlayer: AVQueuePlayer?
+    private var musicPlaybackEngine: MusicPlaybackEngine?
     private var audioLocalMirrorPlayer: AVPlayer?
     private var audioRouteProxyPlayer: AVPlayer?
     private var audioRouteProxyObservation: NSKeyValueObservation?
@@ -823,10 +816,18 @@ final class MpvPlayerController: ObservableObject {
                 renderView?.requestRedraw()
             }
             let engine = MpvVideoPlaybackEngine(transport: client)
+            let trackEngine = MpvVideoTrackSelectionEngine(transport: client)
+            let frameCommandEngine = MpvVideoFrameCommandEngine(transport: client)
+            let loopCommandEngine = MpvVideoLoopCommandEngine(transport: client)
+            let audioDeviceReader = MpvVideoAudioDeviceReader(transport: client)
             try engine.loadFile(filePath)
-            applyVideoAdjustments(to: client)
+            applyVideoAdjustments(to: client, loopCommandEngine: loopCommandEngine)
             libMpvClient = client
             videoPlaybackEngine = engine
+            videoTrackSelectionEngine = trackEngine
+            videoFrameCommandEngine = frameCommandEngine
+            videoLoopCommandEngine = loopCommandEngine
+            videoAudioDeviceReader = audioDeviceReader
             mpvSnapshotReader = MpvVideoSnapshotReader(handle: client.makePropertyReadHandle())
             mpvSnapshotReadInFlight = false
             pendingForcedTrackSnapshot = false
@@ -902,11 +903,14 @@ final class MpvPlayerController: ObservableObject {
     ) {
         currentMemoryAudioAsset = memoryAsset
         let player = AVQueuePlayer(items: [playerItem])
+        let musicEngine = AVQueueMusicPlaybackEngine(
+            transport: AVQueueMusicPlayerTransport(player: player)
+        )
         player.allowsExternalPlayback = true
         applyAudioStallPolicy(to: player, isNetwork: isNetwork)
         player.actionAtItemEnd = .advance
-        player.volume = effectiveMusicVolume
-        player.isMuted = false
+        musicEngine.setVolume(effectiveMusicVolume)
+        musicEngine.setMuted(false)
 
         observeAudioEnd(for: playerItem, generation: generation)
         observeAudioExternalPlayback(for: player)
@@ -914,6 +918,7 @@ final class MpvPlayerController: ObservableObject {
 
         didReachAudioEnd = false
         audioPlayer = player
+        musicPlaybackEngine = musicEngine
         isPreparing = false
         isReady = true
         isPlaying = false
@@ -923,18 +928,14 @@ final class MpvPlayerController: ObservableObject {
 
         let startSeconds = max(currentTime, 0)
         if startSeconds > 0 {
-            player.seek(
-                to: CMTime(seconds: startSeconds, preferredTimescale: 600),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            ) { [weak self, weak player] _ in
+            musicEngine.seek(to: startSeconds) { [weak self, weak player] _ in
                 Task { @MainActor in
                     guard let self,
                           let player,
                           self.playbackGeneration == generation,
                           self.audioPlayer === player,
                           player.currentItem === playerItem else { return }
-                    player.playImmediately(atRate: self.playbackRate)
+                    self.musicPlaybackEngine?.playImmediately(atRate: self.playbackRate)
                     self.isPlaying = true
                     self.scheduleMusicOutputRecovery(generation: generation, shouldPlay: true)
                     self.updateSystemNowPlaying()
@@ -942,7 +943,7 @@ final class MpvPlayerController: ObservableObject {
                 }
             }
         } else {
-            player.playImmediately(atRate: playbackRate)
+            musicEngine.playImmediately(atRate: playbackRate)
             isPlaying = true
             scheduleMusicOutputRecovery(generation: generation, shouldPlay: true)
             updateSystemNowPlaying()
@@ -983,7 +984,7 @@ final class MpvPlayerController: ObservableObject {
            url.isFileURL {
             let loadGeneration = playbackGeneration
             musicMemoryLoadTask?.cancel()
-            player.pause()
+            musicPlaybackEngine?.pause()
             audioLocalMirrorPlayer?.pause()
             audioRouteProxyPlayer?.pause()
             isPlaying = false
@@ -1030,7 +1031,7 @@ final class MpvPlayerController: ObservableObject {
             audioRouteRefreshTask = nil
             stopAudioLocalMirror()
             clearAudioRouteProxy()
-            player.pause()
+            musicPlaybackEngine?.pause()
             if queuedPreload == nil {
                 clearPreloadedMusicItem()
             }
@@ -1094,7 +1095,7 @@ final class MpvPlayerController: ObservableObject {
         if alreadyAdvancedToPreload {
             isPlaying = player.rate > 0
             if !isPlaying {
-                player.playImmediately(atRate: playbackRate)
+                musicPlaybackEngine?.playImmediately(atRate: playbackRate)
                 isPlaying = true
             }
             startSoftFadeInIfNeeded(generation: generation)
@@ -1105,18 +1106,14 @@ final class MpvPlayerController: ObservableObject {
             return
         }
         if startSeconds > 0 {
-            player.seek(
-                to: CMTime(seconds: startSeconds, preferredTimescale: 600),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            ) { [weak self, weak player] _ in
+            musicPlaybackEngine?.seek(to: startSeconds) { [weak self, weak player] _ in
                 Task { @MainActor in
                     guard let self,
                           let player,
                           self.playbackGeneration == generation,
                           self.audioPlayer === player,
                           player.currentItem === playerItem else { return }
-                    player.playImmediately(atRate: self.playbackRate)
+                    self.musicPlaybackEngine?.playImmediately(atRate: self.playbackRate)
                     self.isPlaying = true
                     self.startSoftFadeInIfNeeded(generation: generation)
                     self.scheduleMusicOutputRecovery(generation: generation, shouldPlay: true)
@@ -1125,7 +1122,7 @@ final class MpvPlayerController: ObservableObject {
                 }
             }
         } else {
-            player.playImmediately(atRate: playbackRate)
+            musicPlaybackEngine?.playImmediately(atRate: playbackRate)
             isPlaying = true
             startSoftFadeInIfNeeded(generation: generation)
             scheduleMusicOutputRecovery(generation: generation, shouldPlay: true)
@@ -1718,12 +1715,12 @@ final class MpvPlayerController: ObservableObject {
                 return
             }
             if isPlaying {
-                audioPlayer.pause()
+                musicPlaybackEngine?.pause()
                 audioLocalMirrorPlayer?.pause()
                 audioRouteProxyPlayer?.pause()
                 isPlaying = false
             } else {
-                audioPlayer.playImmediately(atRate: playbackRate)
+                musicPlaybackEngine?.playImmediately(atRate: playbackRate)
                 syncAudioLocalMirrorPlayback()
                 syncAudioRouteProxyPlayback()
                 isPlaying = true
@@ -1801,18 +1798,15 @@ final class MpvPlayerController: ObservableObject {
         spectrumSuppressedDuringSeek = true
         let seekRevision = beginTimelineSeek(to: target, generation: generation)
         if let audioPlayer {
+            guard let musicPlaybackEngine else { return }
             scheduleSeekSyncCorrection(for: generation)
             audioPlayer.currentItem?.cancelPendingSeeks()
-            audioPlayer.seek(
-                to: CMTime(seconds: target, preferredTimescale: 600),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            ) { [weak self, weak audioPlayer] finished in
+            musicPlaybackEngine.seek(to: target) { [weak self, weak audioPlayer] finished in
                 Task { @MainActor in
                     guard let self,
                           let audioPlayer,
                           self.audioPlayer === audioPlayer else { return }
-                    let actualTime = finished ? audioPlayer.currentTime().seconds : nil
+                    let actualTime = finished ? self.musicPlaybackEngine?.currentTimeSeconds : nil
                     let decision = PlaybackSeekCommandPolicy.completionDecision(
                         finished: finished,
                         observedTime: actualTime,
@@ -1835,7 +1829,7 @@ final class MpvPlayerController: ObservableObject {
                             self.reissuePendingSeekIfNeeded(
                                 observedTime: actualTime,
                                 generation: generation,
-                                audioPlayer: audioPlayer
+                                musicPlaybackEngine: self.musicPlaybackEngine
                             )
                         }
                         self.scheduleSeekSyncCorrection(for: generation)
@@ -1940,14 +1934,10 @@ final class MpvPlayerController: ObservableObject {
                 observeAudioEnd(for: playerItem, generation: playbackGeneration)
             }
             guard audioPlayer.currentItem != nil else { return }
-            audioPlayer.seek(
-                to: .zero,
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            ) { [weak self, weak audioPlayer] _ in
+            musicPlaybackEngine?.seekToStart { [weak self, weak audioPlayer] _ in
                 Task { @MainActor in
                     guard let self, let audioPlayer, self.audioPlayer === audioPlayer else { return }
-                    audioPlayer.playImmediately(atRate: self.playbackRate)
+                    self.musicPlaybackEngine?.playImmediately(atRate: self.playbackRate)
                     self.syncAudioLocalMirrorPlayback()
                     self.syncAudioRouteProxyPlayback()
                     self.isPlaying = true
@@ -1974,9 +1964,9 @@ final class MpvPlayerController: ObservableObject {
         if persistPreference, rememberPlaybackRateEnabled, let item, item.type != .music {
             TrackPreferenceStore.setPlaybackRate(Double(playbackRate), for: item)
         }
-        if let audioPlayer {
+        if audioPlayer != nil {
             if isPlaying {
-                audioPlayer.playImmediately(atRate: playbackRate)
+                musicPlaybackEngine?.playImmediately(atRate: playbackRate)
                 if updateExternalState {
                     syncAudioLocalMirrorPlayback()
                     syncAudioRouteProxyPlayback()
@@ -2024,7 +2014,10 @@ final class MpvPlayerController: ObservableObject {
         abLoopEnd = nil
     }
 
-    private func applyVideoAdjustments(to client: LibMpvClient) {
+    private func applyVideoAdjustments(
+        to client: LibMpvClient,
+        loopCommandEngine: VideoLoopCommandEngine? = nil
+    ) {
         client.setDouble("audio-delay", audioDelay)
         client.setDouble("sub-delay", subtitleDelay)
         client.setDouble("sub-scale", subtitleScale)
@@ -2041,9 +2034,10 @@ final class MpvPlayerController: ObservableObject {
         rebuildAudioFilterChain(to: client)
         client.setString("tone-mapping", toneMappingMode.rawValue)
         client.setFlag("audio-pitch-correction", pitchCorrectionEnabled)
-        client.setString("loop-file", loopCurrentItem ? "inf" : "no")
+        let loopCommandEngine = loopCommandEngine ?? videoLoopCommandEngine
+        loopCommandEngine?.setLoopCurrentItem(loopCurrentItem)
         client.setNetworkMemoryBufferingEnabled(videoMemoryBufferingEnabled)
-        applyABLoop(to: client)
+        loopCommandEngine?.setABLoop(start: abLoopStart, end: abLoopEnd)
     }
 
     /// 统一合成 vf 链：清晰度档位的缩放滤镜在最前，之后依次是翻转、锐化、降噪。
@@ -2212,7 +2206,7 @@ final class MpvPlayerController: ObservableObject {
 
     func setLoopCurrentItem(_ enabled: Bool) {
         loopCurrentItem = enabled
-        libMpvClient?.setString("loop-file", enabled ? "inf" : "no")
+        videoLoopCommandEngine?.setLoopCurrentItem(enabled)
     }
 
     @discardableResult
@@ -2241,21 +2235,7 @@ final class MpvPlayerController: ObservableObject {
     private func setABLoop(start: Double?, end: Double?) {
         abLoopStart = start
         abLoopEnd = end
-        guard let libMpvClient else { return }
-        applyABLoop(to: libMpvClient)
-    }
-
-    private func applyABLoop(to client: LibMpvClient) {
-        if let abLoopStart {
-            client.setDouble("ab-loop-a", abLoopStart)
-        } else {
-            client.setString("ab-loop-a", "no")
-        }
-        if let abLoopEnd {
-            client.setDouble("ab-loop-b", abLoopEnd)
-        } else {
-            client.setString("ab-loop-b", "no")
-        }
+        videoLoopCommandEngine?.setABLoop(start: start, end: end)
     }
 
     func cycleAspectOverride() {
@@ -2311,7 +2291,7 @@ final class MpvPlayerController: ObservableObject {
 
     private func applyAudioOutputVolume() {
         let outputVolume = effectiveMusicVolume
-        audioPlayer?.volume = outputVolume
+        musicPlaybackEngine?.setVolume(outputVolume)
         audioLocalMirrorPlayer?.volume = outputVolume
         audioRouteProxyPlayer?.volume = audioRouteProxyIsActive ? outputVolume : 0
     }
@@ -2320,7 +2300,7 @@ final class MpvPlayerController: ObservableObject {
         guard playbackGeneration == generation,
               item?.type == .music,
               let player = audioPlayer else { return }
-        player.isMuted = false
+        musicPlaybackEngine?.setMuted(false)
         applyAudioOutputVolume()
         if keepLocalAudioWithAirPlay {
             syncAudioLocalMirrorPlayback()
@@ -2332,7 +2312,7 @@ final class MpvPlayerController: ObservableObject {
         }
         guard shouldPlay, player.currentItem != nil else { return }
         if player.rate == 0 {
-            player.playImmediately(atRate: playbackRate)
+            musicPlaybackEngine?.playImmediately(atRate: playbackRate)
         }
         isPlaying = true
     }
@@ -2441,7 +2421,7 @@ final class MpvPlayerController: ObservableObject {
                         self.reissuePendingSeekIfNeeded(
                             observedTime: actualTime,
                             generation: generation,
-                            audioPlayer: audioPlayer
+                            musicPlaybackEngine: self.musicPlaybackEngine
                         )
                     }
                 } else if let libMpvClient = self.libMpvClient,
@@ -2551,7 +2531,7 @@ final class MpvPlayerController: ObservableObject {
     private func reissuePendingSeekIfNeeded(
         observedTime: Double,
         generation: Int,
-        audioPlayer: AVPlayer? = nil,
+        musicPlaybackEngine: MusicPlaybackEngine? = nil,
         videoPlaybackEngine: VideoPlaybackEngine? = nil
     ) {
         guard let intent = PlaybackSeekCommandPolicy.reissueIntent(
@@ -2563,12 +2543,8 @@ final class MpvPlayerController: ObservableObject {
         ) else { return }
         pendingTimelineSeek = intent.pending
 
-        if let audioPlayer {
-            audioPlayer.seek(
-                to: CMTime(seconds: intent.targetTime, preferredTimescale: 600),
-                toleranceBefore: .zero,
-                toleranceAfter: .zero
-            )
+        if let musicPlaybackEngine {
+            musicPlaybackEngine.seek(to: intent.targetTime) { _ in }
         } else if let videoPlaybackEngine {
             try? videoPlaybackEngine.seek(toMpvTime: mpvTimelineTime(for: intent.targetTime), precision: .exact)
         }
@@ -2696,10 +2672,8 @@ final class MpvPlayerController: ObservableObject {
     }
 
     func enableAutoSubtitle() {
-        if let libMpvClient {
-            try? libMpvClient.command(["set", "sub-auto", "fuzzy"])
-            try? libMpvClient.command(["rescan_external_files"])
-            try? libMpvClient.command(["set", "sub-visibility", "yes"])
+        if let videoTrackSelectionEngine {
+            videoTrackSelectionEngine.enableAutoSubtitle()
             subtitleAutoLoadEnabled = true
             scheduleVideoSnapshotRead(forceTrackRefresh: true)
             return
@@ -2707,9 +2681,8 @@ final class MpvPlayerController: ObservableObject {
     }
 
     func disableSubtitle() {
-        if let libMpvClient {
-            try? libMpvClient.command(["set", "sub-visibility", "no"])
-            try? libMpvClient.command(["set", "sid", "no"])
+        if let libMpvClient, let videoTrackSelectionEngine {
+            videoTrackSelectionEngine.disableSubtitle()
             didApplyTrackPreference = true
             if let item { TrackPreferenceStore.setSubtitle(.off, for: item) }
             markPrimarySubtitleSelection(nil)
@@ -2719,9 +2692,8 @@ final class MpvPlayerController: ObservableObject {
     }
 
     func toggleSubtitleVisibility() {
-        if let libMpvClient {
-            let visible = libMpvClient.getFlag("sub-visibility") ?? true
-            libMpvClient.setFlag("sub-visibility", !visible)
+        if let videoTrackSelectionEngine {
+            videoTrackSelectionEngine.toggleSubtitleVisibility()
             return
         }
     }
@@ -2732,9 +2704,8 @@ final class MpvPlayerController: ObservableObject {
     }
 
     func cycleSubtitle() {
-        if let libMpvClient {
-            try? libMpvClient.command(["set", "sub-visibility", "yes"])
-            try? libMpvClient.command(["cycle", "sub"])
+        if let videoTrackSelectionEngine {
+            videoTrackSelectionEngine.cycleSubtitle()
             scheduleVideoSnapshotRead(forceTrackRefresh: true)
             return
         }
@@ -2742,9 +2713,8 @@ final class MpvPlayerController: ObservableObject {
 
     func addExternalSubtitle(path: String?) {
         guard let path else { return }
-        if let libMpvClient {
-            try? libMpvClient.command(["sub-add", path, "select"])
-            try? libMpvClient.command(["set", "sub-visibility", "yes"])
+        if let videoTrackSelectionEngine {
+            videoTrackSelectionEngine.addExternalSubtitle(path: path)
             subtitleAutoLoadEnabled = true
             scheduleVideoSnapshotRead(forceTrackRefresh: true)
             return
@@ -2774,9 +2744,8 @@ final class MpvPlayerController: ObservableObject {
     }
 
     func selectSubtitleTrack(_ id: Int) {
-        if let libMpvClient {
-            try? libMpvClient.command(["set", "sid", "\(id)"])
-            try? libMpvClient.command(["set", "sub-visibility", "yes"])
+        if let libMpvClient, let videoTrackSelectionEngine {
+            videoTrackSelectionEngine.selectSubtitleTrack(id)
             didApplyTrackPreference = true
             if let item, let language = subtitleTracks.first(where: { $0.id == id })?.language {
                 TrackPreferenceStore.setSubtitle(.language(language), for: item)
@@ -2789,56 +2758,42 @@ final class MpvPlayerController: ObservableObject {
 
     /// 选择第二字幕轨道（mpv `secondary-sid`，双语对照），nil 表示关闭。
     func selectSecondarySubtitleTrack(_ id: Int?) {
-        guard let libMpvClient else { return }
-        if let id {
-            try? libMpvClient.command(["set", "secondary-sid", "\(id)"])
-            try? libMpvClient.command(["set", "secondary-sub-visibility", "yes"])
-        } else {
-            try? libMpvClient.command(["set", "secondary-sid", "no"])
-        }
+        guard let libMpvClient, let videoTrackSelectionEngine else { return }
+        videoTrackSelectionEngine.selectSecondarySubtitleTrack(id)
         markSecondarySubtitleSelection(id)
         scheduleDeferredTrackListRefresh(from: libMpvClient)
     }
 
     /// 刷新音频输出设备列表与当前选中设备（mpv `audio-device-list` / `audio-device`）。
     func refreshAudioDevices() {
-        guard let libMpvClient else {
+        guard let videoAudioDeviceReader else {
             audioDevices = []
             return
         }
-        selectedAudioDeviceName = libMpvClient.getString("audio-device") ?? "auto"
-        guard let json = libMpvClient.getString("audio-device-list"),
-              let data = json.data(using: .utf8),
-              let entries = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
-            audioDevices = []
-            return
-        }
-        let devices = entries.compactMap { entry -> MpvAudioDevice? in
-            guard let name = entry["name"] as? String else { return nil }
-            return MpvAudioDevice(name: name, deviceDescription: (entry["description"] as? String) ?? "")
-        }
-        if audioDevices != devices {
-            audioDevices = devices
+        let snapshot = videoAudioDeviceReader.readSnapshot()
+        selectedAudioDeviceName = snapshot.selectedDeviceName
+        if audioDevices != snapshot.devices {
+            audioDevices = snapshot.devices
         }
     }
 
     func selectAudioDevice(_ name: String) {
-        guard let libMpvClient else { return }
+        guard let videoTrackSelectionEngine else { return }
         selectedAudioDeviceName = name
-        libMpvClient.setString("audio-device", name)
+        videoTrackSelectionEngine.selectAudioDevice(name)
     }
 
     func cycleAudioTrack() {
-        if let libMpvClient {
-            try? libMpvClient.command(["cycle", "audio"])
+        if let videoTrackSelectionEngine {
+            videoTrackSelectionEngine.cycleAudioTrack()
             scheduleVideoSnapshotRead(forceTrackRefresh: true)
             return
         }
     }
 
     func selectDefaultAudioTrack() {
-        if let libMpvClient {
-            try? libMpvClient.command(["set", "aid", "auto"])
+        if let libMpvClient, let videoTrackSelectionEngine {
+            videoTrackSelectionEngine.selectDefaultAudioTrack()
             markAudioTrackSelection(nil)
             scheduleDeferredTrackListRefresh(from: libMpvClient)
             return
@@ -2846,8 +2801,8 @@ final class MpvPlayerController: ObservableObject {
     }
 
     func selectAudioTrack(_ id: Int) {
-        if let libMpvClient {
-            try? libMpvClient.command(["set", "aid", "\(id)"])
+        if let libMpvClient, let videoTrackSelectionEngine {
+            videoTrackSelectionEngine.selectAudioTrack(id)
             didApplyTrackPreference = true
             if let item, let language = audioTracks.first(where: { $0.id == id })?.language {
                 TrackPreferenceStore.setAudioLanguage(language, for: item)
@@ -2866,19 +2821,18 @@ final class MpvPlayerController: ObservableObject {
     }
 
     func stepFrame(backward: Bool) {
-        guard let libMpvClient else { return }
-        try? libMpvClient.command([backward ? "frame-back-step" : "frame-step"])
+        videoFrameCommandEngine?.stepFrame(backward: backward)
     }
 
     func captureCurrentVideoFrame(title: String, mode: VideoScreenshotMode) throws -> URL {
-        guard let libMpvClient else {
+        guard let videoFrameCommandEngine else {
             throw PlayerScreenshotError.unavailable
         }
         let folder = try Self.screenshotDirectory()
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let targetURL = folder.appendingPathComponent(Self.screenshotFilename(title: title))
         do {
-            try libMpvClient.command(["screenshot-to-file", targetURL.path, mode.mpvArgument])
+            try videoFrameCommandEngine.captureCurrentFrame(to: targetURL, mode: mode)
             return targetURL
         } catch {
             // vo=libmpv 渲染 API 未开 advanced-control 时 screenshot 命令会报不支持；
@@ -2903,8 +2857,8 @@ final class MpvPlayerController: ObservableObject {
             duration: duration > 0 ? duration : nil,
             reloadLibrary: shouldReloadLibrary
         )
-        if let audioPlayer {
-            audioPlayer.pause()
+        if audioPlayer != nil {
+            musicPlaybackEngine?.pause()
             audioLocalMirrorPlayer?.pause()
             audioRouteProxyPlayer?.pause()
             isPlaying = false
@@ -2995,14 +2949,19 @@ final class MpvPlayerController: ObservableObject {
         audioRouteRefreshTask = nil
         stopAudioLocalMirror()
         clearAudioRouteProxy()
-        audioPlayer?.pause()
+        musicPlaybackEngine?.pause()
         audioPlayer = nil
+        musicPlaybackEngine = nil
         clearVideoRouteProxy()
         stopMpvSnapshotReader()
         videoPlaybackEngine?.stopPlayback()
         // 必须在 libMpvClient 释放（连带释放渲染上下文）之前排空 Metal 独立渲染队列，
         // 否则队列里还在跑的渲染调用可能访问已释放的上下文（见 installRenderHandle 文档）。
         renderView?.installRenderHandle(nil)
+        videoAudioDeviceReader = nil
+        videoLoopCommandEngine = nil
+        videoFrameCommandEngine = nil
+        videoTrackSelectionEngine = nil
         videoPlaybackEngine = nil
         libMpvClient = nil
         isPlaying = false
@@ -3055,12 +3014,17 @@ final class MpvPlayerController: ObservableObject {
         audioRouteRefreshTask = nil
         stopAudioLocalMirror()
         clearAudioRouteProxy()
-        audioPlayer?.pause()
+        musicPlaybackEngine?.pause()
         audioPlayer = nil
+        musicPlaybackEngine = nil
         clearVideoRouteProxy()
         stopMpvSnapshotReader()
         // 同上：先排空 Metal 独立渲染队列再释放 libMpvClient。
         renderView?.installRenderHandle(nil)
+        videoAudioDeviceReader = nil
+        videoLoopCommandEngine = nil
+        videoFrameCommandEngine = nil
+        videoTrackSelectionEngine = nil
         videoPlaybackEngine = nil
         libMpvClient = nil
         isPreparing = false
@@ -3511,13 +3475,14 @@ final class MpvPlayerController: ObservableObject {
     private func applyTrackPreferenceIfNeeded(client: LibMpvClient) {
         guard !didApplyTrackPreference, let item else { return }
         guard !audioTracks.isEmpty || !subtitleTracks.isEmpty else { return }
+        guard let videoTrackSelectionEngine else { return }
         didApplyTrackPreference = true
         var didIssueTrackCommand = false
 
         if let language = TrackPreferenceStore.audioLanguage(for: item),
            let track = TrackLanguageMatcher.bestTrack(in: audioTracks, matching: language),
            !track.isSelected {
-            try? client.command(["set", "aid", "\(track.id)"])
+            videoTrackSelectionEngine.selectAudioTrack(track.id)
             markAudioTrackSelection(track.id)
             didIssueTrackCommand = true
         }
@@ -3525,23 +3490,20 @@ final class MpvPlayerController: ObservableObject {
         if let preference = TrackPreferenceStore.subtitle(for: item) {
             switch preference {
             case .off:
-                try? client.command(["set", "sub-visibility", "no"])
-                try? client.command(["set", "sid", "no"])
+                videoTrackSelectionEngine.disableSubtitle()
                 markPrimarySubtitleSelection(nil)
                 didIssueTrackCommand = true
             case .language(let language):
                 if let track = TrackLanguageMatcher.bestTrack(in: subtitleTracks, matching: language),
                    !track.isSelected {
-                    try? client.command(["set", "sid", "\(track.id)"])
-                    try? client.command(["set", "sub-visibility", "yes"])
+                    videoTrackSelectionEngine.selectSubtitleTrack(track.id)
                     markPrimarySubtitleSelection(track.id)
                     didIssueTrackCommand = true
                 }
             }
         } else if let track = TrackLanguageMatcher.bestTrack(in: subtitleTracks, matching: preferredSubtitleLanguage),
                   !track.isSelected {
-            try? client.command(["set", "sid", "\(track.id)"])
-            try? client.command(["set", "sub-visibility", "yes"])
+            videoTrackSelectionEngine.selectSubtitleTrack(track.id)
             markPrimarySubtitleSelection(track.id)
             didIssueTrackCommand = true
         }
