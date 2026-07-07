@@ -89,6 +89,16 @@ final class ProgressPublishPolicyTests: XCTestCase {
         XCTAssertTrue(policy.shouldPublish(1, now: baseDate))
     }
 
+    func testFractionalProgressTreatsNonFiniteValuesAsZeroWithoutPoisoningState() {
+        var policy = FractionalProgressPublishPolicy(minimumInterval: 1, minimumProgressStep: 0.01)
+
+        XCTAssertEqual(FractionalProgressPublishPolicy.clampedProgress(.nan), 0)
+        XCTAssertEqual(FractionalProgressPublishPolicy.clampedProgress(.infinity), 0)
+        XCTAssertEqual(FractionalProgressPublishPolicy.clampedProgress(-.infinity), 0)
+        XCTAssertTrue(policy.shouldPublish(.nan, now: baseDate))
+        XCTAssertTrue(policy.shouldPublish(0.02, now: baseDate.addingTimeInterval(0.01)))
+    }
+
     func testFractionalProgressResetAllowsNextValueAsInitialPublish() {
         var policy = FractionalProgressPublishPolicy()
 

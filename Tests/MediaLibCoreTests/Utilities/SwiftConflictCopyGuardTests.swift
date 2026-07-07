@@ -71,6 +71,10 @@ final class SwiftConflictCopyGuardTests: XCTestCase {
     }
 
     private func runGuard(root: URL) throws -> (status: Int32, stdout: String, stderr: String) {
+        guard FileManager.default.isReadableFile(atPath: scriptURL.path) else {
+            throw XCTSkip("Swift conflict-copy guard script is not available in this test environment.")
+        }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = [scriptURL.path, root.path]

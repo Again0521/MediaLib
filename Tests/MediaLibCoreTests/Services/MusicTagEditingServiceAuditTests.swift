@@ -168,7 +168,10 @@ final class MusicTagEditingServiceAuditTests: XCTestCase {
         let inputURL = directory.appendingPathComponent("song.mp3")
         try Data("original-audio".utf8).write(to: inputURL)
 
-        let misleadingArtworkURL = URL(fileURLWithPath: "HTTP://assets.example/cover.jpg")
+        let misleadingArtworkURL = directory
+            .appendingPathComponent("HTTP:", isDirectory: true)
+            .appendingPathComponent("assets.example", isDirectory: true)
+            .appendingPathComponent("cover.jpg")
         try FileManager.default.createDirectory(
             at: misleadingArtworkURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
