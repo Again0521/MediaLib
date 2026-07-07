@@ -72,6 +72,27 @@ final class AppSettingsSecretStorageTests: XCTestCase {
         XCTAssertEqual(storedSecrets["traktRefreshToken"], "trakt-refresh")
     }
 
+    func testAsyncSaveReturnsFalseAndDoesNotWriteStrippedBlobWhenSecretPersistenceFails() async throws {
+        struct TestSecretWriteError: Error {}
+
+        let failingSecretStore = SecretStore(
+            directory: tempDirectory,
+            io: SecretStore.IO(
+                read: { _ in Data("{}".utf8) },
+                write: { _, _ in throw TestSecretWriteError() }
+            )
+        )
+        let store = AppSettingsStore(defaults: defaults, secretStore: failingSecretStore)
+        var settings = AppSettings()
+        settings.traktAccessToken = "async-token-that-must-not-be-lost"
+        settings.tmdbLanguage = "ko-KR"
+
+        let saved = await store.saveAsync(settings)
+
+        XCTAssertFalse(saved)
+        XCTAssertNil(defaults.data(forKey: blobKey))
+    }
+
     func testAsyncLoadAppliesStoredSecretsWhenSettingsBlobIsMissing() async {
         let secretStore = SecretStore(directory: tempDirectory)
         await secretStore.saveAsync([

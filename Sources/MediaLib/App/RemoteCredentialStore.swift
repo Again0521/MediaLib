@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import MediaLibCore
 
 struct RemoteSourceCredential: Codable {
@@ -95,6 +96,11 @@ final class RemoteCredentialStore {
             throw NSError(domain: "MediaLib.RemoteCredentialStore", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法定位凭据存储目录"])
         }
         try io.write(data, url)
+        if let legacyURL = legacyFileURL(for: sourceID, directoryOverride: directoryOverride),
+           legacyURL.standardizedFileURL != url.standardizedFileURL,
+           FileManager.default.fileExists(atPath: legacyURL.path) {
+            try? io.remove(legacyURL)
+        }
     }
 
     private static func load(sourceID: String, directoryOverride: URL?, io: IO) throws -> RemoteSourceCredential? {
@@ -102,8 +108,11 @@ final class RemoteCredentialStore {
         // 每次更新变化而弹出系统钥匙串密码框——这正是"更新后首次打开要输密码"的根因，故彻底不再读取。
         // 旧用户更新后需在设置里重新登录一次 Emby/NAS（一次性，且不会弹任何系统密码框）。
         if let url = io.fileURL(sourceID, directoryOverride),
-           let data = try? io.read(url),
-           let credential = try? JSONDecoder().decode(RemoteSourceCredential.self, from: data) {
+           let credential = readCredential(at: url, io: io) {
+            return credential
+        }
+        if let url = legacyFileURL(for: sourceID, directoryOverride: directoryOverride),
+           let credential = readCredential(at: url, io: io) {
             return credential
         }
         return nil
@@ -111,6 +120,10 @@ final class RemoteCredentialStore {
 
     private static func delete(sourceID: String, directoryOverride: URL?, io: IO) {
         if let url = io.fileURL(sourceID, directoryOverride) {
+            try? io.remove(url)
+        }
+        if let url = legacyFileURL(for: sourceID, directoryOverride: directoryOverride),
+           FileManager.default.fileExists(atPath: url.path) {
             try? io.remove(url)
         }
     }
@@ -135,9 +148,37 @@ final class RemoteCredentialStore {
     }
 
     private static func fileURL(for sourceID: String, directoryOverride: URL?) -> URL? {
+        directory(directoryOverride: directoryOverride)?.appendingPathComponent(fileName(for: sourceID))
+    }
+
+    private static func legacyFileURL(for sourceID: String, directoryOverride: URL?) -> URL? {
+        directory(directoryOverride: directoryOverride)?.appendingPathComponent(legacyFileName(for: sourceID))
+    }
+
+    private static func readCredential(at url: URL, io: IO) -> RemoteSourceCredential? {
+        guard let data = try? io.read(url),
+              let credential = try? JSONDecoder().decode(RemoteSourceCredential.self, from: data) else {
+            return nil
+        }
+        return credential
+    }
+
+    private static func fileName(for sourceID: String) -> String {
+        let prefix = sanitizedSourceIDPrefix(sourceID)
+        let digest = SHA256.hash(data: Data(sourceID.utf8))
+        let suffix = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "\(prefix)-\(suffix).json"
+    }
+
+    private static func legacyFileName(for sourceID: String) -> String {
         let safe = sourceID.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : "_" }
-        let name = String(safe)
-        return directory(directoryOverride: directoryOverride)?.appendingPathComponent("\(name).json")
+        return "\(String(safe)).json"
+    }
+
+    private static func sanitizedSourceIDPrefix(_ sourceID: String) -> String {
+        let safe = sourceID.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : "_" }
+        let prefix = String(String(safe).prefix(48)).trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        return prefix.isEmpty ? "source" : prefix
     }
 
 }

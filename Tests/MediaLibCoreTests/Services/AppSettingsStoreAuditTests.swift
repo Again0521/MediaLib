@@ -92,4 +92,54 @@ final class AppSettingsStoreAuditTests: XCTestCase {
         let newBlob = try JSONDecoder().decode(AppSettings.self, from: newBlobData)
         XCTAssertNil(newBlob.tmdbAPIKey, "旧版遗留明文必须在首次 load 时被自动迁移剥离并清零！")
     }
+
+    func testSaveReturnsFalseAndDoesNotWriteStrippedBlobWhenSecretPersistenceFails() throws {
+        struct TestSecretWriteError: Error {}
+
+        let failingSecretStore = SecretStore(
+            directory: tempDir,
+            io: SecretStore.IO(
+                read: { _ in Data("{}".utf8) },
+                write: { _, _ in throw TestSecretWriteError() }
+            )
+        )
+        let store = AppSettingsStore(defaults: defaults, secretStore: failingSecretStore)
+        var settings = AppSettings()
+        settings.tmdbAPIKey = "tmdb-key-that-must-not-be-lost"
+        settings.tmdbLanguage = "en-US"
+
+        let saved = store.save(settings)
+
+        XCTAssertFalse(saved)
+        XCTAssertNil(
+            defaults.data(forKey: "MediaLib.AppSettings"),
+            "SecretStore 写失败且存在敏感字段时，不应继续写入已剥离 secret 的 blob，避免把唯一凭据来源抹掉。"
+        )
+    }
+
+    func testFailedLegacySecretMigrationKeepsPlaintextBlobForRetryInsteadOfScrubbingIt() throws {
+        struct TestSecretWriteError: Error {}
+
+        var legacySettings = AppSettings()
+        legacySettings.tmdbAPIKey = "legacy-key-needs-retry"
+        legacySettings.tmdbLanguage = "ja-JP"
+        let legacyData = try JSONEncoder().encode(legacySettings)
+        defaults.set(legacyData, forKey: "MediaLib.AppSettings")
+        let failingSecretStore = SecretStore(
+            directory: tempDir,
+            io: SecretStore.IO(
+                read: { _ in Data("{}".utf8) },
+                write: { _, _ in throw TestSecretWriteError() }
+            )
+        )
+        let store = AppSettingsStore(defaults: defaults, secretStore: failingSecretStore)
+
+        let loaded = store.load()
+
+        XCTAssertEqual(loaded.tmdbAPIKey, "legacy-key-needs-retry")
+        let blobData = try XCTUnwrap(defaults.data(forKey: "MediaLib.AppSettings"))
+        let retriableBlob = try JSONDecoder().decode(AppSettings.self, from: blobData)
+        XCTAssertEqual(retriableBlob.tmdbAPIKey, "legacy-key-needs-retry")
+        XCTAssertEqual(retriableBlob.tmdbLanguage, "ja-JP")
+    }
 }

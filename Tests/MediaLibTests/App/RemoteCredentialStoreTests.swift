@@ -28,7 +28,8 @@ final class RemoteCredentialStoreTests: XCTestCase {
 
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
         XCTAssertEqual(files.count, 1)
-        XCTAssertEqual(files[0].lastPathComponent, "server_one_with_unsafe_chars.json")
+        XCTAssertTrue(files[0].lastPathComponent.hasPrefix("server_one_with_unsafe_chars-"))
+        XCTAssertTrue(files[0].lastPathComponent.hasSuffix(".json"))
         let attributes = try FileManager.default.attributesOfItem(atPath: files[0].path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
 
@@ -79,6 +80,64 @@ final class RemoteCredentialStoreTests: XCTestCase {
         XCTAssertEqual(files.count, count)
     }
 
+    func testSourceIDsWithSameLegacySanitizedNameUseDistinctCredentialFiles() async throws {
+        let directory = try makeTemporaryDirectory()
+        let store = RemoteCredentialStore(directory: directory)
+        let colonCredential = RemoteSourceCredential(
+            kind: "emby",
+            serverURL: "https://colon.example.test",
+            username: nil,
+            password: nil,
+            accessToken: "colon-token",
+            userID: nil
+        )
+        let slashCredential = RemoteSourceCredential(
+            kind: "emby",
+            serverURL: "https://slash.example.test",
+            username: nil,
+            password: nil,
+            accessToken: "slash-token",
+            userID: nil
+        )
+
+        try await store.saveAsync(colonCredential, sourceID: "server:a")
+        try await store.saveAsync(slashCredential, sourceID: "server/a")
+
+        let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        XCTAssertEqual(files.count, 2)
+        XCTAssertEqual(Set(files).count, 2)
+        XCTAssertFalse(files.contains("server_a.json"))
+        let loadedColonCredential = try await store.loadAsync(sourceID: "server:a")
+        let loadedSlashCredential = try await store.loadAsync(sourceID: "server/a")
+        XCTAssertEqual(loadedColonCredential?.accessToken, "colon-token")
+        XCTAssertEqual(loadedSlashCredential?.accessToken, "slash-token")
+    }
+
+    func testLoadAndDeleteRemainCompatibleWithLegacySanitizedFilename() async throws {
+        let directory = try makeTemporaryDirectory()
+        let store = RemoteCredentialStore(directory: directory)
+        let sourceID = "legacy:source/path"
+        let legacyURL = directory.appendingPathComponent("legacy_source_path.json")
+        let legacyCredential = RemoteSourceCredential(
+            kind: "plex",
+            serverURL: "https://legacy.example.test",
+            username: "legacy-user",
+            password: "legacy-password",
+            accessToken: "legacy-token",
+            userID: "legacy-user-id"
+        )
+        try JSONEncoder().encode(legacyCredential).write(to: legacyURL, options: .atomic)
+
+        let loaded = try await store.loadAsync(sourceID: sourceID)
+
+        XCTAssertEqual(loaded?.serverURL, "https://legacy.example.test")
+        XCTAssertEqual(loaded?.accessToken, "legacy-token")
+
+        await store.deleteAsync(sourceID: sourceID)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyURL.path))
+    }
+
     func testAsyncLoadReturnsNilForCorruptedJSONAndDeleteIsIdempotent() async throws {
         let directory = try makeTemporaryDirectory()
         let store = RemoteCredentialStore(directory: directory)
@@ -94,7 +153,10 @@ final class RemoteCredentialStoreTests: XCTestCase {
             ),
             sourceID: sourceID
         )
-        let fileURL = directory.appendingPathComponent("corrupted.json")
+        let fileURL = try XCTUnwrap(FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).first)
         try Data("{\"serverURL\":".utf8).write(to: fileURL)
 
         let corruptedCredential = try await store.loadAsync(sourceID: sourceID)

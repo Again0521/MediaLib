@@ -75,28 +75,36 @@ public final class AppSettingsStore {
         return settings
     }
 
-    public func save(_ settings: AppSettings) {
+    @discardableResult
+    public func save(_ settings: AppSettings) -> Bool {
         // 1) secret → 独立 0600 文件
-        secretStore.save(collectSecrets(from: settings))
+        let secrets = collectSecrets(from: settings)
+        let secretsSaved = secretStore.save(secrets)
+        guard secretsSaved || secrets.isEmpty else { return false }
         // 2) 去除 secret 的副本 → UserDefaults（不再有明文密钥落入 prefs）
         var stripped = settings
         for field in Self.secretFields {
             stripped[keyPath: field.keyPath] = nil
         }
-        guard let data = try? JSONEncoder().encode(stripped) else { return }
+        guard let data = try? JSONEncoder().encode(stripped) else { return false }
         defaults.set(data, forKey: key)
+        return secretsSaved
     }
 
-    public func saveAsync(_ settings: AppSettings) async {
+    @discardableResult
+    public func saveAsync(_ settings: AppSettings) async -> Bool {
         // 1) secret → 独立 0600 文件
-        await secretStore.saveAsync(collectSecrets(from: settings))
+        let secrets = collectSecrets(from: settings)
+        let secretsSaved = await secretStore.saveAsync(secrets)
+        guard secretsSaved || secrets.isEmpty else { return false }
         // 2) 去除 secret 的副本 → UserDefaults（不再有明文密钥落入 prefs）
         var stripped = settings
         for field in Self.secretFields {
             stripped[keyPath: field.keyPath] = nil
         }
-        guard let data = try? JSONEncoder().encode(stripped) else { return }
+        guard let data = try? JSONEncoder().encode(stripped) else { return false }
         defaults.set(data, forKey: key)
+        return secretsSaved
     }
 
     // MARK: - Helpers
