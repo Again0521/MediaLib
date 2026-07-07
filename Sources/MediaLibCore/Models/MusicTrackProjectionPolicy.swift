@@ -1,6 +1,16 @@
 import Foundation
 
 public enum MusicTrackProjectionPolicy {
+    private static func normalizedProgress(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
+    }
+
+    private static func normalizedUserRating(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return value
+    }
+
     public static func uniquePlayableMusicTracks(_ tracks: [MediaItem]) -> [MediaItem] {
         var seen = Set<String>()
         var result: [MediaItem] = []
@@ -38,14 +48,20 @@ public enum MusicTrackProjectionPolicy {
         limit: Int
     ) -> [MediaItem] {
         Array(tracks
-            .filter { $0.lastPlayedAt != nil || ($0.playProgress > 0 && $0.playProgress < 0.98) }
+            .filter {
+                let progress = normalizedProgress($0.playProgress)
+                return $0.lastPlayedAt != nil || (progress > 0 && progress < 0.98)
+            }
             .sorted { ($0.lastPlayedAt ?? $0.updatedAt) > ($1.lastPlayedAt ?? $1.updatedAt) }
             .prefix(max(limit, 0)))
     }
 
     public static func signalTracks(_ tracks: [MediaItem]) -> [MediaItem] {
         tracks.filter {
-            ($0.playCount ?? 0) > 0 || $0.lastPlayedAt != nil || $0.favorite || ($0.userRating ?? 0) > 0
+            ($0.playCount ?? 0) > 0 ||
+                $0.lastPlayedAt != nil ||
+                $0.favorite ||
+                (normalizedUserRating($0.userRating) ?? 0) > 0
         }
     }
 }

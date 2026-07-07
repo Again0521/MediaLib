@@ -194,6 +194,21 @@ public struct ProfileMediaState: Identifiable, Codable, Hashable, Sendable {
 
     public var id: String { "\(profileID)-\(mediaID)" }
 
+    private static func normalizedPosition(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return max(value, 0)
+    }
+
+    private static func normalizedProgress(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
+    }
+
+    private static func normalizedUserRating(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value > 0, value <= 5 else { return nil }
+        return value
+    }
+
     public init(
         profileID: String,
         mediaID: String,
@@ -210,12 +225,12 @@ public struct ProfileMediaState: Identifiable, Codable, Hashable, Sendable {
         self.profileID = profileID
         self.mediaID = mediaID
         self.playCount = max(playCount, 0)
-        self.playPosition = max(playPosition, 0)
-        self.playProgress = min(max(playProgress, 0), 1)
+        self.playPosition = Self.normalizedPosition(playPosition)
+        self.playProgress = Self.normalizedProgress(playProgress)
         self.watched = watched
         self.favorite = favorite
         self.watchlist = watchlist
-        self.userRating = userRating
+        self.userRating = Self.normalizedUserRating(userRating)
         self.lastPlayedAt = lastPlayedAt
         self.updatedAt = updatedAt
     }

@@ -27,7 +27,7 @@ public final class MusicLibraryProjectionRepository {
                 trackCount: row.int(5) ?? 0,
                 favoriteCount: row.int(6) ?? 0,
                 remoteCount: row.int(7) ?? 0,
-                playCount: row.int(8) ?? 0,
+                playCount: Self.normalizedPlayCount(row.int(8)),
                 totalDuration: row.double(9),
                 coverPath: row.string(10),
                 latestUpdatedAt: row.date(11) ?? .distantPast,
@@ -51,7 +51,7 @@ public final class MusicLibraryProjectionRepository {
                 albumCount: row.int(4) ?? 0,
                 favoriteCount: row.int(5) ?? 0,
                 remoteCount: row.int(6) ?? 0,
-                playCount: row.int(7) ?? 0,
+                playCount: Self.normalizedPlayCount(row.int(7)),
                 coverPath: row.string(8),
                 latestUpdatedAt: row.date(9) ?? .distantPast,
                 trackIDs: []
@@ -535,7 +535,7 @@ public final class MusicLibraryProjectionRepository {
             trackCount: tracks.count,
             favoriteCount: tracks.filter(\.favorite).count,
             remoteCount: tracks.filter(\.isRemoteResource).count,
-            playCount: tracks.reduce(0) { $0 + ($1.playCount ?? 0) },
+            playCount: playCountSum(tracks),
             totalDuration: durationSum(tracks),
             coverPath: tracks.first(where: { $0.posterPath?.isEmpty == false })?.posterPath,
             latestUpdatedAt: tracks.map(\.updatedAt).max() ?? rebuiltAt,
@@ -557,7 +557,7 @@ public final class MusicLibraryProjectionRepository {
             albumCount: albumKeys.count,
             favoriteCount: tracks.filter(\.favorite).count,
             remoteCount: tracks.filter(\.isRemoteResource).count,
-            playCount: tracks.reduce(0) { $0 + ($1.playCount ?? 0) },
+            playCount: playCountSum(tracks),
             coverPath: tracks.first(where: { $0.posterPath?.isEmpty == false })?.posterPath,
             latestUpdatedAt: tracks.map(\.updatedAt).max() ?? rebuiltAt,
             trackIDs: tracks.map(\.id)
@@ -578,9 +578,19 @@ public final class MusicLibraryProjectionRepository {
     }
 
     private static func durationSum(_ tracks: [MediaItem]) -> Double? {
-        let values = tracks.compactMap(\.duration).filter(\.isFinite)
+        let values = tracks.compactMap(\.duration).filter { $0.isFinite && $0 >= 0 }
         guard !values.isEmpty else { return nil }
         return values.reduce(0, +)
+    }
+
+    private static func playCountSum(_ tracks: [MediaItem]) -> Int {
+        tracks.reduce(0) { result, track in
+            result + normalizedPlayCount(track.playCount)
+        }
+    }
+
+    private static func normalizedPlayCount(_ playCount: Int?) -> Int {
+        max(playCount ?? 0, 0)
     }
 
     private static func albumID(for track: MediaItem) -> String {

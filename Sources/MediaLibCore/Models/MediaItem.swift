@@ -178,6 +178,9 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
     }
 
     public var hasPlaybackTrace: Bool {
-        lastPlayedAt != nil || playPosition > 0 || playProgress > 0 || watched
+        lastPlayedAt != nil ||
+            (playPosition.isFinite && playPosition > 0) ||
+            (playProgress.isFinite && playProgress > 0) ||
+            watched
     }
 }

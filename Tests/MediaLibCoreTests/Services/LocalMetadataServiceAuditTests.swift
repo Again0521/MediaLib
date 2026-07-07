@@ -93,6 +93,49 @@ final class LocalMetadataServiceAuditTests: XCTestCase {
         XCTAssertEqual(meta.overview, "plot 字段优先")
     }
 
+    func testBlankNFOFieldsAreIgnoredAndOverviewFallbackStillWorks() throws {
+        let nfoContent = """
+        <movie>
+            <title>   \n\t   </title>
+            <originaltitle>   </originaltitle>
+            <year>0</year>
+            <plot>   </plot>
+            <overview>overview fallback survives blank plot</overview>
+        </movie>
+        """
+        try nfoContent.write(to: tempDir.appendingPathComponent("movie.nfo"), atomically: true, encoding: .utf8)
+
+        let meta = service.metadata(
+            for: tempDir.appendingPathComponent("blank-fields.mp4"),
+            readNFO: true,
+            preferLocalArtwork: false
+        )
+
+        XCTAssertNil(meta.title)
+        XCTAssertNil(meta.originalTitle)
+        XCTAssertNil(meta.year)
+        XCTAssertEqual(meta.overview, "overview fallback survives blank plot")
+    }
+
+    func testNegativeNFOYearIsIgnored() throws {
+        let nfoContent = """
+        <movie>
+            <title>Negative Year</title>
+            <year>-2024</year>
+        </movie>
+        """
+        try nfoContent.write(to: tempDir.appendingPathComponent("movie.nfo"), atomically: true, encoding: .utf8)
+
+        let meta = service.metadata(
+            for: tempDir.appendingPathComponent("negative-year.mp4"),
+            readNFO: true,
+            preferLocalArtwork: false
+        )
+
+        XCTAssertEqual(meta.title, "Negative Year")
+        XCTAssertNil(meta.year)
+    }
+
     func testReadNFOFalseSkipsTextMetadataButStillHonorsLocalArtworkPreference() throws {
         try """
         <movie>

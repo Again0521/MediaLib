@@ -56,6 +56,44 @@ final class MusicLibraryProjectionRepositoryTests: XCTestCase {
         XCTAssertFalse(try projectionRepository.needsBackfill())
     }
 
+    func testRebuildIgnoresNegativeDurationsInAlbumTotals() async throws {
+        try mediaRepository.upsert(track(id: "valid", title: "Valid", artist: "A", album: "First", duration: 180))
+        try mediaRepository.upsert(track(id: "negative", title: "Negative", artist: "A", album: "First", duration: -90))
+
+        _ = try await projectionRepository.rebuildAll()
+
+        let snapshot = try projectionRepository.fetchSnapshot()
+        let album = try XCTUnwrap(snapshot.albums.first { $0.title == "First" })
+        XCTAssertEqual(album.totalDuration, 180)
+        XCTAssertEqual(album.trackCount, 2)
+    }
+
+    func testRebuildAndSnapshotNormalizeNegativePlayCounts() async throws {
+        try mediaRepository.upsert(track(id: "valid", title: "Valid", artist: "A", album: "First", playCount: 4))
+        try mediaRepository.upsert(track(id: "negative", title: "Negative", artist: "A", album: "First", playCount: 0))
+        try database.execute(
+            "UPDATE media_items SET play_count = ? WHERE id = ?",
+            bindings: [.int(-9), .text("negative")]
+        )
+
+        _ = try await projectionRepository.rebuildAll()
+
+        var snapshot = try projectionRepository.fetchSnapshot()
+        var album = try XCTUnwrap(snapshot.albums.first { $0.title == "First" })
+        var artist = try XCTUnwrap(snapshot.artists.first { $0.name == "A" })
+        XCTAssertEqual(album.playCount, 4)
+        XCTAssertEqual(artist.playCount, 4)
+
+        try database.execute("UPDATE music_album_index SET play_count = ?", bindings: [.int(-3)])
+        try database.execute("UPDATE music_artist_index SET play_count = ?", bindings: [.int(-5)])
+
+        snapshot = try projectionRepository.fetchSnapshot()
+        album = try XCTUnwrap(snapshot.albums.first { $0.title == "First" })
+        artist = try XCTUnwrap(snapshot.artists.first { $0.name == "A" })
+        XCTAssertEqual(album.playCount, 0)
+        XCTAssertEqual(artist.playCount, 0)
+    }
+
     func testRebuildMergesCaseAndDiacriticVariantsWithoutUniqueConstraintFailure() async throws {
         try mediaRepository.upsert(track(id: "song-1", title: "One", artist: "Beyonce", album: "Lemonade"))
         try mediaRepository.upsert(track(id: "song-2", title: "Two", artist: "Beyoncé", album: "LÉMONADE"))
@@ -144,7 +182,8 @@ final class MusicLibraryProjectionRepositoryTests: XCTestCase {
         album: String?,
         trackNumber: Int? = nil,
         favorite: Bool = false,
-        playCount: Int = 0
+        playCount: Int = 0,
+        duration: Double = 180
     ) -> MediaItem {
         MediaItem(
             id: id,
@@ -156,7 +195,7 @@ final class MusicLibraryProjectionRepositoryTests: XCTestCase {
             posterPath: "/covers/\(id).jpg",
             sourcePath: "/music",
             filePath: "/music/\(id).mp3",
-            duration: 180,
+            duration: duration,
             playCount: playCount,
             favorite: favorite,
             metadataProvider: "Embedded"

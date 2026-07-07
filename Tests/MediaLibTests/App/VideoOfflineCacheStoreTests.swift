@@ -81,6 +81,83 @@ final class VideoOfflineCacheStoreTests: XCTestCase {
         XCTAssertTrue(entries.isEmpty)
     }
 
+    func testCacheScopeRejectsSiblingPrefixAndStandardizedParentTraversal() throws {
+        let environment = try makeEnvironment()
+        let cacheDirectory = environment.cache.appendingPathComponent("VideoCache", isDirectory: true)
+        let insideURL = cacheDirectory.appendingPathComponent("movie.mp4")
+        let siblingPrefixURL = environment.cache
+            .appendingPathComponent("VideoCacheEvil", isDirectory: true)
+            .appendingPathComponent("movie.mp4")
+        let traversalURL = cacheDirectory
+            .appendingPathComponent("..", isDirectory: true)
+            .appendingPathComponent("outside.mp4")
+
+        XCTAssertTrue(VideoOfflineCacheStore.isFileURL(insideURL, containedIn: cacheDirectory))
+        XCTAssertFalse(VideoOfflineCacheStore.isFileURL(siblingPrefixURL, containedIn: cacheDirectory))
+        XCTAssertFalse(VideoOfflineCacheStore.isFileURL(traversalURL, containedIn: cacheDirectory))
+    }
+
+    func testUpsertRejectsOutOfScopeLocalPath() async throws {
+        let environment = try makeEnvironment()
+        let store = try makeStore(in: environment)
+        let outsideURL = environment.root
+            .appendingPathComponent("Outside", isDirectory: true)
+            .appendingPathComponent("external.mp4")
+        try FileManager.default.createDirectory(at: outsideURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([0x09]).write(to: outsideURL)
+
+        do {
+            try await store.upsertAsync(makeEntry(itemID: "outside", localPath: outsideURL.path, fileSize: 1))
+            XCTFail("Expected out-of-scope video cache entry to be rejected")
+        } catch VideoOfflineCacheStoreError.invalidCacheDirectory {
+            // Expected.
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outsideURL.path))
+        let entries = await store.allEntriesAsync()
+        XCTAssertTrue(entries.isEmpty)
+    }
+
+    func testRefreshPruningMissingFilesDropsOutOfScopeManifestEntryWithoutDeletingFile() async throws {
+        let environment = try makeEnvironment()
+        let outsideURL = environment.root
+            .appendingPathComponent("Outside", isDirectory: true)
+            .appendingPathComponent("manifest-external.mp4")
+        try FileManager.default.createDirectory(at: outsideURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([0x0A]).write(to: outsideURL)
+        let recorder = RecordingManifestIO(initialEntries: [
+            "outside": makeEntry(itemID: "outside", localPath: outsideURL.path, fileSize: 1)
+        ])
+        let store = try makeStore(in: environment, manifestIO: recorder.io())
+
+        let entries = try await store.refreshEntriesPruningMissingFilesAsync()
+
+        XCTAssertTrue(entries.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outsideURL.path))
+        XCTAssertEqual(recorder.writeSnapshots.last?.keys.sorted(), [])
+    }
+
+    func testRemoveAsyncDropsOutOfScopeManifestEntryWithoutDeletingExternalFile() async throws {
+        let environment = try makeEnvironment()
+        let outsideURL = environment.root
+            .appendingPathComponent("Outside", isDirectory: true)
+            .appendingPathComponent("remove-external.mp4")
+        try FileManager.default.createDirectory(at: outsideURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([0x0B]).write(to: outsideURL)
+        let recorder = RecordingManifestIO(initialEntries: [
+            "outside": makeEntry(itemID: "outside", localPath: outsideURL.path, fileSize: 1)
+        ])
+        let store = try makeStore(in: environment, manifestIO: recorder.io())
+
+        let removed = try await store.removeAsync(itemIDs: ["outside"])
+
+        XCTAssertEqual(removed.map(\.itemID), ["outside"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outsideURL.path))
+        let entries = await store.allEntriesAsync()
+        XCTAssertTrue(entries.isEmpty)
+        XCTAssertEqual(recorder.writeSnapshots.last?.keys.sorted(), [])
+    }
+
     func testRunMaintenanceAsyncPrunesUntrackedFilesAndOverLimitEntries() async throws {
         let environment = try makeEnvironment()
         let store = try makeStore(in: environment)

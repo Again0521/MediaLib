@@ -11,12 +11,16 @@ final class VideoSmartCollectionTests: XCTestCase {
         watchlist: Bool = false,
         watched: Bool = false,
         playProgress: Double = 0,
+        rating: Double? = nil,
+        userRating: Double? = nil,
         sourcePath: String? = nil,
         metadataProvider: String? = nil
     ) -> MediaItem {
         MediaItem(
             id: UUID().uuidString, type: type, title: "t",
             year: year,
+            rating: rating,
+            userRating: userRating,
             sourcePath: sourcePath,
             playProgress: playProgress,
             watched: watched, favorite: favorite, watchlist: watchlist,
@@ -80,6 +84,33 @@ final class VideoSmartCollectionTests: XCTestCase {
         XCTAssertFalse(collection.matches(item(playProgress: 0.95), watchedThreshold: 0.9))
     }
 
+    func testStateFiltersTreatNonFiniteProgressAsUnstarted() {
+        let watching = VideoSmartCollection(name: "正在观看", stateFilter: .watching)
+        let unwatched = VideoSmartCollection(name: "未观看", stateFilter: .unwatched)
+        let watched = VideoSmartCollection(name: "已观看", stateFilter: .watched)
+
+        for value in [Double.nan, .infinity, -.infinity] {
+            let candidate = item(playProgress: value)
+            XCTAssertFalse(watching.matches(candidate, watchedThreshold: 0.9))
+            XCTAssertTrue(unwatched.matches(candidate, watchedThreshold: 0.9))
+            XCTAssertFalse(watched.matches(candidate, watchedThreshold: 0.9))
+        }
+
+        XCTAssertTrue(watched.matches(item(watched: true, playProgress: .nan), watchedThreshold: 0.9))
+    }
+
+    func testStateFiltersUseDefaultThresholdWhenThresholdIsNonFinite() {
+        let unwatched = VideoSmartCollection(name: "未观看", stateFilter: .unwatched)
+        let watched = VideoSmartCollection(name: "已观看", stateFilter: .watched)
+
+        for threshold in [Double.nan, .infinity, -.infinity] {
+            XCTAssertTrue(watched.matches(item(playProgress: 0.95), watchedThreshold: threshold))
+            XCTAssertFalse(unwatched.matches(item(playProgress: 0.95), watchedThreshold: threshold))
+            XCTAssertTrue(unwatched.matches(item(playProgress: 0.5), watchedThreshold: threshold))
+            XCTAssertFalse(watched.matches(item(playProgress: 0.5), watchedThreshold: threshold))
+        }
+    }
+
     // MARK: - 年份规则
 
     func testYearRuleSince2020() {
@@ -109,6 +140,58 @@ final class VideoSmartCollectionTests: XCTestCase {
         XCTAssertTrue(collection.matches(item(year: 2021, favorite: false), watchedThreshold: 0.9))   // 仅年份
         XCTAssertTrue(collection.matches(item(year: 2019, favorite: true), watchedThreshold: 0.9))    // 仅喜欢
         XCTAssertFalse(collection.matches(item(year: 2019, favorite: false), watchedThreshold: 0.9))  // 都不满足
+    }
+
+    func testProviderRatingRulesTreatNonFiniteValuesAsUnrated() {
+        let unrated = VideoSmartCollection(
+            name: "暂无评分",
+            rules: VideoSmartCollectionRules(providerRating: .unrated)
+        )
+        let highRated = VideoSmartCollection(
+            name: "高分",
+            rules: VideoSmartCollectionRules(providerRating: .atLeastEight)
+        )
+        let lowRated = VideoSmartCollection(
+            name: "低分",
+            rules: VideoSmartCollectionRules(providerRating: .belowSix)
+        )
+
+        for value in [Double.nan, .infinity, -.infinity] {
+            let candidate = item(rating: value)
+            XCTAssertTrue(unrated.matches(candidate, watchedThreshold: 0.9))
+            XCTAssertFalse(highRated.matches(candidate, watchedThreshold: 0.9))
+            XCTAssertFalse(lowRated.matches(candidate, watchedThreshold: 0.9))
+        }
+
+        XCTAssertTrue(highRated.matches(item(rating: 8.1), watchedThreshold: 0.9))
+        XCTAssertTrue(lowRated.matches(item(rating: 5.9), watchedThreshold: 0.9))
+        XCTAssertFalse(unrated.matches(item(rating: 7.0), watchedThreshold: 0.9))
+    }
+
+    func testUserRatingRulesTreatNonFiniteValuesAsUnrated() {
+        let unrated = VideoSmartCollection(
+            name: "未评级",
+            rules: VideoSmartCollectionRules(userRating: .unrated)
+        )
+        let rated = VideoSmartCollection(
+            name: "已评级",
+            rules: VideoSmartCollectionRules(userRating: .rated)
+        )
+        let atLeastFour = VideoSmartCollection(
+            name: "四星以上",
+            rules: VideoSmartCollectionRules(userRating: .atLeastFour)
+        )
+
+        for value in [Double.nan, .infinity, -.infinity] {
+            let candidate = item(userRating: value)
+            XCTAssertTrue(unrated.matches(candidate, watchedThreshold: 0.9))
+            XCTAssertFalse(rated.matches(candidate, watchedThreshold: 0.9))
+            XCTAssertFalse(atLeastFour.matches(candidate, watchedThreshold: 0.9))
+        }
+
+        XCTAssertTrue(rated.matches(item(userRating: 4.0), watchedThreshold: 0.9))
+        XCTAssertTrue(atLeastFour.matches(item(userRating: 4.0), watchedThreshold: 0.9))
+        XCTAssertFalse(unrated.matches(item(userRating: 4.0), watchedThreshold: 0.9))
     }
 
     func testSourceRuleClassifiesRemoteSourcePathsCaseInsensitively() {

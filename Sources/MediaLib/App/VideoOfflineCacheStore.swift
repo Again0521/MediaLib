@@ -261,7 +261,9 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
 
     func entry(for itemID: String) -> VideoCacheEntry? {
         lock.withLock {
-            guard let entry = entries[itemID], fileManager.fileExists(atPath: entry.localPath) else { return nil }
+            guard let entry = entries[itemID],
+                  cacheScopedURL(for: entry) != nil,
+                  fileManager.fileExists(atPath: entry.localPath) else { return nil }
             return entry
         }
     }
@@ -275,6 +277,7 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
     func markAccessed(itemID: String, at date: Date = Date()) throws {
         try lock.withLock {
             guard var entry = entries[itemID],
+                  cacheScopedURL(for: entry) != nil,
                   fileManager.fileExists(atPath: entry.localPath) else { return }
             entry = VideoCacheEntry(
                 itemID: entry.itemID,
@@ -302,6 +305,9 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
 
     func upsert(_ entry: VideoCacheEntry) throws {
         try lock.withLock {
+            guard cacheScopedURL(for: entry) != nil else {
+                throw VideoOfflineCacheStoreError.invalidCacheDirectory
+            }
             entries[entry.itemID] = entry
             try saveLocked(entries)
         }
@@ -403,7 +409,8 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
 
     private func pruneMissingFilesLocked(_ input: [String: VideoCacheEntry]) -> [String: VideoCacheEntry] {
         input.filter { _, entry in
-            fileManager.fileExists(atPath: entry.localPath)
+            guard cacheScopedURL(for: entry) != nil else { return false }
+            return fileManager.fileExists(atPath: entry.localPath)
         }
     }
 
@@ -416,7 +423,7 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
     }
 
     private func removeCachedFilesLocked(for entry: VideoCacheEntry) throws {
-        let url = URL(fileURLWithPath: entry.localPath)
+        guard let url = cacheScopedURL(for: entry) else { return }
         let directory = url.deletingLastPathComponent()
         let base = url.deletingPathExtension().lastPathComponent
         if fileManager.fileExists(atPath: url.path) {
@@ -486,12 +493,13 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
         // 设置页只需要轻量趋势值，避免滚动或播放缓存时同步枚举大量字幕旁路文件。
         // 真正删除前的容量回收仍通过 totalTrackedBytesLocked 做一次完整核算。
         entries.values.reduce(Int64(0)) { partial, entry in
-            partial + max(entry.fileSize ?? fileSize(at: URL(fileURLWithPath: entry.localPath)) ?? 0, 0)
+            guard let videoURL = cacheScopedURL(for: entry) else { return partial }
+            return partial + max(entry.fileSize ?? fileSize(at: videoURL) ?? 0, 0)
         }
     }
 
     private func trackedBytesLocked(for entry: VideoCacheEntry) -> Int64 {
-        let videoURL = URL(fileURLWithPath: entry.localPath)
+        guard let videoURL = cacheScopedURL(for: entry) else { return 0 }
         var total = fileSize(at: videoURL) ?? entry.fileSize ?? 0
         let directory = videoURL.deletingLastPathComponent()
         let base = videoURL.deletingPathExtension().lastPathComponent
@@ -549,6 +557,19 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
 
     private static func normalizedFilePath(_ url: URL) -> String {
         url.standardizedFileURL.path
+    }
+
+    private func cacheScopedURL(for entry: VideoCacheEntry) -> URL? {
+        let url = URL(fileURLWithPath: entry.localPath)
+        guard Self.isFileURL(url, containedIn: cacheDirectory) else { return nil }
+        return url
+    }
+
+    static func isFileURL(_ fileURL: URL, containedIn directoryURL: URL) -> Bool {
+        let filePath = fileURL.standardizedFileURL.path
+        let directoryPath = directoryURL.standardizedFileURL.path
+        let directoryPrefix = directoryPath.hasSuffix("/") ? directoryPath : "\(directoryPath)/"
+        return filePath.hasPrefix(directoryPrefix)
     }
 
     private static func isSidecarBase(_ candidateBase: String, forVideoBase videoBase: String) -> Bool {

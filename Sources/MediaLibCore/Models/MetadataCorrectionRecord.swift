@@ -84,8 +84,8 @@ public enum MetadataCorrectionField: String, Codable, CaseIterable, Identifiable
         case .overview: return item.overview
         case .posterPath: return item.posterPath
         case .backdropPath: return item.backdropPath
-        case .rating: return item.rating.map(Self.encodeDouble)
-        case .userRating: return item.userRating.map(Self.encodeDouble)
+        case .rating: return item.rating.flatMap(Self.encodeDouble)
+        case .userRating: return item.userRating.flatMap(Self.encodeDouble)
         case .runtime: return item.runtime.map(String.init)
         case .externalID: return item.externalID
         case .metadataProvider: return item.metadataProvider
@@ -94,8 +94,9 @@ public enum MetadataCorrectionField: String, Codable, CaseIterable, Identifiable
         }
     }
 
-    private static func encodeDouble(_ value: Double) -> String {
-        String(format: "%.6f", value)
+    private static func encodeDouble(_ value: Double) -> String? {
+        guard value.isFinite else { return nil }
+        return String(format: "%.6f", value)
             .replacingOccurrences(of: #"0+$"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\.$"#, with: "", options: .regularExpression)
     }

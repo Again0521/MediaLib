@@ -80,6 +80,56 @@ final class RemoteSyncRepositoryAuditTests: XCTestCase {
         XCTAssertEqual(profiles.first(where: { $0.id == "user-1" })?.isDefault, false, "此前默认的角色在事务中必须被自动降级")
     }
 
+    /// 测试多档案媒体状态保存前会清洗被外部改脏的数值字段
+    func testProfileMediaStateSaveSanitizesMutatedNumericValues() throws {
+        try MediaRepository(database: dbManager).upsert(MediaItem(id: "movie-state", type: .movie, title: "State Movie"))
+
+        var state = ProfileMediaState(
+            profileID: "default",
+            mediaID: "movie-state",
+            playCount: 3,
+            playPosition: 42,
+            playProgress: 0.4,
+            userRating: 4,
+            lastPlayedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        state.playCount = -9
+        state.playPosition = Double.nan
+        state.playProgress = Double.infinity
+        state.userRating = -Double.infinity
+
+        let saved = try profileRepo.saveState(state)
+        XCTAssertEqual(saved.playCount, 0)
+        XCTAssertEqual(saved.playPosition, 0)
+        XCTAssertEqual(saved.playProgress, 0)
+        XCTAssertNil(saved.userRating)
+        XCTAssertEqual(saved.lastPlayedAt, state.lastPlayedAt)
+
+        let fetched = try XCTUnwrap(profileRepo.state(profileID: "default", mediaID: "movie-state"))
+        XCTAssertEqual(fetched.playCount, 0)
+        XCTAssertEqual(fetched.playPosition, 0)
+        XCTAssertEqual(fetched.playProgress, 0)
+        XCTAssertNil(fetched.userRating)
+        XCTAssertEqual(fetched.lastPlayedAt, state.lastPlayedAt)
+    }
+
+    func testProfileMediaStateSaveDropsFiniteOutOfRangeUserRating() throws {
+        try MediaRepository(database: dbManager).upsert(MediaItem(id: "movie-rating-state", type: .movie, title: "Rating State"))
+
+        var state = ProfileMediaState(
+            profileID: "default",
+            mediaID: "movie-rating-state",
+            userRating: 4
+        )
+        state.userRating = 6
+
+        let saved = try profileRepo.saveState(state)
+        XCTAssertNil(saved.userRating)
+
+        let fetched = try XCTUnwrap(profileRepo.state(profileID: "default", mediaID: "movie-rating-state"))
+        XCTAssertNil(fetched.userRating)
+    }
+
     /// 测试多端同步冲突处理：待办查询、解决仲裁与忽略机制
     func testSyncConflictPendingQueryResolveAndIgnore() throws {
         try MediaRepository(database: dbManager).upsert(MediaItem(id: "movie-abc", type: .movie, title: "Movie ABC"))

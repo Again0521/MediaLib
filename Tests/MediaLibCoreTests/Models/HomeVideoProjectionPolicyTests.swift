@@ -73,6 +73,25 @@ final class HomeVideoProjectionPolicyTests: XCTestCase {
         XCTAssertFalse(tabs.contains(.unwatched))
     }
 
+    func testAvailableHomeTabsTreatsNonFiniteProgressAsUnwatchedAndInvalidThresholdAsDefault() {
+        let tabs = HomeVideoProjectionPolicy.availableHomeTabs(
+            HomeTabAvailabilityInput(
+                homeVideoItems: [
+                    item(id: "invalid-progress", type: .movie, playProgress: .infinity)
+                ],
+                nextUpItems: [],
+                continueWatchingItems: [],
+                offlineVideoItems: [],
+                musicTracks: [],
+                privateTopLevelItems: [],
+                watchedThreshold: .nan
+            )
+        )
+
+        XCTAssertTrue(tabs.contains(.movies))
+        XCTAssertTrue(tabs.contains(.unwatched))
+    }
+
     func testNextUpItemsReturnsEpisodeAfterLastFinishedEpisode() {
         let series = item(id: "series", type: .tvShow)
         let episodes = [
@@ -120,6 +139,45 @@ final class HomeVideoProjectionPolicyTests: XCTestCase {
             ),
             []
         )
+    }
+
+    func testNextUpItemsTreatsNonFiniteProgressAsUnfinished() {
+        let series = item(id: "series", type: .tvShow)
+        let episodes = [
+            item(id: "e1", type: .episode, watched: true),
+            item(id: "e2", type: .episode, playProgress: .infinity),
+            item(id: "e3", type: .episode, playProgress: 0.1)
+        ]
+
+        XCTAssertEqual(
+            HomeVideoProjectionPolicy.nextUpItems(
+                from: [series],
+                childrenByParentID: ["series": episodes],
+                watchedThreshold: 0.8,
+                limit: 12
+            ).map(\.id),
+            ["e2"]
+        )
+    }
+
+    func testNextUpItemsUsesDefaultThresholdWhenThresholdIsNonFinite() {
+        let series = item(id: "series", type: .tvShow)
+        let episodes = [
+            item(id: "e1", type: .episode, playProgress: 0.95),
+            item(id: "e2", type: .episode, playProgress: 0.5)
+        ]
+
+        for threshold in [Double.nan, .infinity, -.infinity] {
+            XCTAssertEqual(
+                HomeVideoProjectionPolicy.nextUpItems(
+                    from: [series],
+                    childrenByParentID: ["series": episodes],
+                    watchedThreshold: threshold,
+                    limit: 12
+                ).map(\.id),
+                ["e2"]
+            )
+        }
     }
 
     func testNextUpItemsHonorsLimitAndInputOrder() {

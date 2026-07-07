@@ -20,7 +20,8 @@ public enum SQLiteValue {
     }
 
     public static func optionalDouble(_ value: Double?) -> SQLiteValue {
-        value.map(SQLiteValue.double) ?? .null
+        guard let value, value.isFinite else { return .null }
+        return .double(value)
     }
 
     public static func optionalDate(_ value: Date?) -> SQLiteValue {

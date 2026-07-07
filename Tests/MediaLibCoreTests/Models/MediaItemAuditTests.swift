@@ -54,4 +54,40 @@ final class MediaItemAuditTests: XCTestCase {
         item.album = ""
         XCTAssertEqual(item.artistAlbumLine, "Michael Jackson", "空字符串字段在拼接时必须被干净剔除")
     }
+
+    /// 测试非有限播放进度不会被误判为真实播放痕迹
+    func testPlaybackTraceIgnoresNonFinitePlaybackValues() {
+        let nonFiniteValues = [Double.nan, Double.infinity, -Double.infinity]
+
+        for value in nonFiniteValues {
+            var positionItem = MediaItem(id: "position-\(value)", type: .movie, title: "Corrupt Position")
+            positionItem.playPosition = value
+            XCTAssertFalse(positionItem.hasPlaybackTrace, "非有限 playPosition 不应伪造播放痕迹")
+
+            var progressItem = MediaItem(id: "progress-\(value)", type: .movie, title: "Corrupt Progress")
+            progressItem.playProgress = value
+            XCTAssertFalse(progressItem.hasPlaybackTrace, "非有限 playProgress 不应伪造播放痕迹")
+        }
+
+        let playedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let timestampItem = MediaItem(
+            id: "timestamp-trace",
+            type: .movie,
+            title: "Timestamp Trace",
+            playPosition: Double.nan,
+            playProgress: Double.infinity,
+            lastPlayedAt: playedAt
+        )
+        XCTAssertTrue(timestampItem.hasPlaybackTrace, "明确的最后播放时间仍应保留播放痕迹语义")
+
+        let watchedItem = MediaItem(
+            id: "watched-trace",
+            type: .movie,
+            title: "Watched Trace",
+            playPosition: -Double.infinity,
+            playProgress: Double.nan,
+            watched: true
+        )
+        XCTAssertTrue(watchedItem.hasPlaybackTrace, "明确 watched 标记仍应保留播放痕迹语义")
+    }
 }

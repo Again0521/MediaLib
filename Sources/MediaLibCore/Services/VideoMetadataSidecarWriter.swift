@@ -10,7 +10,7 @@ public enum VideoMetadataSidecarWriter {
           \(update.originalTitle.map { "<originaltitle>\(xmlEscaped($0))</originaltitle>" } ?? "")
           \(update.year.map { "<year>\($0)</year>" } ?? "")
           \(update.overview.map { "<plot>\(xmlEscaped($0))</plot>" } ?? "")
-          \(update.rating.map { "<rating>\($0)</rating>" } ?? "")
+          \(ratingTag(for: update.rating) ?? "")
           \(update.genre.map { "<genre>\(xmlEscaped($0))</genre>" } ?? "")
           \(update.externalID.map { "<uniqueid type=\"tmdb\">\(xmlEscaped($0))</uniqueid>" } ?? "")
         </\(rootTag)>
@@ -30,6 +30,11 @@ public enum VideoMetadataSidecarWriter {
             try xml.write(to: targetURL, atomically: true, encoding: .utf8)
             return true
         }
+    }
+
+    private static func ratingTag(for rating: Double?) -> String? {
+        guard let rating, rating.isFinite, rating > 0, rating <= 10 else { return nil }
+        return "<rating>\(rating)</rating>"
     }
 
     private static func xmlEscaped(_ text: String) -> String {

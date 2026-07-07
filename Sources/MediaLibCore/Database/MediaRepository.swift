@@ -94,8 +94,8 @@ public final class MediaRepository {
                     WHERE id = ?
                     """,
                     bindings: [
-                        .double(item.playPosition),
-                        .double(item.playProgress),
+                        .double(Self.normalizedPlaybackPosition(item.playPosition)),
+                        .double(Self.normalizedPlaybackProgress(item.playProgress)),
                         .bool(item.watched),
                         .bool(item.favorite),
                         .optionalDate(item.lastPlayedAt),
@@ -287,7 +287,9 @@ public final class MediaRepository {
     }
 
     public func updatePlayback(id: String, position: Double, duration: Double?, watchedThreshold: Double) throws {
-        let progress = duration.map { $0 > 0 ? min(max(position / $0, 0), 1) : 0 } ?? 0
+        let sanitizedPosition = Self.normalizedPlaybackPosition(position)
+        let progress = Self.normalizedPlaybackProgress(position: sanitizedPosition, duration: duration)
+        let watchedThreshold = Self.normalizedWatchedThreshold(watchedThreshold)
         // 已看只置位、不复位：重看一部已看影片的开头不应把「已看」刷回未看
         // （主流媒体库 Plex/Emby 的口径）。取消已看走显式的标记接口。
         let reachedThreshold = progress >= watchedThreshold
@@ -298,7 +300,7 @@ public final class MediaRepository {
             WHERE id = ?
             """,
             bindings: [
-                .double(position),
+                .double(sanitizedPosition),
                 .double(progress),
                 .bool(reachedThreshold),
                 .optionalDate(Date()),
@@ -396,7 +398,7 @@ public final class MediaRepository {
     public func updateRating(id: String, rating: Double?) throws {
         try database.execute(
             "UPDATE media_items SET user_rating = ?, updated_at = ? WHERE id = ?",
-            bindings: [.optionalDouble(rating), .optionalDate(Date()), .text(id)]
+            bindings: [.optionalDouble(Self.normalizedUserRating(rating)), .optionalDate(Date()), .text(id)]
         )
     }
 
@@ -431,14 +433,14 @@ public final class MediaRepository {
                     .optionalText(metadata.originalTitle),
                     .optionalText(metadata.artist),
                     .optionalText(metadata.album),
-                    .optionalInt(metadata.trackNumber),
-                    .optionalInt(metadata.year),
+                    .optionalInt(Self.normalizedPositiveInt(metadata.trackNumber)),
+                    .optionalInt(Self.normalizedPositiveInt(metadata.year)),
                     .optionalText(metadata.overview),
                     .optionalText(metadata.posterPath),
                     .optionalText(metadata.backdropPath),
-                    .optionalDouble(metadata.rating),
-                    .optionalDouble(Self.seedUserRating(from: metadata.rating)),
-                    .optionalInt(metadata.runtime),
+                    .optionalDouble(Self.normalizedProviderRating(metadata.rating)),
+                    .optionalDouble(Self.seedUserRating(from: Self.normalizedProviderRating(metadata.rating))),
+                    .optionalInt(Self.normalizedPositiveInt(metadata.runtime)),
                     .optionalText(metadata.externalID),
                     .optionalText(metadata.metadataProvider),
                     .optionalText(metadata.collectionTitle),
@@ -517,14 +519,14 @@ public final class MediaRepository {
             .optionalText(item.originalTitle),
             .optionalText(item.artist),
             .optionalText(item.album),
-            .optionalInt(item.trackNumber),
-            .optionalInt(item.year),
+            .optionalInt(Self.normalizedPositiveInt(item.trackNumber)),
+            .optionalInt(Self.normalizedPositiveInt(item.year)),
             .optionalText(item.overview),
             .optionalText(item.posterPath),
             .optionalText(item.backdropPath),
-            .optionalDouble(item.rating),
-            .optionalDouble(item.userRating),
-            .optionalInt(item.runtime),
+            .optionalDouble(Self.normalizedProviderRating(item.rating)),
+            .optionalDouble(Self.normalizedUserRating(item.userRating)),
+            .optionalInt(Self.normalizedPositiveInt(item.runtime)),
             .optionalText(item.sourcePath),
             .optionalText(item.parentID),
             .optionalInt(item.seasonNumber),
@@ -535,14 +537,14 @@ public final class MediaRepository {
             .optionalText(item.audioCodec),
             .optionalText(item.resolution),
             .optionalInt64(item.videoBitrate),
-            .optionalDouble(item.duration),
-            .optionalDouble(item.loudnessTrackGainDB),
-            .optionalDouble(item.loudnessAlbumGainDB),
-            .optionalDouble(item.loudnessTrackPeak),
-            .optionalDouble(item.loudnessAlbumPeak),
-            .optionalInt(item.playCount),
-            .double(item.playPosition),
-            .double(item.playProgress),
+            .optionalDouble(Self.normalizedDuration(item.duration)),
+            .optionalDouble(Self.normalizedFiniteDouble(item.loudnessTrackGainDB)),
+            .optionalDouble(Self.normalizedFiniteDouble(item.loudnessAlbumGainDB)),
+            .optionalDouble(Self.normalizedPeak(item.loudnessTrackPeak)),
+            .optionalDouble(Self.normalizedPeak(item.loudnessAlbumPeak)),
+            .optionalInt(Self.normalizedPlayCount(item.playCount)),
+            .double(Self.normalizedPlaybackPosition(item.playPosition)),
+            .double(Self.normalizedPlaybackProgress(item.playProgress)),
             .bool(item.watched),
             .bool(item.favorite),
             .bool(item.watchlist),
@@ -564,14 +566,14 @@ public final class MediaRepository {
             originalTitle: row.string(3),
             artist: row.string(4),
             album: row.string(5),
-            trackNumber: row.int(6),
-            year: row.int(7),
+            trackNumber: Self.normalizedPositiveInt(row.int(6)),
+            year: Self.normalizedPositiveInt(row.int(7)),
             overview: row.string(8),
             posterPath: row.string(9),
             backdropPath: row.string(10),
-            rating: row.double(11),
-            userRating: row.double(12),
-            runtime: row.int(13),
+            rating: Self.normalizedProviderRating(row.double(11)),
+            userRating: Self.normalizedUserRating(row.double(12)),
+            runtime: Self.normalizedPositiveInt(row.int(13)),
             sourcePath: row.string(14),
             parentID: row.string(15),
             seasonNumber: row.int(16),
@@ -582,14 +584,14 @@ public final class MediaRepository {
             audioCodec: row.string(21),
             resolution: row.string(22),
             videoBitrate: row.int64(23),
-            duration: row.double(24),
-            loudnessTrackGainDB: row.double(25),
-            loudnessAlbumGainDB: row.double(26),
-            loudnessTrackPeak: row.double(27),
-            loudnessAlbumPeak: row.double(28),
-            playCount: row.int(29) ?? 0,
-            playPosition: row.double(30) ?? 0,
-            playProgress: row.double(31) ?? 0,
+            duration: Self.normalizedDuration(row.double(24)),
+            loudnessTrackGainDB: Self.normalizedFiniteDouble(row.double(25)),
+            loudnessAlbumGainDB: Self.normalizedFiniteDouble(row.double(26)),
+            loudnessTrackPeak: Self.normalizedPeak(row.double(27)),
+            loudnessAlbumPeak: Self.normalizedPeak(row.double(28)),
+            playCount: Self.normalizedPlayCount(row.int(29)) ?? 0,
+            playPosition: Self.normalizedPlaybackPosition(row.double(30) ?? 0),
+            playProgress: Self.normalizedPlaybackProgress(row.double(31) ?? 0),
             watched: row.bool(32),
             favorite: row.bool(33),
             watchlist: row.bool(34),
@@ -604,8 +606,68 @@ public final class MediaRepository {
     }
 
     private static func seedUserRating(from providerRating: Double?) -> Double? {
-        guard let providerRating, providerRating.isFinite, providerRating > 0 else { return nil }
+        guard let providerRating = normalizedProviderRating(providerRating) else { return nil }
         return min(max((providerRating / 2).rounded(), 1), 5)
+    }
+
+    private static func normalizedProviderRating(_ rating: Double?) -> Double? {
+        guard let rating, rating.isFinite, rating > 0, rating <= 10 else { return nil }
+        return rating
+    }
+
+    private static func normalizedUserRating(_ rating: Double?) -> Double? {
+        guard let rating, rating.isFinite, rating > 0, rating <= 5 else { return nil }
+        return rating
+    }
+
+    private static func normalizedPlayCount(_ playCount: Int?) -> Int? {
+        guard let playCount else { return nil }
+        return max(playCount, 0)
+    }
+
+    private static func normalizedPositiveInt(_ value: Int?) -> Int? {
+        guard let value, value > 0 else { return nil }
+        return value
+    }
+
+    private static func normalizedDuration(_ duration: Double?) -> Double? {
+        guard let duration, duration.isFinite, duration > 0 else { return nil }
+        return duration
+    }
+
+    private static func normalizedFiniteDouble(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return value
+    }
+
+    private static func normalizedPeak(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value > 0 else { return nil }
+        return value
+    }
+
+    private static func normalizedPlaybackPosition(_ position: Double) -> Double {
+        guard position.isFinite else { return 0 }
+        return max(position, 0)
+    }
+
+    private static func normalizedPlaybackProgress(position: Double, duration: Double?) -> Double {
+        guard position.isFinite,
+              let duration,
+              duration.isFinite,
+              duration > 0 else {
+            return 0
+        }
+        return min(max(position / duration, 0), 1)
+    }
+
+    private static func normalizedPlaybackProgress(_ progress: Double) -> Double {
+        guard progress.isFinite else { return 0 }
+        return min(max(progress, 0), 1)
+    }
+
+    private static func normalizedWatchedThreshold(_ threshold: Double) -> Double {
+        guard threshold.isFinite, threshold > 0, threshold <= 1 else { return 0.9 }
+        return threshold
     }
 
     private static func metadataChanges(before: MediaItem, after: MediaItem) -> [MetadataCorrectionFieldChange] {

@@ -82,4 +82,33 @@ final class PlaybackStateAndResumeAuditTests: XCTestCase {
             XCTAssertEqual(marker?.startTime ?? 0.0, expectedTime, accuracy: 0.01, "播放标记存盘精度不符")
         }
     }
+
+    func testPlaybackMarkerRepositoryNormalizesMutatedNonFiniteValuesBeforeSave() throws {
+        let db = try DatabaseManager(url: dbURL)
+        try seedMediaItems(db: db, ids: ["episode"])
+        let repo = PlaybackMarkerRepository(database: db)
+
+        var marker = PlaybackMarker(
+            mediaID: "episode",
+            kind: .intro,
+            title: "Intro",
+            startTime: 10,
+            endTime: 20,
+            confidence: 0.8
+        )
+        marker.startTime = .nan
+        marker.endTime = .infinity
+        marker.confidence = -.infinity
+
+        let saved = try repo.save(marker)
+        XCTAssertEqual(saved.startTime, 0)
+        XCTAssertNil(saved.endTime)
+        XCTAssertNil(saved.confidence)
+
+        let fetched = try XCTUnwrap(repo.fetch(mediaID: "episode").first)
+        XCTAssertEqual(fetched.startTime, 0)
+        XCTAssertNil(fetched.endTime)
+        XCTAssertNil(fetched.confidence)
+        XCTAssertFalse(fetched.isCompleteRange)
+    }
 }

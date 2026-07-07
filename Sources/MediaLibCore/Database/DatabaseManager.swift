@@ -227,7 +227,9 @@ public final class DatabaseManager: @unchecked Sendable {
             case .int(let int):
                 result = sqlite3_bind_int64(statement, index, int)
             case .double(let double):
-                result = sqlite3_bind_double(statement, index, double)
+                result = double.isFinite
+                    ? sqlite3_bind_double(statement, index, double)
+                    : sqlite3_bind_null(statement, index)
             case .bool(let bool):
                 result = sqlite3_bind_int(statement, index, bool ? 1 : 0)
             }

@@ -92,6 +92,52 @@ final class BackgroundTaskPersistenceTests: XCTestCase {
         XCTAssertTrue(recorder.allOperationsObservedOnBlockingIOQueue)
     }
 
+    func testLoadResultDistinguishesMissingURLReadFailureAndCorruptJSON() async throws {
+        struct TestReadError: Error {}
+
+        let missingResult = await BackgroundTaskPersistence.loadResult(
+            from: nil,
+            io: BackgroundTaskPersistence.IO(
+                read: { _ in Data() },
+                write: { _, _ in }
+            )
+        )
+        if case .missingURL = missingResult {
+        } else {
+            XCTFail("Expected nil persistence URL to be reported as missingURL")
+        }
+
+        let failingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("background-task-read-failure-\(UUID().uuidString).json")
+        let failingIO = BackgroundTaskPersistence.IO(
+            read: { _ in throw TestReadError() },
+            write: { _, _ in }
+        )
+        let readFailure = await BackgroundTaskPersistence.loadResult(from: failingURL, io: failingIO)
+        guard case let .failed(readError) = readFailure else {
+            return XCTFail("Expected read failure to be observable")
+        }
+        XCTAssertEqual(readError.operation, "read")
+        XCTAssertEqual(readError.path, failingURL.path)
+        XCTAssertFalse(readError.message.isEmpty)
+
+        let corruptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("background-task-corrupt-\(UUID().uuidString).json")
+        let corruptIO = BackgroundTaskPersistence.IO(
+            read: { _ in Data("{not-json".utf8) },
+            write: { _, _ in }
+        )
+        let corruptResult = await BackgroundTaskPersistence.loadResult(from: corruptURL, io: corruptIO)
+        guard case let .failed(decodeError) = corruptResult else {
+            return XCTFail("Expected corrupt JSON to be observable")
+        }
+        XCTAssertEqual(decodeError.operation, "decode")
+        XCTAssertEqual(decodeError.path, corruptURL.path)
+        XCTAssertFalse(decodeError.message.isEmpty)
+        let compatibilityLoadResult = await BackgroundTaskPersistence.load(from: corruptURL, io: corruptIO)
+        XCTAssertNil(compatibilityLoadResult)
+    }
+
     func testWriteToDirectoryReportsFailure() async {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("background-task-persistence-dir-\(UUID().uuidString)", isDirectory: true)

@@ -131,6 +131,203 @@ final class MediaRepositoryAuditTests: XCTestCase {
         XCTAssertTrue(ids.contains("remote-sibling"))
     }
 
+    func testUpsertAndRemoteReplaceNormalizePlaybackValuesBeforeBinding() throws {
+        var local = MediaItem(id: "local-invalid-playback", type: .movie, title: "Local Invalid")
+        local.playPosition = Double.nan
+        local.playProgress = Double.infinity
+
+        XCTAssertNoThrow(try repo.upsert(local))
+        var fetched = try XCTUnwrap(repo.fetch(id: "local-invalid-playback"))
+        XCTAssertEqual(fetched.playPosition, 0)
+        XCTAssertEqual(fetched.playProgress, 0)
+
+        var remote = mediaItem(
+            id: "remote-invalid-playback",
+            sourcePath: "emby://server/Playback",
+            filePath: "https://server.example/videos/remote-invalid.mkv"
+        )
+        remote.playPosition = -Double.infinity
+        remote.playProgress = 1.4
+
+        XCTAssertNoThrow(try repo.replaceRemoteItems(sourcePathPrefix: "emby://server/Playback", with: [remote]))
+        fetched = try XCTUnwrap(repo.fetch(id: "remote-invalid-playback"))
+        XCTAssertEqual(fetched.playPosition, 0)
+        XCTAssertEqual(fetched.playProgress, 1)
+    }
+
+    func testUpsertAndFetchNormalizeNegativePlayCount() throws {
+        var item = MediaItem(id: "negative-play-count", type: .movie, title: "Negative Play Count")
+        item.playCount = -7
+
+        try repo.upsert(item)
+
+        var fetched = try XCTUnwrap(repo.fetch(id: "negative-play-count"))
+        XCTAssertEqual(fetched.playCount, 0)
+
+        try dbManager.execute(
+            "UPDATE media_items SET play_count = ? WHERE id = ?",
+            bindings: [.int(-12), .text("negative-play-count")]
+        )
+
+        fetched = try XCTUnwrap(repo.fetch(id: "negative-play-count"))
+        XCTAssertEqual(fetched.playCount, 0, "旧库或外部写入的负播放次数读取时也应归零")
+    }
+
+    func testUpsertUpdateAndFetchNormalizeRatingFields() throws {
+        var item = MediaItem(id: "rating-boundary", type: .movie, title: "Rating Boundary")
+        item.rating = 12
+        item.userRating = 7
+
+        try repo.upsert(item)
+
+        var fetched = try XCTUnwrap(repo.fetch(id: "rating-boundary"))
+        XCTAssertNil(fetched.rating)
+        XCTAssertNil(fetched.userRating)
+
+        item.rating = 8.4
+        item.userRating = 0.5
+        try repo.upsert(item)
+
+        fetched = try XCTUnwrap(repo.fetch(id: "rating-boundary"))
+        XCTAssertEqual(try XCTUnwrap(fetched.rating), 8.4, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(fetched.userRating), 0.5, accuracy: 0.0001)
+
+        try repo.updateRating(id: "rating-boundary", rating: 3.5)
+        fetched = try XCTUnwrap(repo.fetch(id: "rating-boundary"))
+        XCTAssertEqual(try XCTUnwrap(fetched.userRating), 3.5, accuracy: 0.0001)
+
+        try repo.updateRating(id: "rating-boundary", rating: 0)
+        fetched = try XCTUnwrap(repo.fetch(id: "rating-boundary"))
+        XCTAssertNil(fetched.userRating)
+
+        try dbManager.execute(
+            "UPDATE media_items SET rating = ?, user_rating = ? WHERE id = ?",
+            bindings: [.double(-2), .double(9), .text("rating-boundary")]
+        )
+
+        fetched = try XCTUnwrap(repo.fetch(id: "rating-boundary"))
+        XCTAssertNil(fetched.rating, "旧库或外部写入的越界资料源评分读取时应视为缺失")
+        XCTAssertNil(fetched.userRating, "旧库或外部写入的越界用户评级读取时应视为未评级")
+    }
+
+    func testUpsertUpdateAndFetchNormalizeMetadataNumericFields() throws {
+        var item = MediaItem(id: "numeric-boundary", type: .music, title: "Numeric Boundary")
+        item.trackNumber = 0
+        item.year = -2024
+        item.runtime = 0
+        item.duration = -30
+        item.loudnessTrackGainDB = .infinity
+        item.loudnessAlbumGainDB = -Double.infinity
+        item.loudnessTrackPeak = 0
+        item.loudnessAlbumPeak = -0.5
+
+        try repo.upsert(item)
+
+        var fetched = try XCTUnwrap(repo.fetch(id: "numeric-boundary"))
+        XCTAssertNil(fetched.trackNumber)
+        XCTAssertNil(fetched.year)
+        XCTAssertNil(fetched.runtime)
+        XCTAssertNil(fetched.duration)
+        XCTAssertNil(fetched.loudnessTrackGainDB)
+        XCTAssertNil(fetched.loudnessAlbumGainDB)
+        XCTAssertNil(fetched.loudnessTrackPeak)
+        XCTAssertNil(fetched.loudnessAlbumPeak)
+
+        item.trackNumber = 2
+        item.year = 2026
+        item.runtime = 91
+        item.duration = 240
+        item.loudnessTrackGainDB = -7.25
+        item.loudnessAlbumGainDB = 3.5
+        item.loudnessTrackPeak = 0.97
+        item.loudnessAlbumPeak = 1.2
+        try repo.upsert(item)
+
+        fetched = try XCTUnwrap(repo.fetch(id: "numeric-boundary"))
+        XCTAssertEqual(fetched.trackNumber, 2)
+        XCTAssertEqual(fetched.year, 2026)
+        XCTAssertEqual(fetched.runtime, 91)
+        XCTAssertEqual(try XCTUnwrap(fetched.duration), 240, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(fetched.loudnessTrackGainDB), -7.25, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(fetched.loudnessAlbumGainDB), 3.5, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(fetched.loudnessTrackPeak), 0.97, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(fetched.loudnessAlbumPeak), 1.2, accuracy: 0.0001)
+
+        _ = try repo.updateMetadata(
+            id: "numeric-boundary",
+            metadata: MediaMetadataUpdate(trackNumber: -4, year: 0, runtime: -90)
+        )
+
+        fetched = try XCTUnwrap(repo.fetch(id: "numeric-boundary"))
+        XCTAssertEqual(fetched.trackNumber, 2, "非法曲序不应覆盖已有合法曲序")
+        XCTAssertEqual(fetched.year, 2026, "非法年份不应覆盖已有合法年份")
+        XCTAssertEqual(fetched.runtime, 91, "非法 runtime 不应覆盖已有合法 runtime")
+
+        try dbManager.execute(
+            """
+            UPDATE media_items
+            SET track_number = ?,
+                year = ?,
+                runtime = ?,
+                duration = ?,
+                loudness_track_gain_db = ?,
+                loudness_album_gain_db = ?,
+                loudness_track_peak = ?,
+                loudness_album_peak = ?
+            WHERE id = ?
+            """,
+            bindings: [
+                .int(-2),
+                .int(0),
+                .int(-1),
+                .double(-10),
+                .double(Double.infinity),
+                .double(-Double.infinity),
+                .double(0),
+                .double(-0.1),
+                .text("numeric-boundary")
+            ]
+        )
+
+        fetched = try XCTUnwrap(repo.fetch(id: "numeric-boundary"))
+        XCTAssertNil(fetched.trackNumber, "旧库或外部写入的非正曲序读取时应视为缺失")
+        XCTAssertNil(fetched.year, "旧库或外部写入的非正年份读取时应视为缺失")
+        XCTAssertNil(fetched.runtime, "旧库或外部写入的非正 runtime 读取时应视为缺失")
+        XCTAssertNil(fetched.duration, "旧库或外部写入的非正 duration 读取时应视为缺失")
+        XCTAssertNil(fetched.loudnessTrackGainDB, "旧库或外部写入的非有限 track gain 读取时应视为缺失")
+        XCTAssertNil(fetched.loudnessAlbumGainDB, "旧库或外部写入的非有限 album gain 读取时应视为缺失")
+        XCTAssertNil(fetched.loudnessTrackPeak, "旧库或外部写入的非正 track peak 读取时应视为缺失")
+        XCTAssertNil(fetched.loudnessAlbumPeak, "旧库或外部写入的非正 album peak 读取时应视为缺失")
+    }
+
+    func testUpdatePlaybackNormalizesNonFiniteInputsBeforePersisting() throws {
+        try repo.upsert(MediaItem(id: "playback-state", type: .movie, title: "Playback State"))
+
+        try repo.updatePlayback(
+            id: "playback-state",
+            position: Double.nan,
+            duration: Double.infinity,
+            watchedThreshold: Double.nan
+        )
+
+        var fetched = try XCTUnwrap(repo.fetch(id: "playback-state"))
+        XCTAssertEqual(fetched.playPosition, 0)
+        XCTAssertEqual(fetched.playProgress, 0)
+        XCTAssertFalse(fetched.watched)
+
+        try repo.updatePlayback(
+            id: "playback-state",
+            position: 95,
+            duration: 100,
+            watchedThreshold: Double.infinity
+        )
+
+        fetched = try XCTUnwrap(repo.fetch(id: "playback-state"))
+        XCTAssertEqual(fetched.playPosition, 95)
+        XCTAssertEqual(fetched.playProgress, 0.95, accuracy: 0.0001)
+        XCTAssertTrue(fetched.watched, "非有限阈值应回退到默认 0.9，不能阻断正常片尾已看判定")
+    }
+
     func testDeleteItemsFilePathPrefixKeepsCaseDifferingAndWildcardLikeSiblings() throws {
         let sourcePath = "/Volumes/Media/Wildcard"
         try repo.upsert(mediaItem(

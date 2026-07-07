@@ -93,6 +93,36 @@ final class SecretStoreAuditTests: XCTestCase {
         XCTAssertTrue(recorder.didObserveBlockingIOOperation)
         XCTAssertTrue(recorder.allOperationsObservedOnBlockingIOQueue)
     }
+
+    func testSecretStoreSaveReportsInjectedWriteFailure() throws {
+        struct WriteFailed: Error {}
+        let store = SecretStore(
+            directory: tempDir,
+            io: SecretStore.IO(
+                read: { _ in Data() },
+                write: { _, _ in throw WriteFailed() }
+            )
+        )
+
+        let saved = store.save(["tmdb_api_key": "secret"])
+
+        XCTAssertFalse(saved)
+    }
+
+    func testSecretStoreAsyncSaveReportsInjectedWriteFailure() async throws {
+        struct WriteFailed: Error {}
+        let store = SecretStore(
+            directory: tempDir,
+            io: SecretStore.IO(
+                read: { _ in Data() },
+                write: { _, _ in throw WriteFailed() }
+            )
+        )
+
+        let saved = await store.saveAsync(["tmdb_api_key": "secret"])
+
+        XCTAssertFalse(saved)
+    }
 }
 
 private final class RecordingSecretStoreIO: @unchecked Sendable {

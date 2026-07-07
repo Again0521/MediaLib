@@ -42,6 +42,21 @@ public struct PlaybackMarker: Identifiable, Codable, Hashable, Sendable {
     public var createdAt: Date
     public var updatedAt: Date
 
+    static func normalizedTime(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return max(value, 0)
+    }
+
+    static func normalizedEndTime(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return max(value, 0)
+    }
+
+    static func normalizedConfidence(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return min(max(value, 0), 1)
+    }
+
     public init(
         id: String = UUID().uuidString,
         mediaID: String,
@@ -60,12 +75,12 @@ public struct PlaybackMarker: Identifiable, Codable, Hashable, Sendable {
         self.mediaID = mediaID
         self.kind = kind
         self.title = title
-        self.startTime = max(startTime, 0)
-        self.endTime = endTime.map { max($0, 0) }
+        self.startTime = Self.normalizedTime(startTime)
+        self.endTime = Self.normalizedEndTime(endTime)
         self.origin = origin
         self.reviewStatus = reviewStatus
         self.detectorIdentifier = detectorIdentifier
-        self.confidence = confidence
+        self.confidence = Self.normalizedConfidence(confidence)
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -76,6 +91,7 @@ public struct PlaybackMarker: Identifiable, Codable, Hashable, Sendable {
     }
 
     public func contains(_ time: Double) -> Bool {
+        guard time.isFinite else { return false }
         guard isCompleteRange, let endTime else { return false }
         return time >= startTime && time < endTime
     }

@@ -76,6 +76,21 @@ final class MusicTrackProjectionPolicyTests: XCTestCase {
         )
     }
 
+    func testContinueListeningTreatsNonFiniteProgressAsUnstarted() {
+        let tracks = [
+            track(id: "nan", updatedAt: day(10), playProgress: .nan),
+            track(id: "positive-infinity", updatedAt: day(9), playProgress: .infinity),
+            track(id: "negative-infinity", updatedAt: day(8), playProgress: -.infinity),
+            track(id: "played-with-invalid-progress", updatedAt: day(7), lastPlayedAt: day(2), playProgress: .nan),
+            track(id: "valid", updatedAt: day(1), playProgress: 0.25)
+        ]
+
+        XCTAssertEqual(
+            MusicTrackProjectionPolicy.continueListeningTracks(tracks, limit: 10).map(\.id),
+            ["played-with-invalid-progress", "valid"]
+        )
+    }
+
     func testSignalTracksIncludePlayCountLastPlayedFavoriteOrUserRating() {
         let tracks = [
             track(id: "plain"),
@@ -88,6 +103,20 @@ final class MusicTrackProjectionPolicyTests: XCTestCase {
         XCTAssertEqual(
             MusicTrackProjectionPolicy.signalTracks(tracks).map(\.id),
             ["played-count", "last-played", "favorite", "rated"]
+        )
+    }
+
+    func testSignalTracksTreatNonFiniteUserRatingsAsUnrated() {
+        let tracks = [
+            track(id: "nan", userRating: .nan),
+            track(id: "positive-infinity", userRating: .infinity),
+            track(id: "negative-infinity", userRating: -.infinity),
+            track(id: "rated", userRating: 0.5)
+        ]
+
+        XCTAssertEqual(
+            MusicTrackProjectionPolicy.signalTracks(tracks).map(\.id),
+            ["rated"]
         )
     }
 

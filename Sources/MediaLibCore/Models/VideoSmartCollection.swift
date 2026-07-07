@@ -1,5 +1,20 @@
 import Foundation
 
+fileprivate func finiteSmartCollectionRating(_ rating: Double?) -> Double? {
+    guard let rating, rating.isFinite else { return nil }
+    return rating
+}
+
+fileprivate func normalizedSmartCollectionProgress(_ progress: Double) -> Double {
+    guard progress.isFinite else { return 0 }
+    return min(max(progress, 0), 1)
+}
+
+fileprivate func normalizedSmartCollectionWatchedThreshold(_ threshold: Double) -> Double {
+    guard threshold.isFinite, threshold > 0, threshold <= 1 else { return 0.9 }
+    return threshold
+}
+
 public enum VideoSmartCollectionMediaScope: String, Codable, CaseIterable, Identifiable, Sendable {
     case all
     case movies
@@ -149,6 +164,7 @@ public enum VideoSmartCollectionProviderRatingRule: String, Codable, CaseIterabl
     }
 
     fileprivate func matches(rating: Double?) -> Bool {
+        let rating = finiteSmartCollectionRating(rating)
         switch self {
         case .any:
             return true
@@ -188,6 +204,7 @@ public enum VideoSmartCollectionUserRatingRule: String, Codable, CaseIterable, I
     }
 
     fileprivate func matches(rating: Double?) -> Bool {
+        let rating = finiteSmartCollectionRating(rating)
         switch self {
         case .any:
             return true
@@ -381,6 +398,13 @@ public struct VideoSmartCollection: Identifiable, Codable, Hashable, Sendable {
     }
 
     private func matchesState(_ item: MediaItem, watchedThreshold: Double) -> Bool {
+        let playProgress = normalizedSmartCollectionProgress(item.playProgress)
+        let watchedThreshold = normalizedSmartCollectionWatchedThreshold(watchedThreshold)
+        let hasPlaybackTrace = item.lastPlayedAt != nil ||
+            (item.playPosition.isFinite && item.playPosition > 0) ||
+            playProgress > 0 ||
+            item.watched
+
         switch stateFilter {
         case .any:
             return true
@@ -389,11 +413,11 @@ public struct VideoSmartCollection: Identifiable, Codable, Hashable, Sendable {
         case .favorites:
             return item.favorite
         case .watching:
-            return item.hasPlaybackTrace && !(item.watched || item.playProgress >= watchedThreshold)
+            return hasPlaybackTrace && !(item.watched || playProgress >= watchedThreshold)
         case .unwatched:
-            return !item.watched && item.playProgress < watchedThreshold
+            return !item.watched && playProgress < watchedThreshold
         case .watched:
-            return item.watched || item.playProgress >= watchedThreshold
+            return item.watched || playProgress >= watchedThreshold
         }
     }
 

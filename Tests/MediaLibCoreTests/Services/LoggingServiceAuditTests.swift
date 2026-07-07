@@ -55,6 +55,38 @@ final class LoggingServiceAuditTests: XCTestCase {
         XCTAssertTrue(contents.contains("启动日志目录缺失时仍应落盘"))
     }
 
+    func testWriteFailureIsObservableAndDoesNotThrowIntoCaller() throws {
+        let blockedLogDirectory = tempDir.appendingPathComponent("BlockedLogs")
+        try "not a directory".write(to: blockedLogDirectory, atomically: true, encoding: .utf8)
+        let logger = LoggingService(logDirectory: blockedLogDirectory)
+
+        logger.log("目录位置被普通文件占用时不应让业务调用崩溃")
+        logger.flush()
+
+        let failure = try XCTUnwrap(logger.lastFailure())
+        XCTAssertEqual(failure.operation, "createDirectory")
+        XCTAssertEqual(failure.path, blockedLogDirectory.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: logger.exportURL().path))
+    }
+
+    func testSuccessfulWriteClearsPreviousFailureDiagnostic() throws {
+        let recoverableLogDirectory = tempDir.appendingPathComponent("RecoverableLogs")
+        try "not a directory".write(to: recoverableLogDirectory, atomically: true, encoding: .utf8)
+        let logger = LoggingService(logDirectory: recoverableLogDirectory)
+
+        logger.log("第一次写入会失败")
+        logger.flush()
+        XCTAssertNotNil(logger.lastFailure())
+
+        try FileManager.default.removeItem(at: recoverableLogDirectory)
+        logger.log("解除占用后写入恢复")
+        logger.flush()
+
+        XCTAssertNil(logger.lastFailure())
+        let contents = try String(contentsOf: logger.exportURL(), encoding: .utf8)
+        XCTAssertTrue(contents.contains("解除占用后写入恢复"))
+    }
+
     /// 测试海量并发写日志触发文件滚动，严格约束落盘体积上限
     func testHighVolumeConcurrentLoggingTriggersRotationWithoutOOM() throws {
         let maxBytes = 64 * 1024 // 限流 64KB

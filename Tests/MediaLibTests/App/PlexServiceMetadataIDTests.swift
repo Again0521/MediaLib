@@ -42,6 +42,44 @@ final class PlexServiceMetadataIDTests: XCTestCase {
         )
     }
 
+    func testPlexRatingNormalizationRejectsNonFiniteAndOutOfRangeValues() throws {
+        for rating in [Double.nan, .infinity, -.infinity, -1, 0, 10.1] {
+            XCTAssertNil(PlexService.normalizedProviderRating(rating))
+            XCTAssertNil(PlexService.normalizedPlexUserRating(rating))
+            XCTAssertNil(PlexService.seedUserRating(from: rating))
+        }
+
+        XCTAssertEqual(try XCTUnwrap(PlexService.normalizedProviderRating(8.25)), 8.25, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(PlexService.normalizedPlexUserRating(8)), 4, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(PlexService.seedUserRating(from: 8)), 4, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(PlexService.normalizedProviderRating(10)), 10, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(PlexService.normalizedPlexUserRating(10)), 5, accuracy: 0.0001)
+    }
+
+    func testPlexDateFromUnixSecondsRejectsNonFiniteValues() throws {
+        for rawValue in ["nan", "inf", "-inf", "infinity"] {
+            XCTAssertNil(PlexService.date(fromUnixSeconds: rawValue))
+        }
+
+        XCTAssertEqual(
+            try XCTUnwrap(PlexService.date(fromUnixSeconds: "1700000000")).timeIntervalSince1970,
+            1_700_000_000,
+            accuracy: 0.0001
+        )
+    }
+
+    func testEmbyRatingNormalizationRejectsNonFiniteAndOutOfRangeValues() throws {
+        for rating in [Double.nan, .infinity, -.infinity, -1, 0, 10.1] {
+            XCTAssertNil(EmbyService.normalizedProviderRating(rating))
+            XCTAssertNil(EmbyService.seedUserRating(from: rating))
+        }
+
+        XCTAssertEqual(try XCTUnwrap(EmbyService.normalizedProviderRating(8.4)), 8.4, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(EmbyService.seedUserRating(from: 8.4)), 4, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(EmbyService.normalizedProviderRating(10)), 10, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(EmbyService.seedUserRating(from: 10)), 5, accuracy: 0.0001)
+    }
+
     func testRefreshedResourceURLReplacesTokenWhenHostCaseDiffers() {
         let service = PlexService()
         let session = PlexSession(

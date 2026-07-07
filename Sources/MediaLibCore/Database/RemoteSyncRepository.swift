@@ -289,8 +289,19 @@ public final class LocalUserProfileRepository {
 
     @discardableResult
     public func saveState(_ state: ProfileMediaState) throws -> ProfileMediaState {
-        var updated = state
-        updated.updatedAt = Date()
+        let updated = ProfileMediaState(
+            profileID: state.profileID,
+            mediaID: state.mediaID,
+            playCount: state.playCount,
+            playPosition: state.playPosition,
+            playProgress: state.playProgress,
+            watched: state.watched,
+            favorite: state.favorite,
+            watchlist: state.watchlist,
+            userRating: state.userRating,
+            lastPlayedAt: state.lastPlayedAt,
+            updatedAt: Date()
+        )
         try database.execute(
             """
             INSERT INTO profile_media_state (

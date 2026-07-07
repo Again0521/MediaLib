@@ -62,4 +62,66 @@ final class AppSettingsCodecTests: XCTestCase {
         XCTAssertEqual(blankDecoded.tmdbLanguage, "zh-CN")
         XCTAssertEqual(blankDecoded.subtitleLanguage, "zh-CN")
     }
+
+    func testVolumeSettingsClampNonFiniteAndOutOfRangeValues() {
+        let defaultVolume = AppSettings().defaultVolume
+        let invalid = AppSettings(
+            defaultVolume: Double.nan,
+            lastVideoVolume: Double.infinity,
+            lastMusicVolume: -Double.infinity
+        )
+
+        XCTAssertEqual(invalid.defaultVolume, defaultVolume, accuracy: 0.0001)
+        XCTAssertEqual(invalid.lastVideoVolume, defaultVolume, accuracy: 0.0001)
+        XCTAssertEqual(invalid.lastMusicVolume, defaultVolume, accuracy: 0.0001)
+
+        let outOfRange = AppSettings(
+            defaultVolume: 1.4,
+            lastVideoVolume: 2,
+            lastMusicVolume: -0.2
+        )
+
+        XCTAssertEqual(outOfRange.defaultVolume, 1, accuracy: 0.0001)
+        XCTAssertEqual(outOfRange.lastVideoVolume, 1, accuracy: 0.0001)
+        XCTAssertEqual(outOfRange.lastMusicVolume, 0, accuracy: 0.0001)
+    }
+
+    func testRememberedVolumeRejectsNonFiniteRuntimeUpdates() {
+        var settings = AppSettings(
+            defaultVolume: 0.4,
+            lastVideoVolume: 0.3,
+            lastMusicVolume: 0.6
+        )
+
+        settings.setRememberedVolume(Double.nan, for: .movie)
+        settings.setRememberedVolume(Double.infinity, for: .music)
+
+        XCTAssertEqual(settings.lastVideoVolume, 0.3, accuracy: 0.0001)
+        XCTAssertEqual(settings.lastMusicVolume, 0.6, accuracy: 0.0001)
+
+        settings.setRememberedVolume(1.2, for: .movie)
+        settings.setRememberedVolume(-0.2, for: .music)
+
+        XCTAssertEqual(settings.rememberedVolume(for: .movie), 1, accuracy: 0.0001)
+        XCTAssertEqual(settings.rememberedVolume(for: .music), 0, accuracy: 0.0001)
+
+        settings.lastVideoVolume = Double.nan
+        settings.lastMusicVolume = Double.infinity
+
+        XCTAssertEqual(settings.rememberedVolume(for: .movie), AppSettings().defaultVolume, accuracy: 0.0001)
+        XCTAssertEqual(settings.rememberedVolume(for: .music), AppSettings().defaultVolume, accuracy: 0.0001)
+    }
+
+    func testMusicSoftFadeDurationClampsNonFiniteAndOutOfRangeValues() {
+        let defaultDuration = AppSettings().musicSoftFadeDuration
+
+        for value in [Double.nan, .infinity, -.infinity] {
+            let settings = AppSettings(musicSoftFadeDuration: value)
+            XCTAssertEqual(settings.musicSoftFadeDuration, defaultDuration, accuracy: 0.0001)
+        }
+
+        XCTAssertEqual(AppSettings(musicSoftFadeDuration: 0.1).musicSoftFadeDuration, 0.3, accuracy: 0.0001)
+        XCTAssertEqual(AppSettings(musicSoftFadeDuration: 3).musicSoftFadeDuration, 2, accuracy: 0.0001)
+        XCTAssertEqual(AppSettings(musicSoftFadeDuration: 1.2).musicSoftFadeDuration, 1.2, accuracy: 0.0001)
+    }
 }

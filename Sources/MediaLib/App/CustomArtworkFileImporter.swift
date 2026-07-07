@@ -4,6 +4,7 @@ import MediaLibCore
 struct CustomArtworkFileIO: @unchecked Sendable {
     var createDirectory: @Sendable (URL) throws -> Void
     var contentsOfDirectory: @Sendable (URL) throws -> [URL]
+    var isRegularFile: @Sendable (URL) throws -> Bool
     var removeItem: @Sendable (URL) throws -> Void
     var copyItem: @Sendable (URL, URL) throws -> Void
 
@@ -16,6 +17,9 @@ struct CustomArtworkFileIO: @unchecked Sendable {
                 at: directory,
                 includingPropertiesForKeys: nil
             )
+        },
+        isRegularFile: { url in
+            try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true
         },
         removeItem: { url in
             try FileManager.default.removeItem(at: url)
@@ -52,6 +56,7 @@ enum CustomArtworkFileImporter {
             try io.createDirectory(thumbnailsDirectory)
             if let existing = try? io.contentsOfDirectory(thumbnailsDirectory) {
                 for old in existing where old.lastPathComponent.hasPrefix(prefix) {
+                    guard (try? io.isRegularFile(old)) == true else { continue }
                     try? io.removeItem(old)
                 }
             }

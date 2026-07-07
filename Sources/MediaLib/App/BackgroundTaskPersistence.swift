@@ -16,6 +16,25 @@ enum BackgroundTaskPersistence {
         )
     }
 
+    struct LoadFailure: Sendable {
+        let operation: String
+        let path: String
+        let message: String
+    }
+
+    enum LoadResult: Sendable {
+        case missingURL
+        case loaded([BackgroundTaskSnapshot])
+        case failed(LoadFailure)
+
+        var tasks: [BackgroundTaskSnapshot]? {
+            if case let .loaded(tasks) = self {
+                return tasks
+            }
+            return nil
+        }
+    }
+
     static let persistedLimit = 60
 
     static func persistedSnapshot(from tasks: [BackgroundTaskSnapshot]) -> [BackgroundTaskSnapshot] {
@@ -37,13 +56,27 @@ enum BackgroundTaskPersistence {
     }
 
     static func load(from url: URL?, io: IO) async -> [BackgroundTaskSnapshot]? {
+        await loadResult(from: url, io: io).tasks
+    }
+
+    static func loadResult(from url: URL?, io: IO) async -> LoadResult {
         await BlockingIOExecutor.run {
-            guard let url,
-                  let data = try? io.read(url),
-                  let decoded = try? decodedTasks(from: data) else {
-                return nil
+            guard let url else {
+                return .missingURL
             }
-            return decoded
+
+            let data: Data
+            do {
+                data = try io.read(url)
+            } catch {
+                return .failed(LoadFailure(operation: "read", path: url.path, message: error.localizedDescription))
+            }
+
+            do {
+                return .loaded(try decodedTasks(from: data))
+            } catch {
+                return .failed(LoadFailure(operation: "decode", path: url.path, message: error.localizedDescription))
+            }
         }
     }
 

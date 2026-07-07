@@ -15,6 +15,56 @@ final class AudioMetadataReaderAuditTests: XCTestCase {
         }
     }
 
+    func testAudioMetadataNormalizesNumericFieldsAtModelBoundary() throws {
+        let dirty = AudioMetadata(
+            title: " \n\t ",
+            trackNumber: 0,
+            year: -2024,
+            duration: .nan,
+            artworkPath: " ",
+            lyrics: "",
+            loudnessTrackGainDB: .infinity,
+            loudnessAlbumGainDB: -Double.infinity,
+            loudnessTrackPeak: 0,
+            loudnessAlbumPeak: .nan,
+            hasEmbeddedMetadata: true
+        )
+
+        XCTAssertNil(dirty.title)
+        XCTAssertNil(dirty.trackNumber)
+        XCTAssertNil(dirty.year)
+        XCTAssertNil(dirty.duration)
+        XCTAssertNil(dirty.artworkPath)
+        XCTAssertNil(dirty.lyrics)
+        XCTAssertNil(dirty.loudnessTrackGainDB)
+        XCTAssertNil(dirty.loudnessAlbumGainDB)
+        XCTAssertNil(dirty.loudnessTrackPeak)
+        XCTAssertNil(dirty.loudnessAlbumPeak)
+        XCTAssertFalse(dirty.hasEmbeddedMetadata)
+
+        let valid = AudioMetadata(
+            title: "  Song  ",
+            trackNumber: 1,
+            year: 2026,
+            duration: 0.25,
+            loudnessTrackGainDB: -6,
+            loudnessAlbumGainDB: 4,
+            loudnessTrackPeak: 0.9,
+            loudnessAlbumPeak: 1.2,
+            hasEmbeddedMetadata: true
+        )
+
+        XCTAssertEqual(valid.title, "Song")
+        XCTAssertEqual(valid.trackNumber, 1)
+        XCTAssertEqual(valid.year, 2026)
+        XCTAssertEqual(try XCTUnwrap(valid.duration), 0.25, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(valid.loudnessTrackGainDB), -6, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(valid.loudnessAlbumGainDB), 4, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(valid.loudnessTrackPeak), 0.9, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(valid.loudnessAlbumPeak), 1.2, accuracy: 0.0001)
+        XCTAssertTrue(valid.hasEmbeddedMetadata)
+    }
+
     /// 测试针对不存在的物理路径读取时，解析器安全返回空结构体而非抛错
     func testMetadataReaderSurvivesNonExistentURL() async {
         let reader = AudioMetadataReader()

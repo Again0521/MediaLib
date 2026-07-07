@@ -57,6 +57,30 @@ final class VideoMetadataSidecarWriterTests: XCTestCase {
         XCTAssertFalse(xml.contains("<uniqueid"))
     }
 
+    func testXMLContentOmitsNonFiniteAndOutOfRangeRatings() {
+        let item = MediaItem(id: "movie-rating", type: .movie, title: "Rating")
+        for rating in [Double.nan, .infinity, -.infinity, -1, 0, 10.1] {
+            let xml = VideoMetadataSidecarWriter.xmlContent(
+                for: item,
+                update: MediaMetadataUpdate(rating: rating)
+            )
+
+            XCTAssertFalse(xml.contains("<rating>"), "rating \(rating) should not be exported to sidecar XML")
+        }
+
+        let lowBoundary = VideoMetadataSidecarWriter.xmlContent(
+            for: item,
+            update: MediaMetadataUpdate(rating: 0.1)
+        )
+        XCTAssertTrue(lowBoundary.contains("<rating>0.1</rating>"))
+
+        let highBoundary = VideoMetadataSidecarWriter.xmlContent(
+            for: item,
+            update: MediaMetadataUpdate(rating: 10)
+        )
+        XCTAssertTrue(highBoundary.contains("<rating>10.0</rating>"))
+    }
+
     func testXMLContentUsesTVShowRootForAllNonMovieVideoCollections() {
         for type in [MediaType.tvShow, .anime, .documentary, .variety, .homeVideo, .episode] {
             let item = MediaItem(id: "item-\(type.rawValue)", type: type, title: "Collection")

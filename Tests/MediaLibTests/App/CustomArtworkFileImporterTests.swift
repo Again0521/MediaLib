@@ -39,6 +39,32 @@ final class CustomArtworkFileImporterTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: otherPoster.path))
     }
 
+    func testImportArtworkDoesNotRemoveDirectoriesThatMatchOldArtworkPrefix() async throws {
+        let directory = try makeTemporaryDirectory()
+        let thumbnailsDirectory = directory.appendingPathComponent("Thumbnails", isDirectory: true)
+        let sourceURL = directory.appendingPathComponent("cover.PNG")
+        try Data([0xCA, 0xFE]).write(to: sourceURL)
+        try FileManager.default.createDirectory(at: thumbnailsDirectory, withIntermediateDirectories: true)
+        let stalePoster = thumbnailsDirectory.appendingPathComponent("movie-1-custom-poster-1.png")
+        let matchingDirectory = thumbnailsDirectory.appendingPathComponent("movie-1-custom-poster-folder.png", isDirectory: true)
+        try Data([0x00]).write(to: stalePoster)
+        try FileManager.default.createDirectory(at: matchingDirectory, withIntermediateDirectories: true)
+        try Data([0x01]).write(to: matchingDirectory.appendingPathComponent("nested.txt"))
+
+        let importedURL = try await CustomArtworkFileImporter.importArtwork(
+            itemID: "movie-1",
+            sourceURL: sourceURL,
+            thumbnailsDirectory: thumbnailsDirectory,
+            kind: .poster,
+            timestamp: 124
+        )
+
+        XCTAssertEqual(importedURL.lastPathComponent, "movie-1-custom-poster-124.png")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stalePoster.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: matchingDirectory.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: matchingDirectory.appendingPathComponent("nested.txt").path))
+    }
+
     func testImportArtworkUsesJPGFallbackForExtensionlessSource() async throws {
         let directory = try makeTemporaryDirectory()
         let thumbnailsDirectory = directory.appendingPathComponent("Nested/Thumbnails", isDirectory: true)
@@ -103,6 +129,7 @@ final class CustomArtworkFileImporterTests: XCTestCase {
         XCTAssertEqual(recorder.operationNames, [
             "createDirectory",
             "contentsOfDirectory",
+            "isRegularFile",
             "removeItem",
             "copyItem"
         ])
@@ -121,6 +148,7 @@ final class CustomArtworkFileImporterTests: XCTestCase {
         let io = CustomArtworkFileIO(
             createDirectory: { _ in },
             contentsOfDirectory: { _ in [] },
+            isRegularFile: { _ in true },
             removeItem: { _ in },
             copyItem: { _, _ in throw CopyFailed() }
         )
@@ -152,13 +180,15 @@ final class CustomArtworkFileImporterTests: XCTestCase {
 private final class RecordingCustomArtworkFileIO: @unchecked Sendable {
     private let lock = NSLock()
     private let existingURLs: [URL]
+    private let regularURLs: Set<URL>
     private var operations: [(name: String, onBlockingIOQueue: Bool)] = []
     private var directories: [URL] = []
     private var removals: [URL] = []
     private var copyRecords: [(source: URL, destination: URL)] = []
 
-    init(existingURLs: [URL]) {
+    init(existingURLs: [URL], regularURLs: Set<URL>? = nil) {
         self.existingURLs = existingURLs
+        self.regularURLs = regularURLs ?? Set(existingURLs)
     }
 
     var operationNames: [String] {
@@ -208,6 +238,10 @@ private final class RecordingCustomArtworkFileIO: @unchecked Sendable {
             contentsOfDirectory: { [self] _ in
                 record("contentsOfDirectory")
                 return existingURLs
+            },
+            isRegularFile: { [self] url in
+                record("isRegularFile")
+                return regularURLs.contains(url)
             },
             removeItem: { [self] url in
                 record("removeItem")

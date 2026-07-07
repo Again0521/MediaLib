@@ -33,21 +33,23 @@ public enum HomeVideoProjectionPolicy {
         watchedThreshold: Double,
         limit: Int
     ) -> [MediaItem] {
-        Array(seriesItems.compactMap { series -> MediaItem? in
+        let watchedThreshold = normalizedWatchedThreshold(watchedThreshold)
+        return Array(seriesItems.compactMap { series -> MediaItem? in
             guard let episodes = childrenByParentID[series.id], !episodes.isEmpty else { return nil }
             guard let lastFinishedIndex = episodes.lastIndex(where: {
-                $0.watched || $0.playProgress >= watchedThreshold
+                isFinished($0, watchedThreshold: watchedThreshold)
             }) else { return nil }
             let nextIndex = lastFinishedIndex + 1
             guard episodes.indices.contains(nextIndex) else { return nil }
             let next = episodes[nextIndex]
-            guard !(next.watched || next.playProgress >= watchedThreshold) else { return nil }
+            guard !isFinished(next, watchedThreshold: watchedThreshold) else { return nil }
             return next
         }.prefix(max(limit, 0)))
     }
 
     public static func availableHomeTabs(_ input: HomeTabAvailabilityInput) -> Set<HomeTab> {
-        Set(HomeTab.allCases.filter { tab in
+        let watchedThreshold = normalizedWatchedThreshold(input.watchedThreshold)
+        return Set(HomeTab.allCases.filter { tab in
             switch tab {
             case .overview:
                 return true
@@ -79,11 +81,29 @@ public enum HomeVideoProjectionPolicy {
                 return input.homeVideoItems.contains { $0.type != .music && $0.favorite }
             case .unwatched:
                 return input.homeVideoItems.contains {
-                    $0.type != .music && !$0.watched && $0.playProgress < input.watchedThreshold
+                    $0.type != .music && isUnwatched($0, watchedThreshold: watchedThreshold)
                 }
             case .privacy:
                 return !input.privateTopLevelItems.isEmpty
             }
         })
+    }
+
+    private static func isFinished(_ item: MediaItem, watchedThreshold: Double) -> Bool {
+        item.watched || normalizedPlayProgress(item.playProgress) >= watchedThreshold
+    }
+
+    private static func isUnwatched(_ item: MediaItem, watchedThreshold: Double) -> Bool {
+        !item.watched && normalizedPlayProgress(item.playProgress) < watchedThreshold
+    }
+
+    private static func normalizedPlayProgress(_ progress: Double) -> Double {
+        guard progress.isFinite else { return 0 }
+        return min(max(progress, 0), 1)
+    }
+
+    private static func normalizedWatchedThreshold(_ threshold: Double) -> Double {
+        guard threshold.isFinite, threshold > 0, threshold <= 1 else { return 0.9 }
+        return threshold
     }
 }

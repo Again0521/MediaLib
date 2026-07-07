@@ -219,7 +219,7 @@ struct TMDBEnrichmentService {
                 id: path,
                 thumbURL: "https://image.tmdb.org/t/p/w500\(path)",
                 fullURL: "https://image.tmdb.org/t/p/original\(path)",
-                aspectRatio: dto.aspectRatio ?? 1.78,
+                aspectRatio: Self.normalizedArtworkAspectRatio(dto.aspectRatio),
                 kind: imageKind,
                 language: dto.iso6391
             )
@@ -231,7 +231,7 @@ struct TMDBEnrichmentService {
             overview: decoded.overview,
             posterURL: decoded.posterPath.map { "https://image.tmdb.org/t/p/w500\($0)" },
             backdropURL: decoded.backdropPath.map { "https://image.tmdb.org/t/p/w780\($0)" },
-            rating: decoded.voteAverage,
+            rating: Self.normalizedRating(decoded.voteAverage),
             runtime: decoded.runtime ?? decoded.episodeRunTime?.first,
             genres: (decoded.genres ?? []).compactMap(\.name),
             cast: Array(cast),
@@ -245,8 +245,8 @@ struct TMDBEnrichmentService {
             status: decoded.status,
             firstAirDate: decoded.firstAirDate ?? decoded.releaseDate,
             endDate: decoded.lastAirDate,
-            seasonCount: decoded.numberOfSeasons,
-            episodeCount: decoded.numberOfEpisodes,
+            seasonCount: Self.normalizedCount(decoded.numberOfSeasons),
+            episodeCount: Self.normalizedCount(decoded.numberOfEpisodes),
             contentRating: Self.contentRating(from: decoded, kind: kind),
             originalLanguage: decoded.originalLanguage,
             countries: (decoded.originCountry ?? []) + (decoded.productionCountries ?? []).compactMap(\.name),
@@ -368,8 +368,8 @@ struct TMDBEnrichmentService {
             year: year(from: date),
             posterURL: posterURL(item.posterPath),
             overview: item.overview,
-            rating: item.voteAverage,
-            popularity: item.popularity,
+            rating: normalizedRating(item.voteAverage),
+            popularity: normalizedPopularity(item.popularity),
             relation: relation
         )
     }
@@ -425,6 +425,26 @@ struct TMDBEnrichmentService {
         return min(max(retry, 0.5), 4)
     }
 
+    static func normalizedRating(_ rating: Double?) -> Double? {
+        guard let rating, rating.isFinite, rating > 0, rating <= 10 else { return nil }
+        return rating
+    }
+
+    static func normalizedPopularity(_ popularity: Double?) -> Double? {
+        guard let popularity, popularity.isFinite, popularity >= 0 else { return nil }
+        return popularity
+    }
+
+    static func normalizedArtworkAspectRatio(_ aspectRatio: Double?) -> Double {
+        guard let aspectRatio, aspectRatio.isFinite, aspectRatio > 0, aspectRatio <= 10 else { return 1.78 }
+        return aspectRatio
+    }
+
+    static func normalizedCount(_ count: Int?) -> Int? {
+        guard let count, count >= 0 else { return nil }
+        return count
+    }
+
     private static func personWorks(from credits: TMDBCombinedCredits?) -> [MediaPersonWork] {
         let cast = credits?.cast ?? []
         let crew = credits?.crew ?? []
@@ -441,7 +461,7 @@ struct TMDBEnrichmentService {
                 role: role,
                 mediaKind: mediaType,
                 posterURL: posterURL(item.posterPath),
-                popularity: item.popularity
+                popularity: normalizedPopularity(item.popularity)
             )
             if (work.popularity ?? 0) >= (byID[externalID]?.popularity ?? -1) {
                 byID[externalID] = work
@@ -886,7 +906,7 @@ extension TMDBEnrichment {
                 thumbURL: image.thumbURL,
                 fullURL: image.fullURL,
                 language: image.language,
-                aspectRatio: image.aspectRatio,
+                aspectRatio: TMDBEnrichmentService.normalizedArtworkAspectRatio(image.aspectRatio),
                 order: index
             )
         }
@@ -900,8 +920,8 @@ extension TMDBEnrichment {
                 year: value.year,
                 posterURL: value.posterURL,
                 overview: value.overview,
-                rating: value.rating,
-                popularity: value.popularity,
+                rating: TMDBEnrichmentService.normalizedRating(value.rating),
+                popularity: TMDBEnrichmentService.normalizedPopularity(value.popularity),
                 order: index
             )
         }
@@ -916,8 +936,8 @@ extension TMDBEnrichment {
                 status: status,
                 firstAirDate: firstAirDate,
                 endDate: endDate,
-                seasonCount: seasonCount,
-                episodeCount: episodeCount,
+                seasonCount: TMDBEnrichmentService.normalizedCount(seasonCount),
+                episodeCount: TMDBEnrichmentService.normalizedCount(episodeCount),
                 contentRating: contentRating,
                 originalLanguage: originalLanguage,
                 countries: Array(Set(countries)).filter { !$0.isEmpty },

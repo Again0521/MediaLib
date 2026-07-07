@@ -108,6 +108,7 @@ struct EmbyService {
     private let deviceName = Host.current().localizedName ?? "Mac"
     private let version = AppVersion.current
     private let pageSize = 300
+    private static let maxItemPageIterations = 10_000
     private let deviceIDDefaults: UserDefaults
 
     init(deviceIDDefaults: UserDefaults = .standard) {
@@ -396,6 +397,27 @@ struct EmbyService {
         return lowercased.hasPrefix("emby://") || lowercased.hasPrefix("jellyfin://") || lowercased.hasPrefix("plex://")
     }
 
+    static func shouldContinueItemPagination(
+        pageItemCount: Int,
+        addedUniqueItems: Int,
+        totalRecordCount: Int?,
+        nextStartIndex: Int,
+        pageIndex: Int,
+        maxPageIterations: Int
+    ) -> Bool {
+        guard pageItemCount > 0 else { return false }
+        if addedUniqueItems <= 0, totalRecordCount == nil {
+            return false
+        }
+        if let totalRecordCount, nextStartIndex >= totalRecordCount {
+            return false
+        }
+        if pageIndex >= maxPageIterations {
+            return false
+        }
+        return true
+    }
+
     private func fetchItems(session: EmbySession, sourceID: String, sourcePath: String, parentID: String?) async throws -> [MediaItem] {
         var imported: [MediaItem] = []
         var existingIDs = Set<String>()
@@ -405,7 +427,6 @@ struct EmbyService {
         // 防御：若服务器忽略 StartIndex/Limit（每次返回相同非空页）且不返回 TotalRecordCount，
         // 原循环 pageCount>0 恒真会无限翻页。用「绝对页数上限」+「连续页无新增去重项即中止」双闸。
         var pageIndex = 0
-        let maxPageIterations = 10_000
 
         repeat {
             pageIndex += 1
@@ -426,18 +447,18 @@ struct EmbyService {
             collectSyntheticSeriesCandidates(from: payload.Items, into: &syntheticSeriesCandidates)
 
             let pageCount = payload.Items.count
-            guard pageCount > 0 else { break }
-            // 整页都是已见 ID 且没有 total 兜底 → 服务器在重复同一批，停止以免死循环。
-            if imported.count == importedCountBeforePage, totalRecordCount == nil {
+            let nextStartIndex = startIndex + pageCount
+            guard Self.shouldContinueItemPagination(
+                pageItemCount: pageCount,
+                addedUniqueItems: imported.count - importedCountBeforePage,
+                totalRecordCount: totalRecordCount,
+                nextStartIndex: nextStartIndex,
+                pageIndex: pageIndex,
+                maxPageIterations: Self.maxItemPageIterations
+            ) else {
                 break
             }
-            startIndex += pageCount
-            if let totalRecordCount, startIndex >= totalRecordCount {
-                break
-            }
-            if pageIndex >= maxPageIterations {
-                break
-            }
+            startIndex = nextStartIndex
         } while true
 
         imported.append(contentsOf: syntheticSeriesParents(
@@ -523,7 +544,7 @@ struct EmbyService {
             backdropPath: dto.BackdropImageTags?.isEmpty == false
                 ? backdropImageURL(itemID: dto.Id, index: 0, maxWidth: 1280, session: session)?.absoluteString
                 : nil,
-            rating: dto.CommunityRating,
+            rating: Self.normalizedProviderRating(dto.CommunityRating),
             userRating: Self.seedUserRating(from: dto.CommunityRating),
             runtime: duration.map { Int($0 / 60) },
             sourcePath: sourcePath,
@@ -593,7 +614,7 @@ struct EmbyService {
                 year: episodeDTO.ProductionYear,
                 overview: nil,
                 posterPath: imageURL(itemID: seriesID, session: session)?.absoluteString,
-                rating: episodeDTO.CommunityRating,
+                rating: Self.normalizedProviderRating(episodeDTO.CommunityRating),
                 userRating: Self.seedUserRating(from: episodeDTO.CommunityRating),
                 sourcePath: sourcePath,
                 externalID: seriesID,
@@ -881,9 +902,14 @@ struct EmbyService {
         return Int64((seconds * 10_000_000).rounded())
     }
 
-    private static func seedUserRating(from providerRating: Double?) -> Double? {
-        guard let providerRating, providerRating.isFinite, providerRating > 0 else { return nil }
+    static func seedUserRating(from providerRating: Double?) -> Double? {
+        guard let providerRating = normalizedProviderRating(providerRating) else { return nil }
         return min(max((providerRating / 2).rounded(), 1), 5)
+    }
+
+    static func normalizedProviderRating(_ providerRating: Double?) -> Double? {
+        guard let providerRating, providerRating.isFinite, providerRating > 0, providerRating <= 10 else { return nil }
+        return providerRating
     }
 
     private func normalizedServerURL(_ url: URL) -> URL {

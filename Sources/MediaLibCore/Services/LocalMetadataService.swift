@@ -7,6 +7,32 @@ public struct LocalMetadata: Sendable {
     public var overview: String?
     public var posterPath: String?
     public var backdropPath: String?
+
+    public init(
+        title: String? = nil,
+        originalTitle: String? = nil,
+        year: Int? = nil,
+        overview: String? = nil,
+        posterPath: String? = nil,
+        backdropPath: String? = nil
+    ) {
+        self.title = Self.cleaned(title)
+        self.originalTitle = Self.cleaned(originalTitle)
+        self.year = Self.normalizedYear(year)
+        self.overview = Self.cleaned(overview)
+        self.posterPath = Self.cleaned(posterPath)
+        self.backdropPath = Self.cleaned(backdropPath)
+    }
+
+    static func normalizedYear(_ year: Int?) -> Int? {
+        guard let year, year > 0 else { return nil }
+        return year
+    }
+
+    private static func cleaned(_ value: String?) -> String? {
+        let cleaned = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned?.isEmpty == false ? cleaned : nil
+    }
 }
 
 public final class LocalMetadataService: @unchecked Sendable {
@@ -125,6 +151,7 @@ public final class LocalMetadataService: @unchecked Sendable {
               let swiftRange = Range(match.range(at: 1), in: raw) else {
             return nil
         }
-        return String(raw[swiftRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = String(raw[swiftRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 }

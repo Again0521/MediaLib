@@ -2,6 +2,51 @@ import XCTest
 @testable import MediaLib
 
 final class MetadataSearchResultTests: XCTestCase {
+    func testProviderRatingIsNormalizedAtConstruction() throws {
+        for rating in [Double.nan, .infinity, -.infinity, -1, 0, 10.1] {
+            let result = MetadataSearchResult(
+                id: "tmdb:invalid:\(rating)",
+                provider: "TMDB",
+                title: "Movie",
+                rating: rating
+            )
+
+            XCTAssertNil(result.rating, "rating \(rating) should be dropped before entering search result state")
+            XCTAssertNil(result.metadataUpdate.rating)
+        }
+
+        let lowBoundary = MetadataSearchResult(
+            id: "tmdb:low",
+            provider: "TMDB",
+            title: "Movie",
+            rating: 0.1
+        )
+        XCTAssertEqual(try XCTUnwrap(lowBoundary.rating), 0.1, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(lowBoundary.metadataUpdate.rating), 0.1, accuracy: 0.0001)
+
+        let highBoundary = MetadataSearchResult(
+            id: "tmdb:high",
+            provider: "TMDB",
+            title: "Movie",
+            rating: 10
+        )
+        XCTAssertEqual(try XCTUnwrap(highBoundary.rating), 10, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(highBoundary.metadataUpdate.rating), 10, accuracy: 0.0001)
+    }
+
+    func testMetadataUpdateRechecksMutatedProviderRating() {
+        var result = MetadataSearchResult(
+            id: "tmdb:mutated",
+            provider: "TMDB",
+            title: "Movie",
+            rating: 8.5
+        )
+
+        result.rating = .infinity
+
+        XCTAssertNil(result.metadataUpdate.rating)
+    }
+
     func testMetadataUpdateDropsHTTPArtworkURLsCaseInsensitively() {
         let result = MetadataSearchResult(
             id: "tmdb:1",

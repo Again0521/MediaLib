@@ -318,8 +318,9 @@ struct PlexService {
         let height = Self.int(media?.attributes["height"])
         let resolution = (width.flatMap { width in height.map { "\(width)x\($0)" } })
         let streamURL = part?.attributes["key"].flatMap { mediaURL(relativeOrAbsolutePath: $0, session: session) }
-        let rating = Self.double(node.attributes["audienceRating"]) ?? Self.double(node.attributes["rating"])
-        let userRating = Self.double(node.attributes["userRating"]).map { min(max($0 / 2.0, 0), 5) }
+        let rating = Self.normalizedProviderRating(Self.double(node.attributes["audienceRating"]))
+            ?? Self.normalizedProviderRating(Self.double(node.attributes["rating"]))
+        let userRating = Self.normalizedPlexUserRating(Self.double(node.attributes["userRating"]))
             ?? Self.seedUserRating(from: rating)
 
         return MediaItem(
@@ -372,7 +373,8 @@ struct PlexService {
             guard existingIDs.insert(id).inserted else { return nil }
             let libraryID = episode.attributes["librarySectionID"] ?? episode.attributes["librarySectionKey"] ?? ""
             let sourcePath = sourcePathByLibraryID[libraryID] ?? sourcePathByLibraryID.values.first ?? "plex://unknown/\(sourceID)"
-            let rating = Self.double(episode.attributes["audienceRating"]) ?? Self.double(episode.attributes["rating"])
+            let rating = Self.normalizedProviderRating(Self.double(episode.attributes["audienceRating"]))
+                ?? Self.normalizedProviderRating(Self.double(episode.attributes["rating"]))
             return MediaItem(
                 id: id,
                 type: .tvShow,
@@ -530,8 +532,8 @@ struct PlexService {
     }
 
     private static func double(_ value: String?) -> Double? {
-        guard let value else { return nil }
-        return Double(value)
+        guard let value, let parsed = Double(value), parsed.isFinite else { return nil }
+        return parsed
     }
 
     private static func year(from value: String?) -> Int? {
@@ -539,14 +541,24 @@ struct PlexService {
         return Int(value.prefix(4))
     }
 
-    private static func date(fromUnixSeconds value: String?) -> Date? {
-        guard let seconds = value.flatMap(Double.init) else { return nil }
+    static func date(fromUnixSeconds value: String?) -> Date? {
+        guard let seconds = double(value) else { return nil }
         return Date(timeIntervalSince1970: seconds)
     }
 
-    private static func seedUserRating(from rating: Double?) -> Double? {
-        guard let rating, rating > 0 else { return nil }
+    static func seedUserRating(from rating: Double?) -> Double? {
+        guard let rating = normalizedProviderRating(rating) else { return nil }
         return min(max((rating / 10.0) * 5.0, 0), 5)
+    }
+
+    static func normalizedProviderRating(_ rating: Double?) -> Double? {
+        guard let rating, rating.isFinite, rating > 0, rating <= 10 else { return nil }
+        return rating
+    }
+
+    static func normalizedPlexUserRating(_ rating: Double?) -> Double? {
+        guard let rating, rating.isFinite, rating > 0, rating <= 10 else { return nil }
+        return min(max(rating / 2.0, 0), 5)
     }
 
     static func providerIDs(guidValues: [String], legacyGUID: String?) -> (tmdbID: String?, imdbID: String?) {

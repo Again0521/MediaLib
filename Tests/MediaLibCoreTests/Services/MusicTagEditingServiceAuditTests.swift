@@ -45,6 +45,37 @@ final class MusicTagEditingServiceAuditTests: XCTestCase {
         XCTAssertNil(draft.metadataProvider)
     }
 
+    func testMusicTagDraftNormalizesNonPositiveTrackAndYearAcrossExports() {
+        var draft = MusicTagDraft(
+            title: "Song",
+            trackNumber: 0,
+            year: -2024
+        )
+
+        XCTAssertNil(draft.trackNumber)
+        XCTAssertNil(draft.year)
+        XCTAssertNil(draft.metadataUpdate.trackNumber)
+        XCTAssertNil(draft.metadataUpdate.year)
+        XCTAssertFalse(draft.writableMetadataPairs.contains { $0.0 == "track" || $0.0 == "year" })
+
+        draft.trackNumber = -3
+        draft.year = 0
+
+        XCTAssertNil(draft.metadataUpdate.trackNumber)
+        XCTAssertNil(draft.metadataUpdate.year)
+        XCTAssertFalse(draft.writableMetadataPairs.contains { $0.0 == "track" || $0.0 == "year" })
+
+        draft.trackNumber = 7
+        draft.year = 2026
+
+        XCTAssertEqual(draft.metadataUpdate.trackNumber, 7)
+        XCTAssertEqual(draft.metadataUpdate.year, 2026)
+        XCTAssertTrue(draft.writableMetadataPairs.contains { $0.0 == "track" && $0.1 == "7" })
+        XCTAssertTrue(draft.writableMetadataPairs.contains { $0.0 == "tracknumber" && $0.1 == "7" })
+        XCTAssertTrue(draft.writableMetadataPairs.contains { $0.0 == "date" && $0.1 == "2026" })
+        XCTAssertTrue(draft.writableMetadataPairs.contains { $0.0 == "year" && $0.1 == "2026" })
+    }
+
     /// 测试从 MediaItem 创建草稿与生成更新对象的属性绝对一致性
     func testMusicTagDraftMediaMetadataUpdateMappingPrecision() {
         var item = MediaItem(id: "music-item-01", type: .music, title: "Original Title")

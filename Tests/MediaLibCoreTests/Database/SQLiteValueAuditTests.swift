@@ -71,4 +71,41 @@ final class SQLiteValueAuditTests: XCTestCase {
         XCTAssertNil(row?.0, "绑定 .null 时必须在数据库中表达为真正 NULL")
         XCTAssertEqual(row?.1, 1, "布尔值 true 应该被正确转化为整数 1")
     }
+
+    func testOptionalDoubleTreatsNonFiniteValuesAsNull() {
+        guard case .double(let finite) = SQLiteValue.optionalDouble(1.25) else {
+            return XCTFail("有限 Double 应保留为 REAL 绑定值")
+        }
+        XCTAssertEqual(finite, 1.25)
+
+        if case .null = SQLiteValue.optionalDouble(.nan) {} else {
+            XCTFail("NaN 可选浮点值必须清洗为 NULL")
+        }
+        if case .null = SQLiteValue.optionalDouble(.infinity) {} else {
+            XCTFail("正无穷可选浮点值必须清洗为 NULL")
+        }
+        if case .null = SQLiteValue.optionalDouble(-.infinity) {} else {
+            XCTFail("负无穷可选浮点值必须清洗为 NULL")
+        }
+    }
+
+    func testNonFiniteDoubleBindingsPersistAsSQLiteNull() throws {
+        try db.execute(
+            "INSERT INTO val_audit (id, flt) VALUES (?, ?), (?, ?), (?, ?)",
+            bindings: [
+                .text("nan-row"), .double(.nan),
+                .text("inf-row"), .double(.infinity),
+                .text("neg-inf-row"), .double(-.infinity)
+            ]
+        )
+
+        let nullFlags = try db.query(
+            "SELECT flt IS NULL FROM val_audit WHERE id IN (?, ?, ?) ORDER BY id",
+            bindings: [.text("inf-row"), .text("nan-row"), .text("neg-inf-row")]
+        ) { row in
+            row.int(0)
+        }
+
+        XCTAssertEqual(nullFlags, [1, 1, 1])
+    }
 }

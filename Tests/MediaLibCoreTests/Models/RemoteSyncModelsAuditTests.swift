@@ -57,4 +57,70 @@ final class RemoteSyncModelsAuditTests: XCTestCase {
         XCTAssertEqual(RemoteConnectorProvider.trakt.displayName, "Trakt")
         XCTAssertEqual(RemoteConnectorProvider.iCloud.displayName, "iCloud")
     }
+
+    func testProfileMediaStateClampsFinitePlaybackValues() {
+        let state = ProfileMediaState(
+            profileID: "profile",
+            mediaID: "media",
+            playCount: -3,
+            playPosition: -12,
+            playProgress: 1.5
+        )
+
+        XCTAssertEqual(state.playCount, 0)
+        XCTAssertEqual(state.playPosition, 0)
+        XCTAssertEqual(state.playProgress, 1)
+    }
+
+    func testProfileMediaStateTreatsNonFinitePlaybackValuesAsZero() {
+        for value in [Double.nan, .infinity, -.infinity] {
+            let state = ProfileMediaState(
+                profileID: "profile",
+                mediaID: "media-\(value)",
+                playPosition: value,
+                playProgress: value
+            )
+
+            XCTAssertEqual(state.playPosition, 0)
+            XCTAssertEqual(state.playProgress, 0)
+        }
+    }
+
+    func testProfileMediaStateTreatsNonFiniteUserRatingAsNil() {
+        for value in [Double.nan, .infinity, -.infinity] {
+            let state = ProfileMediaState(
+                profileID: "profile",
+                mediaID: "rating-\(value)",
+                userRating: value
+            )
+
+            XCTAssertNil(state.userRating)
+        }
+    }
+
+    func testProfileMediaStateNormalizesFiniteUserRatingBounds() throws {
+        for value in [-1.0, 0, 5.1] {
+            let state = ProfileMediaState(
+                profileID: "profile",
+                mediaID: "rating-\(value)",
+                userRating: value
+            )
+
+            XCTAssertNil(state.userRating)
+        }
+
+        let lowBoundary = ProfileMediaState(
+            profileID: "profile",
+            mediaID: "rating-low",
+            userRating: 0.5
+        )
+        XCTAssertEqual(try XCTUnwrap(lowBoundary.userRating), 0.5, accuracy: 0.0001)
+
+        let highBoundary = ProfileMediaState(
+            profileID: "profile",
+            mediaID: "rating-high",
+            userRating: 5
+        )
+        XCTAssertEqual(try XCTUnwrap(highBoundary.userRating), 5, accuracy: 0.0001)
+    }
 }

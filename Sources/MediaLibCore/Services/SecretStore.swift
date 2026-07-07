@@ -61,19 +61,21 @@ public final class SecretStore {
     }
 
     /// 覆盖写入全部 secret 键值。空字典会清空文件内容（仍写入 `{}`，保持文件存在与权限）。
-    /// 任何失败静默忽略，绝不影响设置主流程。
-    public func save(_ secrets: [String: String]) {
+    /// 返回值用于审计和测试；调用方仍可忽略失败，避免影响设置主流程。
+    @discardableResult
+    public func save(_ secrets: [String: String]) -> Bool {
         guard let fileURL,
-              let data = try? JSONEncoder().encode(secrets) else { return }
-        Self.save(data, to: fileURL, io: io)
+              let data = try? JSONEncoder().encode(secrets) else { return false }
+        return Self.save(data, to: fileURL, io: io)
     }
 
     /// 异步覆盖写入全部 secret 键值。失败策略与同步 `save` 保持一致。
-    public func saveAsync(_ secrets: [String: String]) async {
+    @discardableResult
+    public func saveAsync(_ secrets: [String: String]) async -> Bool {
         guard let fileURL,
-              let data = try? JSONEncoder().encode(secrets) else { return }
+              let data = try? JSONEncoder().encode(secrets) else { return false }
         let io = io
-        await BlockingIOExecutor.run {
+        return await BlockingIOExecutor.run {
             Self.save(data, to: fileURL, io: io)
         }
     }
@@ -99,7 +101,12 @@ public final class SecretStore {
         return dict
     }
 
-    private static func save(_ data: Data, to fileURL: URL, io: IO) {
-        try? io.write(data, fileURL)
+    private static func save(_ data: Data, to fileURL: URL, io: IO) -> Bool {
+        do {
+            try io.write(data, fileURL)
+            return true
+        } catch {
+            return false
+        }
     }
 }

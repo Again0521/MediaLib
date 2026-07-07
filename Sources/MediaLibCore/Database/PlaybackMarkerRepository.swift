@@ -38,8 +38,9 @@ public final class PlaybackMarkerRepository {
     public func save(_ marker: PlaybackMarker) throws -> PlaybackMarker {
         var updated = marker
         updated.title = normalizedTitle(marker.title, kind: marker.kind)
-        updated.startTime = max(marker.startTime, 0)
-        updated.endTime = marker.endTime.map { max($0, 0) }
+        updated.startTime = PlaybackMarker.normalizedTime(marker.startTime)
+        updated.endTime = PlaybackMarker.normalizedEndTime(marker.endTime)
+        updated.confidence = PlaybackMarker.normalizedConfidence(marker.confidence)
         updated.reviewStatus = normalizedReviewStatus(marker.reviewStatus, origin: marker.origin)
         updated.updatedAt = Date()
         try database.execute(

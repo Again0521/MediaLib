@@ -91,4 +91,76 @@ final class TMDBEnrichmentServiceTests: XCTestCase {
         XCTAssertEqual(TMDBEnrichmentService.retryDelaySeconds(retryAfter: "NaN", attempt: 2), 2)
         XCTAssertEqual(TMDBEnrichmentService.retryDelaySeconds(retryAfter: nil, attempt: 9), 4)
     }
+
+    func testNumericNormalizersRejectInvalidTMDBValues() throws {
+        for value in [Double.nan, .infinity, -.infinity, -1, 0, 10.1] {
+            XCTAssertNil(TMDBEnrichmentService.normalizedRating(value))
+        }
+        XCTAssertEqual(try XCTUnwrap(TMDBEnrichmentService.normalizedRating(8.7)), 8.7, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(TMDBEnrichmentService.normalizedRating(10)), 10, accuracy: 0.0001)
+
+        for value in [Double.nan, .infinity, -.infinity, -0.01] {
+            XCTAssertNil(TMDBEnrichmentService.normalizedPopularity(value))
+        }
+        XCTAssertEqual(try XCTUnwrap(TMDBEnrichmentService.normalizedPopularity(0)), 0, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(TMDBEnrichmentService.normalizedPopularity(42)), 42, accuracy: 0.0001)
+
+        for value in [Double.nan, .infinity, -.infinity, -1, 0, 10.1] {
+            XCTAssertEqual(TMDBEnrichmentService.normalizedArtworkAspectRatio(value), 1.78, accuracy: 0.0001)
+        }
+        XCTAssertEqual(TMDBEnrichmentService.normalizedArtworkAspectRatio(2.35), 2.35, accuracy: 0.0001)
+        XCTAssertNil(TMDBEnrichmentService.normalizedCount(-1))
+        XCTAssertEqual(TMDBEnrichmentService.normalizedCount(0), 0)
+    }
+
+    func testSnapshotNormalizesNumericFieldsBeforePersistence() throws {
+        let enrichment = TMDBEnrichment(
+            title: "Numeric",
+            originalTitle: nil,
+            overview: nil,
+            posterURL: nil,
+            backdropURL: nil,
+            rating: 12,
+            runtime: nil,
+            cast: [],
+            crew: [],
+            similar: [
+                TMDBSimilarTitle(
+                    id: "tmdb:movie:1",
+                    title: "Related",
+                    year: nil,
+                    posterURL: nil,
+                    rating: 12,
+                    popularity: -0.1
+                )
+            ],
+            images: [
+                TMDBImage(
+                    id: "bad-aspect",
+                    thumbURL: "thumb",
+                    fullURL: "full",
+                    aspectRatio: .nan
+                )
+            ],
+            trailerURL: nil,
+            imdbID: nil,
+            tmdbKind: "movie",
+            tmdbID: "123",
+            status: nil,
+            firstAirDate: nil,
+            endDate: nil,
+            seasonCount: -1,
+            episodeCount: -2,
+            contentRating: nil,
+            originalLanguage: nil
+        )
+
+        let snapshot = enrichment.snapshot(mediaID: "media", provider: "TMDB", language: "zh-CN")
+
+        XCTAssertEqual(try XCTUnwrap(snapshot.artwork.first?.aspectRatio), 1.78, accuracy: 0.0001)
+        XCTAssertNil(snapshot.relatedTitles.first?.rating)
+        XCTAssertNil(snapshot.relatedTitles.first?.popularity)
+        XCTAssertNil(snapshot.metadata.seasonCount)
+        XCTAssertNil(snapshot.metadata.episodeCount)
+    }
 }

@@ -108,6 +108,34 @@ final class VideoOfflinePolicyTests: XCTestCase {
         )
     }
 
+    func testNextUnwatchedEpisodesTreatsNonFiniteProgressAsUnwatchedUnlessFlaggedWatched() {
+        let episodes = [
+            mediaItem(id: "nan", type: .episode, playProgress: .nan),
+            mediaItem(id: "positive-infinity", type: .episode, playProgress: .infinity),
+            mediaItem(id: "negative-infinity", type: .episode, playProgress: -.infinity),
+            mediaItem(id: "watched-nan", type: .episode, playProgress: .nan, watched: true)
+        ]
+
+        XCTAssertEqual(
+            VideoOfflinePolicy.nextUnwatchedEpisodes(in: episodes, watchedThreshold: 0.8).map(\.id),
+            ["nan", "positive-infinity", "negative-infinity"]
+        )
+    }
+
+    func testNextUnwatchedEpisodesUsesDefaultThresholdWhenThresholdIsNonFinite() {
+        let episodes = [
+            mediaItem(id: "half", type: .episode, playProgress: 0.5),
+            mediaItem(id: "almost-done", type: .episode, playProgress: 0.95)
+        ]
+
+        for threshold in [Double.nan, .infinity, -.infinity] {
+            XCTAssertEqual(
+                VideoOfflinePolicy.nextUnwatchedEpisodes(in: episodes, watchedThreshold: threshold).map(\.id),
+                ["half"]
+            )
+        }
+    }
+
     func testSeriesCacheStateReturnsNilWhenSeriesHasNoCacheableOrCachedChildren() {
         let children = [
             mediaItem(id: "local", type: .episode, filePath: "/Volumes/Series/e1.mkv"),

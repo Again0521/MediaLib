@@ -18,6 +18,40 @@ struct MetadataSearchResult: Identifiable, Hashable {
     var trackNumber: Int?
     var genre: String?
 
+    init(
+        id: String,
+        provider: String,
+        title: String,
+        originalTitle: String? = nil,
+        subtitle: String? = nil,
+        year: Int? = nil,
+        overview: String? = nil,
+        posterPath: String? = nil,
+        backdropPath: String? = nil,
+        rating: Double? = nil,
+        runtime: Int? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        trackNumber: Int? = nil,
+        genre: String? = nil
+    ) {
+        self.id = id
+        self.provider = provider
+        self.title = title
+        self.originalTitle = originalTitle
+        self.subtitle = subtitle
+        self.year = year
+        self.overview = overview
+        self.posterPath = posterPath
+        self.backdropPath = backdropPath
+        self.rating = Self.normalizedProviderRating(rating)
+        self.runtime = runtime
+        self.artist = artist
+        self.album = album
+        self.trackNumber = trackNumber
+        self.genre = genre
+    }
+
     var metadataUpdate: MediaMetadataUpdate {
         MediaMetadataUpdate(
             title: title,
@@ -29,12 +63,17 @@ struct MetadataSearchResult: Identifiable, Hashable {
             overview: overview,
             posterPath: metadataArtworkPath(posterPath),
             backdropPath: metadataArtworkPath(backdropPath),
-            rating: rating,
+            rating: Self.normalizedProviderRating(rating),
             runtime: runtime,
             externalID: id,
             metadataProvider: provider,
             genre: genre
         )
+    }
+
+    static func normalizedProviderRating(_ rating: Double?) -> Double? {
+        guard let rating, rating.isFinite, rating > 0, rating <= 10 else { return nil }
+        return rating
     }
 }
 
@@ -471,7 +510,7 @@ struct MetadataSearchService {
                 overview: result.overview,
                 posterPath: result.posterPath.map { "https://image.tmdb.org/t/p/w500\($0)" },
                 backdropPath: result.backdropPath.map { "https://image.tmdb.org/t/p/w780\($0)" },
-                rating: result.voteAverage,
+                rating: MetadataSearchResult.normalizedProviderRating(result.voteAverage),
                 genre: genreNames.isEmpty ? nil : genreNames.joined(separator: ", ")
             )
         }

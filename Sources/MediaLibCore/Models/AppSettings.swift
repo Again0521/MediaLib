@@ -1728,9 +1728,10 @@ public struct AppSettings: Codable, Hashable {
         self.autoMarkWatched = autoMarkWatched
         self.watchedThreshold = watchedThreshold
         self.skipInterval = skipInterval
-        self.defaultVolume = defaultVolume
-        self.lastVideoVolume = Self.clampedVolume(lastVideoVolume ?? defaultVolume)
-        self.lastMusicVolume = Self.clampedVolume(lastMusicVolume ?? defaultVolume)
+        let normalizedDefaultVolume = Self.clampedVolume(defaultVolume)
+        self.defaultVolume = normalizedDefaultVolume
+        self.lastVideoVolume = Self.clampedVolume(lastVideoVolume ?? normalizedDefaultVolume, fallback: normalizedDefaultVolume)
+        self.lastMusicVolume = Self.clampedVolume(lastMusicVolume ?? normalizedDefaultVolume, fallback: normalizedDefaultVolume)
         self.defaultPlaybackRate = defaultPlaybackRate
         self.enableQuickPreview = enableQuickPreview
         self.enableSystemPhotoLibrary = enableSystemPhotoLibrary
@@ -1791,7 +1792,7 @@ public struct AppSettings: Codable, Hashable {
         self.lyricSyncAlgorithm = lyricSyncAlgorithm
         self.musicLoudnessNormalization = musicLoudnessNormalization
         self.musicTransitionMode = musicTransitionMode
-        self.musicSoftFadeDuration = min(max(musicSoftFadeDuration, 0.3), 2)
+        self.musicSoftFadeDuration = Self.clampedMusicSoftFadeDuration(musicSoftFadeDuration)
         self.musicAlbumCoverGlowEnabled = musicAlbumCoverGlowEnabled
         self.musicPlayerVisualScheme = musicPlayerVisualScheme
         self.videoCacheDirectoryPath = videoCacheDirectoryPath
@@ -2134,10 +2135,11 @@ public struct AppSettings: Codable, Hashable {
     }
 
     public func rememberedVolume(for mediaType: MediaType) -> Double {
-        mediaType == .music ? lastMusicVolume : lastVideoVolume
+        Self.clampedVolume(mediaType == .music ? lastMusicVolume : lastVideoVolume)
     }
 
     public mutating func setRememberedVolume(_ volume: Double, for mediaType: MediaType) {
+        guard volume.isFinite else { return }
         let clamped = Self.clampedVolume(volume)
         if mediaType == .music {
             lastMusicVolume = clamped
@@ -2146,8 +2148,9 @@ public struct AppSettings: Codable, Hashable {
         }
     }
 
-    private static func clampedVolume(_ volume: Double) -> Double {
-        min(max(volume, 0), 1)
+    private static func clampedVolume(_ volume: Double, fallback: Double = 0.8) -> Double {
+        guard volume.isFinite else { return fallback }
+        return min(max(volume, 0), 1)
     }
 
     public static func clampedVideoSyncDelay(_ value: Double) -> Double {
@@ -2183,6 +2186,11 @@ public struct AppSettings: Codable, Hashable {
     public static func clampedVideoResumeRewind(_ value: Double) -> Double {
         guard value.isFinite else { return 0 }
         return min(max((value / 5).rounded() * 5, 0), 30)
+    }
+
+    public static func clampedMusicSoftFadeDuration(_ value: Double) -> Double {
+        guard value.isFinite else { return 0.8 }
+        return min(max(value, 0.3), 2)
     }
 
     private static func normalizedLanguageCode(_ value: String, fallback: String) -> String {

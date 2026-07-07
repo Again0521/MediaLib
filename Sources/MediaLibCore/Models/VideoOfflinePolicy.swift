@@ -101,7 +101,10 @@ public enum VideoOfflinePolicy {
         in episodes: [MediaItem],
         watchedThreshold: Double
     ) -> [MediaItem] {
-        episodes.filter { !($0.watched || $0.playProgress >= watchedThreshold) }
+        let threshold = normalizedWatchedThreshold(watchedThreshold)
+        return episodes.filter {
+            !$0.watched && normalizedPlayProgress($0.playProgress) < threshold
+        }
     }
 
     public static func networkPolicyAllows(
@@ -144,5 +147,15 @@ public enum VideoOfflinePolicy {
         default:
             return false
         }
+    }
+
+    private static func normalizedPlayProgress(_ progress: Double) -> Double {
+        guard progress.isFinite else { return 0 }
+        return min(max(progress, 0), 1)
+    }
+
+    private static func normalizedWatchedThreshold(_ threshold: Double) -> Double {
+        guard threshold.isFinite, threshold > 0, threshold <= 1 else { return 0.9 }
+        return threshold
     }
 }

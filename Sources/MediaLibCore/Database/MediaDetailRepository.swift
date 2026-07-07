@@ -5,6 +5,35 @@ public final class MediaDetailRepository {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
 
+    private enum DetailPresenceTable: CaseIterable {
+        case externalIDs
+        case credits
+        case artwork
+        case relatedTitles
+
+        var selectDistinctMediaIDsSQL: String {
+            switch self {
+            case .externalIDs:
+                return "SELECT DISTINCT media_id FROM media_external_ids"
+            case .credits:
+                return "SELECT DISTINCT media_id FROM media_credits"
+            case .artwork:
+                return "SELECT DISTINCT media_id FROM media_artwork"
+            case .relatedTitles:
+                return "SELECT DISTINCT media_id FROM media_related_titles"
+            }
+        }
+
+        var missingLabel: String {
+            switch self {
+            case .externalIDs: return "外部 ID"
+            case .credits: return "人物"
+            case .artwork: return "艺术照"
+            case .relatedTitles: return "推荐"
+            }
+        }
+    }
+
     public init(database: DatabaseManager) {
         self.database = database
     }
@@ -45,7 +74,7 @@ public final class MediaDetailRepository {
                 thumbURL: $0.string(2) ?? "",
                 fullURL: $0.string(3) ?? "",
                 language: $0.string(4),
-                aspectRatio: $0.double(5) ?? 1.78,
+                aspectRatio: Self.normalizedArtworkAspectRatio($0.double(5)),
                 order: $0.int(6) ?? 0,
                 localPath: $0.string(7)
             )
@@ -66,8 +95,8 @@ public final class MediaDetailRepository {
                 year: $0.int(4),
                 posterURL: $0.string(5),
                 overview: $0.string(6),
-                rating: $0.double(7),
-                popularity: $0.double(8),
+                rating: Self.normalizedRelatedRating($0.double(7)),
+                popularity: Self.normalizedPopularity($0.double(8)),
                 localMediaID: $0.string(9),
                 order: $0.int(10) ?? 0
             )
@@ -296,7 +325,7 @@ public final class MediaDetailRepository {
                 kind: $0.string(1) ?? "backdrop",
                 fullURL: $0.string(2) ?? "",
                 localPath: $0.string(3),
-                aspectRatio: $0.double(4) ?? 1.78,
+                aspectRatio: Self.normalizedArtworkAspectRatio($0.double(4)),
                 order: $0.int(5) ?? 0
             )
         }
@@ -331,22 +360,23 @@ public final class MediaDetailRepository {
     public func detailCompleteness(mediaIDs: [String]) throws -> [String: Set<String>] {
         guard !mediaIDs.isEmpty else { return [:] }
         let candidates = Set(mediaIDs)
-        func mediaIDsWithRows(in table: String) throws -> Set<String> {
+        func mediaIDsWithRows(in table: DetailPresenceTable) throws -> Set<String> {
             Set(try database.query(
-                "SELECT DISTINCT media_id FROM \(table)"
+                table.selectDistinctMediaIDsSQL
             ) { $0.string(0) ?? "" }.filter { candidates.contains($0) })
         }
-        let withExternalIDs = try mediaIDsWithRows(in: "media_external_ids")
-        let withCredits = try mediaIDsWithRows(in: "media_credits")
-        let withArtwork = try mediaIDsWithRows(in: "media_artwork")
-        let withRelated = try mediaIDsWithRows(in: "media_related_titles")
+        var mediaIDsByTable: [DetailPresenceTable: Set<String>] = [:]
+        for table in DetailPresenceTable.allCases {
+            mediaIDsByTable[table] = try mediaIDsWithRows(in: table)
+        }
         var result: [String: Set<String>] = [:]
         for mediaID in mediaIDs {
             var missing = Set<String>()
-            if !withExternalIDs.contains(mediaID) { missing.insert("外部 ID") }
-            if !withCredits.contains(mediaID) { missing.insert("人物") }
-            if !withArtwork.contains(mediaID) { missing.insert("艺术照") }
-            if !withRelated.contains(mediaID) { missing.insert("推荐") }
+            for table in DetailPresenceTable.allCases {
+                if mediaIDsByTable[table]?.contains(mediaID) != true {
+                    missing.insert(table.missingLabel)
+                }
+            }
             if !missing.isEmpty { result[mediaID] = missing }
         }
         return result
@@ -500,8 +530,8 @@ public final class MediaDetailRepository {
                 .optionalText(value.status),
                 .optionalText(value.firstAirDate),
                 .optionalText(value.endDate),
-                .optionalInt(value.seasonCount),
-                .optionalInt(value.episodeCount),
+                .optionalInt(Self.normalizedCount(value.seasonCount)),
+                .optionalInt(Self.normalizedCount(value.episodeCount)),
                 .optionalText(value.contentRating),
                 .optionalText(value.originalLanguage),
                 .text(encodeStrings(value.countries)),
@@ -531,8 +561,8 @@ public final class MediaDetailRepository {
                 status: $0.string(0),
                 firstAirDate: $0.string(1),
                 endDate: $0.string(2),
-                seasonCount: $0.int(3),
-                episodeCount: $0.int(4),
+                seasonCount: Self.normalizedCount($0.int(3)),
+                episodeCount: Self.normalizedCount($0.int(4)),
                 contentRating: $0.string(5),
                 originalLanguage: $0.string(6),
                 countries: self.decodeStrings($0.string(7)),
@@ -605,7 +635,7 @@ public final class MediaDetailRepository {
                 """,
                 bindings: [
                     .text(value.id), .text(mediaID), .text(value.kind), .text(value.thumbURL),
-                    .text(value.fullURL), .optionalText(value.language), .double(value.aspectRatio),
+                    .text(value.fullURL), .optionalText(value.language), .double(Self.normalizedArtworkAspectRatio(value.aspectRatio)),
                     .int(Int64(value.order)), .optionalText(value.localPath)
                 ]
             )
@@ -625,8 +655,8 @@ public final class MediaDetailRepository {
                 bindings: [
                     .text(value.id), .text(mediaID), .text(value.relation), .text(value.externalID),
                     .text(value.title), .optionalInt(value.year), .optionalText(value.posterURL),
-                    .optionalText(value.overview), .optionalDouble(value.rating),
-                    .optionalDouble(value.popularity), .optionalText(value.localMediaID),
+                    .optionalText(value.overview), .optionalDouble(Self.normalizedRelatedRating(value.rating)),
+                    .optionalDouble(Self.normalizedPopularity(value.popularity)), .optionalText(value.localMediaID),
                     .int(Int64(value.order))
                 ]
             )
@@ -644,6 +674,34 @@ public final class MediaDetailRepository {
         )
     }
 
+    private static func normalizedCount(_ value: Int?) -> Int? {
+        guard let value, value >= 0 else { return nil }
+        return value
+    }
+
+    private static func normalizedArtworkAspectRatio(_ value: Double?) -> Double {
+        guard let value, value.isFinite, value > 0, value <= 10 else { return 1.78 }
+        return value
+    }
+
+    private static func normalizedRelatedRating(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, (0...10).contains(value) else { return nil }
+        return value
+    }
+
+    private static func normalizedPopularity(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value >= 0 else { return nil }
+        return value
+    }
+
+    private static func normalizedWorks(_ values: [MediaPersonWork]) -> [MediaPersonWork] {
+        values.map { value in
+            var normalized = value
+            normalized.popularity = normalizedPopularity(value.popularity)
+            return normalized
+        }
+    }
+
     private func encodeStrings(_ values: [String]) -> String {
         guard let data = try? encoder.encode(values) else { return "[]" }
         return String(data: data, encoding: .utf8) ?? "[]"
@@ -655,12 +713,12 @@ public final class MediaDetailRepository {
     }
 
     private func encodeWorks(_ values: [MediaPersonWork]) -> String {
-        guard let data = try? encoder.encode(values) else { return "[]" }
+        guard let data = try? encoder.encode(Self.normalizedWorks(values)) else { return "[]" }
         return String(data: data, encoding: .utf8) ?? "[]"
     }
 
     private func decodeWorks(_ value: String?) -> [MediaPersonWork] {
         guard let value, let data = value.data(using: .utf8) else { return [] }
-        return (try? decoder.decode([MediaPersonWork].self, from: data)) ?? []
+        return Self.normalizedWorks((try? decoder.decode([MediaPersonWork].self, from: data)) ?? [])
     }
 }

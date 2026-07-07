@@ -28,8 +28,8 @@ public struct MusicTagDraft: Sendable, Hashable {
         self.artist = Self.cleaned(artist)
         self.album = Self.cleaned(album)
         self.genre = Self.cleaned(genre)
-        self.trackNumber = trackNumber
-        self.year = year
+        self.trackNumber = Self.normalizedTrackNumber(trackNumber)
+        self.year = Self.normalizedYear(year)
         self.lyrics = Self.cleaned(lyrics)
         self.artworkPath = Self.cleaned(artworkPath)
         self.externalID = Self.cleaned(externalID)
@@ -56,8 +56,8 @@ public struct MusicTagDraft: Sendable, Hashable {
             title: title,
             artist: artist,
             album: album,
-            trackNumber: trackNumber,
-            year: year,
+            trackNumber: Self.normalizedTrackNumber(trackNumber),
+            year: Self.normalizedYear(year),
             posterPath: artworkPath,
             externalID: externalID,
             metadataProvider: metadataProvider ?? "MediaLIB MusicTag",
@@ -71,11 +71,11 @@ public struct MusicTagDraft: Sendable, Hashable {
         Self.append("artist", artist, to: &pairs)
         Self.append("album", album, to: &pairs)
         Self.append("genre", genre, to: &pairs)
-        if let trackNumber, trackNumber > 0 {
+        if let trackNumber = Self.normalizedTrackNumber(trackNumber) {
             pairs.append(("track", "\(trackNumber)"))
             pairs.append(("tracknumber", "\(trackNumber)"))
         }
-        if let year, year > 0 {
+        if let year = Self.normalizedYear(year) {
             pairs.append(("date", "\(year)"))
             pairs.append(("year", "\(year)"))
         }
@@ -95,6 +95,16 @@ public struct MusicTagDraft: Sendable, Hashable {
     private static func cleaned(_ value: String?) -> String? {
         let cleaned = value?.trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned?.isEmpty == false ? cleaned : nil
+    }
+
+    static func normalizedTrackNumber(_ value: Int?) -> Int? {
+        guard let value, value > 0 else { return nil }
+        return value
+    }
+
+    static func normalizedYear(_ value: Int?) -> Int? {
+        guard let value, value > 0 else { return nil }
+        return value
     }
 }
 

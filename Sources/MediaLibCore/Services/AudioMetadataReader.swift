@@ -16,6 +16,98 @@ public struct AudioMetadata: Sendable {
     public var loudnessTrackPeak: Double?
     public var loudnessAlbumPeak: Double?
     public var hasEmbeddedMetadata: Bool
+
+    public init(
+        title: String? = nil,
+        artist: String? = nil,
+        album: String? = nil,
+        genre: String? = nil,
+        trackNumber: Int? = nil,
+        year: Int? = nil,
+        duration: Double? = nil,
+        artworkPath: String? = nil,
+        lyrics: String? = nil,
+        loudnessTrackGainDB: Double? = nil,
+        loudnessAlbumGainDB: Double? = nil,
+        loudnessTrackPeak: Double? = nil,
+        loudnessAlbumPeak: Double? = nil,
+        hasEmbeddedMetadata: Bool = false
+    ) {
+        self.title = Self.cleaned(title)
+        self.artist = Self.cleaned(artist)
+        self.album = Self.cleaned(album)
+        self.genre = Self.cleaned(genre)
+        self.trackNumber = Self.normalizedTrackNumber(trackNumber)
+        self.year = Self.normalizedYear(year)
+        self.duration = Self.normalizedDuration(duration)
+        self.artworkPath = Self.cleaned(artworkPath)
+        self.lyrics = Self.cleaned(lyrics)
+        self.loudnessTrackGainDB = Self.normalizedFinite(loudnessTrackGainDB)
+        self.loudnessAlbumGainDB = Self.normalizedFinite(loudnessAlbumGainDB)
+        self.loudnessTrackPeak = Self.normalizedPeak(loudnessTrackPeak)
+        self.loudnessAlbumPeak = Self.normalizedPeak(loudnessAlbumPeak)
+        self.hasEmbeddedMetadata = hasEmbeddedMetadata && Self.containsEmbeddedMetadata(
+            title: self.title,
+            artist: self.artist,
+            album: self.album,
+            genre: self.genre,
+            artworkPath: self.artworkPath,
+            lyrics: self.lyrics,
+            trackNumber: self.trackNumber,
+            year: self.year,
+            loudnessTrackGainDB: self.loudnessTrackGainDB,
+            loudnessAlbumGainDB: self.loudnessAlbumGainDB
+        )
+    }
+
+    static func normalizedTrackNumber(_ value: Int?) -> Int? {
+        guard let value, value > 0 else { return nil }
+        return value
+    }
+
+    static func normalizedYear(_ value: Int?) -> Int? {
+        guard let value, value > 0 else { return nil }
+        return value
+    }
+
+    static func normalizedDuration(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value > 0 else { return nil }
+        return value
+    }
+
+    static func normalizedFinite(_ value: Double?) -> Double? {
+        guard let value, value.isFinite else { return nil }
+        return value
+    }
+
+    static func normalizedPeak(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value > 0 else { return nil }
+        return value
+    }
+
+    private static func cleaned(_ value: String?) -> String? {
+        let cleaned = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned?.isEmpty == false ? cleaned : nil
+    }
+
+    private static func containsEmbeddedMetadata(
+        title: String?,
+        artist: String?,
+        album: String?,
+        genre: String?,
+        artworkPath: String?,
+        lyrics: String?,
+        trackNumber: Int?,
+        year: Int?,
+        loudnessTrackGainDB: Double?,
+        loudnessAlbumGainDB: Double?
+    ) -> Bool {
+        [title, artist, album, genre, artworkPath, lyrics].contains { $0?.isEmpty == false } ||
+            trackNumber != nil ||
+            year != nil ||
+            loudnessTrackGainDB != nil ||
+            loudnessAlbumGainDB != nil
+    }
 }
 
 public final class AudioMetadataReader {
@@ -177,12 +269,18 @@ public final class AudioMetadataReader {
         }
         for item in candidates {
             if let number = try? await item.load(.numberValue)?.intValue {
-                return number
+                if let normalized = AudioMetadata.normalizedTrackNumber(number) {
+                    return normalized
+                }
+                continue
             }
             if let text = try? await item.load(.stringValue) {
                 let first = text.split(separator: "/").first.map(String.init) ?? text
                 if let number = Int(first.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)) {
-                    return number
+                    if let normalized = AudioMetadata.normalizedTrackNumber(number) {
+                        return normalized
+                    }
+                    continue
                 }
             }
         }
@@ -197,11 +295,17 @@ public final class AudioMetadataReader {
             $0.key?.description.lowercased().contains("date") == true
         }
         for item in candidates {
-            if let number = try? await item.load(.numberValue)?.intValue, number > 0 {
-                return number
+            if let number = try? await item.load(.numberValue)?.intValue {
+                if let normalized = AudioMetadata.normalizedYear(number) {
+                    return normalized
+                }
+                continue
             }
             if let text = try? await item.load(.stringValue), text.count >= 4, let year = Int(text.prefix(4)) {
-                return year
+                if let normalized = AudioMetadata.normalizedYear(year) {
+                    return normalized
+                }
+                continue
             }
         }
         return nil
