@@ -98,4 +98,34 @@ final class HTTPClientTests: XCTestCase {
         )!
         XCTAssertEqual(HTTPClient.defaultRetryDelay(response, attempt: 0), 5)
     }
+
+    func testDefaultRetryDelayIgnoresNonFiniteRetryAfterHeader() throws {
+        let response = HTTPURLResponse(
+            url: URL(string: "https://example.com")!,
+            statusCode: 429,
+            httpVersion: nil,
+            headerFields: ["Retry-After": "NaN"]
+        )!
+
+        XCTAssertEqual(HTTPClient.defaultRetryDelay(response, attempt: 1), 2)
+    }
+
+    func testDefaultRetryDelayClampsRetryAfterHeaderRange() throws {
+        let url = URL(string: "https://example.com")!
+        let negativeResponse = HTTPURLResponse(
+            url: url,
+            statusCode: 429,
+            httpVersion: nil,
+            headerFields: ["Retry-After": "-5"]
+        )!
+        let hugeResponse = HTTPURLResponse(
+            url: url,
+            statusCode: 429,
+            httpVersion: nil,
+            headerFields: ["Retry-After": "999"]
+        )!
+
+        XCTAssertEqual(HTTPClient.defaultRetryDelay(negativeResponse, attempt: 0), 0)
+        XCTAssertEqual(HTTPClient.defaultRetryDelay(hugeResponse, attempt: 0), 30)
+    }
 }

@@ -22,7 +22,7 @@ extension AppState {
     }
 
     var isTraktConnected: Bool {
-        !(settings.traktAccessToken?.isEmpty ?? true)
+        TraktService.normalizedToken(settings.traktAccessToken) != nil
     }
 
     /// 设备码授权：请求 code → 打开浏览器 → 提示验证码 → 轮询直至授权或超时。
@@ -147,13 +147,13 @@ extension AppState {
     }
 
     func withValidTraktToken<T>(_ operation: (TraktService, String) async throws -> T) async throws -> T {
-        guard let service = traktService, let token = settings.traktAccessToken, !token.isEmpty else {
+        guard let service = traktService, let token = TraktService.normalizedToken(settings.traktAccessToken) else {
             throw TraktError.notConnected
         }
         do {
             return try await operation(service, token)
         } catch TraktError.requestFailed(401) {
-            guard let refresh = settings.traktRefreshToken, !refresh.isEmpty else { throw TraktError.notConnected }
+            guard let refresh = TraktService.normalizedToken(settings.traktRefreshToken) else { throw TraktError.notConnected }
             let tokens = try await service.refreshTokens(refresh)
             settings.traktAccessToken = tokens.accessToken
             settings.traktRefreshToken = tokens.refreshToken

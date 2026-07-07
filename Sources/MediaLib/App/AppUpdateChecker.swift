@@ -293,7 +293,7 @@ enum AppUpdateChecker {
     private static func preferredInstallAssetIndex(in assets: [AppUpdateAssetCandidate]) -> Int? {
         assets
             .enumerated()
-            .filter { !$0.element.browserDownloadURL.isEmpty }
+            .filter { !$0.element.browserDownloadURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .sorted { lhs, rhs in
                 let lhsRank = assetRank(lhs.element)
                 let rhsRank = assetRank(rhs.element)

@@ -224,6 +224,45 @@ final class MusicTagEditingServiceAuditTests: XCTestCase {
         XCTAssertEqual(report.warning, "没有可写入的标签字段。")
     }
 
+    func testCanWriteFileTagsRejectsWhitespaceOnlyLocalPath() {
+        let service = MusicTagEditingService(
+            ffmpegExecutableURLProvider: { URL(fileURLWithPath: "/usr/bin/ffmpeg-test-double") },
+            ffmpegRunner: { _, _, _ in
+                XCTFail("canWriteFileTags 不应进入写入 runner")
+                return (false, "unexpected")
+            }
+        )
+
+        let item = MediaItem(id: "blank-path", type: .music, title: "Blank Path", filePath: " \n\t ")
+
+        XCTAssertFalse(service.canWriteFileTags(for: item))
+    }
+
+    func testWriteRejectsWhitespaceOnlyLocalPathBeforeResolvingFFmpeg() async {
+        let service = MusicTagEditingService(
+            ffmpegExecutableURLProvider: {
+                XCTFail("纯空白本地路径必须在解析 ffmpeg 之前被拒绝")
+                return nil
+            },
+            ffmpegRunner: { _, _, _ in
+                XCTFail("纯空白本地路径不应进入写入 runner")
+                return (false, "unexpected")
+            }
+        )
+
+        do {
+            _ = try await service.write(
+                MusicTagDraft(title: "Song"),
+                to: MediaItem(id: "blank-path", type: .music, title: "Blank Path", filePath: " \n\t ")
+            )
+            XCTFail("预期抛出 missingFile")
+        } catch MusicTagEditingError.missingFile {
+            // Expected.
+        } catch {
+            XCTFail("捕获到了非预期的错误类型：\(error)")
+        }
+    }
+
     func testWriteRejectsUnsupportedFormatBeforeResolvingFFmpeg() async {
         let service = MusicTagEditingService(
             ffmpegExecutableURLProvider: {

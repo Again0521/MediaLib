@@ -9,6 +9,13 @@ final class LastfmScrobbleServiceTests: XCTestCase {
         XCTAssertTrue(LastfmScrobbleService(apiKey: " key ", sharedSecret: "\nsecret\t").hasCredentials)
     }
 
+    func testNormalizedSessionKeyRejectsBlankValuesAndTrimsUsableTokens() {
+        XCTAssertNil(LastfmScrobbleService.normalizedSessionKey(nil))
+        XCTAssertNil(LastfmScrobbleService.normalizedSessionKey(""))
+        XCTAssertNil(LastfmScrobbleService.normalizedSessionKey(" \n\t "))
+        XCTAssertEqual(LastfmScrobbleService.normalizedSessionKey(" session-key\n"), "session-key")
+    }
+
     func testMissingCredentialsThrowBeforeNetworkForTokenFetch() async {
         let service = LastfmScrobbleService(apiKey: "\n", sharedSecret: "secret")
 

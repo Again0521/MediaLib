@@ -6,13 +6,20 @@ public enum MusicPlaylistM3UPolicy {
         for track in tracks {
             guard let path = track.filePath,
                   !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            let seconds = Int((track.duration ?? 0).rounded())
+            let seconds = extinfSeconds(for: track.duration)
             let artist = track.artist?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let info = artist.isEmpty ? track.title : "\(artist) - \(track.title)"
             lines.append("#EXTINF:\(seconds),\(info)")
             lines.append(path)
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    static func extinfSeconds(for duration: Double?) -> Int {
+        guard let duration, duration.isFinite else { return 0 }
+        let rounded = duration.rounded()
+        guard rounded >= Double(Int.min), rounded <= Double(Int.max) else { return 0 }
+        return Int(rounded)
     }
 
     public static func decodedText(from data: Data) -> String? {

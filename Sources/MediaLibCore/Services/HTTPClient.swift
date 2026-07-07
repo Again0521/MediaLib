@@ -64,7 +64,9 @@ public final class HTTPClient: @unchecked Sendable {
 
     /// 默认退避：优先 `Retry-After`（秒，封顶 30s），否则指数退避 1/2/4…（封顶 8s）。
     public static func defaultRetryDelay(_ response: HTTPURLResponse, attempt: Int) -> Double {
-        if let header = response.value(forHTTPHeaderField: "Retry-After"), let seconds = Double(header) {
+        if let header = response.value(forHTTPHeaderField: "Retry-After"),
+           let seconds = Double(header),
+           seconds.isFinite {
             return min(max(seconds, 0), 30)
         }
         return min(pow(2.0, Double(attempt)), 8)

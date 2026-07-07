@@ -83,4 +83,12 @@ final class TMDBEnrichmentServiceTests: XCTestCase {
         XCTAssertEqual(TMDBEnrichmentService.localizedJob("Original Music Composer"), "配乐")
         XCTAssertEqual(TMDBEnrichmentService.localizedJob("Editor"), "Editor")
     }
+
+    func testRetryDelayClampsRetryAfterAndFallsBackForNonFiniteValues() {
+        XCTAssertEqual(TMDBEnrichmentService.retryDelaySeconds(retryAfter: "2.5", attempt: 1), 2.5)
+        XCTAssertEqual(TMDBEnrichmentService.retryDelaySeconds(retryAfter: "-1", attempt: 1), 0.5)
+        XCTAssertEqual(TMDBEnrichmentService.retryDelaySeconds(retryAfter: "999", attempt: 1), 4)
+        XCTAssertEqual(TMDBEnrichmentService.retryDelaySeconds(retryAfter: "NaN", attempt: 2), 2)
+        XCTAssertEqual(TMDBEnrichmentService.retryDelaySeconds(retryAfter: nil, attempt: 9), 4)
+    }
 }

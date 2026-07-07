@@ -13,7 +13,8 @@ public enum DateCoding {
     }
 
     public static func date(from string: String?) -> Date? {
-        guard let string, !string.isEmpty else { return nil }
-        return formatter.date(from: string)
+        let trimmed = string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        return formatter.date(from: trimmed)
     }
 }

@@ -129,11 +129,13 @@ public enum VideoOfflinePolicy {
         if normalized == "localhost" || normalized == "::1" || normalized.hasSuffix(".local") {
             return true
         }
-        if normalized.hasPrefix("fe80:") || normalized.hasPrefix("fd") {
+        if normalized.hasPrefix("fe80:") ||
+            ((normalized.hasPrefix("fc") || normalized.hasPrefix("fd")) && normalized.contains(":")) {
             return true
         }
         let octets = normalized.split(separator: ".").compactMap { Int(String($0)) }
-        guard octets.count == 4 else { return false }
+        guard octets.count == 4,
+              octets.allSatisfy({ (0...255).contains($0) }) else { return false }
         switch (octets[0], octets[1]) {
         case (10, _), (127, _), (192, 168):
             return true

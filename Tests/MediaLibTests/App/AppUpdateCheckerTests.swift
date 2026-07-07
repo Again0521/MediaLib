@@ -112,6 +112,7 @@ final class AppUpdateCheckerTests: XCTestCase {
     func testPreferredInstallAssetIgnoresMissingDownloadURLsAndUnsupportedTypes() {
         let selected = AppUpdateChecker.preferredInstallAsset(from: [
             asset("MediaLib-1.5.0.dmg", size: 2_000, browserDownloadURL: ""),
+            asset("MediaLib-1.5.1.dmg", size: 3_000, browserDownloadURL: " \n\t "),
             asset("checksums.txt", size: 100),
             asset("MediaLib.pkg", size: 3_000)
         ])

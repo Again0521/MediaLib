@@ -19,6 +19,13 @@ final class DateCodingTests: XCTestCase {
     func testNilAndEmptyStringDecodeToNil() {
         XCTAssertNil(DateCoding.date(from: nil))
         XCTAssertNil(DateCoding.date(from: ""))
+        XCTAssertNil(DateCoding.date(from: " \n\t "))
+    }
+
+    func testDateDecodingTrimsWhitespaceAroundISO8601String() throws {
+        let decoded = try XCTUnwrap(DateCoding.date(from: " \n1970-01-01T00:00:00.000Z\t"))
+
+        XCTAssertEqual(decoded.timeIntervalSince1970, 0, accuracy: 0.001)
     }
 
     func testInvalidStringDecodesToNil() {

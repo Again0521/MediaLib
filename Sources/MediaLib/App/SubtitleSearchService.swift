@@ -152,9 +152,18 @@ struct SubtitleSearchService {
             }
         }()
         let (pod, os) = await (podnapisiTask, openSubsTask)
-        // Deduplicate by display name (case-insensitive)
+        return Self.deduplicatedResultsByDisplayName(pod + os)
+    }
+
+    static func deduplicatedResultsByDisplayName(_ results: [OnlineSubtitleResult]) -> [OnlineSubtitleResult] {
         var seen = Set<String>()
-        return (pod + os).filter { seen.insert($0.displayName.lowercased()).inserted }
+        return results.filter { result in
+            let key = result.displayName
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+                .lowercased()
+            return seen.insert(key).inserted
+        }
     }
 
     /// Downloads a result from any source and saves next to the video file.
@@ -225,9 +234,15 @@ struct SubtitleSearchService {
         let baseName = videoURL.deletingPathExtension().lastPathComponent
         let directory = videoURL.deletingLastPathComponent()
         let rawExtension = downloadedFileName
-            .map { URL(fileURLWithPath: $0).pathExtension.lowercased() } ?? ""
-        let ext = rawExtension.isEmpty ? "srt" : rawExtension
+            .map { URL(fileURLWithPath: $0).pathExtension.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+        let ext = subtitleExtension(from: rawExtension)
         return directory.appendingPathComponent("\(baseName).\(ext)")
+    }
+
+    static func subtitleExtension(from rawExtension: String) -> String {
+        let cleaned = rawExtension.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let allowed = Set(["srt", "ass", "ssa", "vtt", "sub", "smi", "sami", "ttml", "dfxp"])
+        return allowed.contains(cleaned) ? cleaned : "srt"
     }
 
     private func podnapisiLang(_ language: String) -> String {

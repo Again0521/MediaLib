@@ -34,6 +34,46 @@ final class SubtitleSearchServiceTests: XCTestCase {
         XCTAssertEqual(outputURL.lastPathComponent, "Episode 01.srt")
     }
 
+    func testSubtitleOutputURLFallsBackToSRTForUnsupportedDownloadedExtension() throws {
+        let videoURL = try temporaryFileURL("Episode 02.mp4")
+
+        let outputURL = SubtitleSearchService.subtitleOutputURL(
+            videoPath: videoURL.path,
+            downloadedFileName: "subtitle.zip"
+        )
+
+        XCTAssertEqual(outputURL.lastPathComponent, "Episode 02.srt")
+    }
+
+    func testSubtitleExtensionAllowsKnownSubtitleFormatsAndRejectsBlankOrUnsupportedValues() {
+        XCTAssertEqual(SubtitleSearchService.subtitleExtension(from: "ASS"), "ass")
+        XCTAssertEqual(SubtitleSearchService.subtitleExtension(from: " vtt\n"), "vtt")
+        XCTAssertEqual(SubtitleSearchService.subtitleExtension(from: "ttml"), "ttml")
+        XCTAssertEqual(SubtitleSearchService.subtitleExtension(from: ""), "srt")
+        XCTAssertEqual(SubtitleSearchService.subtitleExtension(from: "zip"), "srt")
+        XCTAssertEqual(SubtitleSearchService.subtitleExtension(from: "exe"), "srt")
+    }
+
+    func testDeduplicatedResultsByDisplayNameTrimsAndMatchesCaseInsensitively() {
+        let results = SubtitleSearchService.deduplicatedResultsByDisplayName([
+            onlineResult(id: "pod-1", displayName: " Movie.Release.zh.srt ", source: .podnapisi(subtitleID: 1)),
+            onlineResult(id: "os-1", displayName: "\nmovie.release.ZH.srt", source: .openSubtitles(fileID: 10)),
+            onlineResult(id: "pod-2", displayName: "Movie.Release.en.srt", source: .podnapisi(subtitleID: 2))
+        ])
+
+        XCTAssertEqual(results.map(\.id), ["pod-1", "pod-2"])
+    }
+
+    func testDeduplicatedResultsByDisplayNameUsesWidthAndDiacriticInsensitiveKeys() {
+        let results = SubtitleSearchService.deduplicatedResultsByDisplayName([
+            onlineResult(id: "full-width", displayName: "Ｃａｆｅ.ass", source: .podnapisi(subtitleID: 1)),
+            onlineResult(id: "plain", displayName: "Cafe.ass", source: .openSubtitles(fileID: 10)),
+            onlineResult(id: "distinct", displayName: "Cafe Commentary.ass", source: .openSubtitles(fileID: 11))
+        ])
+
+        XCTAssertEqual(results.map(\.id), ["full-width", "distinct"])
+    }
+
     func testDownloadAndSaveRejectsBlankOpenSubtitlesAPIKeyBeforeNetwork() async throws {
         let videoURL = try temporaryFileURL("Feature.mov")
         let service = SubtitleSearchService()
@@ -137,6 +177,21 @@ final class SubtitleSearchServiceTests: XCTestCase {
             tempDirectory = root
         }
         return tempDirectory!.appendingPathComponent(name)
+    }
+
+    private func onlineResult(
+        id: String,
+        displayName: String,
+        source: OnlineSubtitleResult.Source
+    ) -> OnlineSubtitleResult {
+        OnlineSubtitleResult(
+            id: id,
+            sourceName: "Test",
+            displayName: displayName,
+            language: "zh-Hans",
+            downloads: 1,
+            source: source
+        )
     }
 }
 

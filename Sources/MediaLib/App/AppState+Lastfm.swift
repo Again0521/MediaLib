@@ -15,14 +15,14 @@ extension AppState {
     }
 
     var isLastfmConnected: Bool {
-        !(settings.lastfmSessionKey?.isEmpty ?? true)
+        LastfmScrobbleService.normalizedSessionKey(settings.lastfmSessionKey) != nil
     }
 
     /// 新曲目开始：先结算上一首，再对当前曲目发送 updateNowPlaying 并登记候选。
     func scrobbleMusicStart(_ item: MediaItem) {
         finalizeScrobble()
         guard settings.lastfmScrobblingEnabled,
-              let sessionKey = settings.lastfmSessionKey, !sessionKey.isEmpty,
+              let sessionKey = LastfmScrobbleService.normalizedSessionKey(settings.lastfmSessionKey),
               let service = lastfmService,
               let artist = item.artist, !artist.isEmpty else {
             pendingScrobble = nil
@@ -51,7 +51,7 @@ extension AppState {
         guard let candidate = pendingScrobble else { return }
         pendingScrobble = nil
         guard settings.lastfmScrobblingEnabled,
-              let sessionKey = settings.lastfmSessionKey, !sessionKey.isEmpty,
+              let sessionKey = LastfmScrobbleService.normalizedSessionKey(settings.lastfmSessionKey),
               let service = lastfmService,
               let artist = candidate.item.artist, !artist.isEmpty else { return }
 

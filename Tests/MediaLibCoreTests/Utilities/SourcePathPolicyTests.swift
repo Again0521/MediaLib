@@ -20,6 +20,14 @@ final class SourcePathPolicyTests: XCTestCase {
         XCTAssertFalse(SourcePathPolicy.isSourcePath("/Media/Movies", inside: ""))
     }
 
+    func testWhitespaceOnlyInputsNeverMatchSources() {
+        XCTAssertFalse(SourcePathPolicy.isSourcePath(" \n\t ", inside: "/Media/Movies"))
+        XCTAssertFalse(SourcePathPolicy.isSourcePath("/Media/Movies/Film.mkv", inside: " \n\t "))
+        XCTAssertFalse(SourcePathPolicy.isSourcePath(" \n\t ", inside: " \n\t "))
+        XCTAssertFalse(SourcePathPolicy.isExcluded(" \n\t ", in: ["/Media/Movies"]))
+        XCTAssertFalse(SourcePathPolicy.isExcluded("/Media/Movies/Film.mkv", in: [" \n\t "]))
+    }
+
     func testRemoteSourcePathMatchingUsesSameBoundaryRules() {
         XCTAssertTrue(SourcePathPolicy.isSourcePath("emby://server/library/movies/item-1", inside: "emby://server/library/movies"))
         XCTAssertTrue(SourcePathPolicy.isSourcePath("plex://server/source/item-1", inside: "plex://server/source/"))

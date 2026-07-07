@@ -40,6 +40,37 @@ final class MusicPlaylistM3UPolicyTests: XCTestCase {
         )
     }
 
+    func testM3UContentUsesZeroForNonFiniteAndUnrepresentableDurations() {
+        let tracks = [
+            track(id: "nan", title: "NaN", path: "/Music/nan.flac", duration: .nan),
+            track(id: "inf", title: "Inf", path: "/Music/inf.flac", duration: .infinity),
+            track(id: "neg-inf", title: "NegInf", path: "/Music/neg-inf.flac", duration: -.infinity),
+            track(id: "huge", title: "Huge", path: "/Music/huge.flac", duration: .greatestFiniteMagnitude)
+        ]
+
+        XCTAssertEqual(
+            MusicPlaylistM3UPolicy.m3uContent(for: tracks),
+            """
+            #EXTM3U
+            #EXTINF:0,NaN
+            /Music/nan.flac
+            #EXTINF:0,Inf
+            /Music/inf.flac
+            #EXTINF:0,NegInf
+            /Music/neg-inf.flac
+            #EXTINF:0,Huge
+            /Music/huge.flac
+
+            """
+        )
+    }
+
+    func testExtinfSecondsKeepsFiniteRepresentableDurations() {
+        XCTAssertEqual(MusicPlaylistM3UPolicy.extinfSeconds(for: 3.6), 4)
+        XCTAssertEqual(MusicPlaylistM3UPolicy.extinfSeconds(for: nil), 0)
+        XCTAssertEqual(MusicPlaylistM3UPolicy.extinfSeconds(for: -1), -1)
+    }
+
     func testDecodedTextReadsUTF8AndFallsBackToLatin1() throws {
         let utf8 = try XCTUnwrap("音乐/海边.m3u".data(using: .utf8))
         XCTAssertEqual(MusicPlaylistM3UPolicy.decodedText(from: utf8), "音乐/海边.m3u")

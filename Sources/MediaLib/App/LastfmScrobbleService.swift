@@ -41,6 +41,11 @@ struct LastfmScrobbleService {
         !sharedSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    static func normalizedSessionKey(_ sessionKey: String?) -> String? {
+        let trimmed = sessionKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     // MARK: - 授权流程
 
     /// 第一步：获取 request token。

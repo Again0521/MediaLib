@@ -15,6 +15,13 @@ final class TraktServiceTests: XCTestCase {
         XCTAssertTrue(TraktService(clientID: "\tclient\n", clientSecret: " secret ").hasCredentials)
     }
 
+    func testNormalizedTokenRejectsBlankValuesAndTrimsUsableTokens() {
+        XCTAssertNil(TraktService.normalizedToken(nil))
+        XCTAssertNil(TraktService.normalizedToken(""))
+        XCTAssertNil(TraktService.normalizedToken(" \n\t "))
+        XCTAssertEqual(TraktService.normalizedToken("\naccess-token "), "access-token")
+    }
+
     func testMissingCredentialsThrowBeforeNetworkForDeviceCodeRequest() async {
         let service = TraktService(clientID: "\n\t", clientSecret: "secret")
 

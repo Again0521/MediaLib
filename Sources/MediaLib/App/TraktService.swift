@@ -58,6 +58,11 @@ struct TraktService {
         !clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    static func normalizedToken(_ token: String?) -> String? {
+        let trimmed = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     // MARK: - 设备码授权
 
     func requestDeviceCode() async throws -> TraktDeviceCode {

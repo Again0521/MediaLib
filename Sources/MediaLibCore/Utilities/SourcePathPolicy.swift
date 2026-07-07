@@ -1,6 +1,8 @@
 public enum SourcePathPolicy {
     public static func isSourcePath(_ candidate: String?, inside sourceRoot: String) -> Bool {
-        guard let candidate, !sourceRoot.isEmpty else { return false }
+        guard let candidate,
+              !candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !sourceRoot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         let sourceRoot = normalizedSourceRoot(sourceRoot)
         guard !sourceRoot.isEmpty else { return false }
         if sourceRoot == "/" {

@@ -46,4 +46,20 @@ final class AppSettingsCodecTests: XCTestCase {
         XCTAssertEqual(decoded.watchedThreshold, 0.31, accuracy: 0.0001)
         XCTAssertEqual(decoded.skipInterval, AppSettings().skipInterval, accuracy: 0.0001)
     }
+
+    func testLanguageSettingsTrimWhitespaceAndFallbackForBlankValues() throws {
+        let initialized = AppSettings(
+            tmdbLanguage: " en-US\n",
+            subtitleLanguage: "\tja-JP "
+        )
+
+        XCTAssertEqual(initialized.tmdbLanguage, "en-US")
+        XCTAssertEqual(initialized.subtitleLanguage, "ja-JP")
+
+        let blankJSON = #"{"tmdbLanguage":" \n\t ","subtitleLanguage":"\t "}"#
+        let blankDecoded = try decoder.decode(AppSettings.self, from: Data(blankJSON.utf8))
+
+        XCTAssertEqual(blankDecoded.tmdbLanguage, "zh-CN")
+        XCTAssertEqual(blankDecoded.subtitleLanguage, "zh-CN")
+    }
 }

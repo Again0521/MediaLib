@@ -1784,7 +1784,7 @@ public struct AppSettings: Codable, Hashable {
         self.musicExternalPlayerPath = musicExternalPlayerPath
         self.keepLocalAudioWithAirPlay = keepLocalAudioWithAirPlay
         self.tmdbAPIKey = tmdbAPIKey
-        self.tmdbLanguage = tmdbLanguage
+        self.tmdbLanguage = Self.normalizedLanguageCode(tmdbLanguage, fallback: "zh-CN")
         self.metadataMatchTolerance = metadataMatchTolerance
         self.musicMetadataProvider = musicMetadataProvider
         self.musicMetadataMatchTolerance = musicMetadataMatchTolerance
@@ -1805,7 +1805,7 @@ public struct AppSettings: Codable, Hashable {
         self.privacyVaultName = privacyVaultName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "保险库" : privacyVaultName
         self.privacyPINEnabled = privacyPINEnabled
         self.openSubtitlesAPIKey = openSubtitlesAPIKey
-        self.subtitleLanguage = subtitleLanguage.isEmpty ? "zh-CN" : subtitleLanguage
+        self.subtitleLanguage = Self.normalizedLanguageCode(subtitleLanguage, fallback: "zh-CN")
         self.lastfmAPIKey = lastfmAPIKey
         self.lastfmScrobblingEnabled = lastfmScrobblingEnabled
         self.lastfmSharedSecret = lastfmSharedSecret
@@ -2183,6 +2183,11 @@ public struct AppSettings: Codable, Hashable {
     public static func clampedVideoResumeRewind(_ value: Double) -> Double {
         guard value.isFinite else { return 0 }
         return min(max((value / 5).rounded() * 5, 0), 30)
+    }
+
+    private static func normalizedLanguageCode(_ value: String, fallback: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? fallback : trimmed
     }
 
     private static func sanitizedVideoKeyboardShortcuts(_ shortcuts: [VideoPlayerShortcutAction: [VideoKeyboardShortcut]]) -> [VideoPlayerShortcutAction: [VideoKeyboardShortcut]] {

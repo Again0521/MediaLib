@@ -404,12 +404,25 @@ struct TMDBEnrichmentService {
             if http.statusCode == 200 { return data }
             if (http.statusCode == 429 || (500...599).contains(http.statusCode)), attempt < 2 {
                 attempt += 1
-                let retry = http.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init) ?? Double(attempt)
-                try await Task.sleep(nanoseconds: UInt64(min(max(retry, 0.5), 4) * 1_000_000_000))
+                let retry = retryDelaySeconds(
+                    retryAfter: http.value(forHTTPHeaderField: "Retry-After"),
+                    attempt: attempt
+                )
+                try await Task.sleep(nanoseconds: UInt64(retry * 1_000_000_000))
                 continue
             }
             throw MetadataSearchError.invalidResponse
         }
+    }
+
+    static func retryDelaySeconds(retryAfter: String?, attempt: Int) -> Double {
+        let retry: Double
+        if let parsed = retryAfter.flatMap(Double.init), parsed.isFinite {
+            retry = parsed
+        } else {
+            retry = Double(attempt)
+        }
+        return min(max(retry, 0.5), 4)
     }
 
     private static func personWorks(from credits: TMDBCombinedCredits?) -> [MediaPersonWork] {

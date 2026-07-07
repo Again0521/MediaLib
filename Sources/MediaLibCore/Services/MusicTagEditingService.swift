@@ -302,7 +302,9 @@ public final class MusicTagEditingService {
     }
 
     private func localFileURL(for item: MediaItem) -> URL? {
-        guard let filePath = item.filePath, !filePath.isEmpty, !item.isRemoteResource else {
+        guard let filePath = item.filePath,
+              !filePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !item.isRemoteResource else {
             return nil
         }
         return URL(fileURLWithPath: filePath)

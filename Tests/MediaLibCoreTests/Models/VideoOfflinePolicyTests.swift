@@ -25,6 +25,7 @@ final class VideoOfflinePolicyTests: XCTestCase {
             "172.16.0.1",
             "172.31.255.254",
             "fe80::1",
+            "fc00::1234",
             "fd00::1234"
         ]
 
@@ -40,7 +41,14 @@ final class VideoOfflinePolicyTests: XCTestCase {
             "8.8.8.8",
             "172.15.255.255",
             "172.32.0.1",
+            "10.0.0.256",
+            "10.0.0.-1",
+            "192.168.1.999",
+            "127.0.0.999",
             "100.64.0.1",
+            "fdstream.example",
+            "fd.example.com",
+            "fc.example.com",
             "2001:4860:4860::8888"
         ]
 
