@@ -216,6 +216,33 @@ final class PlayerLayeringBoundaryTests: XCTestCase {
         XCTAssertFalse(matcher.contains("NSView"))
     }
 
+    func testMemoryAudioAssetLivesInAppLayerWithoutControllerUIOrMpvOwnership() throws {
+        let root = repositoryRoot()
+        let asset = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/MemoryAudioAsset.swift"),
+            encoding: .utf8
+        )
+        let controller = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/MpvPlayerController.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(asset.contains("final class MemoryAudioResourceLoader"))
+        XCTAssertTrue(asset.contains("struct MemoryAudioAsset"))
+        XCTAssertTrue(asset.contains("enum MemoryAudioResourceLoadingPolicy"))
+        XCTAssertFalse(controller.contains("final class MemoryAudioResourceLoader"))
+        XCTAssertFalse(controller.contains("private struct MemoryAudioAsset"))
+        XCTAssertFalse(asset.contains("import SwiftUI"))
+        XCTAssertFalse(asset.contains("import AppKit"))
+        XCTAssertFalse(asset.contains("LibMpvClient"))
+        XCTAssertFalse(asset.contains("ObservableObject"))
+        XCTAssertFalse(asset.contains("@Published"))
+        XCTAssertFalse(asset.contains("MpvRenderSurface"))
+        XCTAssertFalse(asset.contains("TrackPreferenceStore"))
+        XCTAssertFalse(asset.contains("command("))
+        XCTAssertFalse(asset.contains("setString"))
+    }
+
     func testMusicPlaybackEngineAdapterLivesInAppLayerAndStaysNarrow() throws {
         let root = repositoryRoot()
         let engine = try String(
@@ -369,6 +396,75 @@ final class PlayerLayeringBoundaryTests: XCTestCase {
         XCTAssertFalse(policy.contains("import SwiftUI"))
         XCTAssertFalse(policy.contains("import AVKit"))
         XCTAssertFalse(policy.contains("LibMpvClient"))
+    }
+
+    func testMusicOutputPolicyStaysInCoreWithoutPlatformOrControllerImports() throws {
+        let root = repositoryRoot()
+        let policy = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLibCore/Models/MusicOutputPolicy.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(policy.contains("enum MusicOutputPolicy"))
+        XCTAssertTrue(policy.contains("effectiveVolume"))
+        XCTAssertTrue(policy.contains("softFadeScale"))
+        XCTAssertFalse(policy.contains("import AppKit"))
+        XCTAssertFalse(policy.contains("import SwiftUI"))
+        XCTAssertFalse(policy.contains("import AVKit"))
+        XCTAssertFalse(policy.contains("import AVFoundation"))
+        XCTAssertFalse(policy.contains("LibMpvClient"))
+        XCTAssertFalse(policy.contains("MpvPlayerController"))
+        XCTAssertFalse(policy.contains("AVPlayer"))
+    }
+
+    func testMusicPlaybackBufferPolicyStaysInCoreWithoutPlatformOrControllerImports() throws {
+        let root = repositoryRoot()
+        let policy = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLibCore/Models/MusicPlaybackBufferPolicy.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(policy.contains("enum MusicPlaybackBufferPolicy"))
+        XCTAssertTrue(policy.contains("preferredForwardBufferDuration"))
+        XCTAssertTrue(policy.contains("prefersPreciseTiming"))
+        XCTAssertFalse(policy.contains("import AppKit"))
+        XCTAssertFalse(policy.contains("import SwiftUI"))
+        XCTAssertFalse(policy.contains("import AVKit"))
+        XCTAssertFalse(policy.contains("import AVFoundation"))
+        XCTAssertFalse(policy.contains("LibMpvClient"))
+        XCTAssertFalse(policy.contains("MpvPlayerController"))
+        XCTAssertFalse(policy.contains("AVPlayer"))
+    }
+
+    func testCyclicModePolicyStaysInCoreWithoutPlatformOrControllerImports() throws {
+        let root = repositoryRoot()
+        let policy = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLibCore/Models/CyclicModePolicy.swift"),
+            encoding: .utf8
+        )
+        let controller = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/App/MpvPlayerController.swift"),
+            encoding: .utf8
+        )
+        let playerView = try String(
+            contentsOf: root.appendingPathComponent("Sources/MediaLib/Views/PlayerView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(policy.contains("enum CyclicModePolicy"))
+        XCTAssertTrue(policy.contains("next<"))
+        XCTAssertTrue(policy.contains("previous<"))
+        XCTAssertFalse(controller.contains("private func nextMode"))
+        XCTAssertFalse(playerView.contains("private func nextMode"))
+        XCTAssertFalse(controller.contains("modes[(index + delta) % modes.count]"))
+        XCTAssertFalse(playerView.contains("modes[(index + (clockwise ? 1 : modes.count - 1)) % modes.count]"))
+        XCTAssertFalse(policy.contains("import AppKit"))
+        XCTAssertFalse(policy.contains("import SwiftUI"))
+        XCTAssertFalse(policy.contains("import AVKit"))
+        XCTAssertFalse(policy.contains("import AVFoundation"))
+        XCTAssertFalse(policy.contains("LibMpvClient"))
+        XCTAssertFalse(policy.contains("MpvPlayerController"))
+        XCTAssertFalse(policy.contains("AVPlayer"))
     }
 
     func testAppStateLibraryRemoteSessionScanAndTaskCenterStateAreOwnedByDomainStores() throws {

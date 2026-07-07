@@ -1646,7 +1646,7 @@ struct PlayerView: View {
     }
 
     private func cycleVideoAspectOverride() {
-        let mode = nextMode(after: appState.settings.videoAspectOverride, in: VideoAspectOverride.allCases)
+        let mode = CyclicModePolicy.next(after: appState.settings.videoAspectOverride, in: VideoAspectOverride.allCases)
         appState.settings.videoAspectOverride = mode
         appState.saveSettings()
         controller.setAspectOverride(mode)
@@ -1654,7 +1654,7 @@ struct PlayerView: View {
     }
 
     private func cycleVideoCropMode() {
-        let mode = nextMode(after: appState.settings.videoCropMode, in: VideoCropMode.allCases)
+        let mode = CyclicModePolicy.next(after: appState.settings.videoCropMode, in: VideoCropMode.allCases)
         appState.settings.videoCropMode = mode
         appState.saveSettings()
         controller.setCropMode(mode)
@@ -1662,7 +1662,7 @@ struct PlayerView: View {
     }
 
     private func cycleVideoDeinterlaceMode() {
-        let mode = nextMode(after: appState.settings.videoDeinterlaceMode, in: VideoDeinterlaceMode.allCases)
+        let mode = CyclicModePolicy.next(after: appState.settings.videoDeinterlaceMode, in: VideoDeinterlaceMode.allCases)
         appState.settings.videoDeinterlaceMode = mode
         appState.saveSettings()
         controller.setDeinterlaceMode(mode)
@@ -1671,21 +1671,13 @@ struct PlayerView: View {
 
     private func rotateVideo(clockwise: Bool) {
         let current = appState.settings.videoRotationMode
-        let modes = VideoRotationMode.allCases
-        guard let index = modes.firstIndex(of: current) else { return }
-        let next = modes[(index + (clockwise ? 1 : modes.count - 1)) % modes.count]
+        let next = clockwise
+            ? CyclicModePolicy.next(after: current, in: VideoRotationMode.allCases)
+            : CyclicModePolicy.previous(after: current, in: VideoRotationMode.allCases)
         appState.settings.videoRotationMode = next
         appState.saveSettings()
         controller.setRotationMode(next)
         showPlayerToast("画面旋转：\(next.displayName)")
-    }
-
-    private func nextMode<T: Equatable>(after current: T, in modes: [T]) -> T {
-        guard !modes.isEmpty,
-              let index = modes.firstIndex(of: current) else {
-            return modes[0]
-        }
-        return modes[(index + 1) % modes.count]
     }
 
     private func syncDelayText(_ value: Double) -> String {

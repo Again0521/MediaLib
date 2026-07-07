@@ -5,85 +5,6 @@ import Combine
 import Foundation
 import MediaLibCore
 import SwiftUI
-import UniformTypeIdentifiers
-
-private final class MemoryAudioResourceLoader: NSObject, AVAssetResourceLoaderDelegate {
-    let queue = DispatchQueue(label: "MediaLIB.memory-audio-resource-loader", qos: .userInitiated)
-
-    private let data: Data
-    private let preferredContentType: String
-
-    init(fileURL: URL, data: Data) {
-        self.data = data
-        preferredContentType = UTType(filenameExtension: fileURL.pathExtension)?.identifier ?? UTType.data.identifier
-        super.init()
-    }
-
-    func resourceLoader(
-        _ resourceLoader: AVAssetResourceLoader,
-        shouldWaitForLoadingOfRequestedResource loadingRequest: AVAssetResourceLoadingRequest
-    ) -> Bool {
-        if let info = loadingRequest.contentInformationRequest {
-            info.contentType = contentType(allowedTypes: info.allowedContentTypes)
-            info.contentLength = Int64(data.count)
-            info.isByteRangeAccessSupported = true
-        }
-
-        if let request = loadingRequest.dataRequest {
-            respond(to: request)
-        }
-
-        loadingRequest.finishLoading()
-        return true
-    }
-
-    func resourceLoader(
-        _ resourceLoader: AVAssetResourceLoader,
-        didCancel loadingRequest: AVAssetResourceLoadingRequest
-    ) {}
-
-    private func contentType(allowedTypes: [String]?) -> String {
-        guard let allowedTypes, !allowedTypes.isEmpty else {
-            return preferredContentType
-        }
-        if allowedTypes.contains(preferredContentType) {
-            return preferredContentType
-        }
-        return allowedTypes.first ?? preferredContentType
-    }
-
-    private func respond(to request: AVAssetResourceLoadingDataRequest) {
-        let requestedOffset = max(Int(request.requestedOffset), 0)
-        let currentOffset = max(Int(request.currentOffset), requestedOffset)
-        let offset = min(max(currentOffset, requestedOffset), data.count)
-        let requestedLength = request.requestsAllDataToEndOfResource
-            ? data.count - offset
-            : request.requestedLength
-        let length = min(max(requestedLength, 0), max(data.count - offset, 0))
-        guard length > 0 else { return }
-        request.respond(with: data.subdata(in: offset..<(offset + length)))
-    }
-}
-
-private struct MemoryAudioAsset {
-    let asset: AVURLAsset
-    let loader: MemoryAudioResourceLoader
-
-    init(fileURL: URL, data: Data) {
-        loader = MemoryAudioResourceLoader(fileURL: fileURL, data: data)
-        let assetURL = Self.assetURL(for: fileURL)
-        asset = AVURLAsset(
-            url: assetURL,
-            options: [AVURLAssetPreferPreciseDurationAndTimingKey: true]
-        )
-        asset.resourceLoader.setDelegate(loader, queue: loader.queue)
-    }
-
-    private static func assetURL(for fileURL: URL) -> URL {
-        let ext = fileURL.pathExtension.isEmpty ? "audio" : fileURL.pathExtension
-        return URL(string: "medialib-memory-audio://track/\(UUID().uuidString).\(ext)")!
-    }
-}
 
 @MainActor
 final class MpvPlayerController: ObservableObject {
@@ -462,7 +383,7 @@ final class MpvPlayerController: ObservableObject {
                 let prepared = try await self.prepareMusicPlayerItem(url: nextURL, preloaded: true)
                 // 本地内存源可大幅前向缓冲；网络挂载盘只预读受控提前量，避免预缓冲整首歌占满网络。
                 prepared.playerItem.preferredForwardBufferDuration = nextIsNetwork
-                    ? self.preferredForwardBuffer(isNetwork: true, preloaded: true)
+                    ? MusicPlaybackBufferPolicy.preferredForwardBufferDuration(isNetwork: true, preloaded: true)
                     : self.preferredMusicPreloadBufferDuration(for: nextItem)
                 guard !Task.isCancelled,
                       self.playbackGeneration == generation,
@@ -918,7 +839,10 @@ final class MpvPlayerController: ObservableObject {
         isNetwork: Bool = false
     ) -> AVPlayerItem {
         // 网络源不做精确时序（会在起播前扫描整段），用容差时序换即时起播。
-        let usePreciseTiming = preferPreciseTiming ?? (!isNetwork && item?.type == .music)
+        let usePreciseTiming = preferPreciseTiming ?? MusicPlaybackBufferPolicy.prefersPreciseTiming(
+            isNetwork: isNetwork,
+            isMusic: item?.type == .music
+        )
         return makeAudioPlayerItem(
             asset: makeAudioAsset(url: url, preferPreciseTiming: usePreciseTiming),
             isLocal: url.isFileURL,
@@ -931,9 +855,15 @@ final class MpvPlayerController: ObservableObject {
         let playerItem = AVPlayerItem(asset: asset)
         if isNetwork {
             // 网络挂载盘的流式 file 项：给足前向缓冲，配合 waitToMinimizeStalling 自动重缓冲。
-            playerItem.preferredForwardBufferDuration = preferredForwardBuffer(isNetwork: true, preloaded: preloaded)
+            playerItem.preferredForwardBufferDuration = MusicPlaybackBufferPolicy.preferredForwardBufferDuration(
+                isNetwork: true,
+                preloaded: preloaded
+            )
         } else if isLocal {
-            playerItem.preferredForwardBufferDuration = preloaded ? 120 : 0
+            playerItem.preferredForwardBufferDuration = MusicPlaybackBufferPolicy.preferredForwardBufferDuration(
+                isNetwork: false,
+                preloaded: preloaded
+            )
         } else {
             playerItem.preferredForwardBufferDuration = 2
         }
@@ -979,15 +909,8 @@ final class MpvPlayerController: ObservableObject {
     /// 本地内存源关闭 waitToMinimizeStalling 以求即时起播；网络源开启，
     /// 让缓冲见底时自动停顿重缓冲并恢复，而不是「时钟继续走但没声音」。
     private func applyAudioStallPolicy(to player: AVPlayer, isNetwork: Bool) {
-        player.automaticallyWaitsToMinimizeStalling = isNetwork
-    }
-
-    /// 网络源前向缓冲：本地内存源用各自原有值；网络源给足读取提前量。
-    private func preferredForwardBuffer(isNetwork: Bool, preloaded: Bool) -> TimeInterval {
-        if isNetwork {
-            return preloaded ? 30 : 12
-        }
-        return preloaded ? 120 : 0
+        player.automaticallyWaitsToMinimizeStalling = MusicPlaybackBufferPolicy
+            .automaticallyWaitsToMinimizeStalling(isNetwork: isNetwork)
     }
 
     /// 安装网络源卡顿恢复：监听 timeControlStatus / 缓冲空 / 可续播，
@@ -1946,37 +1869,30 @@ final class MpvPlayerController: ObservableObject {
     }
 
     func cycleAspectOverride() {
-        setAspectOverride(nextMode(after: aspectOverride, in: VideoAspectOverride.allCases))
+        setAspectOverride(CyclicModePolicy.next(after: aspectOverride, in: VideoAspectOverride.allCases))
     }
 
     func cycleCropMode() {
-        setCropMode(nextMode(after: cropMode, in: VideoCropMode.allCases))
+        setCropMode(CyclicModePolicy.next(after: cropMode, in: VideoCropMode.allCases))
     }
 
     func cycleDeinterlaceMode() {
-        setDeinterlaceMode(nextMode(after: deinterlaceMode, in: VideoDeinterlaceMode.allCases))
+        setDeinterlaceMode(CyclicModePolicy.next(after: deinterlaceMode, in: VideoDeinterlaceMode.allCases))
     }
 
     func rotateVideo(clockwise: Bool) {
-        let modes = VideoRotationMode.allCases
-        guard let index = modes.firstIndex(of: rotationMode) else {
-            setRotationMode(clockwise ? .clockwise90 : .counterclockwise90)
-            return
-        }
-        let delta = clockwise ? 1 : modes.count - 1
-        setRotationMode(modes[(index + delta) % modes.count])
-    }
-
-    private func nextMode<T: CaseIterable & Equatable>(after current: T, in modes: T.AllCases) -> T where T.AllCases: RandomAccessCollection, T.AllCases.Index == Int {
-        guard !modes.isEmpty,
-              let index = modes.firstIndex(of: current) else {
-            return modes[modes.startIndex]
-        }
-        return modes[(index + 1) % modes.count]
+        let mode = clockwise
+            ? CyclicModePolicy.next(after: rotationMode, in: VideoRotationMode.allCases)
+            : CyclicModePolicy.previous(after: rotationMode, in: VideoRotationMode.allCases)
+        setRotationMode(mode)
     }
 
     private var effectiveMusicVolume: Float {
-        min(max(volume * musicNormalizationGain * audioTransitionVolumeScale, 0), 1)
+        MusicOutputPolicy.effectiveVolume(
+            baseVolume: volume,
+            normalizationGain: musicNormalizationGain,
+            transitionScale: audioTransitionVolumeScale
+        )
     }
 
     private func configureMusicOutput(for item: MediaItem, settings: AppSettings, isTrackTransition: Bool) {
@@ -1990,10 +1906,13 @@ final class MpvPlayerController: ObservableObject {
             albumPeak: item.loudnessAlbumPeak
         )
         musicTransitionMode = settings.musicTransitionMode
-        musicSoftFadeDuration = min(max(settings.musicSoftFadeDuration, 0.3), 2)
+        musicSoftFadeDuration = MusicOutputPolicy.clampedSoftFadeDuration(settings.musicSoftFadeDuration)
         musicEqualizerEnabled = settings.musicEqualizerEnabled && !settings.musicEqualizerPreset.isFlat
         musicEqualizerGains = settings.musicEqualizerPreset.gainsDB
-        audioTransitionVolumeScale = isTrackTransition && musicTransitionMode == .softFade ? 0 : 1
+        audioTransitionVolumeScale = MusicOutputPolicy.initialTransitionScale(
+            isTrackTransition: isTrackTransition,
+            mode: musicTransitionMode
+        )
     }
 
     private func applyAudioOutputVolume() {
@@ -2052,7 +1971,7 @@ final class MpvPlayerController: ObservableObject {
         let duration = musicSoftFadeDuration
         audioTransitionTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            let steps = max(Int(duration * 60), 1)
+            let steps = MusicOutputPolicy.softFadeStepCount(duration: duration)
             for step in 1...steps {
                 do {
                     try await Task.sleep(nanoseconds: 16_666_667)
@@ -2063,8 +1982,7 @@ final class MpvPlayerController: ObservableObject {
                 // 任何让 generation 变化的路径都会经 configure / configureMusicOutput 重置 audioTransitionVolumeScale，
                 // 因此中途残留的 <1 值必被下一首覆盖，不会出现音量卡在低位。
                 guard self.playbackGeneration == generation else { return }
-                let progress = Float(step) / Float(steps)
-                self.audioTransitionVolumeScale = progress * progress * (3 - 2 * progress)
+                self.audioTransitionVolumeScale = MusicOutputPolicy.softFadeScale(step: step, totalSteps: steps)
                 self.applyAudioOutputVolume()
             }
             self.audioTransitionVolumeScale = 1
