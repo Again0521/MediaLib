@@ -22,6 +22,150 @@ public struct ScanSummary: Equatable {
     public var errors: [String]
 }
 
+enum MediaScannerPathKind: Sendable, Equatable {
+    case missing
+    case file
+    case directory
+}
+
+struct MediaScannerFileCatalog: @unchecked Sendable {
+    var mediaFilesInSource: @Sendable (MediaSource) -> [URL]
+    var mediaFilesAtRoot: @Sendable (URL, MediaSource, Bool) -> [URL]
+    var pathKind: @Sendable (String) -> MediaScannerPathKind
+    var fileSize: @Sendable (URL) throws -> Int64
+    var photoMetadata: @Sendable (URL, Bool) -> MediaScannerPhotoMetadata
+
+    static func fileSystem(parser: FilenameParser, fileManager: FileManager) -> MediaScannerFileCatalog {
+        let catalog = FileSystemMediaScannerFileCatalog(parser: parser, fileManager: fileManager)
+        return MediaScannerFileCatalog(
+            mediaFilesInSource: { catalog.mediaFiles(in: $0) },
+            mediaFilesAtRoot: { catalog.mediaFiles(at: $0, source: $1, recursive: $2) },
+            pathKind: { catalog.pathKind(at: $0) },
+            fileSize: { try catalog.fileSize(for: $0) },
+            photoMetadata: { catalog.photoMetadata(for: $0, isImage: $1) }
+        )
+    }
+}
+
+struct MediaScannerPhotoMetadata: Sendable, Equatable {
+    var capturedDate: Date
+    var imagePixelSize: String?
+}
+
+private final class FileSystemMediaScannerFileCatalog: @unchecked Sendable {
+    private let parser: FilenameParser
+    private let fileManager: FileManager
+
+    init(parser: FilenameParser, fileManager: FileManager) {
+        self.parser = parser
+        self.fileManager = fileManager
+    }
+
+    func mediaFiles(in source: MediaSource) -> [URL] {
+        mediaFiles(at: URL(fileURLWithPath: source.path, isDirectory: true), source: source, recursive: source.recursive)
+    }
+
+    func mediaFiles(at root: URL, source: MediaSource, recursive: Bool) -> [URL] {
+        var results: [URL] = []
+        var seenPaths = Set<String>()
+
+        func appendIfMediaFile(_ url: URL) {
+            guard parser.isMediaFile(url, preferredType: source.mediaType) else { return }
+            let canonicalURL = canonicalMediaURL(url)
+            guard let values = try? canonicalURL.resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true else { return }
+            guard seenPaths.insert(canonicalURL.path).inserted else { return }
+            results.append(canonicalURL)
+        }
+
+        if recursive {
+            guard let enumerator = fileManager.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isRegularFileKey, .isHiddenKey, .fileSizeKey],
+                options: source.ignoreHiddenFiles ? [.skipsHiddenFiles] : []
+            ) else {
+                return []
+            }
+            for case let url as URL in enumerator {
+                appendIfMediaFile(url)
+            }
+        } else if let urls = try? fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isHiddenKey, .fileSizeKey],
+            options: source.ignoreHiddenFiles ? [.skipsHiddenFiles] : []
+        ) {
+            urls.forEach(appendIfMediaFile)
+        }
+
+        return results.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    }
+
+    func pathKind(at path: String) -> MediaScannerPathKind {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory) else {
+            return .missing
+        }
+        return isDirectory.boolValue ? .directory : .file
+    }
+
+    func fileSize(for url: URL) throws -> Int64 {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        return Int64(values.fileSize ?? 0)
+    }
+
+    func photoMetadata(for url: URL, isImage: Bool) -> MediaScannerPhotoMetadata {
+        MediaScannerPhotoMetadata(
+            capturedDate: fileCaptureDate(for: url, isImage: isImage),
+            imagePixelSize: isImage ? imagePixelSize(for: url) : nil
+        )
+    }
+
+    private func canonicalMediaURL(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private func fileCaptureDate(for fileURL: URL, isImage: Bool) -> Date {
+        // 照片优先用 EXIF 拍摄时间（更贴合「相册按拍摄日期分组」），回落到文件创建/修改日期。
+        if isImage, let exifDate = exifCaptureDate(for: fileURL) {
+            return exifDate
+        }
+        let values = try? fileURL.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+        return values?.creationDate ?? values?.contentModificationDate ?? Date()
+    }
+
+    private func imagePixelSize(for url: URL) -> String? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0 else {
+            return nil
+        }
+        return "\(width)x\(height)"
+    }
+
+    private func exifCaptureDate(for url: URL) -> Date? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return nil
+        }
+        let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        let tiff = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+        let dateString = (exif?[kCGImagePropertyExifDateTimeOriginal] as? String)
+            ?? (exif?[kCGImagePropertyExifDateTimeDigitized] as? String)
+            ?? (tiff?[kCGImagePropertyTIFFDateTime] as? String)
+        guard let dateString else { return nil }
+        return Self.exifDateFormatter.date(from: dateString)
+    }
+
+    private static let exifDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
+}
+
 public final class MediaScanner {
     private let parser: FilenameParser
     private let localMetadataService: LocalMetadataService
@@ -29,7 +173,7 @@ public final class MediaScanner {
     private let thumbnailGenerator: ThumbnailGenerator?
     private let mediaRepository: MediaRepository
     private let logger: LoggingService?
-    private let fileManager: FileManager
+    private let fileCatalog: MediaScannerFileCatalog
 
     public init(
         parser: FilenameParser = FilenameParser(),
@@ -46,7 +190,25 @@ public final class MediaScanner {
         self.thumbnailGenerator = thumbnailGenerator
         self.mediaRepository = mediaRepository
         self.logger = logger
-        self.fileManager = fileManager
+        self.fileCatalog = .fileSystem(parser: parser, fileManager: fileManager)
+    }
+
+    init(
+        parser: FilenameParser = FilenameParser(),
+        localMetadataService: LocalMetadataService = LocalMetadataService(),
+        audioMetadataReader: AudioMetadataReader = AudioMetadataReader(),
+        thumbnailGenerator: ThumbnailGenerator?,
+        mediaRepository: MediaRepository,
+        logger: LoggingService? = nil,
+        fileCatalog: MediaScannerFileCatalog
+    ) {
+        self.parser = parser
+        self.localMetadataService = localMetadataService
+        self.audioMetadataReader = audioMetadataReader
+        self.thumbnailGenerator = thumbnailGenerator
+        self.mediaRepository = mediaRepository
+        self.logger = logger
+        self.fileCatalog = fileCatalog
     }
 
     public func scan(
@@ -55,14 +217,14 @@ public final class MediaScanner {
         progress: @escaping (ScanProgress) -> Void,
         onImportedIDs: @escaping (Set<String>) -> Void = { _ in }
     ) async -> ScanSummary {
-        guard FileAccessService.isReachableDirectory(source.path) else {
+        guard await FileAccessService.isReachableDirectoryAsync(source.path) else {
             let message = inaccessibleSourceMessage(source, incremental: false)
             logger?.log(message, level: .warning)
             progress(ScanProgress(sourceID: source.id, status: "failed", totalFiles: 0, processedFiles: 0, currentPath: nil, errorMessage: message))
             return ScanSummary(scannedFiles: 0, importedItems: 0, skippedFiles: 0, errors: [message])
         }
 
-        let files = mediaFiles(in: source)
+        let files = await catalogMediaFiles(in: source)
         progress(ScanProgress(sourceID: source.id, status: "running", totalFiles: files.count, processedFiles: 0, currentPath: nil, errorMessage: nil))
 
         var imported = 0
@@ -74,8 +236,7 @@ public final class MediaScanner {
             if Task.isCancelled { break }
             progress(ScanProgress(sourceID: source.id, status: "running", totalFiles: files.count, processedFiles: index, currentPath: source.mediaType == .privateCollection ? nil : fileURL.path, errorMessage: nil))
             do {
-                let values = try fileURL.resourceValues(forKeys: [.fileSizeKey])
-                let fileSize = Int64(values.fileSize ?? 0)
+                let fileSize = try await catalogFileSize(for: fileURL)
                 guard fileSize >= minimumFileSize(for: fileURL, source: source) else {
                     skipped += 1
                     continue
@@ -116,7 +277,7 @@ public final class MediaScanner {
         progress: @escaping (ScanProgress) -> Void,
         onImportedIDs: @escaping (Set<String>) -> Void = { _ in }
     ) async -> ScanSummary {
-        guard FileAccessService.isReachableDirectory(source.path) else {
+        guard await FileAccessService.isReachableDirectoryAsync(source.path) else {
             let message = inaccessibleSourceMessage(source, incremental: true)
             logger?.log(message, level: .warning)
             progress(ScanProgress(sourceID: source.id, status: "failed", totalFiles: 0, processedFiles: 0, currentPath: nil, errorMessage: message))
@@ -135,22 +296,35 @@ public final class MediaScanner {
         var deletedDirectoryPaths = Set<String>()
         for path in normalizedPaths {
             let url = URL(fileURLWithPath: path)
-            var isDirectory: ObjCBool = false
-            if fileManager.fileExists(atPath: path, isDirectory: &isDirectory) {
-                if isDirectory.boolValue {
-                    mediaFiles(at: url, source: source, recursive: source.recursive).forEach { importURLs.insert($0) }
-                } else if parser.isMediaFile(url, preferredType: source.mediaType) {
+            switch await catalogPathKind(at: path) {
+            case .directory:
+                let discovered = await catalogMediaFiles(at: url, source: source, recursive: source.recursive)
+                discovered.forEach { importURLs.insert($0) }
+            case .file:
+                if parser.isMediaFile(url, preferredType: source.mediaType) {
                     importURLs.insert(canonicalMediaURL(url))
                 } else if isMetadataSidecar(url) {
-                    mediaFiles(at: url.deletingLastPathComponent(), source: source, recursive: false).forEach { importURLs.insert($0) }
+                    let discovered = await catalogMediaFiles(
+                        at: url.deletingLastPathComponent(),
+                        source: source,
+                        recursive: false
+                    )
+                    discovered.forEach { importURLs.insert($0) }
                 }
-            } else if parser.isMediaFile(url, preferredType: source.mediaType) {
-                deletedFilePaths.insert(path)
-                deletedFilePaths.insert(canonicalMediaURL(url).path)
-            } else if isMetadataSidecar(url) {
-                mediaFiles(at: url.deletingLastPathComponent(), source: source, recursive: false).forEach { importURLs.insert($0) }
-            } else {
-                deletedDirectoryPaths.insert(path)
+            case .missing:
+                if parser.isMediaFile(url, preferredType: source.mediaType) {
+                    deletedFilePaths.insert(path)
+                    deletedFilePaths.insert(canonicalMediaURL(url).path)
+                } else if isMetadataSidecar(url) {
+                    let discovered = await catalogMediaFiles(
+                        at: url.deletingLastPathComponent(),
+                        source: source,
+                        recursive: false
+                    )
+                    discovered.forEach { importURLs.insert($0) }
+                } else {
+                    deletedDirectoryPaths.insert(path)
+                }
             }
         }
 
@@ -188,8 +362,7 @@ public final class MediaScanner {
         for fileURL in files {
             if Task.isCancelled { break }
             do {
-                let values = try fileURL.resourceValues(forKeys: [.fileSizeKey])
-                let fileSize = Int64(values.fileSize ?? 0)
+                let fileSize = try await catalogFileSize(for: fileURL)
                 guard fileSize >= minimumFileSize(for: fileURL, source: source) else {
                     skipped += 1
                     processed += 1
@@ -232,7 +405,7 @@ public final class MediaScanner {
         let isMusicFile = source.mediaType == .music || (source.mediaType == .auto && parser.isAudioFile(fileURL))
         let localMetadata = isMusicFile
             ? LocalMetadata()
-            : localMetadataService.metadata(for: fileURL, readNFO: source.readNFO, preferLocalArtwork: source.preferLocalArtwork)
+            : await localMetadataService.metadataAsync(for: fileURL, readNFO: source.readNFO, preferLocalArtwork: source.preferLocalArtwork)
         let mediaInfo = await thumbnailGenerator?.mediaInfo(for: fileURL)
 
         if isMusicFile {
@@ -319,9 +492,16 @@ public final class MediaScanner {
 
         case .episode:
             let seriesDirectory = parsed.seriesDirectoryPath.map { URL(fileURLWithPath: $0, isDirectory: true) }
-            let seriesMetadata = seriesDirectory.map {
-                localMetadataService.metadata(forDirectory: $0, readNFO: source.readNFO, preferLocalArtwork: source.preferLocalArtwork)
-            } ?? LocalMetadata()
+            let seriesMetadata: LocalMetadata
+            if let seriesDirectory {
+                seriesMetadata = await localMetadataService.metadataAsync(
+                    forDirectory: seriesDirectory,
+                    readNFO: source.readNFO,
+                    preferLocalArtwork: source.preferLocalArtwork
+                )
+            } else {
+                seriesMetadata = LocalMetadata()
+            }
             let showTitle = seriesMetadata.title ?? parsed.title
             let showIDSource = parsed.seriesDirectoryPath ?? "\(source.path)/\(showTitle)"
             let showID = StableID.make(prefix: "show", value: showIDSource)
@@ -379,7 +559,8 @@ public final class MediaScanner {
         let isImage = parser.isImageFile(canonicalURL)
         let id = StableID.make(prefix: isImage ? "photo" : "albumvideo", value: canonicalURL.path)
         let title = canonicalURL.deletingPathExtension().lastPathComponent
-        let capturedDate = fileCaptureDate(for: canonicalURL, isImage: isImage)
+        let photoMetadata = await catalogPhotoMetadata(for: canonicalURL, isImage: isImage)
+        let capturedDate = photoMetadata.capturedDate
 
         var poster: String?
         var resolution: String?
@@ -387,7 +568,7 @@ public final class MediaScanner {
         if isImage {
             poster = canonicalURL.path
             // 记录像素尺寸（W×H），相册网格用它做保留宽高比的瀑布式排版。
-            resolution = Self.imagePixelSize(for: canonicalURL)
+            resolution = photoMetadata.imagePixelSize
         } else {
             let mediaInfo = await thumbnailGenerator?.mediaInfo(for: canonicalURL)
             resolution = mediaInfo?.resolution
@@ -419,47 +600,6 @@ public final class MediaScanner {
         try mediaRepository.deleteItems(filePath: canonicalURL.path, excludingID: id)
         try mediaRepository.upsert(item)
         return [id]
-    }
-
-    private func fileCaptureDate(for fileURL: URL, isImage: Bool) -> Date {
-        // 照片优先用 EXIF 拍摄时间（更贴合「相册按拍摄日期分组」），回落到文件创建/修改日期。
-        if isImage, let exifDate = Self.exifCaptureDate(for: fileURL) {
-            return exifDate
-        }
-        let values = try? fileURL.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-        return values?.creationDate ?? values?.contentModificationDate ?? Date()
-    }
-
-    private static let exifDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        return formatter
-    }()
-
-    private static func imagePixelSize(for url: URL) -> String? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-              let width = properties[kCGImagePropertyPixelWidth] as? Int,
-              let height = properties[kCGImagePropertyPixelHeight] as? Int,
-              width > 0, height > 0 else {
-            return nil
-        }
-        return "\(width)x\(height)"
-    }
-
-    private static func exifCaptureDate(for url: URL) -> Date? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
-            return nil
-        }
-        let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any]
-        let tiff = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
-        let dateString = (exif?[kCGImagePropertyExifDateTimeOriginal] as? String)
-            ?? (exif?[kCGImagePropertyExifDateTimeDigitized] as? String)
-            ?? (tiff?[kCGImagePropertyTIFFDateTime] as? String)
-        guard let dateString else { return nil }
-        return exifDateFormatter.date(from: dateString)
     }
 
     private func fallbackPoster(
@@ -516,43 +656,34 @@ public final class MediaScanner {
         return width / height
     }
 
-    private func mediaFiles(in source: MediaSource) -> [URL] {
-        mediaFiles(at: URL(fileURLWithPath: source.path, isDirectory: true), source: source, recursive: source.recursive)
+    private func catalogMediaFiles(in source: MediaSource) async -> [URL] {
+        await BlockingIOExecutor.run {
+            self.fileCatalog.mediaFilesInSource(source)
+        }
     }
 
-    private func mediaFiles(at root: URL, source: MediaSource, recursive: Bool) -> [URL] {
-        var results: [URL] = []
-        var seenPaths = Set<String>()
-
-        func appendIfMediaFile(_ url: URL) {
-            guard parser.isMediaFile(url, preferredType: source.mediaType) else { return }
-            let canonicalURL = canonicalMediaURL(url)
-            guard let values = try? canonicalURL.resourceValues(forKeys: [.isRegularFileKey]),
-                  values.isRegularFile == true else { return }
-            guard seenPaths.insert(canonicalURL.path).inserted else { return }
-            results.append(canonicalURL)
+    private func catalogMediaFiles(at root: URL, source: MediaSource, recursive: Bool) async -> [URL] {
+        await BlockingIOExecutor.run {
+            self.fileCatalog.mediaFilesAtRoot(root, source, recursive)
         }
+    }
 
-        if recursive {
-            guard let enumerator = fileManager.enumerator(
-                at: root,
-                includingPropertiesForKeys: [.isRegularFileKey, .isHiddenKey, .fileSizeKey],
-                options: source.ignoreHiddenFiles ? [.skipsHiddenFiles] : []
-            ) else {
-                return []
-            }
-            for case let url as URL in enumerator {
-                appendIfMediaFile(url)
-            }
-        } else if let urls = try? fileManager.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.isRegularFileKey, .isHiddenKey, .fileSizeKey],
-            options: source.ignoreHiddenFiles ? [.skipsHiddenFiles] : []
-        ) {
-            urls.forEach(appendIfMediaFile)
+    private func catalogPathKind(at path: String) async -> MediaScannerPathKind {
+        await BlockingIOExecutor.run {
+            self.fileCatalog.pathKind(path)
         }
+    }
 
-        return results.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+    private func catalogFileSize(for url: URL) async throws -> Int64 {
+        try await BlockingIOExecutor.run {
+            try self.fileCatalog.fileSize(url)
+        }
+    }
+
+    private func catalogPhotoMetadata(for url: URL, isImage: Bool) async -> MediaScannerPhotoMetadata {
+        await BlockingIOExecutor.run {
+            self.fileCatalog.photoMetadata(url, isImage)
+        }
     }
 
     private func isMetadataSidecar(_ url: URL) -> Bool {

@@ -303,8 +303,12 @@ struct TMDBEnrichmentService {
     }
 
     /// TMDB 艺术照按语言过滤：保留当前语言、无文字版(null)与英文，覆盖大多数剧照。
-    private static func imageLanguageFilter(for language: String) -> String {
-        let base = language.split(separator: "-").first.map(String.init) ?? language
+    static func imageLanguageFilter(for language: String) -> String {
+        let normalized = language
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .nilIfEmpty ?? "zh-CN"
+        let base = normalized.split(separator: "-").first.map(String.init) ?? normalized
         var langs = [base, "null", "en"]
         var seen = Set<String>()
         langs = langs.filter { seen.insert($0).inserted }
@@ -312,20 +316,31 @@ struct TMDBEnrichmentService {
     }
 
     /// 选出最佳预告片：优先 官方 YouTube Trailer，其次任意 YouTube Trailer，再次任意 YouTube 视频。
-    private static func trailerURL(from videos: [TMDBVideo]) -> String? {
-        let youtube = videos.filter { ($0.site ?? "").lowercased() == "youtube" && !($0.key ?? "").isEmpty }
-        let pick = youtube.first { ($0.type ?? "") == "Trailer" && $0.official == true }
-            ?? youtube.first { ($0.type ?? "") == "Trailer" }
+    static func trailerURL(from videos: [TMDBVideo]) -> String? {
+        let youtube = videos.filter {
+            ($0.site ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "youtube" &&
+            !($0.key ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let pick = youtube.first {
+            ($0.type ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "trailer" &&
+            $0.official == true
+        }
+            ?? youtube.first {
+                ($0.type ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "trailer"
+            }
             ?? youtube.first
-        guard let key = pick?.key else { return nil }
+        guard let key = pick?.key?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else { return nil }
         return "https://www.youtube.com/watch?v=\(key)"
     }
 
-    private static func parse(externalID: String) -> (kind: String, id: String)? {
-        let parts = externalID.split(separator: ":").map(String.init)
+    static func parse(externalID: String) -> (kind: String, id: String)? {
+        let parts = externalID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: ":")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
         guard parts.count == 3, parts[0] == "tmdb", !parts[2].isEmpty else { return nil }
         let kind = parts[1] == "movie" ? "movie" : (parts[1] == "tv" ? "tv" : "")
-        guard !kind.isEmpty else { return nil }
+        guard !kind.isEmpty, let numericID = Int(parts[2]), numericID > 0 else { return nil }
         return (kind, parts[2])
     }
 
@@ -425,12 +440,12 @@ struct TMDBEnrichmentService {
         }
     }
 
-    private static func year(from date: String?) -> Int? {
+    static func year(from date: String?) -> Int? {
         guard let date, date.count >= 4 else { return nil }
         return Int(date.prefix(4))
     }
 
-    private static func localizedJob(_ job: String) -> String {
+    static func localizedJob(_ job: String) -> String {
         switch job {
         case "Director": return "导演"
         case "Writer", "Screenplay": return "编剧"
@@ -624,7 +639,7 @@ private struct TMDBVideosResponse: Decodable {
     let results: [TMDBVideo]?
 }
 
-private struct TMDBVideo: Decodable {
+struct TMDBVideo: Decodable {
     let key: String?
     let site: String?
     let type: String?

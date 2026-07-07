@@ -853,12 +853,8 @@ final class AlbumAspectRatioStore: ObservableObject {
         }
         guard !missing.isEmpty else { return }
         missing.forEach { inFlight.insert($0) }
-        Task.detached(priority: .utility) {
-            var results: [String: Double] = [:]
-            for path in missing {
-                if let ratio = Self.readAspect(path) { results[path] = ratio }
-            }
-            let resolvedResults = results
+        Task(priority: .utility) {
+            let resolvedResults = await Self.readAspects(paths: missing)
             await MainActor.run {
                 for (key, value) in resolvedResults { self.cached[key] = value }
                 missing.forEach { self.inFlight.remove($0) }
@@ -871,6 +867,18 @@ final class AlbumAspectRatioStore: ObservableObject {
         let parts = resolution.lowercased().split(separator: "x")
         guard parts.count == 2, let w = Double(parts[0]), let h = Double(parts[1]), w > 0, h > 0 else { return nil }
         return w / h
+    }
+
+    nonisolated static func readAspects(paths: [String]) async -> [String: Double] {
+        await BlockingIOExecutor.run {
+            var results: [String: Double] = [:]
+            for path in paths {
+                if let ratio = Self.readAspect(path) {
+                    results[path] = ratio
+                }
+            }
+            return results
+        }
     }
 
     nonisolated private static func readAspect(_ path: String) -> Double? {

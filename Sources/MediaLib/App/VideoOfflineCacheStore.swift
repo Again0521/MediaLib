@@ -41,12 +41,6 @@ struct VideoCacheEntry: Codable, Hashable, Sendable {
     }
 }
 
-enum VideoSeriesCacheState: Equatable, Sendable {
-    case none
-    case partial
-    case complete
-}
-
 struct VideoCacheQualityChoice: Identifiable, Hashable, Sendable {
     let id: String
     let label: String
@@ -108,12 +102,34 @@ enum VideoOfflineCacheStoreError: LocalizedError {
     }
 }
 
+struct VideoOfflineCacheManifestIO {
+    let read: (URL) throws -> [String: VideoCacheEntry]
+    let write: ([String: VideoCacheEntry], URL) throws -> Void
+
+    static func fileSystem(fileManager: FileManager) -> VideoOfflineCacheManifestIO {
+        VideoOfflineCacheManifestIO(
+            read: { url in
+                guard fileManager.fileExists(atPath: url.path) else { return [:] }
+                let data = try Data(contentsOf: url)
+                return try JSONDecoder().decode([String: VideoCacheEntry].self, from: data)
+            },
+            write: { entries, url in
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                let data = try encoder.encode(entries)
+                try data.write(to: url, options: [.atomic])
+            }
+        )
+    }
+}
+
 final class VideoOfflineCacheStore: @unchecked Sendable {
     static let sidecarSubtitleExtensions = Set(["srt", "ass", "ssa", "vtt"])
 
     private let manifestURL: URL
     private let defaultCacheRootDirectory: URL
     private let fileManager: FileManager
+    private let manifestIO: VideoOfflineCacheManifestIO
     private let lock = NSLock()
     private var entries: [String: VideoCacheEntry] = [:]
     private var customCacheRootDirectory: URL?
@@ -123,14 +139,16 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
         defaultCacheDirectory: URL,
         customCacheDirectoryPath: String?,
         pruneOnInit: Bool = true,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        manifestIO: VideoOfflineCacheManifestIO? = nil
     ) throws {
         self.manifestURL = applicationSupportDirectory.appendingPathComponent("VideoCacheManifest.json")
         self.defaultCacheRootDirectory = defaultCacheDirectory
         self.fileManager = fileManager
+        self.manifestIO = manifestIO ?? .fileSystem(fileManager: fileManager)
         self.customCacheRootDirectory = Self.validCustomCacheRoot(from: customCacheDirectoryPath, fileManager: fileManager)
         try fileManager.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true)
-        self.entries = try Self.readManifest(from: manifestURL, fileManager: fileManager)
+        self.entries = try self.manifestIO.read(manifestURL)
         if pruneOnInit {
             self.entries = pruneMissingFilesLocked(self.entries)
             try saveLocked(self.entries)
@@ -139,6 +157,12 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
 
     func allEntries() -> [String: VideoCacheEntry] {
         lock.withLock { entries }
+    }
+
+    func allEntriesAsync() async -> [String: VideoCacheEntry] {
+        await BlockingIOExecutor.run {
+            self.allEntries()
+        }
     }
 
     func refreshEntriesPruningMissingFiles() throws -> [String: VideoCacheEntry] {
@@ -152,6 +176,12 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
         }
     }
 
+    func refreshEntriesPruningMissingFilesAsync() async throws -> [String: VideoCacheEntry] {
+        try await BlockingIOExecutor.run {
+            try self.refreshEntriesPruningMissingFiles()
+        }
+    }
+
     func storageSummary(byteLimit: Int64?) -> VideoCacheStorageSummary {
         lock.withLock {
             VideoCacheStorageSummary(
@@ -159,6 +189,12 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
                 totalBytes: estimatedTotalBytesLocked(for: entries),
                 byteLimit: Self.normalizedByteLimit(byteLimit)
             )
+        }
+    }
+
+    func storageSummaryAsync(byteLimit: Int64?) async -> VideoCacheStorageSummary {
+        await BlockingIOExecutor.run {
+            self.storageSummary(byteLimit: byteLimit)
         }
     }
 
@@ -209,10 +245,30 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
         }
     }
 
+    func runMaintenanceAsync(
+        validItemIDs: Set<String>,
+        byteLimit: Int64?,
+        cleanupHint: VideoCacheCleanupHint = VideoCacheCleanupHint()
+    ) async throws -> VideoCacheMaintenanceResult {
+        try await BlockingIOExecutor.run {
+            try self.runMaintenance(
+                validItemIDs: validItemIDs,
+                byteLimit: byteLimit,
+                cleanupHint: cleanupHint
+            )
+        }
+    }
+
     func entry(for itemID: String) -> VideoCacheEntry? {
         lock.withLock {
             guard let entry = entries[itemID], fileManager.fileExists(atPath: entry.localPath) else { return nil }
             return entry
+        }
+    }
+
+    func entryAsync(for itemID: String) async -> VideoCacheEntry? {
+        await BlockingIOExecutor.run {
+            self.entry(for: itemID)
         }
     }
 
@@ -238,10 +294,22 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
         }
     }
 
+    func markAccessedAsync(itemID: String, at date: Date = Date()) async throws {
+        try await BlockingIOExecutor.run {
+            try self.markAccessed(itemID: itemID, at: date)
+        }
+    }
+
     func upsert(_ entry: VideoCacheEntry) throws {
         try lock.withLock {
             entries[entry.itemID] = entry
             try saveLocked(entries)
+        }
+    }
+
+    func upsertAsync(_ entry: VideoCacheEntry) async throws {
+        try await BlockingIOExecutor.run {
+            try self.upsert(entry)
         }
     }
 
@@ -255,6 +323,12 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
                 throw VideoOfflineCacheStoreError.invalidCacheDirectory
             }
             try fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+        }
+    }
+
+    func setCustomCacheDirectoryPathAsync(_ path: String?) async throws {
+        try await BlockingIOExecutor.run {
+            try self.setCustomCacheDirectoryPath(path)
         }
     }
 
@@ -275,6 +349,12 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
             }
             try saveLocked(entries)
             return removed
+        }
+    }
+
+    func removeAsync(itemIDs: Set<String>) async throws -> [VideoCacheEntry] {
+        try await BlockingIOExecutor.run {
+            try self.remove(itemIDs: itemIDs)
         }
     }
 
@@ -321,12 +401,6 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
         return cached
     }
 
-    private static func readManifest(from url: URL, fileManager: FileManager) throws -> [String: VideoCacheEntry] {
-        guard fileManager.fileExists(atPath: url.path) else { return [:] }
-        let data = try Data(contentsOf: url)
-        return try JSONDecoder().decode([String: VideoCacheEntry].self, from: data)
-    }
-
     private func pruneMissingFilesLocked(_ input: [String: VideoCacheEntry]) -> [String: VideoCacheEntry] {
         input.filter { _, entry in
             fileManager.fileExists(atPath: entry.localPath)
@@ -338,10 +412,7 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
     }
 
     private func saveLocked(_ entries: [String: VideoCacheEntry]) throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(entries)
-        try data.write(to: manifestURL, options: [.atomic])
+        try manifestIO.write(entries, manifestURL)
     }
 
     private func removeCachedFilesLocked(for entry: VideoCacheEntry) throws {
@@ -455,13 +526,13 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
         ) else { return 0 }
 
         let entryURLs = entries.values.map { URL(fileURLWithPath: $0.localPath) }
-        let keptVideoPaths = Set(entryURLs.map(\.path))
+        let keptVideoPaths = Set(entryURLs.map(Self.normalizedFilePath))
         let keptSidecarBases = Set(entryURLs.map { $0.deletingPathExtension().lastPathComponent })
         var removed = 0
 
         for file in files {
             guard (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
-            if keptVideoPaths.contains(file.path) { continue }
+            if keptVideoPaths.contains(Self.normalizedFilePath(file)) { continue }
             let base = file.deletingPathExtension().lastPathComponent
             let isTrackedSidecar = Self.sidecarSubtitleExtensions.contains(file.pathExtension.lowercased()) &&
                 keptSidecarBases.contains { Self.isSidecarBase(base, forVideoBase: $0) }
@@ -474,6 +545,10 @@ final class VideoOfflineCacheStore: @unchecked Sendable {
             }
         }
         return removed
+    }
+
+    private static func normalizedFilePath(_ url: URL) -> String {
+        url.standardizedFileURL.path
     }
 
     private static func isSidecarBase(_ candidateBase: String, forVideoBase videoBase: String) -> Bool {

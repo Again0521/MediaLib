@@ -10,12 +10,17 @@ final class VideoSmartCollectionTests: XCTestCase {
         favorite: Bool = false,
         watchlist: Bool = false,
         watched: Bool = false,
-        playProgress: Double = 0
+        playProgress: Double = 0,
+        sourcePath: String? = nil,
+        metadataProvider: String? = nil
     ) -> MediaItem {
         MediaItem(
             id: UUID().uuidString, type: type, title: "t",
-            year: year, playProgress: playProgress,
-            watched: watched, favorite: favorite, watchlist: watchlist
+            year: year,
+            sourcePath: sourcePath,
+            playProgress: playProgress,
+            watched: watched, favorite: favorite, watchlist: watchlist,
+            metadataProvider: metadataProvider
         )
     }
 
@@ -104,5 +109,25 @@ final class VideoSmartCollectionTests: XCTestCase {
         XCTAssertTrue(collection.matches(item(year: 2021, favorite: false), watchedThreshold: 0.9))   // 仅年份
         XCTAssertTrue(collection.matches(item(year: 2019, favorite: true), watchedThreshold: 0.9))    // 仅喜欢
         XCTAssertFalse(collection.matches(item(year: 2019, favorite: false), watchedThreshold: 0.9))  // 都不满足
+    }
+
+    func testSourceRuleClassifiesRemoteSourcePathsCaseInsensitively() {
+        let remoteCollection = VideoSmartCollection(
+            name: "远程",
+            rules: VideoSmartCollectionRules(source: .emby)
+        )
+        let localCollection = VideoSmartCollection(
+            name: "本地",
+            rules: VideoSmartCollectionRules(source: .local)
+        )
+        let mixedCaseRemote = item(sourcePath: "Jellyfin://Server/Library/Item")
+        let providerRemote = item(metadataProvider: "PLEX")
+        let local = item(sourcePath: "/Volumes/Media/Movie.mkv")
+
+        XCTAssertTrue(remoteCollection.matches(mixedCaseRemote, watchedThreshold: 0.9))
+        XCTAssertTrue(remoteCollection.matches(providerRemote, watchedThreshold: 0.9))
+        XCTAssertFalse(remoteCollection.matches(local, watchedThreshold: 0.9))
+        XCTAssertFalse(localCollection.matches(mixedCaseRemote, watchedThreshold: 0.9))
+        XCTAssertTrue(localCollection.matches(local, watchedThreshold: 0.9))
     }
 }

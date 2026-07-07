@@ -27,8 +27,8 @@ struct MetadataSearchResult: Identifiable, Hashable {
             trackNumber: trackNumber,
             year: year,
             overview: overview,
-            posterPath: posterPath?.hasPrefix("http") == true ? nil : posterPath,
-            backdropPath: backdropPath?.hasPrefix("http") == true ? nil : backdropPath,
+            posterPath: metadataArtworkPath(posterPath),
+            backdropPath: metadataArtworkPath(backdropPath),
             rating: rating,
             runtime: runtime,
             externalID: id,
@@ -139,7 +139,7 @@ enum MetadataMatchScorer {
         let keep = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " "))
         text = String(text.unicodeScalars.map { keep.contains($0) ? Character($0) : " " })
         text = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-        return text.trimmingCharacters(in: .whitespaces)
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func titleVariants(for raw: String) -> [String] {
@@ -316,6 +316,35 @@ enum MetadataSearchError: LocalizedError {
 }
 
 struct MetadataSearchService {
+    typealias ArtworkDataLoader = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
+    struct ArtworkIO: @unchecked Sendable {
+        var createDirectory: @Sendable (URL) throws -> Void
+        var write: @Sendable (Data, URL) throws -> Void
+
+        static let fileSystem = ArtworkIO(
+            createDirectory: { directory in
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            },
+            write: { data, url in
+                try data.write(to: url, options: .atomic)
+            }
+        )
+    }
+
+    private let artworkDataLoader: ArtworkDataLoader
+    private let artworkIO: ArtworkIO
+
+    init(
+        artworkDataLoader: @escaping ArtworkDataLoader = { request in
+            try await HTTPClient.shared.data(for: request)
+        },
+        artworkIO: ArtworkIO = .fileSystem
+    ) {
+        self.artworkDataLoader = artworkDataLoader
+        self.artworkIO = artworkIO
+    }
+
     static func tmdbProviderName(language: String) -> String {
         let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
         return "TMDB[\(trimmed.isEmpty ? "zh-CN" : trimmed)]"
@@ -765,8 +794,9 @@ struct MetadataSearchService {
         kind: String,
         directory: URL
     ) async -> String? {
-        guard let urlString, !urlString.isEmpty else { return nil }
-        guard urlString.hasPrefix("http"), let url = URL(string: urlString) else {
+        guard let urlString, !urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        guard let remoteArtworkURLString = normalizedHTTPURLString(urlString),
+              let url = URL(string: remoteArtworkURLString) else {
             return urlString
         }
 
@@ -774,17 +804,19 @@ struct MetadataSearchService {
         request.timeoutInterval = 18
 
         do {
-            let (data, response) = try await HTTPClient.shared.data(for: request)
+            let (data, response) = try await artworkDataLoader(request)
             guard (response as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty else {
                 return nil
             }
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let ext = ["jpg", "jpeg", "png", "webp"].contains(url.pathExtension.lowercased())
                 ? url.pathExtension.lowercased()
                 : "jpg"
             let filename = "\(safeFilename(itemID))-\(safeFilename(resultID))-\(kind).\(ext)"
             let outputURL = directory.appendingPathComponent(filename)
-            try data.write(to: outputURL, options: .atomic)
+            try await BlockingIOExecutor.run {
+                try artworkIO.createDirectory(directory)
+                try artworkIO.write(data, outputURL)
+            }
             return outputURL.path
         } catch {
             return nil
@@ -799,6 +831,30 @@ struct MetadataSearchService {
         let filename = mapped.joined()
         return filename.isEmpty ? UUID().uuidString : filename
     }
+}
+
+private func isHTTPURLString(_ value: String?) -> Bool {
+    normalizedHTTPURLString(value) != nil
+}
+
+private func metadataArtworkPath(_ value: String?) -> String? {
+    guard let value,
+          !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        return nil
+    }
+    return isHTTPURLString(value) ? nil : value
+}
+
+private func normalizedHTTPURLString(_ value: String?) -> String? {
+    guard let value else {
+        return nil
+    }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let scheme = URLComponents(string: trimmed)?.scheme?.lowercased(),
+          scheme == "http" || scheme == "https" else {
+        return nil
+    }
+    return trimmed
 }
 
 private struct TMDBSearchResponse: Decodable {

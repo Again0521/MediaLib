@@ -26,6 +26,10 @@ public final class LoggingService {
         let line = "[\(DateCoding.string(from: Date()) ?? "")] [\(level.rawValue)] \(sanitized)\n"
         queue.async { [logFileURL, maxFileBytes] in
             guard let data = line.data(using: .utf8) else { return }
+            try? FileManager.default.createDirectory(
+                at: logFileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
             Self.rotateIfNeeded(at: logFileURL, incomingBytes: data.count, maxFileBytes: maxFileBytes)
             if FileManager.default.fileExists(atPath: logFileURL.path) {
                 if let handle = try? FileHandle(forWritingTo: logFileURL) {
@@ -41,6 +45,10 @@ public final class LoggingService {
 
     public func exportURL() -> URL {
         logFileURL
+    }
+
+    func flush() {
+        queue.sync {}
     }
 
     // MARK: - 路径脱敏

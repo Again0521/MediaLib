@@ -1,4 +1,5 @@
 import Foundation
+import MediaLibCore
 
 /// 内置音乐播放器主题参数的文件化存储（R4）。
 ///
@@ -13,11 +14,40 @@ import Foundation
 /// 一键恢复默认：删除文件、重写默认模板、`active` 复位为 `MusicThemeConfig()`。
 /// 任意失败都安全回退默认且不抛、不崩。
 enum MusicThemeConfigStore {
+    struct IO: @unchecked Sendable {
+        let resolveFileURL: @Sendable () -> URL?
+        let fileExists: @Sendable (URL) -> Bool
+        let read: @Sendable (URL) throws -> Data
+        let write: @Sendable (Data, URL) throws -> Void
+        let remove: @Sendable (URL) throws -> Void
+
+        static let fileSystem = IO(
+            resolveFileURL: { MusicThemeConfigStore.fileURL },
+            fileExists: { url in
+                FileManager.default.fileExists(atPath: url.path)
+            },
+            read: { url in
+                try Data(contentsOf: url)
+            },
+            write: { data, url in
+                try data.write(to: url, options: .atomic)
+            },
+            remove: { url in
+                try FileManager.default.removeItem(at: url)
+            }
+        )
+    }
+
     static let fileName = "music-theme.json"
     /// 单个数值的安全量级上限（含纳秒级时长 ~1e9，故放宽到 1e11；仅拦截真正离谱的值）。
     private static let magnitudeCap = 1e11
+    static var directoryOverrideForTesting: URL?
 
     static func directory() -> URL? {
+        if let directoryOverrideForTesting {
+            try? FileManager.default.createDirectory(at: directoryOverrideForTesting, withIntermediateDirectories: true)
+            return directoryOverrideForTesting
+        }
         guard let base = try? FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
@@ -35,14 +65,18 @@ enum MusicThemeConfigStore {
 
     /// 启动时调用：有文件→加载并应用；无文件→写一份默认模板供用户编辑，active 用默认。
     static func bootstrap() {
-        guard let url = fileURL else {
+        bootstrap(io: .fileSystem)
+    }
+
+    static func bootstrap(io: IO) {
+        guard let url = io.resolveFileURL() else {
             MusicThemeConfig.active = MusicThemeConfig()
             return
         }
-        if FileManager.default.fileExists(atPath: url.path) {
-            MusicThemeConfig.active = loadFromFile() ?? MusicThemeConfig()
+        if io.fileExists(url) {
+            MusicThemeConfig.active = loadFromFile(io: io) ?? MusicThemeConfig()
         } else {
-            try? writeTemplate(MusicThemeConfig())
+            try? writeTemplate(MusicThemeConfig(), io: io)
             MusicThemeConfig.active = MusicThemeConfig()
         }
     }
@@ -50,30 +84,129 @@ enum MusicThemeConfigStore {
     /// 重新从文件加载并应用（R5「重新加载」入口）。返回是否成功读到文件。
     @discardableResult
     static func reload() -> Bool {
-        let cfg = loadFromFile()
+        reload(io: .fileSystem)
+    }
+
+    @discardableResult
+    static func reload(io: IO) -> Bool {
+        let cfg = loadFromFile(io: io)
+        MusicThemeConfig.active = cfg ?? MusicThemeConfig()
+        return cfg != nil
+    }
+
+    /// 设置页入口：文件读取放到阻塞 I/O 队列，JSON 合并和全局 active 发布回到调用方执行器。
+    @discardableResult
+    static func reloadAsync() async -> Bool {
+        await reloadAsync(io: .fileSystem)
+    }
+
+    @discardableResult
+    static func reloadAsync(io: IO) async -> Bool {
+        let cfg = await loadFromFileAsync(io: io)
         MusicThemeConfig.active = cfg ?? MusicThemeConfig()
         return cfg != nil
     }
 
     /// 一键恢复默认：删文件、重写默认模板、active 复位。
     static func resetToDefaults() {
-        if let url = fileURL { try? FileManager.default.removeItem(at: url) }
-        try? writeTemplate(MusicThemeConfig())
+        resetToDefaults(io: .fileSystem)
+    }
+
+    static func resetToDefaults(io: IO) {
+        if let url = io.resolveFileURL() { try? io.remove(url) }
+        try? writeTemplate(MusicThemeConfig(), io: io)
         MusicThemeConfig.active = MusicThemeConfig()
+    }
+
+    static func resetToDefaultsAsync() async {
+        await resetToDefaultsAsync(io: .fileSystem)
+    }
+
+    static func resetToDefaultsAsync(io: IO) async {
+        let config = MusicThemeConfig()
+        let data = try? templateData(for: config)
+        await BlockingIOExecutor.run {
+            if let url = io.resolveFileURL() {
+                try? io.remove(url)
+                if let data {
+                    try? io.write(data, url)
+                }
+            }
+        }
+        MusicThemeConfig.active = config
     }
 
     /// 把配置写成带全部字段的漂亮 JSON（供用户编辑 / 作为默认模板）。
     static func writeTemplate(_ config: MusicThemeConfig) throws {
-        guard let url = fileURL else { return }
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(config).write(to: url, options: .atomic)
+        try writeTemplate(config, io: .fileSystem)
+    }
+
+    static func writeTemplate(_ config: MusicThemeConfig, io: IO) throws {
+        guard let url = io.resolveFileURL() else { return }
+        try io.write(templateData(for: config), url)
+    }
+
+    static func writeTemplateAsync(_ config: MusicThemeConfig) async throws {
+        try await writeTemplateAsync(config, io: .fileSystem)
+    }
+
+    static func writeTemplateAsync(_ config: MusicThemeConfig, io: IO) async throws {
+        let data = try templateData(for: config)
+        try await BlockingIOExecutor.run {
+            guard let url = io.resolveFileURL() else { return }
+            try io.write(data, url)
+        }
     }
 
     static func loadFromFile() -> MusicThemeConfig? {
-        guard let url = fileURL,
-              let data = try? Data(contentsOf: url),
-              let userObject = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+        loadFromFile(io: .fileSystem)
+    }
+
+    static func loadFromFile(io: IO) -> MusicThemeConfig? {
+        guard let url = io.resolveFileURL(),
+              let data = try? io.read(url)
+        else { return nil }
+        return decodeConfig(from: data)
+    }
+
+    static func loadFromFileAsync() async -> MusicThemeConfig? {
+        await loadFromFileAsync(io: .fileSystem)
+    }
+
+    static func loadFromFileAsync(io: IO) async -> MusicThemeConfig? {
+        let data = await BlockingIOExecutor.run { () -> Data? in
+            guard let url = io.resolveFileURL() else { return nil }
+            return try? io.read(url)
+        }
+        guard let data else { return nil }
+        return decodeConfig(from: data)
+    }
+
+    static func ensureTemplateFileAsync(_ config: MusicThemeConfig = MusicThemeConfig()) async throws -> URL? {
+        try await ensureTemplateFileAsync(config, io: .fileSystem)
+    }
+
+    static func ensureTemplateFileAsync(_ config: MusicThemeConfig = MusicThemeConfig(), io: IO) async throws -> URL? {
+        let data = try templateData(for: config)
+        return try await BlockingIOExecutor.run {
+            guard let url = io.resolveFileURL() else { return nil }
+            if !io.fileExists(url) {
+                try io.write(data, url)
+            }
+            return url
+        }
+    }
+
+    // MARK: - 私有
+
+    private static func templateData(for config: MusicThemeConfig) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(config)
+    }
+
+    private static func decodeConfig(from data: Data) -> MusicThemeConfig? {
+        guard let userObject = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let defaultData = try? JSONEncoder().encode(MusicThemeConfig()),
               let defaultObject = (try? JSONSerialization.jsonObject(with: defaultData)) as? [String: Any]
         else { return nil }
@@ -84,8 +217,6 @@ enum MusicThemeConfigStore {
         else { return nil }
         return config
     }
-
-    // MARK: - 私有
 
     /// 用户值递归覆盖默认；两边都是对象时深合并，否则用户值整体替换。
     private static func deepMerge(base: [String: Any], override: [String: Any]) -> [String: Any] {

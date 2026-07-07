@@ -9,13 +9,24 @@ import Foundation
 /// 这正是"音乐子页面长时间载入"的根因。此类工作必须改经这里的 GCD 队列执行，
 /// 协作池只留给真正的 CPU 计算与 async 挂起点。
 public enum BlockingIOExecutor {
+    private static let queueSpecificKey = DispatchSpecificKey<String>()
+    private static let queueSpecificValue = "MediaLib.blockingIO"
+
     /// 并发队列：互不相关的阻塞 I/O（健康检查、封面清点、可达性探测）可以并行，
     /// 单个慢 NAS 探测不会卡住其他 I/O。使用方数量有限，不会触发线程爆炸。
-    private static let queue = DispatchQueue(
-        label: "MediaLib.blockingIO",
-        qos: .utility,
-        attributes: .concurrent
-    )
+    private static let queue: DispatchQueue = {
+        let queue = DispatchQueue(
+            label: queueSpecificValue,
+            qos: .utility,
+            attributes: .concurrent
+        )
+        queue.setSpecific(key: queueSpecificKey, value: queueSpecificValue)
+        return queue
+    }()
+
+    static func isCurrentExecutionOnBlockingIOQueue() -> Bool {
+        DispatchQueue.getSpecific(key: queueSpecificKey) == queueSpecificValue
+    }
 
     /// 在专用队列上执行阻塞工作并 await 结果；调用方所在执行器（含 MainActor）
     /// 只是挂起等待，不占任何协作池线程。

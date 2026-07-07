@@ -9,9 +9,17 @@ struct AudioEQBand {
     let q: Double
 }
 
+struct AudioEQProcessorSnapshot: Equatable {
+    let gainsDB: [Double]
+    let hasNonZeroGain: Bool
+}
+
 /// 音乐均衡器 DSP：通过 MTAudioProcessingTap 挂到 AVPlayerItem 的音轨上，对 Float32 PCM 做多段峰值（peaking）双二阶滤波。
 /// 仅在用户启用 EQ 且预设非纯平时才创建并挂载——默认不挂，现有播放管线零改动、零开销。
 final class AudioEQProcessor {
+    /// 输入护栏：内置预设目前最高 6dB；24dB 已覆盖常见自定义 EQ，同时避免异常值推爆 biquad 系数。
+    static let gainDBLimit = 24.0
+
     static let bands: [AudioEQBand] = [
         AudioEQBand(frequency: 60, q: 0.9),
         AudioEQBand(frequency: 230, q: 0.9),
@@ -43,24 +51,46 @@ final class AudioEQProcessor {
 
     init(gainsDB: [Double]) {
         let count = Self.bands.count
-        self.gainsDB = Self.normalized(gainsDB, count: count)
+        self.gainsDB = Self.normalizedGains(gainsDB, count: count)
         self.coeffs = Array(repeating: Biquad(), count: count)
-        self.hasNonZeroGain = self.gainsDB.contains { abs($0) > 0.01 }
+        self.hasNonZeroGain = Self.hasAudibleGain(self.gainsDB)
     }
 
-    private static func normalized(_ gains: [Double], count: Int) -> [Double] {
-        if gains.count == count { return gains }
+    static func normalizedGains(_ gains: [Double]) -> [Double] {
+        normalizedGains(gains, count: bands.count)
+    }
+
+    private static func normalizedGains(_ gains: [Double], count: Int) -> [Double] {
         var result = gains
         if result.count > count { result = Array(result.prefix(count)) }
         else { result += Array(repeating: 0, count: count - result.count) }
-        return result
+        return result.map(safeGainDB)
+    }
+
+    private static func safeGainDB(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, -gainDBLimit), gainDBLimit)
+    }
+
+    private static func hasAudibleGain(_ gains: [Double]) -> Bool {
+        gains.contains { abs($0) > 0.01 }
+    }
+
+    func snapshot() -> AudioEQProcessorSnapshot {
+        os_unfair_lock_lock(&lock)
+        let snapshot = AudioEQProcessorSnapshot(
+            gainsDB: gainsDB,
+            hasNonZeroGain: hasNonZeroGain
+        )
+        os_unfair_lock_unlock(&lock)
+        return snapshot
     }
 
     /// 主线程：实时更新各段增益（dB），并重算系数。
     func updateGains(_ gains: [Double]) {
         os_unfair_lock_lock(&lock)
-        gainsDB = Self.normalized(gains, count: Self.bands.count)
-        hasNonZeroGain = gainsDB.contains { abs($0) > 0.01 }
+        gainsDB = Self.normalizedGains(gains, count: Self.bands.count)
+        hasNonZeroGain = Self.hasAudibleGain(gainsDB)
         recomputeCoeffsLocked()
         os_unfair_lock_unlock(&lock)
     }

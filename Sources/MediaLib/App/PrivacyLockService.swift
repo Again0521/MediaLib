@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import LocalAuthentication
+import MediaLibCore
 
 enum PrivacyLockError: LocalizedError {
     case invalidPIN
@@ -17,15 +18,90 @@ enum PrivacyLockError: LocalizedError {
 }
 
 struct PrivacyLockService {
+    struct IO: @unchecked Sendable {
+        let fileURL: (URL?) -> URL?
+        let write: (Data, URL) throws -> Void
+        let read: (URL) throws -> Data
+        let remove: (URL) throws -> Void
+
+        static let fileSystem = IO(
+            fileURL: { directoryOverride in
+                PrivacyLockService.fileURL(directoryOverride: directoryOverride)
+            },
+            write: { data, url in
+                try data.write(to: url, options: .atomic)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            },
+            read: { url in
+                try Data(contentsOf: url)
+            },
+            remove: { url in
+                try FileManager.default.removeItem(at: url)
+            }
+        )
+    }
+
+    private let directoryOverride: URL?
+    private let io: IO
+
+    init(directory: URL? = nil, io: IO = .fileSystem) {
+        self.directoryOverride = directory
+        self.io = io
+    }
+
     static func isValidPIN(_ pin: String) -> Bool {
         (4...8).contains(pin.count) && pin.allSatisfy(\.isNumber)
     }
 
     func hasPIN() -> Bool {
-        credentials() != nil
+        Self.credentials(directoryOverride: directoryOverride, io: io) != nil
+    }
+
+    func hasPINAsync() async -> Bool {
+        let directoryOverride = directoryOverride
+        let io = io
+        return await BlockingIOExecutor.run {
+            Self.credentials(directoryOverride: directoryOverride, io: io) != nil
+        }
     }
 
     func setPIN(_ pin: String) throws {
+        try Self.setPIN(pin, directoryOverride: directoryOverride, io: io)
+    }
+
+    func setPINAsync(_ pin: String) async throws {
+        let directoryOverride = directoryOverride
+        let io = io
+        try await BlockingIOExecutor.run {
+            try Self.setPIN(pin, directoryOverride: directoryOverride, io: io)
+        }
+    }
+
+    func verify(pin: String) -> Bool {
+        Self.verify(pin: pin, directoryOverride: directoryOverride, io: io)
+    }
+
+    func verifyAsync(pin: String) async -> Bool {
+        let directoryOverride = directoryOverride
+        let io = io
+        return await BlockingIOExecutor.run {
+            Self.verify(pin: pin, directoryOverride: directoryOverride, io: io)
+        }
+    }
+
+    func removePIN() {
+        Self.removePIN(directoryOverride: directoryOverride, io: io)
+    }
+
+    func removePINAsync() async {
+        let directoryOverride = directoryOverride
+        let io = io
+        await BlockingIOExecutor.run {
+            Self.removePIN(directoryOverride: directoryOverride, io: io)
+        }
+    }
+
+    private static func setPIN(_ pin: String, directoryOverride: URL?, io: IO) throws {
         guard Self.isValidPIN(pin) else {
             throw PrivacyLockError.invalidPIN
         }
@@ -33,27 +109,26 @@ struct PrivacyLockService {
         let payload = PrivacyPINPayload(salt: salt, digest: digest(pin: pin, salt: salt))
         let data = try JSONEncoder().encode(payload)
         // 文件存储（见 RemoteCredentialStore 同样原因：避免 ad-hoc 更新后的钥匙串密码弹窗）。
-        guard let url = fileURL() else {
+        guard let url = io.fileURL(directoryOverride) else {
             throw PrivacyLockError.storageFailed
         }
         do {
-            try data.write(to: url, options: .atomic)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            try io.write(data, url)
         } catch {
             throw PrivacyLockError.storageFailed
         }
     }
 
-    func verify(pin: String) -> Bool {
-        guard Self.isValidPIN(pin), let payload = credentials() else {
+    private static func verify(pin: String, directoryOverride: URL?, io: IO) -> Bool {
+        guard Self.isValidPIN(pin), let payload = credentials(directoryOverride: directoryOverride, io: io) else {
             return false
         }
         return digest(pin: pin, salt: payload.salt) == payload.digest
     }
 
-    func removePIN() {
-        if let url = fileURL() {
-            try? FileManager.default.removeItem(at: url)
+    private static func removePIN(directoryOverride: URL?, io: IO) {
+        if let url = io.fileURL(directoryOverride) {
+            try? io.remove(url)
         }
     }
 
@@ -80,17 +155,21 @@ struct PrivacyLockService {
         }
     }
 
-    private func credentials() -> PrivacyPINPayload? {
+    private static func credentials(directoryOverride: URL?, io: IO) -> PrivacyPINPayload? {
         // 只读文件，绝不读/删 keychain（旧 keychain ACL 会在 ad-hoc 更新后触发系统密码框）。
-        if let url = fileURL(),
-           let data = try? Data(contentsOf: url),
+        if let url = io.fileURL(directoryOverride),
+           let data = try? io.read(url),
            let payload = try? JSONDecoder().decode(PrivacyPINPayload.self, from: data) {
             return payload
         }
         return nil
     }
 
-    private func fileURL() -> URL? {
+    private static func fileURL(directoryOverride: URL?) -> URL? {
+        if let directoryOverride {
+            try? FileManager.default.createDirectory(at: directoryOverride, withIntermediateDirectories: true)
+            return directoryOverride.appendingPathComponent("privacy-pin.json")
+        }
         guard let base = try? FileManager.default.url(
             for: .applicationSupportDirectory,
             in: .userDomainMask,
@@ -104,7 +183,7 @@ struct PrivacyLockService {
         return dir.appendingPathComponent("privacy-pin.json")
     }
 
-    private func randomData(length: Int) throws -> Data {
+    private static func randomData(length: Int) throws -> Data {
         guard length > 0 else { return Data() }
         var data = Data()
         while data.count < length {
@@ -114,7 +193,7 @@ struct PrivacyLockService {
         return data.prefix(length)
     }
 
-    private func digest(pin: String, salt: Data) -> Data {
+    private static func digest(pin: String, salt: Data) -> Data {
         var data = salt
         data.append(Data(pin.utf8))
         return Data(SHA256.hash(data: data))

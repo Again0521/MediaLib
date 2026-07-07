@@ -9,9 +9,16 @@ import Foundation
 /// 对应报告问题 ID：TC-SCAN-009 / RISK-06
 final class ExternalPlayerServiceAuditTests: XCTestCase {
     private var service: ExternalPlayerService!
+    private var tempDirectory: URL?
 
     override func setUpWithError() throws {
         service = ExternalPlayerService()
+    }
+
+    override func tearDownWithError() throws {
+        if let tempDirectory {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
     }
 
     /// 测试播放远程 HTTP/HTTPS 流地址时无需本地文件存在，且路径构造合法
@@ -49,6 +56,168 @@ final class ExternalPlayerServiceAuditTests: XCTestCase {
         }
     }
 
+    func testOpenAsyncRemoteStreamURLDoesNotRequireLocalFileExistence() async {
+        let remotePath = "https://emby.server:8096/videos/stream.mkv?api_key=12345"
+
+        do {
+            try await service.openAsync(
+                filePath: remotePath,
+                preferredPlayerPath: "/Applications/NonExistentPlayer_AsyncAudit.app"
+            )
+            XCTFail("Expected missing preferred external player to throw")
+        } catch let error as ExternalPlayerError {
+            if case .applicationNotFound(let name) = error {
+                XCTAssertEqual(name, "NonExistentPlayer_AsyncAudit.app")
+            } else {
+                XCTFail("非预期的错误类型：\(error)")
+            }
+        } catch {
+            XCTFail("错误必须被归类为 ExternalPlayerError")
+        }
+    }
+
+    func testOpenAsyncMissingLocalVideoFileThrowsMissingFile() async {
+        let fakeLocalPath = "/Users/shared/Movies/NotExistsVideo-\(UUID().uuidString).mp4"
+
+        do {
+            try await service.openAsync(filePath: fakeLocalPath, preferredPlayerPath: nil)
+            XCTFail("Expected missing local file to throw")
+        } catch let error as ExternalPlayerError {
+            if case .missingFile = error {
+                XCTAssertNotNil(error.errorDescription)
+            } else {
+                XCTFail("必须抛出 missingFile 错误，但得到了：\(error)")
+            }
+        } catch {
+            XCTFail("应该抛出 ExternalPlayerError")
+        }
+    }
+
+    func testAvailablePlayersAsyncIncludesExistingCustomPath() async throws {
+        let customPlayer = try temporaryDirectory()
+            .appendingPathComponent("Custom Audit Player.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: customPlayer, withIntermediateDirectories: true)
+
+        let players = await service.availablePlayersAsync(customPath: customPlayer.path)
+
+        XCTAssertTrue(players.contains { $0.path == customPlayer.path })
+        XCTAssertTrue(players.contains { $0.name == "Custom Audit Player" })
+    }
+
+    func testAvailablePlayersAsyncOmitsMissingCustomPath() async throws {
+        let missingPlayer = try temporaryDirectory()
+            .appendingPathComponent("Missing Audit Player.app", isDirectory: true)
+
+        let players = await service.availablePlayersAsync(customPath: missingPlayer.path)
+
+        XCTAssertFalse(players.contains { $0.path == missingPlayer.path })
+    }
+
+    func testAvailablePlayersAsyncRunsFileExistenceChecksOnBlockingIOQueue() async throws {
+        let customPlayer = try temporaryDirectory()
+            .appendingPathComponent("Blocking IO Player.app", isDirectory: true)
+        let recorder = RecordingFileExistence(existingPaths: [customPlayer.path])
+        let service = ExternalPlayerService(
+            fileExists: { recorder.fileExists($0) },
+            knownPlayersProvider: { [] }
+        )
+
+        let players = await service.availablePlayersAsync(customPath: customPlayer.path)
+
+        XCTAssertTrue(players.contains { $0.path == customPlayer.path })
+        XCTAssertTrue(recorder.paths.contains(customPlayer.path))
+        XCTAssertTrue(recorder.didObserveBlockingIOQueue)
+        XCTAssertTrue(recorder.allCallsObservedOnBlockingIOQueue)
+    }
+
+    func testOpenAsyncMissingLocalFileChecksPathOnBlockingIOQueue() async {
+        let localPath = "/Volumes/Offline/Missing-\(UUID().uuidString).mkv"
+        let recorder = RecordingFileExistence(existingPaths: [])
+        let service = ExternalPlayerService(
+            fileExists: { recorder.fileExists($0) },
+            knownPlayersProvider: { [] }
+        )
+
+        do {
+            try await service.openAsync(filePath: localPath, preferredPlayerPath: nil)
+            XCTFail("Expected missing local file to throw")
+        } catch let error as ExternalPlayerError {
+            if case .missingFile = error {
+                XCTAssertEqual(recorder.paths, [localPath])
+                XCTAssertTrue(recorder.didObserveBlockingIOQueue)
+                XCTAssertTrue(recorder.allCallsObservedOnBlockingIOQueue)
+            } else {
+                XCTFail("Expected missingFile, got \(error)")
+            }
+        } catch {
+            XCTFail("Expected ExternalPlayerError, got \(error)")
+        }
+    }
+
+    func testOpenAsyncMissingPreferredPlayerChecksPathOnBlockingIOQueue() async {
+        let preferredPath = "/Applications/Missing Preferred Player.app"
+        let recorder = RecordingFileExistence(existingPaths: [])
+        let service = ExternalPlayerService(
+            fileExists: { recorder.fileExists($0) },
+            knownPlayersProvider: { [] }
+        )
+
+        do {
+            try await service.openAsync(
+                filePath: "https://example.test/video/stream.mkv",
+                preferredPlayerPath: preferredPath
+            )
+            XCTFail("Expected missing preferred player to throw")
+        } catch let error as ExternalPlayerError {
+            if case .applicationNotFound(let name) = error {
+                XCTAssertEqual(name, "Missing Preferred Player.app")
+                XCTAssertEqual(recorder.paths, [preferredPath])
+                XCTAssertTrue(recorder.didObserveBlockingIOQueue)
+                XCTAssertTrue(recorder.allCallsObservedOnBlockingIOQueue)
+            } else {
+                XCTFail("Expected applicationNotFound, got \(error)")
+            }
+        } catch {
+            XCTFail("Expected ExternalPlayerError, got \(error)")
+        }
+    }
+
+    func testAvailablePlayersAsyncUsesCacheUntilInvalidated() async throws {
+        let customPlayer = try temporaryDirectory()
+            .appendingPathComponent("Cached Audit Player.app", isDirectory: true)
+        let recorder = RecordingFileExistence(existingPaths: [customPlayer.path])
+        let service = ExternalPlayerService(
+            fileExists: { recorder.fileExists($0) },
+            knownPlayersProvider: { [] }
+        )
+
+        let first = await service.availablePlayersAsync(customPath: customPlayer.path)
+        recorder.replaceExistingPaths([])
+        let second = await service.availablePlayersAsync(customPath: customPlayer.path)
+        service.invalidatePlayerCache()
+        let third = await service.availablePlayersAsync(customPath: customPlayer.path)
+
+        XCTAssertTrue(first.contains { $0.path == customPlayer.path })
+        XCTAssertTrue(second.contains { $0.path == customPlayer.path }, "cached result should be reused until explicit invalidation")
+        XCTAssertFalse(third.contains { $0.path == customPlayer.path })
+        XCTAssertGreaterThanOrEqual(recorder.callCount(for: customPlayer.path), 2)
+    }
+
+    func testSynchronousAvailablePlayersUsesInjectedFileExistenceCheckerForCustomPath() async throws {
+        let customPlayer = try temporaryDirectory()
+            .appendingPathComponent("Sync Injected Player.app", isDirectory: true)
+        let recorder = RecordingFileExistence(existingPaths: [customPlayer.path])
+        let service = ExternalPlayerService(
+            fileExists: { recorder.fileExists($0) },
+            knownPlayersProvider: { [] }
+        )
+
+        let players = service.availablePlayers(customPath: customPlayer.path)
+
+        XCTAssertTrue(players.contains { $0.path == customPlayer.path })
+        XCTAssertTrue(recorder.paths.contains(customPlayer.path))
+    }
+
     /// 测试多并发下频繁调用 invalidatePlayerCache 与 availablePlayers 锁不竞争不崩溃
     func testConcurrentCacheInvalidationAndQueryIsThreadSafe() throws {
         let expectation = XCTestExpectation(description: "并发缓存读写处理完毕")
@@ -64,5 +233,94 @@ final class ExternalPlayerServiceAuditTests: XCTestCase {
         }
         
         wait(for: [expectation], timeout: 3.0)
+    }
+
+    func testConcurrentAsyncCacheInvalidationAndQueryIsThreadSafe() async throws {
+        let customPlayer = try temporaryDirectory()
+            .appendingPathComponent("Concurrent Audit Player.app", isDirectory: true)
+        let knownPlayer = ExternalPlayer(
+            name: "Known Concurrent Player",
+            path: "/Applications/Known Concurrent Player.app",
+            bundleIdentifier: "test.known.concurrent"
+        )
+        let recorder = RecordingFileExistence(existingPaths: [customPlayer.path, knownPlayer.path])
+        let isolatedService = ExternalPlayerService(
+            fileExists: { recorder.fileExists($0) },
+            knownPlayersProvider: { [knownPlayer] }
+        )
+
+        await withTaskGroup(of: Void.self) { group in
+            for i in 0..<32 {
+                group.addTask {
+                    if i % 2 == 0 {
+                        isolatedService.invalidatePlayerCache()
+                    } else {
+                        _ = await isolatedService.availablePlayersAsync(customPath: customPlayer.path)
+                    }
+                }
+            }
+        }
+
+        XCTAssertTrue(recorder.didObserveBlockingIOQueue)
+        XCTAssertTrue(recorder.allCallsObservedOnBlockingIOQueue)
+    }
+
+    private func temporaryDirectory() throws -> URL {
+        if let tempDirectory {
+            return tempDirectory
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ExternalPlayerServiceAuditTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        tempDirectory = root
+        return root
+    }
+}
+
+private final class RecordingFileExistence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var existingPaths: Set<String>
+    private var records: [(path: String, onBlockingIOQueue: Bool)] = []
+
+    init(existingPaths: Set<String>) {
+        self.existingPaths = existingPaths
+    }
+
+    var paths: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return records.map(\.path)
+    }
+
+    var didObserveBlockingIOQueue: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return records.contains { $0.onBlockingIOQueue }
+    }
+
+    var allCallsObservedOnBlockingIOQueue: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !records.isEmpty && records.allSatisfy(\.onBlockingIOQueue)
+    }
+
+    func fileExists(_ path: String) -> Bool {
+        lock.lock()
+        records.append((path, BlockingIOExecutor.isCurrentExecutionOnBlockingIOQueue()))
+        let exists = existingPaths.contains(path)
+        lock.unlock()
+        return exists
+    }
+
+    func replaceExistingPaths(_ paths: Set<String>) {
+        lock.lock()
+        existingPaths = paths
+        lock.unlock()
+    }
+
+    func callCount(for path: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return records.filter { $0.path == path }.count
     }
 }

@@ -232,9 +232,10 @@ public enum VideoSmartCollectionSourceRule: String, Codable, CaseIterable, Ident
     }
 
     private static func isEmbyItem(_ item: MediaItem) -> Bool {
-        item.sourcePath?.hasPrefix("emby://") == true ||
-            item.sourcePath?.hasPrefix("jellyfin://") == true ||
-            item.sourcePath?.hasPrefix("plex://") == true ||
+        let sourcePath = item.sourcePath?.lowercased()
+        return sourcePath?.hasPrefix("emby://") == true ||
+            sourcePath?.hasPrefix("jellyfin://") == true ||
+            sourcePath?.hasPrefix("plex://") == true ||
             item.metadataProvider?.localizedCaseInsensitiveContains("emby") == true ||
             item.metadataProvider?.localizedCaseInsensitiveContains("jellyfin") == true ||
             item.metadataProvider?.localizedCaseInsensitiveContains("plex") == true

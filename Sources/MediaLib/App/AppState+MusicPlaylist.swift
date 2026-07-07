@@ -118,57 +118,48 @@ extension AppState {
 
     /// 生成 M3U 文本（含 #EXTINF 时长与"艺人 - 标题"）。
     func musicPlaylistM3UContent(_ playlist: MusicPlaylist) -> String {
-        var lines = ["#EXTM3U"]
-        for track in musicTracks(in: playlist) {
-            guard let path = track.filePath, !path.isEmpty else { continue }
-            let seconds = Int((track.duration ?? 0).rounded())
-            let artist = track.artist?.trimmingCharacters(in: .whitespaces) ?? ""
-            let info = artist.isEmpty ? track.title : "\(artist) - \(track.title)"
-            lines.append("#EXTINF:\(seconds),\(info)")
-            lines.append(path)
-        }
-        return lines.joined(separator: "\n") + "\n"
+        MusicPlaylistM3UPolicy.m3uContent(for: musicTracks(in: playlist))
     }
 
     /// 从 M3U 文件导入：按文件路径（绝对/相对）匹配库内曲目，匹配不到再按文件名兜底，创建新歌单。返回匹配数量。
     @discardableResult
     func importMusicPlaylist(fromM3U url: URL, name: String) -> Int {
-        let content: String
-        if let utf8 = try? String(contentsOf: url, encoding: .utf8) {
-            content = utf8
-        } else if let latin = try? String(contentsOf: url, encoding: .isoLatin1) {
-            content = latin
-        } else {
+        do {
+            return importMusicPlaylist(
+                m3uContent: try MusicPlaylistM3UFileLoader.loadContentSynchronously(from: url),
+                sourceURL: url,
+                name: name
+            )
+        } catch {
             alert = AppAlert(title: "导入失败", message: "无法读取该 M3U 文件。")
             return 0
         }
+    }
 
-        let baseDir = url.deletingLastPathComponent()
-        let rawPaths: [String] = content
-            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
-            .map { line in
-                if line.hasPrefix("/") || line.contains("://") { return line }
-                return baseDir.appendingPathComponent(line).standardizedFileURL.path
-            }
-
-        let byPath = Dictionary(cachedMusicTracks.compactMap { track in
-            track.filePath.map { ($0, track) }
-        }, uniquingKeysWith: { first, _ in first })
-        let byFilename = Dictionary(cachedMusicTracks.compactMap { track -> (String, MediaItem)? in
-            guard let path = track.filePath else { return nil }
-            return (URL(fileURLWithPath: path).lastPathComponent, track)
-        }, uniquingKeysWith: { first, _ in first })
-
-        var matched: [MediaItem] = []
-        var seenIDs = Set<String>()
-        for path in rawPaths {
-            let track = byPath[path] ?? byFilename[URL(fileURLWithPath: path).lastPathComponent]
-            if let track, seenIDs.insert(track.id).inserted {
-                matched.append(track)
-            }
+    @discardableResult
+    func importMusicPlaylistAsync(fromM3U url: URL, name: String) async -> Int {
+        do {
+            return importMusicPlaylist(
+                m3uContent: try await MusicPlaylistM3UFileLoader.loadContent(from: url),
+                sourceURL: url,
+                name: name
+            )
+        } catch {
+            alert = AppAlert(title: "导入失败", message: "无法读取该 M3U 文件。")
+            return 0
         }
+    }
+
+    @discardableResult
+    private func importMusicPlaylist(m3uContent content: String, sourceURL url: URL, name: String) -> Int {
+        let rawPaths = MusicPlaylistM3UPolicy.candidatePaths(
+            from: content,
+            baseDirectory: url.deletingLastPathComponent()
+        )
+        let matched = MusicPlaylistM3UPolicy.matchedTracks(
+            for: rawPaths,
+            in: cachedMusicTracks
+        )
 
         guard !matched.isEmpty else {
             alert = AppAlert(title: "未匹配到歌曲", message: "M3U 里的文件都不在当前音乐库中。请先扫描包含这些文件的音乐媒体源。")

@@ -40,6 +40,23 @@ final class SecretStoreAuditTests: XCTestCase {
         XCTAssertEqual(reloaded["trakt_client_id"], "oauth-client-id-999")
     }
 
+    func testSecretStoreAsyncSaveLoadPreservesPermissionsAndData() async throws {
+        let store = SecretStore(directory: tempDir)
+        let secrets = ["lastfmSessionKey": "session-token", "traktRefreshToken": "refresh-token"]
+
+        await store.saveAsync(secrets)
+
+        let fileURL = tempDir.appendingPathComponent("AppSecrets.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let permissions = attributes[.posixPermissions] as? Int
+        XCTAssertEqual(permissions, 0o600)
+
+        let reloaded = await store.loadAsync()
+        XCTAssertEqual(reloaded["lastfmSessionKey"], "session-token")
+        XCTAssertEqual(reloaded["traktRefreshToken"], "refresh-token")
+    }
+
     /// 测试凭据文件被截断或损坏为非法 JSON 时，读取能够安全降级自愈，绝不崩溃
     func testSecretStoreSurvivesCorruptedOrMalformedJSONFile() throws {
         let store = SecretStore(directory: tempDir)
@@ -51,5 +68,72 @@ final class SecretStoreAuditTests: XCTestCase {
         
         let loaded = store.load()
         XCTAssertTrue(loaded.isEmpty, "当凭据文件损坏或格式解析失败时，必须静默兜底返回空字典，绝对不能导致 App 闪退或死锁")
+    }
+
+    func testSecretStoreAsyncLoadSurvivesCorruptedOrMalformedJSONFile() async throws {
+        let store = SecretStore(directory: tempDir)
+        let fileURL = tempDir.appendingPathComponent("AppSecrets.json")
+        try Data("{\"tmdb_api_key\": \"broken-json...".utf8).write(to: fileURL)
+
+        let loaded = await store.loadAsync()
+
+        XCTAssertTrue(loaded.isEmpty)
+    }
+
+    func testSecretStoreAsyncReadWriteRunsThroughInjectedIOOnBlockingIOQueue() async throws {
+        let recorder = RecordingSecretStoreIO()
+        let store = SecretStore(directory: tempDir, io: recorder.io())
+        let secrets = ["tmdb_api_key": "async-secret", "lastfmSessionKey": "session"]
+
+        await store.saveAsync(secrets)
+        let loaded = await store.loadAsync()
+
+        XCTAssertEqual(loaded, secrets)
+        XCTAssertEqual(recorder.operationNames, ["write", "read"])
+        XCTAssertTrue(recorder.didObserveBlockingIOOperation)
+        XCTAssertTrue(recorder.allOperationsObservedOnBlockingIOQueue)
+    }
+}
+
+private final class RecordingSecretStoreIO: @unchecked Sendable {
+    private let lock = NSLock()
+    private var records: [(name: String, onBlockingIOQueue: Bool)] = []
+
+    var operationNames: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return records.map(\.name)
+    }
+
+    var didObserveBlockingIOOperation: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return records.contains { $0.onBlockingIOQueue }
+    }
+
+    var allOperationsObservedOnBlockingIOQueue: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !records.isEmpty && records.allSatisfy(\.onBlockingIOQueue)
+    }
+
+    func io() -> SecretStore.IO {
+        SecretStore.IO(
+            read: { [weak self] url in
+                self?.record("read")
+                return try Data(contentsOf: url)
+            },
+            write: { [weak self] data, url in
+                self?.record("write")
+                try data.write(to: url, options: .atomic)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            }
+        )
+    }
+
+    private func record(_ name: String) {
+        lock.lock()
+        records.append((name, BlockingIOExecutor.isCurrentExecutionOnBlockingIOQueue()))
+        lock.unlock()
     }
 }

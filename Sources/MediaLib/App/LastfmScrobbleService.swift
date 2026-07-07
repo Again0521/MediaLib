@@ -36,9 +36,9 @@ struct LastfmScrobbleService {
 
     private let endpoint = URL(string: "https://ws.audioscrobbler.com/2.0/")!
 
-    private var hasCredentials: Bool {
-        !apiKey.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !sharedSecret.trimmingCharacters(in: .whitespaces).isEmpty
+    var hasCredentials: Bool {
+        !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !sharedSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     // MARK: - 授权流程
@@ -81,15 +81,14 @@ struct LastfmScrobbleService {
         sessionKey: String
     ) async throws {
         guard hasCredentials else { throw LastfmScrobbleError.missingCredentials }
-        var params: [String: String] = [
-            "method": "track.updateNowPlaying",
-            "api_key": apiKey,
-            "sk": sessionKey,
-            "artist": artist,
-            "track": track
-        ]
-        if let album, !album.isEmpty { params["album"] = album }
-        if let durationSeconds, durationSeconds > 0 { params["duration"] = String(durationSeconds) }
+        let params = Self.nowPlayingParams(
+            apiKey: apiKey,
+            sessionKey: sessionKey,
+            artist: artist,
+            track: track,
+            album: album,
+            durationSeconds: durationSeconds
+        )
         _ = try await post(signing: params)
     }
 
@@ -102,6 +101,49 @@ struct LastfmScrobbleService {
         sessionKey: String
     ) async throws {
         guard hasCredentials else { throw LastfmScrobbleError.missingCredentials }
+        let params = Self.scrobbleParams(
+            apiKey: apiKey,
+            sessionKey: sessionKey,
+            artist: artist,
+            track: track,
+            album: album,
+            timestamp: timestamp,
+            durationSeconds: durationSeconds
+        )
+        _ = try await post(signing: params)
+    }
+
+    // MARK: - 底层请求
+
+    static func nowPlayingParams(
+        apiKey: String,
+        sessionKey: String,
+        artist: String,
+        track: String,
+        album: String?,
+        durationSeconds: Int?
+    ) -> [String: String] {
+        var params: [String: String] = [
+            "method": "track.updateNowPlaying",
+            "api_key": apiKey,
+            "sk": sessionKey,
+            "artist": artist,
+            "track": track
+        ]
+        if let album = nonEmptyTrimmed(album) { params["album"] = album }
+        if let durationSeconds, durationSeconds > 0 { params["duration"] = String(durationSeconds) }
+        return params
+    }
+
+    static func scrobbleParams(
+        apiKey: String,
+        sessionKey: String,
+        artist: String,
+        track: String,
+        album: String?,
+        timestamp: Int,
+        durationSeconds: Int?
+    ) -> [String: String] {
         var params: [String: String] = [
             "method": "track.scrobble",
             "api_key": apiKey,
@@ -110,15 +152,13 @@ struct LastfmScrobbleService {
             "track": track,
             "timestamp": String(timestamp)
         ]
-        if let album, !album.isEmpty { params["album"] = album }
+        if let album = nonEmptyTrimmed(album) { params["album"] = album }
         if let durationSeconds, durationSeconds > 0 { params["duration"] = String(durationSeconds) }
-        _ = try await post(signing: params)
+        return params
     }
 
-    // MARK: - 底层请求
-
     /// 按 Last.fm 规则计算 api_sig：参数名升序拼接 name+value，末尾追加 shared secret，取 md5。
-    private func apiSignature(for params: [String: String]) -> String {
+    static func apiSignature(for params: [String: String], sharedSecret: String) -> String {
         let concatenated = params.keys.sorted()
             .map { "\($0)\(params[$0] ?? "")" }
             .joined()
@@ -127,16 +167,25 @@ struct LastfmScrobbleService {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    private func signedItems(_ params: [String: String]) -> [URLQueryItem] {
+    func apiSignature(for params: [String: String]) -> String {
+        Self.apiSignature(for: params, sharedSecret: sharedSecret)
+    }
+
+    func signedQueryItems(for params: [String: String]) -> [URLQueryItem] {
         var signed = params
         signed["api_sig"] = apiSignature(for: params)
         signed["format"] = "json"
         return signed.map { URLQueryItem(name: $0.key, value: $0.value) }
     }
 
+    private static func nonEmptyTrimmed(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private func get(signing params: [String: String]) async throws -> Data {
         var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
-        components?.queryItems = signedItems(params)
+        components?.queryItems = signedQueryItems(for: params)
         guard let url = components?.url else { throw LastfmScrobbleError.invalidResponse }
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
@@ -149,7 +198,7 @@ struct LastfmScrobbleService {
         request.timeoutInterval = 12
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         var body = URLComponents()
-        body.queryItems = signedItems(params)
+        body.queryItems = signedQueryItems(for: params)
         request.httpBody = body.percentEncodedQuery?.data(using: .utf8)
         return try await perform(request)
     }

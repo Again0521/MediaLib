@@ -7,6 +7,13 @@ import AVFoundation
 /// 非法格式音频或高频并发请求时，能够安全兜底并返回干净的默认元数据，绝不阻塞线程或触发异常。
 /// 对应报告问题 ID：TC-SCAN-003 / RISK-07
 final class AudioMetadataReaderAuditTests: XCTestCase {
+    private var tempDirectory: URL?
+
+    override func tearDownWithError() throws {
+        if let tempDirectory {
+            try? FileManager.default.removeItem(at: tempDirectory)
+        }
+    }
 
     /// 测试针对不存在的物理路径读取时，解析器安全返回空结构体而非抛错
     func testMetadataReaderSurvivesNonExistentURL() async {
@@ -39,5 +46,53 @@ final class AudioMetadataReaderAuditTests: XCTestCase {
             }
             XCTAssertEqual(count, 20, "高频并发对多个路径进行元数据提取时，必须全部安全响应完成")
         }
+    }
+
+    func testEmbeddedArtworkWriterPersistsPNGDataThroughBlockingIOPath() async throws {
+        let directory = temporaryDirectory(named: "embedded-artwork")
+        let data = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01])
+
+        let persistedPath = await AudioMetadataReader.persistEmbeddedArtwork(data, in: directory, mediaID: "song-1")
+        let path = try XCTUnwrap(persistedPath)
+        let outputURL = URL(fileURLWithPath: path)
+
+        XCTAssertEqual(outputURL.pathExtension, "png")
+        XCTAssertEqual(try Data(contentsOf: outputURL), data)
+    }
+
+    func testExistingEmbeddedArtworkPathPrefersSupportedFormatsWithoutRewriting() async throws {
+        let directory = temporaryDirectory(named: "existing-artwork")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let existingURL = directory.appendingPathComponent("song-2-embedded-artwork.jpg")
+        let originalData = Data([0xFF, 0xD8, 0xFF, 0xAA])
+        try originalData.write(to: existingURL)
+
+        let path = await AudioMetadataReader.existingEmbeddedArtworkPath(in: directory, mediaID: "song-2")
+
+        XCTAssertEqual(path, existingURL.path)
+        XCTAssertEqual(try Data(contentsOf: existingURL), originalData)
+    }
+
+    func testEmbeddedArtworkWriterReturnsNilWhenDirectoryCannotBeCreated() async throws {
+        let parent = temporaryDirectory(named: "artwork-parent-file")
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let fileURL = parent.appendingPathComponent("not-a-directory")
+        try Data([0x00]).write(to: fileURL)
+        let impossibleDirectory = fileURL.appendingPathComponent("child", isDirectory: true)
+
+        let path = await AudioMetadataReader.persistEmbeddedArtwork(Data([0xFF, 0xD8, 0xFF]), in: impossibleDirectory, mediaID: "song-3")
+
+        XCTAssertNil(path)
+    }
+
+    private func temporaryDirectory(named name: String) -> URL {
+        if let tempDirectory {
+            return tempDirectory.appendingPathComponent(name, isDirectory: true)
+        }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AudioMetadataReaderAudit-\(UUID().uuidString)", isDirectory: true)
+        tempDirectory = root
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root.appendingPathComponent(name, isDirectory: true)
     }
 }

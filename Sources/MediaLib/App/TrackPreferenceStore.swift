@@ -35,57 +35,57 @@ enum TrackPreferenceStore {
 
     // MARK: - 音轨
 
-    static func setAudioLanguage(_ language: String?, for item: MediaItem) {
+    static func setAudioLanguage(_ language: String?, for item: MediaItem, defaults: UserDefaults = .standard) {
         let key = audioKey(for: item)
         let trimmed = language?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let trimmed, !trimmed.isEmpty {
-            UserDefaults.standard.set(trimmed, forKey: key)
+            defaults.set(trimmed, forKey: key)
         } else {
-            UserDefaults.standard.removeObject(forKey: key)
+            defaults.removeObject(forKey: key)
         }
     }
 
-    static func audioLanguage(for item: MediaItem) -> String? {
-        let value = UserDefaults.standard.string(forKey: audioKey(for: item))
+    static func audioLanguage(for item: MediaItem, defaults: UserDefaults = .standard) -> String? {
+        let value = defaults.string(forKey: audioKey(for: item))
         return (value?.isEmpty == false) ? value : nil
     }
 
     // MARK: - 倍速
 
     /// 记忆该系列/影片的播放倍速；恢复为 1.0 时清掉记忆，回落到全局默认倍速。
-    static func setPlaybackRate(_ rate: Double?, for item: MediaItem) {
+    static func setPlaybackRate(_ rate: Double?, for item: MediaItem, defaults: UserDefaults = .standard) {
         let key = rateKey(for: item)
         if let rate, rate.isFinite, rate > 0, abs(rate - 1.0) > 0.001 {
-            UserDefaults.standard.set(rate, forKey: key)
+            defaults.set(rate, forKey: key)
         } else {
-            UserDefaults.standard.removeObject(forKey: key)
+            defaults.removeObject(forKey: key)
         }
     }
 
-    static func playbackRate(for item: MediaItem) -> Double? {
-        let value = UserDefaults.standard.double(forKey: rateKey(for: item))
+    static func playbackRate(for item: MediaItem, defaults: UserDefaults = .standard) -> Double? {
+        let value = defaults.double(forKey: rateKey(for: item))
         return value > 0 ? value : nil
     }
 
     // MARK: - 字幕
 
-    static func setSubtitle(_ preference: SubtitlePreference, for item: MediaItem) {
+    static func setSubtitle(_ preference: SubtitlePreference, for item: MediaItem, defaults: UserDefaults = .standard) {
         let key = subtitleKey(for: item)
         switch preference {
         case .off:
-            UserDefaults.standard.set(offSentinel, forKey: key)
+            defaults.set(offSentinel, forKey: key)
         case .language(let language):
             let trimmed = language.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
-                UserDefaults.standard.removeObject(forKey: key)
+                defaults.removeObject(forKey: key)
                 return
             }
-            UserDefaults.standard.set(trimmed, forKey: key)
+            defaults.set(trimmed, forKey: key)
         }
     }
 
-    static func subtitle(for item: MediaItem) -> SubtitlePreference? {
-        guard let value = UserDefaults.standard.string(forKey: subtitleKey(for: item)), !value.isEmpty else {
+    static func subtitle(for item: MediaItem, defaults: UserDefaults = .standard) -> SubtitlePreference? {
+        guard let value = defaults.string(forKey: subtitleKey(for: item)), !value.isEmpty else {
             return nil
         }
         return value == offSentinel ? .off : .language(value)

@@ -51,17 +51,7 @@ struct ArtistInfoService {
         guard !key.isEmpty else { return nil }
 
         var components = URLComponents(string: "https://ws.audioscrobbler.com/2.0/")
-        var queryItems = [
-            URLQueryItem(name: "method", value: "artist.getinfo"),
-            URLQueryItem(name: "artist", value: artist),
-            URLQueryItem(name: "api_key", value: key),
-            URLQueryItem(name: "format", value: "json")
-        ]
-        // 中文环境优先请求中文简介。
-        if language.lowercased().hasPrefix("zh") {
-            queryItems.append(URLQueryItem(name: "lang", value: "zh"))
-        }
-        components?.queryItems = queryItems
+        components?.queryItems = Self.lastfmQueryItems(artist: artist, apiKey: key, language: language)
         guard let url = components?.url else { return nil }
 
         var request = URLRequest(url: url)
@@ -74,13 +64,27 @@ struct ArtistInfoService {
         return LastfmArtistResult(
             bio: Self.cleanedBio(artistDTO.bio?.content ?? artistDTO.bio?.summary),
             imageURL: nil,
-            tags: (artistDTO.tags?.tag ?? []).compactMap { $0.name }.filter { !$0.isEmpty },
-            similar: (artistDTO.similar?.artist ?? []).compactMap { $0.name }.filter { !$0.isEmpty }
+            tags: Self.cleanedNames((artistDTO.tags?.tag ?? []).map(\.name)),
+            similar: Self.cleanedNames((artistDTO.similar?.artist ?? []).map(\.name))
         )
     }
 
+    static func lastfmQueryItems(artist: String, apiKey: String, language: String) -> [URLQueryItem] {
+        var queryItems = [
+            URLQueryItem(name: "method", value: "artist.getinfo"),
+            URLQueryItem(name: "artist", value: artist),
+            URLQueryItem(name: "api_key", value: apiKey),
+            URLQueryItem(name: "format", value: "json")
+        ]
+        // 中文环境优先请求中文简介。
+        if language.lowercased().hasPrefix("zh") {
+            queryItems.append(URLQueryItem(name: "lang", value: "zh"))
+        }
+        return queryItems
+    }
+
     /// Last.fm 简介是带 HTML 的文本，末尾常有「Read more on Last.fm」链接，这里去标签、截掉尾链、清理空白。
-    private static func cleanedBio(_ raw: String?) -> String? {
+    static func cleanedBio(_ raw: String?) -> String? {
         guard var text = raw, !text.isEmpty else { return nil }
         if let range = text.range(of: "<a href") {
             text = String(text[..<range.lowerBound])
@@ -95,6 +99,13 @@ struct ArtistInfoService {
             .replacingOccurrences(of: "&gt;", with: ">")
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? nil : cleaned
+    }
+
+    static func cleanedNames(_ values: [String?]) -> [String] {
+        values.compactMap { raw in
+            let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }
     }
 
     // MARK: - Deezer 头像
@@ -112,9 +123,21 @@ struct ArtistInfoService {
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
         let decoded = try JSONDecoder().decode(DeezerArtistSearchResponse.self, from: data)
         guard let first = decoded.data?.first else { return nil }
-        let picture = first.pictureXL ?? first.pictureBig ?? first.pictureMedium
-        guard let picture, !picture.isEmpty else { return nil }
-        return picture
+        return Self.preferredDeezerImage(
+            pictureXL: first.pictureXL,
+            pictureBig: first.pictureBig,
+            pictureMedium: first.pictureMedium
+        )
+    }
+
+    static func preferredDeezerImage(pictureXL: String?, pictureBig: String?, pictureMedium: String?) -> String? {
+        for value in [pictureXL, pictureBig, pictureMedium] {
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return nil
     }
 }
 

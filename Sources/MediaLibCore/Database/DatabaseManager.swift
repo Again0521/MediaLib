@@ -114,19 +114,33 @@ public final class DatabaseManager: @unchecked Sendable {
 
     @discardableResult
     public func createBackup(in directory: URL, reason: String = "manual") throws -> URL {
+        if isOnQueue {
+            return try unsafeCreateBackup(in: directory, reason: reason)
+        }
+        return try queue.sync {
+            try self.unsafeCreateBackup(in: directory, reason: reason)
+        }
+    }
+
+    @discardableResult
+    public func createBackupAsync(in directory: URL, reason: String = "manual") async throws -> URL {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+            queue.async {
+                continuation.resume(with: Result {
+                    try self.unsafeCreateBackup(in: directory, reason: reason)
+                })
+            }
+        }
+    }
+
+    private func unsafeCreateBackup(in directory: URL, reason: String) throws -> URL {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let safeReason = reason
             .lowercased()
             .map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-" }
         let timestamp = Self.backupTimestamp()
         let backupURL = directory.appendingPathComponent("MediaLib-\(String(safeReason))-\(timestamp).sqlite")
-        if isOnQueue {
-            try unsafeBackupCurrent(to: backupURL)
-        } else {
-            try queue.sync {
-                try self.unsafeBackupCurrent(to: backupURL)
-            }
-        }
+        try unsafeBackupCurrent(to: backupURL)
         return backupURL
     }
 

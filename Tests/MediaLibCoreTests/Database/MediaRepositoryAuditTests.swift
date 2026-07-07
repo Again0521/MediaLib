@@ -99,4 +99,71 @@ final class MediaRepositoryAuditTests: XCTestCase {
         XCTAssertEqual(all.first?.id, "emby-new-id")
         XCTAssertEqual(all.first?.title, "Avatar Remastered")
     }
+
+    func testDeleteItemsSourcePathPrefixKeepsCaseDifferingLocalPaths() throws {
+        try repo.upsert(mediaItem(id: "root", sourcePath: "/Volumes/Media/Library"))
+        try repo.upsert(mediaItem(id: "child", sourcePath: "/Volumes/Media/Library/Nested"))
+        try repo.upsert(mediaItem(id: "case-different", sourcePath: "/Volumes/media/Library/Nested"))
+        try repo.upsert(mediaItem(id: "sibling", sourcePath: "/Volumes/Media/Library2"))
+
+        try repo.deleteItems(sourcePathPrefix: "/Volumes/Media/Library")
+
+        let ids = Set(try repo.fetchAll().map(\.id))
+        XCTAssertFalse(ids.contains("root"))
+        XCTAssertFalse(ids.contains("child"))
+        XCTAssertTrue(ids.contains("case-different"))
+        XCTAssertTrue(ids.contains("sibling"))
+    }
+
+    func testReplaceRemoteItemsKeepsCaseDifferingRemotePathSegments() throws {
+        let remoteSourcePath = "emby://server/Library"
+        let refreshed = mediaItem(id: "remote-keep", sourcePath: remoteSourcePath)
+        try repo.upsert(mediaItem(id: "remote-stale", sourcePath: "\(remoteSourcePath)/old"))
+        try repo.upsert(mediaItem(id: "remote-case-different", sourcePath: "emby://server/library/old"))
+        try repo.upsert(mediaItem(id: "remote-sibling", sourcePath: "emby://server/Library2/old"))
+
+        try repo.replaceRemoteItems(sourcePathPrefix: remoteSourcePath, with: [refreshed])
+
+        let ids = Set(try repo.fetchAll().map(\.id))
+        XCTAssertTrue(ids.contains("remote-keep"))
+        XCTAssertFalse(ids.contains("remote-stale"))
+        XCTAssertTrue(ids.contains("remote-case-different"))
+        XCTAssertTrue(ids.contains("remote-sibling"))
+    }
+
+    func testDeleteItemsFilePathPrefixKeepsCaseDifferingAndWildcardLikeSiblings() throws {
+        let sourcePath = "/Volumes/Media/Wildcard"
+        try repo.upsert(mediaItem(
+            id: "target",
+            sourcePath: sourcePath,
+            filePath: "/Volumes/Media/Wildcard/Season_1/movie.mkv"
+        ))
+        try repo.upsert(mediaItem(
+            id: "case-different",
+            sourcePath: sourcePath,
+            filePath: "/Volumes/Media/Wildcard/season_1/movie.mkv"
+        ))
+        try repo.upsert(mediaItem(
+            id: "wildcard-like-sibling",
+            sourcePath: sourcePath,
+            filePath: "/Volumes/Media/Wildcard/SeasonX1/movie.mkv"
+        ))
+
+        try repo.deleteItems(filePathPrefix: "/Volumes/Media/Wildcard/Season_1", sourcePath: sourcePath)
+
+        let ids = Set(try repo.fetchAll().map(\.id))
+        XCTAssertFalse(ids.contains("target"))
+        XCTAssertTrue(ids.contains("case-different"))
+        XCTAssertTrue(ids.contains("wildcard-like-sibling"))
+    }
+
+    private func mediaItem(id: String, sourcePath: String, filePath: String? = nil) -> MediaItem {
+        MediaItem(
+            id: id,
+            type: .movie,
+            title: id,
+            sourcePath: sourcePath,
+            filePath: filePath
+        )
+    }
 }

@@ -29,6 +29,11 @@ struct PlexService {
     private let clientName = "MediaLIB"
     private let version = AppVersion.current
     private let pageSize = 300
+    private let deviceIDDefaults: UserDefaults
+
+    init(deviceIDDefaults: UserDefaults = .standard) {
+        self.deviceIDDefaults = deviceIDDefaults
+    }
 
     func isAuthenticationFailure(_ error: Error) -> Bool {
         guard let error = error as? PlexServiceError else { return false }
@@ -124,7 +129,8 @@ struct PlexService {
     func refreshedResourceURLString(_ value: String?, session: PlexSession) -> String? {
         guard let value,
               var components = URLComponents(string: value),
-              components.url?.host == session.serverURL.host else { return value }
+              let resourceURL = components.url,
+              RemoteResourceURLPolicy.isSameOrigin(resourceURL, session.serverURL) else { return value }
         var queryItems = components.queryItems ?? []
         queryItems.removeAll { $0.name.caseInsensitiveCompare("X-Plex-Token") == .orderedSame }
         queryItems.append(URLQueryItem(name: "X-Plex-Token", value: session.accessToken))
@@ -230,18 +236,18 @@ struct PlexService {
             ))
         }
 
-        let guidValues = node.children(named: "Guid").compactMap { $0.attributes["id"] }
-        let tmdbID = providerID(prefix: "tmdb://", in: guidValues)
-        let imdbID = providerID(prefix: "imdb://", in: guidValues)
-            ?? node.attributes["guid"].flatMap { $0.hasPrefix("imdb://") ? providerID(prefix: "imdb://", in: [$0]) : nil }
+        let providerIDs = Self.providerIDs(
+            guidValues: node.children(named: "Guid").compactMap { $0.attributes["id"] },
+            legacyGUID: node.attributes["guid"]
+        )
         let kind = node.plexType == "movie" ? "movie" : "tv"
         return EmbyDetailExtras(
             cast: Array(cast),
             crew: crew,
             images: images,
-            tmdbID: tmdbID,
-            tmdbKind: tmdbID == nil ? nil : kind,
-            imdbID: imdbID
+            tmdbID: providerIDs.tmdbID,
+            tmdbKind: providerIDs.tmdbID == nil ? nil : kind,
+            imdbID: providerIDs.imdbID
         )
     }
 
@@ -440,12 +446,12 @@ struct PlexService {
         request.setValue(session.accessToken, forHTTPHeaderField: "X-Plex-Token")
     }
 
-    private func deviceIdentifier() -> String {
-        if let existing = UserDefaults.standard.string(forKey: "MediaLib.plex.deviceID") {
+    func deviceIdentifier() -> String {
+        if let existing = deviceIDDefaults.string(forKey: "MediaLib.plex.deviceID") {
             return existing
         }
         let generated = UUID().uuidString
-        UserDefaults.standard.set(generated, forKey: "MediaLib.plex.deviceID")
+        deviceIDDefaults.set(generated, forKey: "MediaLib.plex.deviceID")
         return generated
     }
 
@@ -468,14 +474,13 @@ struct PlexService {
         return components?.url ?? url
     }
 
-    private func mediaURL(relativeOrAbsolutePath: String, session: PlexSession) -> String? {
-        let url = URL(string: relativeOrAbsolutePath, relativeTo: session.serverURL)?.absoluteURL
-        guard var components = url.flatMap({ URLComponents(url: $0, resolvingAgainstBaseURL: false) }) else { return nil }
-        var query = components.queryItems ?? []
-        query.removeAll { $0.name.caseInsensitiveCompare("X-Plex-Token") == .orderedSame }
-        query.append(URLQueryItem(name: "X-Plex-Token", value: session.accessToken))
-        components.queryItems = query
-        return components.string
+    func mediaURL(relativeOrAbsolutePath: String, session: PlexSession) -> String? {
+        RemoteResourceURLPolicy.authenticatedURLString(
+            relativeOrAbsolutePath: relativeOrAbsolutePath,
+            baseURL: session.serverURL,
+            tokenName: "X-Plex-Token",
+            tokenValue: session.accessToken
+        )
     }
 
     private func posterURLString(for node: PlexXMLNode, session: PlexSession) -> String? {
@@ -544,8 +549,16 @@ struct PlexService {
         return min(max((rating / 10.0) * 5.0, 0), 5)
     }
 
-    private func providerID(prefix: String, in values: [String]) -> String? {
-        values.first(where: { $0.lowercased().hasPrefix(prefix) })
+    static func providerIDs(guidValues: [String], legacyGUID: String?) -> (tmdbID: String?, imdbID: String?) {
+        (
+            tmdbID: providerID(prefix: "tmdb://", in: guidValues),
+            imdbID: providerID(prefix: "imdb://", in: guidValues) ?? providerID(prefix: "imdb://", in: legacyGUID.map { [$0] } ?? [])
+        )
+    }
+
+    static func providerID(prefix: String, in values: [String]) -> String? {
+        let normalizedPrefix = prefix.lowercased()
+        return values.first(where: { $0.lowercased().hasPrefix(normalizedPrefix) })
             .map { value in
                 let suffix = String(value.dropFirst(prefix.count))
                 return suffix.split(separator: "?").first.map(String.init) ?? suffix

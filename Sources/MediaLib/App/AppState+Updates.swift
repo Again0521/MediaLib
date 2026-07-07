@@ -1,6 +1,43 @@
 import Foundation
 import MediaLibCore
 
+struct AppUpdatePreferenceStore {
+    private enum Key {
+        static let lastSuccessfulCheck = "MediaLib.update.lastSuccessfulCheck"
+        static let lastBackgroundAttempt = "MediaLib.update.lastBackgroundAttempt"
+        static let launchCount = "MediaLib.launchCount"
+        static let sponsorInvited = "MediaLib.sponsorInvited"
+    }
+
+    var defaults: UserDefaults
+    var calendar: Calendar = .current
+
+    func markUpdateCheckSucceeded(at date: Date = Date()) {
+        defaults.set(date, forKey: Key.lastSuccessfulCheck)
+    }
+
+    func recordBackgroundAttemptIfNeeded(now: Date = Date()) -> Bool {
+        if let lastAttempt = defaults.object(forKey: Key.lastBackgroundAttempt) as? Date,
+           now.timeIntervalSince(lastAttempt) < 4 * 60 * 60 {
+            return false
+        }
+        if let lastSuccess = defaults.object(forKey: Key.lastSuccessfulCheck) as? Date,
+           calendar.isDate(lastSuccess, inSameDayAs: now) {
+            return false
+        }
+        defaults.set(now, forKey: Key.lastBackgroundAttempt)
+        return true
+    }
+
+    func registerLaunchAndShouldInvite() -> Bool {
+        let count = defaults.integer(forKey: Key.launchCount) + 1
+        defaults.set(count, forKey: Key.launchCount)
+        guard count == 3, !defaults.bool(forKey: Key.sponsorInvited) else { return false }
+        defaults.set(true, forKey: Key.sponsorInvited)
+        return true
+    }
+}
+
 // 应用更新检查 + 启动计数/赞赏邀请从 AppState.swift 拆到本文件，直接缩小那个超大文件
 // （R1-ARCH-001 头号债务）。纯文件搬运，逐字不变。依赖均为 internal（alert / settings /
 // availableUpdate / isCheckingForUpdates / updateCheckTask / showingSponsorPrompt / localized）；
@@ -55,33 +92,20 @@ extension AppState {
     }
 
     private func markUpdateCheckSucceeded() {
-        UserDefaults.standard.set(Date(), forKey: "MediaLib.update.lastSuccessfulCheck")
+        AppUpdatePreferenceStore(defaults: .standard).markUpdateCheckSucceeded()
     }
 
     /// 每天第一次启动时静默检查一次更新；失败时保留重试机会，但用短间隔节流避免反复打 GitHub。
     func checkForUpdatesDailyIfNeeded() {
-        let defaults = UserDefaults.standard
-        let now = Date()
-        if let lastAttempt = defaults.object(forKey: "MediaLib.update.lastBackgroundAttempt") as? Date,
-           now.timeIntervalSince(lastAttempt) < 4 * 60 * 60 {
+        guard AppUpdatePreferenceStore(defaults: .standard).recordBackgroundAttemptIfNeeded() else {
             return
         }
-        if let lastSuccess = defaults.object(forKey: "MediaLib.update.lastSuccessfulCheck") as? Date,
-           Calendar.current.isDate(lastSuccess, inSameDayAs: now) {
-            return
-        }
-        defaults.set(now, forKey: "MediaLib.update.lastBackgroundAttempt")
         checkForUpdates(manual: false)
     }
 
     /// 记录启动次数；恰好第三次启动时邀请用户赞赏（只弹一次）。
     func registerLaunchAndMaybeInvite() {
-        let countKey = "MediaLib.launchCount"
-        let invitedKey = "MediaLib.sponsorInvited"
-        let count = UserDefaults.standard.integer(forKey: countKey) + 1
-        UserDefaults.standard.set(count, forKey: countKey)
-        guard count == 3, !UserDefaults.standard.bool(forKey: invitedKey) else { return }
-        UserDefaults.standard.set(true, forKey: invitedKey)
+        guard AppUpdatePreferenceStore(defaults: .standard).registerLaunchAndShouldInvite() else { return }
         showingSponsorPrompt = true
     }
 }

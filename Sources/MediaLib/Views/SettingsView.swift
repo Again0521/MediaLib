@@ -1688,9 +1688,11 @@ struct PrivacySettingsPanel: View {
                     .settingsActionButton(width: 96)
 
                     Button("移除密码", role: .destructive) {
-                        appState.removePrivacyPIN()
-                        pin = ""
-                        confirmPIN = ""
+                        Task { @MainActor in
+                            await appState.removePrivacyPINAsync()
+                            pin = ""
+                            confirmPIN = ""
+                        }
                     }
                     .settingsActionButton(width: 96)
                 }
@@ -1703,8 +1705,11 @@ struct PrivacySettingsPanel: View {
     }
 
     private func unlock() {
-        if appState.verifyPrivacyPIN(unlockPIN) {
-            unlockPIN = ""
+        let submittedPIN = unlockPIN
+        Task { @MainActor in
+            if await appState.verifyPrivacyPINAsync(submittedPIN) {
+                unlockPIN = ""
+            }
         }
     }
 
@@ -1713,9 +1718,12 @@ struct PrivacySettingsPanel: View {
             appState.alert = AppAlert(title: "密码无效", message: "请输入一致的 4 到 8 位数字密码。")
             return
         }
-        if appState.setPrivacyPIN(pin) {
-            pin = ""
-            confirmPIN = ""
+        let submittedPIN = pin
+        Task { @MainActor in
+            if await appState.setPrivacyPINAsync(submittedPIN) {
+                pin = ""
+                confirmPIN = ""
+            }
         }
     }
 }

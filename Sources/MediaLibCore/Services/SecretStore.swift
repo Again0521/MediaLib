@@ -11,11 +11,32 @@ import Foundation
 /// 注意：本存储**不做加密**，仅靠文件权限 + 移出全局可读的 prefs 来收敛暴露面；
 /// 这是相对「明文存 UserDefaults」的明确改进，后续如需更强保护可在此叠加对称加密。
 public final class SecretStore {
+    struct IO: @unchecked Sendable {
+        let read: (URL) throws -> Data
+        let write: (Data, URL) throws -> Void
+
+        static let fileSystem = IO(
+            read: { url in
+                try Data(contentsOf: url)
+            },
+            write: { data, url in
+                try data.write(to: url, options: .atomic)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            }
+        )
+    }
+
     private let fileURL: URL?
+    private let io: IO
 
     /// - Parameter directory: 存储目录。默认 `Application Support/MediaLib/Credentials`；
     ///   测试可注入临时目录以隔离。
-    public init(directory: URL? = nil) {
+    public convenience init(directory: URL? = nil) {
+        self.init(directory: directory, io: .fileSystem)
+    }
+
+    init(directory: URL? = nil, io: IO) {
+        self.io = io
         let baseDirectory = directory ?? Self.defaultDirectory()
         if let baseDirectory {
             try? FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
@@ -27,12 +48,16 @@ public final class SecretStore {
 
     /// 读取全部 secret 键值；文件不存在或解析失败返回空字典。
     public func load() -> [String: String] {
-        guard let fileURL,
-              let data = try? Data(contentsOf: fileURL),
-              let dict = try? JSONDecoder().decode([String: String].self, from: data) else {
-            return [:]
+        Self.load(from: fileURL, io: io)
+    }
+
+    /// 异步读取全部 secret 键值，避免运行期设置保存/迁移占用 Swift 协作线程。
+    public func loadAsync() async -> [String: String] {
+        let fileURL = fileURL
+        let io = io
+        return await BlockingIOExecutor.run {
+            Self.load(from: fileURL, io: io)
         }
-        return dict
     }
 
     /// 覆盖写入全部 secret 键值。空字典会清空文件内容（仍写入 `{}`，保持文件存在与权限）。
@@ -40,8 +65,17 @@ public final class SecretStore {
     public func save(_ secrets: [String: String]) {
         guard let fileURL,
               let data = try? JSONEncoder().encode(secrets) else { return }
-        try? data.write(to: fileURL, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        Self.save(data, to: fileURL, io: io)
+    }
+
+    /// 异步覆盖写入全部 secret 键值。失败策略与同步 `save` 保持一致。
+    public func saveAsync(_ secrets: [String: String]) async {
+        guard let fileURL,
+              let data = try? JSONEncoder().encode(secrets) else { return }
+        let io = io
+        await BlockingIOExecutor.run {
+            Self.save(data, to: fileURL, io: io)
+        }
     }
 
     private static func defaultDirectory() -> URL? {
@@ -54,5 +88,18 @@ public final class SecretStore {
         return base
             .appendingPathComponent("MediaLib", isDirectory: true)
             .appendingPathComponent("Credentials", isDirectory: true)
+    }
+
+    private static func load(from fileURL: URL?, io: IO) -> [String: String] {
+        guard let fileURL,
+              let data = try? io.read(fileURL),
+              let dict = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return [:]
+        }
+        return dict
+    }
+
+    private static func save(_ data: Data, to fileURL: URL, io: IO) {
+        try? io.write(data, fileURL)
     }
 }

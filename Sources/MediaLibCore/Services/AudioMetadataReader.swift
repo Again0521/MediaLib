@@ -241,10 +241,7 @@ public final class AudioMetadataReader {
         guard let artworkDirectory, let mediaID else { return nil }
 
         // 若封面文件已存在（任意支持格式），跳过重新提取和写盘
-        let existingPath = ["jpg", "png", "webp"].lazy.compactMap { ext -> String? in
-            let candidate = artworkDirectory.appendingPathComponent("\(mediaID)-embedded-artwork.\(ext)")
-            return FileManager.default.fileExists(atPath: candidate.path) ? candidate.path : nil
-        }.first
+        let existingPath = await Self.existingEmbeddedArtworkPath(in: artworkDirectory, mediaID: mediaID)
         if let existing = existingPath { return existing }
 
         let artworkItem = metadata.first {
@@ -260,7 +257,20 @@ public final class AudioMetadataReader {
               let data = await artworkData(from: item),
               !data.isEmpty else { return nil }
 
-        return await Task.detached(priority: .utility) {
+        return await Self.persistEmbeddedArtwork(data, in: artworkDirectory, mediaID: mediaID)
+    }
+
+    static func existingEmbeddedArtworkPath(in artworkDirectory: URL, mediaID: String) async -> String? {
+        await BlockingIOExecutor.run {
+            ["jpg", "png", "webp"].lazy.compactMap { ext -> String? in
+                let candidate = artworkDirectory.appendingPathComponent("\(mediaID)-embedded-artwork.\(ext)")
+                return FileManager.default.fileExists(atPath: candidate.path) ? candidate.path : nil
+            }.first
+        }
+    }
+
+    static func persistEmbeddedArtwork(_ data: Data, in artworkDirectory: URL, mediaID: String) async -> String? {
+        await BlockingIOExecutor.run {
             do {
                 try FileManager.default.createDirectory(at: artworkDirectory, withIntermediateDirectories: true)
                 let ext = Self.imageExtension(for: data)
@@ -270,7 +280,7 @@ public final class AudioMetadataReader {
             } catch {
                 return nil
             }
-        }.value
+        }
     }
 
     private func artworkData(from item: AVMetadataItem) async -> Data? {

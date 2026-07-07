@@ -8,27 +8,30 @@ import MediaLibCore
 extension AppState {
     /// 从配置文件重新加载音乐主题参数并即时应用（无需重启）。
     func reloadMusicThemeConfig() {
-        MusicThemeConfigStore.reload()
-        musicThemeRevision &+= 1
+        Task { @MainActor [weak self] in
+            await MusicThemeConfigStore.reloadAsync()
+            self?.musicThemeRevision &+= 1
+        }
     }
 
     /// 一键恢复默认：删除/重写默认模板并复位参数，即时应用。
     func resetMusicThemeConfig() {
-        MusicThemeConfigStore.resetToDefaults()
-        musicThemeRevision &+= 1
+        Task { @MainActor [weak self] in
+            await MusicThemeConfigStore.resetToDefaultsAsync()
+            self?.musicThemeRevision &+= 1
+        }
     }
 
     /// 在访达中定位主题参数文件（不存在则先写一份默认模板），供用户直接编辑。
     func revealMusicThemeConfigFile() {
-        guard let url = MusicThemeConfigStore.fileURL else { return }
-        if !FileManager.default.fileExists(atPath: url.path) {
+        Task { @MainActor [weak self] in
             do {
-                try MusicThemeConfigStore.writeTemplate(MusicThemeConfig())
+                guard let url = try await MusicThemeConfigStore.ensureTemplateFileAsync() else { return }
+                NSWorkspace.shared.activateFileViewerSelecting([url])
             } catch {
-                logger?.log("写入音乐主题模板失败：\(error.localizedDescription)", level: .warning)
+                self?.logger?.log("写入音乐主题模板失败：\(error.localizedDescription)", level: .warning)
             }
         }
-        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     private func publishThemePaletteChange() {
@@ -73,7 +76,7 @@ extension AppState {
         settingsPersistTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled, let self else { return }
-            self.settingsStore.save(self.settings)
+            await self.settingsStore.saveAsync(self.settings)
         }
     }
 }

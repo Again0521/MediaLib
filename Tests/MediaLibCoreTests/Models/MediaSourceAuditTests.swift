@@ -16,14 +16,26 @@ final class MediaSourceAuditTests: XCTestCase {
         let sensitiveFTP = "ftp://backup_user:Pw%23456@ftp.home.local:2121/Videos"
         let sensitiveEmby = "emby://user:token999@emby.server.net/library"
         
-        var smbSource = MediaSource(name: "SMB Store", path: sensitiveSMB)
-        var ftpSource = MediaSource(name: "FTP Store", path: sensitiveFTP)
-        var embySource = MediaSource(name: "Emby Store", path: sensitiveEmby)
+        let smbSource = MediaSource(name: "SMB Store", path: sensitiveSMB)
+        let ftpSource = MediaSource(name: "FTP Store", path: sensitiveFTP)
+        let embySource = MediaSource(name: "Emby Store", path: sensitiveEmby)
         
         XCTAssertEqual(smbSource.displayPath, "smb://192.168.1.100/Movies/HD", "SMB 路径展现时不能包含任何明文账号密码")
         XCTAssertEqual(ftpSource.displayPath, "ftp://ftp.home.local:2121/Videos")
         XCTAssertEqual(embySource.displayPath, "emby://emby.server.net/library")
         XCTAssertFalse(smbSource.displayPath.contains("SuperSecret"), "密码必须被彻底清零剔除！")
+    }
+
+    func testDisplayPathStripsCredentialsFromUppercaseSchemesAndPreservesQueryFragment() {
+        let source = MediaSource(
+            name: "Mixed Case SMB",
+            path: "SMB://admin:p%40ss@NAS.local/Movies/HD?mount=home#recent"
+        )
+
+        XCTAssertEqual(source.displayPath, "SMB://NAS.local/Movies/HD?mount=home#recent")
+        XCTAssertEqual(source.sourceKind, .smb)
+        XCTAssertFalse(source.displayPath.contains("admin"))
+        XCTAssertFalse(source.displayPath.contains("p%40ss"))
     }
 
     /// 测试普通本地路径在 displayPath 下原样呈现，不发生解析误删
@@ -47,5 +59,14 @@ final class MediaSourceAuditTests: XCTestCase {
         XCTAssertEqual(MediaSource(name: "SMB 共享盘", path: "/Volumes/SMB_mount").sourceKind, .smb)
         XCTAssertEqual(MediaSource(name: "FTP 备份目录", path: "/Volumes/FTP_mount").sourceKind, .ftp)
         XCTAssertEqual(MediaSource(name: "我的本地库", path: "/Users/test/Movies").sourceKind, .local)
+    }
+
+    func testSourceKindClassifiesRemoteSchemesCaseInsensitively() {
+        XCTAssertEqual(MediaSource(name: "Test", path: "URLSOURCE://video.mp4").sourceKind, .url)
+        XCTAssertEqual(MediaSource(name: "Test", path: "EMBY://server").sourceKind, .emby)
+        XCTAssertEqual(MediaSource(name: "Test", path: "Jellyfin://server").sourceKind, .jellyfin)
+        XCTAssertEqual(MediaSource(name: "Test", path: "PLEX://server").sourceKind, .plex)
+        XCTAssertEqual(MediaSource(name: "Test", path: "SMB://server/share").sourceKind, .smb)
+        XCTAssertEqual(MediaSource(name: "Test", path: "FTPS://server/share").sourceKind, .ftp)
     }
 }

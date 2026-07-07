@@ -10,23 +10,44 @@ public struct AppDirectories: Sendable {
     public let logs: URL
 }
 
+struct AppDirectoryIO: @unchecked Sendable {
+    let urlForDirectory: (FileManager.SearchPathDirectory) throws -> URL
+    let createDirectory: (URL) throws -> Void
+
+    static func fileSystem(fileManager: FileManager) -> AppDirectoryIO {
+        AppDirectoryIO(
+            urlForDirectory: { directory in
+                try fileManager.url(
+                    for: directory,
+                    in: .userDomainMask,
+                    appropriateFor: nil,
+                    create: true
+                )
+            },
+            createDirectory: { directory in
+                try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            }
+        )
+    }
+}
+
 public enum FileAccessService {
     public static func appDirectories(
         fileManager: FileManager = .default,
         bundleIdentifier: String = "com.local.MediaLib"
     ) throws -> AppDirectories {
-        let supportBase = try fileManager.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
+        try appDirectories(
+            io: .fileSystem(fileManager: fileManager),
+            bundleIdentifier: bundleIdentifier
         )
-        let cacheBase = try fileManager.url(
-            for: .cachesDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
+    }
+
+    static func appDirectories(
+        io: AppDirectoryIO,
+        bundleIdentifier: String = "com.local.MediaLib"
+    ) throws -> AppDirectories {
+        let supportBase = try io.urlForDirectory(.applicationSupportDirectory)
+        let cacheBase = try io.urlForDirectory(.cachesDirectory)
 
         let appSupport = supportBase.appendingPathComponent("MediaLib", isDirectory: true)
         let cache = cacheBase.appendingPathComponent("MediaLib", isDirectory: true)
@@ -36,7 +57,7 @@ public enum FileAccessService {
         let databaseBackups = appSupport.appendingPathComponent("DatabaseBackups", isDirectory: true)
 
         for directory in [appSupport, cache, thumbnails, previewFrames, logs, databaseBackups] {
-            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try io.createDirectory(directory)
         }
 
         return AppDirectories(
@@ -50,9 +71,34 @@ public enum FileAccessService {
         )
     }
 
+    public static func appDirectoriesAsync(
+        fileManager: FileManager = .default,
+        bundleIdentifier: String = "com.local.MediaLib"
+    ) async throws -> AppDirectories {
+        try await appDirectoriesAsync(
+            io: .fileSystem(fileManager: fileManager),
+            bundleIdentifier: bundleIdentifier
+        )
+    }
+
+    static func appDirectoriesAsync(
+        io: AppDirectoryIO,
+        bundleIdentifier: String = "com.local.MediaLib"
+    ) async throws -> AppDirectories {
+        try await BlockingIOExecutor.run {
+            try appDirectories(io: io, bundleIdentifier: bundleIdentifier)
+        }
+    }
+
     public static func isReachableDirectory(_ path: String) -> Bool {
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
         return exists && isDirectory.boolValue
+    }
+
+    public static func isReachableDirectoryAsync(_ path: String) async -> Bool {
+        await BlockingIOExecutor.run {
+            isReachableDirectory(path)
+        }
     }
 }

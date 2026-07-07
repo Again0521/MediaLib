@@ -1,6 +1,6 @@
 import Foundation
 
-public struct LocalMetadata {
+public struct LocalMetadata: Sendable {
     public var title: String?
     public var originalTitle: String?
     public var year: Int?
@@ -9,7 +9,7 @@ public struct LocalMetadata {
     public var backdropPath: String?
 }
 
-public final class LocalMetadataService {
+public final class LocalMetadataService: @unchecked Sendable {
     private let fileManager: FileManager
     private let posterNames = LocalMetadataService.artworkNames(stems: ["poster", "cover", "folder"])
     private let backdropNames = LocalMetadataService.artworkNames(stems: ["fanart", "backdrop", "background"])
@@ -44,6 +44,12 @@ public final class LocalMetadataService {
         return metadata
     }
 
+    public func metadataAsync(for videoURL: URL, readNFO: Bool, preferLocalArtwork: Bool) async -> LocalMetadata {
+        await BlockingIOExecutor.run {
+            self.metadata(for: videoURL, readNFO: readNFO, preferLocalArtwork: preferLocalArtwork)
+        }
+    }
+
     public func metadata(forDirectory directory: URL, readNFO: Bool, preferLocalArtwork: Bool) -> LocalMetadata {
         var metadata = readNFO ? parseNFO(candidates: [
             directory.appendingPathComponent("tvshow.nfo"),
@@ -56,6 +62,12 @@ public final class LocalMetadataService {
         }
 
         return metadata
+    }
+
+    public func metadataAsync(forDirectory directory: URL, readNFO: Bool, preferLocalArtwork: Bool) async -> LocalMetadata {
+        await BlockingIOExecutor.run {
+            self.metadata(forDirectory: directory, readNFO: readNFO, preferLocalArtwork: preferLocalArtwork)
+        }
     }
 
     private func firstExistingFile(named names: [String], in directory: URL) -> URL? {

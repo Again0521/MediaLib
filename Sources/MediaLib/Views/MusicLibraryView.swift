@@ -1241,9 +1241,12 @@ struct MusicLibraryView: View {
         panel.allowedContentTypes = ["m3u", "m3u8"].compactMap { UTType(filenameExtension: $0) }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let baseName = url.deletingPathExtension().lastPathComponent
-        let count = appState.importMusicPlaylist(fromM3U: url, name: baseName.isEmpty ? "导入歌单" : baseName)
-        if count > 0 {
-            appState.alert = AppAlert(title: "导入完成", message: "已从 M3U 创建歌单，匹配到 \(count) 首库内歌曲。")
+        let playlistName = baseName.isEmpty ? "导入歌单" : baseName
+        Task { @MainActor in
+            let count = await appState.importMusicPlaylistAsync(fromM3U: url, name: playlistName)
+            if count > 0 {
+                appState.alert = AppAlert(title: "导入完成", message: "已从 M3U 创建歌单，匹配到 \(count) 首库内歌曲。")
+            }
         }
     }
 
@@ -1696,10 +1699,12 @@ private struct MusicCollectionTrackList: View {
         panel.nameFieldStringValue = "\(playlist.name).m3u"
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try appState.musicPlaylistM3UContent(playlist).write(to: url, atomically: true, encoding: .utf8)
-        } catch {
-            appState.alert = AppAlert(title: "导出失败", message: error.localizedDescription)
+        Task { @MainActor in
+            do {
+                try await MusicPlaylistM3UFileWriter.writeContent(appState.musicPlaylistM3UContent(playlist), to: url)
+            } catch {
+                appState.alert = AppAlert(title: "导出失败", message: error.localizedDescription)
+            }
         }
     }
 

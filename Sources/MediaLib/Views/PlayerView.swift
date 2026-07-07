@@ -540,10 +540,21 @@ private extension Double {
     }
 }
 
-private struct PlayerAuxiliaryPlaybackMetadata: Sendable {
+struct PlayerAuxiliaryPlaybackMetadata: Sendable {
     let sidecarSubtitles: [SidecarSubtitleFile]
     let previewPrefersFFmpeg: Bool
     let qualityOptions: [VideoStreamQualityOption]
+
+    static func load(for item: MediaItem) async -> PlayerAuxiliaryPlaybackMetadata {
+        await BlockingIOExecutor.run {
+            let mountedNetworkFile = RemoteVideoQualityPlanner.isMountedNetworkFile(for: item)
+            return PlayerAuxiliaryPlaybackMetadata(
+                sidecarSubtitles: SidecarSubtitleFile.find(for: item),
+                previewPrefersFFmpeg: item.isRemoteResource || mountedNetworkFile,
+                qualityOptions: RemoteVideoQualityPlanner.options(for: item, knownMountedNetworkFile: mountedNetworkFile)
+            )
+        }
+    }
 }
 
 private struct VideoControlPalette {
@@ -1097,14 +1108,7 @@ struct PlayerView: View {
 
         let targetItem = item
         auxiliaryMetadataTask = Task {
-            let metadata = await Task.detached(priority: .utility) {
-                let mountedNetworkFile = RemoteVideoQualityPlanner.isMountedNetworkFile(for: targetItem)
-                return PlayerAuxiliaryPlaybackMetadata(
-                    sidecarSubtitles: SidecarSubtitleFile.find(for: targetItem),
-                    previewPrefersFFmpeg: targetItem.isRemoteResource || mountedNetworkFile,
-                    qualityOptions: RemoteVideoQualityPlanner.options(for: targetItem, knownMountedNetworkFile: mountedNetworkFile)
-                )
-            }.value
+            let metadata = await PlayerAuxiliaryPlaybackMetadata.load(for: targetItem)
 
             guard !Task.isCancelled, item.id == targetItem.id else { return }
             sidecarSubtitles = metadata.sidecarSubtitles
@@ -8801,10 +8805,10 @@ final class MpvPlayerController: ObservableObject {
         return URL(fileURLWithPath: filePath)
     }
 
-    private nonisolated static func loadMusicFileData(fileURL: URL) async throws -> Data {
-        try await Task.detached(priority: .userInitiated) {
+    nonisolated static func loadMusicFileData(fileURL: URL) async throws -> Data {
+        try await BlockingIOExecutor.run {
             try Data(contentsOf: fileURL)
-        }.value
+        }
     }
 
     private func prepareMusicPlayerItem(
@@ -11873,7 +11877,7 @@ struct SidecarSubtitleFile: Identifiable, Hashable, Sendable {
                     priority = 0
                 } else if loweredStem.hasPrefix("\(base).") || loweredStem.hasPrefix("\(base)-") || loweredStem.hasPrefix("\(base)_") {
                     priority = 1
-                } else if ["subtitle", "subtitles", "subs"].contains(loweredStem) {
+                } else if isGenericSubtitleStem(loweredStem) {
                     priority = 2
                 } else {
                     priority = 3
@@ -11898,21 +11902,33 @@ struct SidecarSubtitleFile: Identifiable, Hashable, Sendable {
             }
     }
 
+    private static func isGenericSubtitleStem(_ stem: String) -> Bool {
+        guard let firstToken = tokens(from: stem).first else { return false }
+        return ["subtitle", "subtitles", "subs"].contains(firstToken)
+    }
+
     private static func languageHint(from fileName: String) -> String? {
         let lower = fileName.lowercased()
-        if lower.contains(".zh") || lower.contains(".chs") || lower.contains("简") {
+        let tokens = Set(tokens(from: lower))
+        if !tokens.isDisjoint(with: ["zh", "chs", "hans"]) || lower.contains("简") {
             return "中文"
         }
-        if lower.contains(".cht") || lower.contains("繁") {
+        if !tokens.isDisjoint(with: ["cht", "hant"]) || lower.contains("繁") {
             return "繁体中文"
         }
-        if lower.contains(".en") {
+        if tokens.contains("en") {
             return "英文"
         }
-        if lower.contains(".jp") || lower.contains(".ja") {
+        if !tokens.isDisjoint(with: ["jp", "ja"]) {
             return "日文"
         }
         return nil
+    }
+
+    private static func tokens(from value: String) -> [String] {
+        value
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
     }
 }
 

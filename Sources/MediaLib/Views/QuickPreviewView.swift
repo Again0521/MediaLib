@@ -7,6 +7,7 @@ struct QuickPreviewView: View {
     let item: MediaItem
 
     @StateObject private var controller = MpvPlayerController()
+    @State private var setupTask: Task<Void, Never>?
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -60,15 +61,22 @@ struct QuickPreviewView: View {
             }
             .frame(width: 0, height: 0)
         }
-        .onAppear(perform: setupPlayer)
+        .onAppear {
+            setupTask?.cancel()
+            setupTask = Task { @MainActor in
+                await setupPlayer()
+            }
+        }
         .onDisappear {
+            setupTask?.cancel()
+            setupTask = nil
             controller.teardown()
         }
     }
 
-    private func setupPlayer() {
-        guard let filePath = item.filePath,
-              item.isRemoteResource || FileManager.default.fileExists(atPath: filePath) else {
+    @MainActor
+    private func setupPlayer() async {
+        guard await Self.canPreview(item: item), !Task.isCancelled else {
             return
         }
         controller.configure(item: item, settings: appState.settings)
@@ -78,6 +86,14 @@ struct QuickPreviewView: View {
         }
         if appState.settings.quickPreviewMuted {
             controller.setVolume(0)
+        }
+    }
+
+    nonisolated static func canPreview(item: MediaItem) async -> Bool {
+        guard let filePath = item.filePath else { return false }
+        if item.isRemoteResource { return true }
+        return await BlockingIOExecutor.run {
+            FileManager.default.fileExists(atPath: filePath)
         }
     }
 }

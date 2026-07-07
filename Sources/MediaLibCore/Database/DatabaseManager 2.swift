@@ -1,0 +1,1208 @@
+import Foundation
+import SQLite3
+
+// 内部所有可变状态（db 句柄）只通过私有串行 queue 访问，线程安全由队列约束保证，
+// 编译器无法静态验证这一点，因此显式标注 @unchecked Sendable（而非让调用处到处 @Sendable 警告）。
+public final class DatabaseManager: @unchecked Sendable {
+    public static let currentSchemaVersion = 20
+
+    private var db: OpaquePointer?
+    private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
+    private let queueKey = DispatchSpecificKey<Bool>()
+    public let url: URL
+
+    private var isOnQueue: Bool {
+        DispatchQueue.getSpecific(key: queueKey) == true
+    }
+
+    public init(url: URL, backupDirectory: URL? = nil) throws {
+        self.url = url
+        let existingDatabase = FileManager.default.fileExists(atPath: url.path) &&
+            ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0
+        queue.setSpecific(key: queueKey, value: true)
+        let result = sqlite3_open_v2(url.path, &db, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil)
+        guard result == SQLITE_OK else {
+            throw DatabaseError.openFailed(Self.message(for: db))
+        }
+        try execute("PRAGMA foreign_keys = ON")
+        try execute("PRAGMA journal_mode = WAL")
+        let storedVersion = try schemaVersion()
+        guard storedVersion <= Self.currentSchemaVersion else {
+            throw DatabaseError.databaseNewerThanApp(found: storedVersion, supported: Self.currentSchemaVersion)
+        }
+        if existingDatabase, storedVersion < Self.currentSchemaVersion, let backupDirectory {
+            _ = try createBackup(in: backupDirectory, reason: "auto-pre-migration-v\(storedVersion)-to-v\(Self.currentSchemaVersion)")
+            try Self.pruneAutomaticBackups(in: backupDirectory, keeping: 5)
+        }
+        try migrate()
+    }
+
+    deinit {
+        sqlite3_close(db)
+    }
+
+    public func execute(_ sql: String, bindings: [SQLiteValue] = []) throws {
+        if isOnQueue {
+            try unsafeExecute(sql, bindings: bindings)
+        } else {
+            try queue.sync { try self.unsafeExecute(sql, bindings: bindings) }
+        }
+    }
+
+    public func query<T>(
+        _ sql: String,
+        bindings: [SQLiteValue] = [],
+        map: (SQLiteRow) throws -> T
+    ) throws -> [T] {
+        if isOnQueue {
+            return try unsafeQuery(sql, bindings: bindings, map: map)
+        } else {
+            return try queue.sync { try self.unsafeQuery(sql, bindings: bindings, map: map) }
+        }
+    }
+
+    /// 在单次 queue.sync 内以 BEGIN IMMEDIATE/COMMIT 包裹 block，保证原子性。
+    /// block 内可继续调用 execute/query，检测到已在队列上后直接执行，不会死锁。
+    /// 若 block 抛出异常则自动 ROLLBACK。
+    public func transaction<T>(_ block: () throws -> T) throws -> T {
+        if isOnQueue {
+            // 嵌套调用：已在事务上下文中，直接执行
+            return try block()
+        }
+        return try queue.sync {
+            try self.unsafeExecute("BEGIN IMMEDIATE TRANSACTION")
+            do {
+                let result = try block()
+                try self.unsafeExecute("COMMIT")
+                return result
+            } catch {
+                try? self.unsafeExecute("ROLLBACK")
+                throw error
+            }
+        }
+    }
+
+    /// `transaction(_:)` 的异步版本：在数据库串行队列上以 `queue.async` 执行（**不阻塞调用方线程**，
+    /// 因此从 @MainActor 调用时不会卡住主线程），并以 BEGIN IMMEDIATE/COMMIT 包裹保证原子性。
+    /// 适用于大批量写（如批量删除上千行），避免 `queue.sync` 在主线程上长时间阻塞。
+    /// block 在队列线程上运行，其内部调用 execute/query 会检测到 isOnQueue 而直接执行，不会死锁。
+    public func transactionAsync<T>(_ block: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+            queue.async {
+                do {
+                    try self.unsafeExecute("BEGIN IMMEDIATE TRANSACTION")
+                    do {
+                        let result = try block()
+                        try self.unsafeExecute("COMMIT")
+                        continuation.resume(returning: result)
+                    } catch {
+                        try? self.unsafeExecute("ROLLBACK")
+                        continuation.resume(throwing: error)
+                    }
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    public func schemaVersion() throws -> Int {
+        try query("PRAGMA user_version") { row in
+            row.int(0) ?? 0
+        }.first ?? 0
+    }
+
+    @discardableResult
+    public func createBackup(in directory: URL, reason: String = "manual") throws -> URL {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let safeReason = reason
+            .lowercased()
+            .map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-" }
+        let timestamp = Self.backupTimestamp()
+        let backupURL = directory.appendingPathComponent("MediaLib-\(String(safeReason))-\(timestamp).sqlite")
+        if isOnQueue {
+            try unsafeBackupCurrent(to: backupURL)
+        } else {
+            try queue.sync {
+                try self.unsafeBackupCurrent(to: backupURL)
+            }
+        }
+        return backupURL
+    }
+
+    public func restore(from backupURL: URL, safetyBackupDirectory: URL) throws {
+        guard backupURL.standardizedFileURL != url.standardizedFileURL else {
+            throw DatabaseError.backupFailed("不能从当前正在使用的数据库文件恢复。")
+        }
+        try validateBackup(at: backupURL)
+        _ = try createBackup(in: safetyBackupDirectory, reason: "auto-pre-restore")
+
+        try queue.sync {
+            try self.unsafeExecute("PRAGMA wal_checkpoint(TRUNCATE)")
+            try self.unsafeRestore(from: backupURL)
+            try self.unsafeExecute("PRAGMA foreign_keys = ON")
+            try self.unsafeExecute("PRAGMA journal_mode = WAL")
+        }
+        try migrate()
+        try validateCurrentDatabase()
+    }
+
+    public func validateCurrentDatabase() throws {
+        let result = try query("PRAGMA integrity_check") { row in
+            row.string(0) ?? ""
+        }
+        guard result.count == 1, result.first?.lowercased() == "ok" else {
+            throw DatabaseError.integrityCheckFailed(result.joined(separator: "; "))
+        }
+    }
+
+    private func unsafeExecute(_ sql: String, bindings: [SQLiteValue] = []) throws {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw DatabaseError.prepareFailed(Self.message(for: db))
+        }
+        defer { sqlite3_finalize(statement) }
+        try bind(bindings, to: statement)
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_DONE { return }
+            if result == SQLITE_ROW { continue }
+            throw DatabaseError.stepFailed(Self.message(for: db))
+        }
+    }
+
+    private func unsafeQuery<T>(
+        _ sql: String,
+        bindings: [SQLiteValue] = [],
+        map: (SQLiteRow) throws -> T
+    ) throws -> [T] {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw DatabaseError.prepareFailed(Self.message(for: db))
+        }
+        defer { sqlite3_finalize(statement) }
+        try bind(bindings, to: statement)
+        var rows: [T] = []
+        while true {
+            let result = sqlite3_step(statement)
+            if result == SQLITE_ROW {
+                rows.append(try map(SQLiteRow(statement: statement)))
+            } else if result == SQLITE_DONE {
+                return rows
+            } else {
+                throw DatabaseError.stepFailed(Self.message(for: db))
+            }
+        }
+    }
+
+    private func bind(_ bindings: [SQLiteValue], to statement: OpaquePointer?) throws {
+        for (offset, value) in bindings.enumerated() {
+            let index = Int32(offset + 1)
+            let result: Int32
+            switch value {
+            case .null:
+                result = sqlite3_bind_null(statement, index)
+            case .text(let text):
+                // 用显式 UTF-8 字节长度绑定，而非 `-1`(strlen)：后者遇到字符串内嵌的 \0 会截断
+                // （且 Swift String→C 字符串桥接本身也在 \0 处截断），导致含 NUL 的文本落库时丢数据。
+                // withUnsafeBufferPointer + SQLITE_TRANSIENT：SQLite 会立刻拷贝这段字节，指针出作用域后失效也安全。
+                let utf8 = Array(text.utf8)
+                result = utf8.withUnsafeBufferPointer { buffer in
+                    sqlite3_bind_text(statement, index, buffer.baseAddress.map { UnsafeRawPointer($0).assumingMemoryBound(to: CChar.self) }, Int32(buffer.count), SQLITE_TRANSIENT)
+                }
+            case .int(let int):
+                result = sqlite3_bind_int64(statement, index, int)
+            case .double(let double):
+                result = sqlite3_bind_double(statement, index, double)
+            case .bool(let bool):
+                result = sqlite3_bind_int(statement, index, bool ? 1 : 0)
+            }
+            guard result == SQLITE_OK else {
+                throw DatabaseError.bindFailed(Self.message(for: db))
+            }
+        }
+    }
+
+    private func migrate() throws {
+        var version = try schemaVersion()
+        guard version <= Self.currentSchemaVersion else {
+            throw DatabaseError.databaseNewerThanApp(found: version, supported: Self.currentSchemaVersion)
+        }
+        if version < 1 {
+            try transaction {
+                try migrateToVersion1()
+                try execute("PRAGMA user_version = 1")
+            }
+            version = 1
+        }
+        if version < 2 {
+            try transaction {
+                try migrateToVersion2()
+                try execute("PRAGMA user_version = 2")
+            }
+            version = 2
+        }
+        if version < 3 {
+            try transaction {
+                try migrateToVersion3()
+                try execute("PRAGMA user_version = 3")
+            }
+            version = 3
+        }
+        if version < 4 {
+            try transaction {
+                try migrateToVersion4()
+                try execute("PRAGMA user_version = 4")
+            }
+            version = 4
+        }
+        if version < 5 {
+            try transaction {
+                try migrateToVersion5()
+                try execute("PRAGMA user_version = 5")
+            }
+            version = 5
+        }
+        if version < 6 {
+            try transaction {
+                try migrateToVersion6()
+                try execute("PRAGMA user_version = 6")
+            }
+            version = 6
+        }
+        if version < 7 {
+            try transaction {
+                try migrateToVersion7()
+                try execute("PRAGMA user_version = 7")
+            }
+            version = 7
+        }
+        if version < 8 {
+            try transaction {
+                try migrateToVersion8()
+                try execute("PRAGMA user_version = 8")
+            }
+            version = 8
+        }
+        if version < 9 {
+            try transaction {
+                try migrateToVersion9()
+                try execute("PRAGMA user_version = 9")
+            }
+            version = 9
+        }
+        if version < 10 {
+            try transaction {
+                try migrateToVersion10()
+                try execute("PRAGMA user_version = 10")
+            }
+            version = 10
+        }
+        if version < 11 {
+            try transaction {
+                try migrateToVersion11()
+                try execute("PRAGMA user_version = 11")
+            }
+            version = 11
+        }
+        if version < 12 {
+            try transaction {
+                try migrateToVersion12()
+                try execute("PRAGMA user_version = 12")
+            }
+            version = 12
+        }
+        if version < 13 {
+            try transaction {
+                try migrateToVersion13()
+                try execute("PRAGMA user_version = 13")
+            }
+            version = 13
+        }
+        if version < 14 {
+            try transaction {
+                try migrateToVersion14()
+                try execute("PRAGMA user_version = 14")
+            }
+            version = 14
+        }
+        if version < 15 {
+            try transaction {
+                try migrateToVersion15()
+                try execute("PRAGMA user_version = 15")
+            }
+            version = 15
+        }
+        if version < 16 {
+            try transaction {
+                try migrateToVersion16()
+                try execute("PRAGMA user_version = 16")
+            }
+            version = 16
+        }
+        if version < 17 {
+            try transaction {
+                try migrateToVersion17()
+                try execute("PRAGMA user_version = 17")
+            }
+            version = 17
+        }
+        if version < 18 {
+            try transaction {
+                try migrateToVersion18()
+                try execute("PRAGMA user_version = 18")
+            }
+            version = 18
+        }
+        if version < 19 {
+            try transaction {
+                try migrateToVersion19()
+                try execute("PRAGMA user_version = 19")
+            }
+            version = 19
+        }
+        if version < 20 {
+            try transaction {
+                try migrateToVersion20()
+                try execute("PRAGMA user_version = 20")
+            }
+            version = 20
+        }
+        guard version == Self.currentSchemaVersion else {
+            throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
+        }
+    }
+
+    private func migrateToVersion1() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_items (
+          id TEXT PRIMARY KEY,
+          type TEXT NOT NULL,
+          title TEXT NOT NULL,
+          original_title TEXT,
+          artist TEXT,
+          album TEXT,
+          track_number INTEGER,
+          year INTEGER,
+          overview TEXT,
+          poster_path TEXT,
+          backdrop_path TEXT,
+          rating REAL,
+          user_rating REAL,
+          runtime INTEGER,
+          source_path TEXT,
+          parent_id TEXT,
+          season_number INTEGER,
+          episode_number INTEGER,
+          file_path TEXT,
+          file_size INTEGER,
+          video_codec TEXT,
+          audio_codec TEXT,
+          resolution TEXT,
+          duration REAL,
+          play_count INTEGER DEFAULT 0,
+          play_position REAL DEFAULT 0,
+          play_progress REAL DEFAULT 0,
+          watched INTEGER DEFAULT 0,
+          favorite INTEGER DEFAULT 0,
+          external_id TEXT,
+          metadata_provider TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          last_played_at TEXT
+        )
+        """)
+
+        try addColumnIfMissing(table: "media_items", column: "artist", definition: "artist TEXT")
+        try addColumnIfMissing(table: "media_items", column: "album", definition: "album TEXT")
+        try addColumnIfMissing(table: "media_items", column: "track_number", definition: "track_number INTEGER")
+        try addColumnIfMissing(table: "media_items", column: "external_id", definition: "external_id TEXT")
+        try addColumnIfMissing(table: "media_items", column: "metadata_provider", definition: "metadata_provider TEXT")
+        try addColumnIfMissing(table: "media_items", column: "video_bitrate", definition: "video_bitrate INTEGER")
+        try addColumnIfMissing(table: "media_items", column: "collection_title", definition: "collection_title TEXT")
+        try addColumnIfMissing(table: "media_items", column: "play_count", definition: "play_count INTEGER DEFAULT 0")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_sources (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          path TEXT NOT NULL,
+          media_type TEXT,
+          recursive INTEGER DEFAULT 1,
+          auto_scan INTEGER DEFAULT 1,
+          minimum_file_size INTEGER DEFAULT 52428800,
+          ignore_hidden_files INTEGER DEFAULT 1,
+          read_nfo INTEGER DEFAULT 1,
+          prefer_local_artwork INTEGER DEFAULT 1,
+          network_scraping_enabled INTEGER DEFAULT 1,
+          screenshot_fallback_enabled INTEGER DEFAULT 1,
+          created_at TEXT,
+          updated_at TEXT
+        )
+        """)
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS images_cache (
+          id TEXT PRIMARY KEY,
+          media_id TEXT,
+          type TEXT,
+          original_url TEXT,
+          local_path TEXT,
+          created_at TEXT
+        )
+        """)
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS scan_tasks (
+          id TEXT PRIMARY KEY,
+          source_id TEXT,
+          status TEXT,
+          total_files INTEGER,
+          processed_files INTEGER,
+          error_message TEXT,
+          created_at TEXT,
+          finished_at TEXT
+        )
+        """)
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_playlists (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          created_at TEXT,
+          updated_at TEXT
+        )
+        """)
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_playlist_items (
+          playlist_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          added_at TEXT,
+          PRIMARY KEY(playlist_id, media_id),
+          FOREIGN KEY(playlist_id) REFERENCES music_playlists(id) ON DELETE CASCADE
+        )
+        """)
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_queue_state (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          repeat_mode TEXT NOT NULL DEFAULT 'sequential',
+          shuffle_enabled INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT
+        )
+        """)
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_queue_items (
+          media_id TEXT PRIMARY KEY,
+          position INTEGER NOT NULL,
+          added_at TEXT,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+
+        try execute("CREATE UNIQUE INDEX IF NOT EXISTS index_media_items_file_path ON media_items(file_path) WHERE file_path IS NOT NULL")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_parent_id ON media_items(parent_id)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_type ON media_items(type)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_source_path ON media_items(source_path)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_title_nocase ON media_items(title COLLATE NOCASE)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_updated_at ON media_items(updated_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_last_played_at ON media_items(last_played_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_play_count ON media_items(play_count)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_type_parent ON media_items(type, parent_id)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_favorite ON media_items(favorite)")
+        try execute("CREATE UNIQUE INDEX IF NOT EXISTS index_media_sources_path ON media_sources(path)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_playlist_items_position ON music_playlist_items(playlist_id, position)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_playlist_items_media_id ON music_playlist_items(media_id)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_queue_items_position ON music_queue_items(position)")
+    }
+
+    private func migrateToVersion2() throws {
+        try addColumnIfMissing(table: "media_items", column: "watchlist", definition: "watchlist INTEGER DEFAULT 0")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_watchlist ON media_items(watchlist)")
+        try execute("""
+        CREATE TABLE IF NOT EXISTS video_smart_collections (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          media_scope TEXT NOT NULL DEFAULT 'all',
+          state_filter TEXT NOT NULL DEFAULT 'any',
+          recency_days INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT,
+          updated_at TEXT
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_video_smart_collections_updated_at ON video_smart_collections(updated_at)")
+    }
+
+    private func migrateToVersion3() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS playback_markers (
+          id TEXT PRIMARY KEY,
+          media_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          title TEXT NOT NULL,
+          start_time REAL NOT NULL,
+          end_time REAL,
+          origin TEXT NOT NULL DEFAULT 'manual',
+          created_at TEXT,
+          updated_at TEXT,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_playback_markers_media_time ON playback_markers(media_id, start_time)")
+        try execute("CREATE INDEX IF NOT EXISTS index_playback_markers_media_kind ON playback_markers(media_id, kind)")
+    }
+
+    private func migrateToVersion4() throws {
+        try addColumnIfMissing(table: "media_items", column: "loudness_track_gain_db", definition: "loudness_track_gain_db REAL")
+        try addColumnIfMissing(table: "media_items", column: "loudness_album_gain_db", definition: "loudness_album_gain_db REAL")
+        try addColumnIfMissing(table: "media_items", column: "loudness_track_peak", definition: "loudness_track_peak REAL")
+        try addColumnIfMissing(table: "media_items", column: "loudness_album_peak", definition: "loudness_album_peak REAL")
+    }
+
+    private func migrateToVersion5() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_smart_playlists (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          filter TEXT NOT NULL DEFAULT 'any',
+          recency_days INTEGER NOT NULL DEFAULT 0,
+          sort TEXT NOT NULL DEFAULT 'dateAddedDesc',
+          item_limit INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT,
+          updated_at TEXT
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_music_smart_playlists_updated_at ON music_smart_playlists(updated_at)")
+    }
+
+    private func migrateToVersion6() throws {
+        try addColumnIfMissing(table: "media_items", column: "user_rating", definition: "user_rating INTEGER")
+    }
+
+    private func migrateToVersion7() throws {
+        try addColumnIfMissing(table: "media_sources", column: "include_in_metadata_fetch", definition: "include_in_metadata_fetch INTEGER DEFAULT 1")
+        try addColumnIfMissing(table: "media_sources", column: "include_in_health_check", definition: "include_in_health_check INTEGER DEFAULT 1")
+    }
+
+    private func migrateToVersion8() throws {
+        try addColumnIfMissing(table: "media_items", column: "genre", definition: "genre TEXT")
+    }
+
+    private func migrateToVersion9() throws {
+        try addColumnIfMissing(table: "media_sources", column: "prefer_metadata_write_to_source", definition: "prefer_metadata_write_to_source INTEGER DEFAULT 0")
+    }
+
+    private func migrateToVersion10() throws {
+        try addColumnIfMissing(table: "media_sources", column: "remote_trace_sync_mode", definition: "remote_trace_sync_mode TEXT DEFAULT 'bidirectional'")
+        try addColumnIfMissing(table: "media_items", column: "user_rating", definition: "user_rating REAL")
+        try execute("""
+        UPDATE media_items
+        SET user_rating = CASE
+            WHEN rating IS NULL OR rating <= 0 THEN NULL
+            WHEN rating <= 5 THEN ROUND(rating)
+            ELSE ROUND(rating / 2.0)
+        END
+        WHERE user_rating IS NULL AND rating IS NOT NULL
+        """)
+    }
+
+    private func migrateToVersion11() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS video_manual_collections (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          created_at TEXT,
+          updated_at TEXT
+        )
+        """)
+        try execute("""
+        CREATE TABLE IF NOT EXISTS video_manual_collection_items (
+          collection_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          added_at TEXT,
+          PRIMARY KEY(collection_id, media_id),
+          FOREIGN KEY(collection_id) REFERENCES video_manual_collections(id) ON DELETE CASCADE,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_video_manual_collections_updated_at ON video_manual_collections(updated_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_video_manual_collection_items_position ON video_manual_collection_items(collection_id, position)")
+        try execute("CREATE INDEX IF NOT EXISTS index_video_manual_collection_items_media_id ON video_manual_collection_items(media_id)")
+    }
+
+    private func migrateToVersion12() throws {
+        try addColumnIfMissing(table: "video_smart_collections", column: "rules_json", definition: "rules_json TEXT")
+    }
+
+    private func migrateToVersion13() throws {
+        try addColumnIfMissing(
+            table: "video_manual_collections",
+            column: "show_on_home",
+            definition: "show_on_home INTEGER NOT NULL DEFAULT 0"
+        )
+        try addColumnIfMissing(
+            table: "video_smart_collections",
+            column: "show_on_home",
+            definition: "show_on_home INTEGER NOT NULL DEFAULT 0"
+        )
+    }
+
+    private func migrateToVersion14() throws {
+        try addColumnIfMissing(
+            table: "media_sources",
+            column: "selected_emby_library_ids",
+            definition: "selected_emby_library_ids TEXT"
+        )
+    }
+
+    private func migrateToVersion15() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS video_offline_subscriptions (
+          id TEXT PRIMARY KEY,
+          series_id TEXT NOT NULL UNIQUE,
+          series_title TEXT NOT NULL,
+          mode TEXT NOT NULL,
+          episode_limit INTEGER NOT NULL DEFAULT 3,
+          quality_id TEXT,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT,
+          updated_at TEXT,
+          FOREIGN KEY(series_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_video_offline_subscriptions_enabled ON video_offline_subscriptions(enabled)")
+        try execute("CREATE INDEX IF NOT EXISTS index_video_offline_subscriptions_updated_at ON video_offline_subscriptions(updated_at)")
+    }
+
+    private func migrateToVersion16() throws {
+        try addColumnIfMissing(table: "video_offline_subscriptions", column: "season_number", definition: "season_number INTEGER")
+        try addColumnIfMissing(table: "video_offline_subscriptions", column: "paused_until", definition: "paused_until TEXT")
+        try addColumnIfMissing(table: "video_offline_subscriptions", column: "expires_at", definition: "expires_at TEXT")
+        try addColumnIfMissing(
+            table: "video_offline_subscriptions",
+            column: "network_policy",
+            definition: "network_policy TEXT NOT NULL DEFAULT 'allowRemote'"
+        )
+        try execute("CREATE INDEX IF NOT EXISTS index_video_offline_subscriptions_season ON video_offline_subscriptions(series_id, season_number)")
+        try execute("CREATE INDEX IF NOT EXISTS index_video_offline_subscriptions_paused_until ON video_offline_subscriptions(paused_until)")
+        try execute("CREATE INDEX IF NOT EXISTS index_video_offline_subscriptions_expires_at ON video_offline_subscriptions(expires_at)")
+    }
+
+    private func migrateToVersion17() throws {
+        try addColumnIfMissing(
+            table: "playback_markers",
+            column: "review_status",
+            definition: "review_status TEXT NOT NULL DEFAULT 'accepted'"
+        )
+        try addColumnIfMissing(table: "playback_markers", column: "detector_identifier", definition: "detector_identifier TEXT")
+        try addColumnIfMissing(table: "playback_markers", column: "confidence", definition: "confidence REAL")
+        try execute("CREATE INDEX IF NOT EXISTS index_playback_markers_review ON playback_markers(media_id, review_status)")
+        try execute("CREATE INDEX IF NOT EXISTS index_playback_markers_origin_review ON playback_markers(origin, review_status)")
+    }
+
+    private func migrateToVersion18() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS metadata_correction_history (
+          id TEXT PRIMARY KEY,
+          batch_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          field_name TEXT NOT NULL,
+          old_value TEXT,
+          new_value TEXT,
+          source TEXT NOT NULL,
+          created_at TEXT,
+          undone_at TEXT,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_metadata_correction_media_time ON metadata_correction_history(media_id, created_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_metadata_correction_batch ON metadata_correction_history(batch_id)")
+        try execute("CREATE INDEX IF NOT EXISTS index_metadata_correction_undone ON metadata_correction_history(media_id, undone_at)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS local_user_profiles (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          is_default INTEGER NOT NULL DEFAULT 0,
+          avatar_symbol TEXT,
+          restricts_private_items INTEGER NOT NULL DEFAULT 0,
+          child_mode INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT,
+          updated_at TEXT
+        )
+        """)
+        try execute("CREATE UNIQUE INDEX IF NOT EXISTS index_local_user_profiles_default ON local_user_profiles(is_default) WHERE is_default = 1")
+        try execute("CREATE INDEX IF NOT EXISTS index_local_user_profiles_updated_at ON local_user_profiles(updated_at)")
+        let now = DateCoding.string(from: Date()) ?? ""
+        try execute(
+            """
+            INSERT INTO local_user_profiles (id, name, is_default, avatar_symbol, restricts_private_items, child_mode, created_at, updated_at)
+            SELECT ?, ?, 1, ?, 0, 0, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM local_user_profiles WHERE is_default = 1)
+            """,
+            bindings: [.text("default"), .text("默认档案"), .text("person.circle"), .text(now), .text(now)]
+        )
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS profile_media_state (
+          profile_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          play_count INTEGER NOT NULL DEFAULT 0,
+          play_position REAL NOT NULL DEFAULT 0,
+          play_progress REAL NOT NULL DEFAULT 0,
+          watched INTEGER NOT NULL DEFAULT 0,
+          favorite INTEGER NOT NULL DEFAULT 0,
+          watchlist INTEGER NOT NULL DEFAULT 0,
+          user_rating REAL,
+          last_played_at TEXT,
+          updated_at TEXT,
+          PRIMARY KEY(profile_id, media_id),
+          FOREIGN KEY(profile_id) REFERENCES local_user_profiles(id) ON DELETE CASCADE,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_profile_media_state_media ON profile_media_state(media_id)")
+        try execute("CREATE INDEX IF NOT EXISTS index_profile_media_state_updated ON profile_media_state(profile_id, updated_at)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS remote_connector_accounts (
+          id TEXT PRIMARY KEY,
+          provider TEXT NOT NULL,
+          account_label TEXT NOT NULL,
+          server_url TEXT,
+          username TEXT,
+          source_id TEXT,
+          connection_mode TEXT NOT NULL DEFAULT 'library',
+          sync_enabled INTEGER NOT NULL DEFAULT 0,
+          capabilities_json TEXT,
+          privacy_note TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          last_synced_at TEXT,
+          FOREIGN KEY(source_id) REFERENCES media_sources(id) ON DELETE SET NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_remote_connector_provider ON remote_connector_accounts(provider)")
+        try execute("CREATE INDEX IF NOT EXISTS index_remote_connector_source ON remote_connector_accounts(source_id)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS sync_conflicts (
+          id TEXT PRIMARY KEY,
+          media_id TEXT,
+          profile_id TEXT,
+          provider TEXT NOT NULL,
+          account_id TEXT,
+          field_name TEXT NOT NULL,
+          local_value TEXT,
+          remote_value TEXT,
+          local_updated_at TEXT,
+          remote_updated_at TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          resolution TEXT,
+          error_message TEXT,
+          created_at TEXT,
+          updated_at TEXT,
+          resolved_at TEXT,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE,
+          FOREIGN KEY(profile_id) REFERENCES local_user_profiles(id) ON DELETE CASCADE,
+          FOREIGN KEY(account_id) REFERENCES remote_connector_accounts(id) ON DELETE SET NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_sync_conflicts_status ON sync_conflicts(status, updated_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_sync_conflicts_media ON sync_conflicts(media_id, provider, field_name)")
+        try execute("CREATE INDEX IF NOT EXISTS index_sync_conflicts_account ON sync_conflicts(account_id)")
+    }
+
+    private func migrateToVersion19() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_detail_metadata (
+          media_id TEXT PRIMARY KEY,
+          status TEXT,
+          first_air_date TEXT,
+          end_date TEXT,
+          season_count INTEGER,
+          episode_count INTEGER,
+          content_rating TEXT,
+          original_language TEXT,
+          countries_json TEXT NOT NULL DEFAULT '[]',
+          production_companies_json TEXT NOT NULL DEFAULT '[]',
+          networks_json TEXT NOT NULL DEFAULT '[]',
+          trailer_url TEXT,
+          provider TEXT NOT NULL,
+          language TEXT NOT NULL,
+          fetched_at TEXT NOT NULL,
+          fetch_version INTEGER NOT NULL DEFAULT 1,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_detail_fetched_at ON media_detail_metadata(fetched_at)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_external_ids (
+          media_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          external_value TEXT NOT NULL,
+          PRIMARY KEY(media_id, provider),
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_external_lookup ON media_external_ids(provider, external_value)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_people (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          profile_url TEXT,
+          biography TEXT,
+          birthday TEXT,
+          deathday TEXT,
+          place_of_birth TEXT,
+          known_for_department TEXT,
+          known_for_json TEXT NOT NULL DEFAULT '[]',
+          filmography_json TEXT NOT NULL DEFAULT '[]',
+          updated_at TEXT NOT NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_people_name ON media_people(name COLLATE NOCASE)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_person_external_ids (
+          person_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          external_value TEXT NOT NULL,
+          PRIMARY KEY(person_id, provider),
+          FOREIGN KEY(person_id) REFERENCES media_people(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_person_external_lookup ON media_person_external_ids(provider, external_value)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_credits (
+          id TEXT PRIMARY KEY,
+          media_id TEXT NOT NULL,
+          person_id TEXT NOT NULL,
+          category TEXT NOT NULL,
+          role TEXT NOT NULL,
+          department TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE,
+          FOREIGN KEY(person_id) REFERENCES media_people(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_credits_media ON media_credits(media_id, category, sort_order)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_credits_person ON media_credits(person_id, sort_order)")
+        try execute("""
+        CREATE TRIGGER IF NOT EXISTS delete_orphaned_media_person_after_credit
+        AFTER DELETE ON media_credits
+        BEGIN
+          DELETE FROM media_people
+          WHERE id = OLD.person_id
+            AND NOT EXISTS (
+              SELECT 1 FROM media_credits WHERE person_id = OLD.person_id
+            );
+        END
+        """)
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_artwork (
+          id TEXT PRIMARY KEY,
+          media_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          thumb_url TEXT NOT NULL,
+          full_url TEXT NOT NULL,
+          language TEXT,
+          aspect_ratio REAL NOT NULL,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          local_path TEXT,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_artwork_media ON media_artwork(media_id, kind, sort_order)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_related_titles (
+          id TEXT PRIMARY KEY,
+          media_id TEXT NOT NULL,
+          relation TEXT NOT NULL,
+          external_id TEXT NOT NULL,
+          title TEXT NOT NULL,
+          year INTEGER,
+          poster_url TEXT,
+          overview TEXT,
+          rating REAL,
+          popularity REAL,
+          local_media_id TEXT,
+          sort_order INTEGER NOT NULL DEFAULT 0,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE,
+          FOREIGN KEY(local_media_id) REFERENCES media_items(id) ON DELETE SET NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_media_related_media ON media_related_titles(media_id, relation, sort_order)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_related_external ON media_related_titles(external_id)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS media_detail_backfill_jobs (
+          media_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL DEFAULT 'pending',
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          next_retry_at TEXT,
+          last_error TEXT,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_detail_backfill_status ON media_detail_backfill_jobs(status, next_retry_at)")
+    }
+
+    private func migrateToVersion20() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_album_index (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          artist TEXT NOT NULL,
+          title_key TEXT NOT NULL,
+          artist_key TEXT NOT NULL,
+          track_count INTEGER NOT NULL DEFAULT 0,
+          favorite_count INTEGER NOT NULL DEFAULT 0,
+          remote_count INTEGER NOT NULL DEFAULT 0,
+          play_count INTEGER NOT NULL DEFAULT 0,
+          total_duration REAL,
+          cover_path TEXT,
+          latest_updated_at TEXT NOT NULL,
+          rebuilt_at TEXT NOT NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_title ON music_album_index(title COLLATE NOCASE, artist COLLATE NOCASE)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_artist ON music_album_index(artist COLLATE NOCASE, title COLLATE NOCASE)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_recent ON music_album_index(latest_updated_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_play_count ON music_album_index(play_count)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_album_track_index (
+          album_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          track_number INTEGER,
+          title TEXT NOT NULL,
+          PRIMARY KEY(album_id, media_id),
+          FOREIGN KEY(album_id) REFERENCES music_album_index(id) ON DELETE CASCADE,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_track_position ON music_album_track_index(album_id, position)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_album_track_media ON music_album_track_index(media_id)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_artist_index (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          name_key TEXT NOT NULL,
+          track_count INTEGER NOT NULL DEFAULT 0,
+          album_count INTEGER NOT NULL DEFAULT 0,
+          favorite_count INTEGER NOT NULL DEFAULT 0,
+          remote_count INTEGER NOT NULL DEFAULT 0,
+          play_count INTEGER NOT NULL DEFAULT 0,
+          cover_path TEXT,
+          latest_updated_at TEXT NOT NULL,
+          rebuilt_at TEXT NOT NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_music_artist_name ON music_artist_index(name COLLATE NOCASE)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_artist_track_count ON music_artist_index(track_count)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_artist_play_count ON music_artist_index(play_count)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_artist_track_index (
+          artist_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          title TEXT NOT NULL,
+          PRIMARY KEY(artist_id, media_id),
+          FOREIGN KEY(artist_id) REFERENCES music_artist_index(id) ON DELETE CASCADE,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_music_artist_track_position ON music_artist_track_index(artist_id, position)")
+        try execute("CREATE INDEX IF NOT EXISTS index_music_artist_track_media ON music_artist_track_index(media_id)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS music_projection_state (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          music_item_count INTEGER NOT NULL DEFAULT 0,
+          latest_music_updated_at TEXT,
+          rebuilt_at TEXT NOT NULL
+        )
+        """)
+    }
+
+    private func validateBackup(at backupURL: URL) throws {
+        guard FileManager.default.fileExists(atPath: backupURL.path) else {
+            throw DatabaseError.backupFailed("选择的备份文件不存在。")
+        }
+        var sourceDB: OpaquePointer?
+        let openResult = sqlite3_open_v2(backupURL.path, &sourceDB, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        guard openResult == SQLITE_OK, let sourceDB else {
+            defer { sqlite3_close(sourceDB) }
+            throw DatabaseError.backupFailed(Self.message(for: sourceDB))
+        }
+        defer { sqlite3_close(sourceDB) }
+        let version = try Self.pragmaInt("user_version", database: sourceDB)
+        guard version <= Self.currentSchemaVersion else {
+            throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
+        }
+        let integrity = try Self.pragmaStrings("integrity_check", database: sourceDB)
+        guard integrity.count == 1, integrity.first?.lowercased() == "ok" else {
+            throw DatabaseError.integrityCheckFailed(integrity.joined(separator: "; "))
+        }
+    }
+
+    private func unsafeBackupCurrent(to backupURL: URL) throws {
+        try? FileManager.default.removeItem(at: backupURL)
+        var destinationDB: OpaquePointer?
+        let openResult = sqlite3_open_v2(
+            backupURL.path,
+            &destinationDB,
+            SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX,
+            nil
+        )
+        guard openResult == SQLITE_OK, let destinationDB else {
+            defer { sqlite3_close(destinationDB) }
+            throw DatabaseError.backupFailed(Self.message(for: destinationDB))
+        }
+        defer { sqlite3_close(destinationDB) }
+        try Self.copyDatabase(from: db, to: destinationDB)
+        let integrity = try Self.pragmaStrings("integrity_check", database: destinationDB)
+        guard integrity.count == 1, integrity.first?.lowercased() == "ok" else {
+            try? FileManager.default.removeItem(at: backupURL)
+            throw DatabaseError.integrityCheckFailed(integrity.joined(separator: "; "))
+        }
+    }
+
+    private func unsafeRestore(from backupURL: URL) throws {
+        var sourceDB: OpaquePointer?
+        let openResult = sqlite3_open_v2(backupURL.path, &sourceDB, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        guard openResult == SQLITE_OK, let sourceDB else {
+            defer { sqlite3_close(sourceDB) }
+            throw DatabaseError.backupFailed(Self.message(for: sourceDB))
+        }
+        defer { sqlite3_close(sourceDB) }
+        try Self.copyDatabase(from: sourceDB, to: db)
+    }
+
+    private static func copyDatabase(from source: OpaquePointer?, to destination: OpaquePointer?) throws {
+        guard let backup = sqlite3_backup_init(destination, "main", source, "main") else {
+            throw DatabaseError.backupFailed(Self.message(for: destination))
+        }
+        let stepResult = sqlite3_backup_step(backup, -1)
+        let finishResult = sqlite3_backup_finish(backup)
+        guard stepResult == SQLITE_DONE, finishResult == SQLITE_OK else {
+            throw DatabaseError.backupFailed(Self.message(for: destination))
+        }
+    }
+
+    private static func pragmaInt(_ name: String, database: OpaquePointer?) throws -> Int {
+        try pragmaStrings(name, database: database).first.flatMap(Int.init) ?? 0
+    }
+
+    private static func pragmaStrings(_ name: String, database: OpaquePointer?) throws -> [String] {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, "PRAGMA \(name)", -1, &statement, nil) == SQLITE_OK else {
+            throw DatabaseError.prepareFailed(message(for: database))
+        }
+        defer { sqlite3_finalize(statement) }
+        var result: [String] = []
+        while true {
+            let step = sqlite3_step(statement)
+            if step == SQLITE_ROW {
+                if let value = sqlite3_column_text(statement, 0) {
+                    result.append(String(cString: value))
+                }
+            } else if step == SQLITE_DONE {
+                return result
+            } else {
+                throw DatabaseError.stepFailed(message(for: database))
+            }
+        }
+    }
+
+    private static func backupTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        return formatter.string(from: Date())
+    }
+
+    private static func pruneAutomaticBackups(in directory: URL, keeping limit: Int) throws {
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey]
+        let backups = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        )
+        .filter { $0.lastPathComponent.hasPrefix("MediaLib-auto-pre-migration-") && $0.pathExtension == "sqlite" }
+        .sorted {
+            let lhs = (try? $0.resourceValues(forKeys: keys).contentModificationDate) ?? .distantPast
+            let rhs = (try? $1.resourceValues(forKeys: keys).contentModificationDate) ?? .distantPast
+            return lhs > rhs
+        }
+        for backup in backups.dropFirst(max(limit, 0)) {
+            try? FileManager.default.removeItem(at: backup)
+        }
+    }
+
+    private func addColumnIfMissing(table: String, column: String, definition: String) throws {
+        let rows = try query("PRAGMA table_info(\(table))") { row in
+            row.string(1)
+        }
+        guard !rows.contains(where: { $0 == column }) else { return }
+        try execute("ALTER TABLE \(table) ADD COLUMN \(definition)")
+    }
+
+    private static func message(for db: OpaquePointer?) -> String {
+        guard let message = sqlite3_errmsg(db) else { return "未知错误" }
+        return String(cString: message)
+    }
+}
+
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+public struct SQLiteRow {
+    fileprivate let statement: OpaquePointer?
+
+    public func string(_ index: Int32) -> String? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
+        guard let cString = sqlite3_column_text(statement, index) else { return nil }
+        // 用 sqlite3_column_bytes 拿到真实字节数按长度读取，而非 String(cString:)——后者遇到内嵌 \0
+        // 会在此截断（与绑定端 strlen 截断相对应）。按字节长度构造才能无损还原含 NUL 的文本。
+        let byteCount = Int(sqlite3_column_bytes(statement, index))
+        let buffer = UnsafeRawBufferPointer(start: cString, count: byteCount)
+        return String(decoding: buffer, as: UTF8.self)
+    }
+
+    public func int(_ index: Int32) -> Int? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
+        return Int(sqlite3_column_int64(statement, index))
+    }
+
+    public func int64(_ index: Int32) -> Int64? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
+        return sqlite3_column_int64(statement, index)
+    }
+
+    public func double(_ index: Int32) -> Double? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL else { return nil }
+        return sqlite3_column_double(statement, index)
+    }
+
+    public func bool(_ index: Int32) -> Bool {
+        sqlite3_column_int(statement, index) == 1
+    }
+
+    public func date(_ index: Int32) -> Date? {
+        DateCoding.date(from: string(index))
+    }
+}

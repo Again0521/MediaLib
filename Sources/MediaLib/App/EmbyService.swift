@@ -108,6 +108,11 @@ struct EmbyService {
     private let deviceName = Host.current().localizedName ?? "Mac"
     private let version = AppVersion.current
     private let pageSize = 300
+    private let deviceIDDefaults: UserDefaults
+
+    init(deviceIDDefaults: UserDefaults = .standard) {
+        self.deviceIDDefaults = deviceIDDefaults
+    }
 
     private var userAgent: String {
         "\(clientName)/\(version) (macOS)"
@@ -252,7 +257,7 @@ struct EmbyService {
         }
         let payload = EmbyPlaybackReportRequest(
             ItemId: itemID,
-            MediaSourceId: mediaSourceID(from: filePath),
+            MediaSourceId: Self.mediaSourceID(from: filePath),
             PlaySessionId: playSessionID,
             PositionTicks: Self.ticks(from: position),
             RunTimeTicks: duration.map(Self.ticks(from:)),
@@ -331,7 +336,8 @@ struct EmbyService {
     func refreshedResourceURLString(_ value: String?, session: EmbySession) -> String? {
         guard let value,
               var components = URLComponents(string: value),
-              components.url?.host == session.serverURL.host else { return value }
+              let resourceURL = components.url,
+              RemoteResourceURLPolicy.isSameOrigin(resourceURL, session.serverURL) else { return value }
         var queryItems = components.queryItems ?? []
         queryItems.removeAll { $0.name.caseInsensitiveCompare("api_key") == .orderedSame }
         queryItems.append(URLQueryItem(name: "api_key", value: session.accessToken))
@@ -346,15 +352,16 @@ struct EmbyService {
     }
 
     static func sourceRootPath(from librarySourcePath: String) -> String? {
-        guard let range = librarySourcePath.range(of: "/library/") else {
-            return isMediaServerSourcePath(librarySourcePath) ? librarySourcePath : nil
+        guard isMediaServerSourcePath(librarySourcePath) else { return nil }
+        guard let range = librarySourcePath.range(of: "/library/", options: .caseInsensitive) else {
+            return librarySourcePath
         }
         return String(librarySourcePath[..<range.lowerBound])
     }
 
     static func libraryInfo(from sourcePath: String) -> (id: String, name: String?, collectionType: String?)? {
         guard isMediaServerSourcePath(sourcePath),
-              let range = sourcePath.range(of: "/library/") else { return nil }
+              let range = sourcePath.range(of: "/library/", options: .caseInsensitive) else { return nil }
         let remainder = sourcePath[range.upperBound...]
         let parts = remainder.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         if parts.count == 1, !parts[0].isEmpty {
@@ -385,7 +392,8 @@ struct EmbyService {
 
     static func isMediaServerSourcePath(_ value: String?) -> Bool {
         guard let value else { return false }
-        return value.hasPrefix("emby://") || value.hasPrefix("jellyfin://") || value.hasPrefix("plex://")
+        let lowercased = value.lowercased()
+        return lowercased.hasPrefix("emby://") || lowercased.hasPrefix("jellyfin://") || lowercased.hasPrefix("plex://")
     }
 
     private func fetchItems(session: EmbySession, sourceID: String, sourcePath: String, parentID: String?) async throws -> [MediaItem] {
@@ -819,7 +827,7 @@ struct EmbyService {
         if let deliveryURLString = stream.deliveryURLString,
            !deliveryURLString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let url = URL(string: deliveryURLString, relativeTo: session.serverURL)?.absoluteURL
-            return Self.urlByRefreshingAPIKey(url, accessToken: session.accessToken)
+            return Self.urlByRefreshingAPIKey(url, baseURL: session.serverURL, accessToken: session.accessToken)
         }
         guard let mediaSourceID = stream.mediaSourceID else { return nil }
         let url = session.serverURL
@@ -829,23 +837,24 @@ struct EmbyService {
             .appendingPathComponent("Subtitles")
             .appendingPathComponent("\(stream.index)")
             .appendingPathComponent("Stream.\(stream.fileExtension)")
-        return Self.urlByRefreshingAPIKey(url, accessToken: session.accessToken)
+        return Self.urlByRefreshingAPIKey(url, baseURL: session.serverURL, accessToken: session.accessToken)
     }
 
-    private static func urlByRefreshingAPIKey(_ url: URL?, accessToken: String) -> URL? {
-        guard let url,
-              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
-        var queryItems = components.queryItems ?? []
-        queryItems.removeAll { $0.name.caseInsensitiveCompare("api_key") == .orderedSame }
-        queryItems.append(URLQueryItem(name: "api_key", value: accessToken))
-        components.queryItems = queryItems
-        return components.url
+    static func urlByRefreshingAPIKey(_ url: URL?, baseURL: URL, accessToken: String) -> URL? {
+        RemoteResourceURLPolicy.authenticatedURL(
+            url,
+            baseURL: baseURL,
+            tokenName: "api_key",
+            tokenValue: accessToken
+        )
     }
 
-    private func mediaSourceID(from filePath: String?) -> String? {
+    static func mediaSourceID(from filePath: String?) -> String? {
         guard let filePath,
               let components = URLComponents(string: filePath) else { return nil }
-        return components.queryItems?.first(where: { $0.name == "MediaSourceId" })?.value
+        return components.queryItems?.first {
+            $0.name.caseInsensitiveCompare("MediaSourceId") == .orderedSame
+        }?.value
     }
 
     private static func subtitleFileExtension(for stream: EmbyMediaStreamDTO) -> String? {
@@ -903,12 +912,12 @@ struct EmbyService {
         return "MediaBrowser " + values.joined(separator: ", ")
     }
 
-    private func deviceIdentifier() -> String {
-        if let existing = UserDefaults.standard.string(forKey: "MediaLib.emby.deviceID") {
+    func deviceIdentifier() -> String {
+        if let existing = deviceIDDefaults.string(forKey: "MediaLib.emby.deviceID") {
             return existing
         }
         let generated = UUID().uuidString
-        UserDefaults.standard.set(generated, forKey: "MediaLib.emby.deviceID")
+        deviceIDDefaults.set(generated, forKey: "MediaLib.emby.deviceID")
         return generated
     }
 

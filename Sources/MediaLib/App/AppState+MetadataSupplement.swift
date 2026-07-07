@@ -169,7 +169,7 @@ extension AppState {
             do {
                 if source(for: item)?.preferMetadataWriteToSource == true {
                     do {
-                        try writeVideoMetadataSidecarIfPossible(item: item, update: update)
+                        try await writeVideoMetadataSidecarIfPossible(item: item, update: update)
                     } catch {
                         logger?.log("写入视频元数据 sidecar 失败(\(item.id))：\(error.localizedDescription)", level: .warning)
                     }
@@ -306,7 +306,7 @@ extension AppState {
         }
     }
 
-    private func writeVideoMetadataSidecarIfPossible(item: MediaItem, update: MediaMetadataUpdate) throws {
+    private func writeVideoMetadataSidecarIfPossible(item: MediaItem, update: MediaMetadataUpdate) async throws {
         guard let source = source(for: item), source.sourceKind == .local else { return }
         let targetURL: URL?
         if item.type == .movie, let filePath = item.filePath {
@@ -318,30 +318,7 @@ extension AppState {
             targetURL = nil
         }
         guard let targetURL else { return }
-        let directory = targetURL.deletingLastPathComponent()
-        guard FileManager.default.isWritableFile(atPath: directory.path) else { return }
-        let xml = """
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <\(item.type == .movie ? "movie" : "tvshow")>
-          <title>\(xmlEscaped(update.title ?? item.title))</title>
-          \(update.originalTitle.map { "<originaltitle>\(xmlEscaped($0))</originaltitle>" } ?? "")
-          \(update.year.map { "<year>\($0)</year>" } ?? "")
-          \(update.overview.map { "<plot>\(xmlEscaped($0))</plot>" } ?? "")
-          \(update.rating.map { "<rating>\($0)</rating>" } ?? "")
-          \(update.genre.map { "<genre>\(xmlEscaped($0))</genre>" } ?? "")
-          \(update.externalID.map { "<uniqueid type=\"tmdb\">\(xmlEscaped($0))</uniqueid>" } ?? "")
-        </\(item.type == .movie ? "movie" : "tvshow")>
-        """
-        try xml.write(to: targetURL, atomically: true, encoding: .utf8)
-    }
-
-    private func xmlEscaped(_ text: String) -> String {
-        text
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&apos;")
+        _ = try await VideoMetadataSidecarWriter.write(item: item, update: update, to: targetURL)
     }
 
     func updateMetadataInMemory(id: String, metadata: MediaMetadataUpdate) {
@@ -412,7 +389,7 @@ extension AppState {
             .deletingLastPathComponent()
             .appendingPathComponent("\(mediaURL.deletingPathExtension().lastPathComponent).lrc")
         do {
-            try text.write(to: outputURL, atomically: true, encoding: .utf8)
+            try await MusicLyricsSidecarWriter.write(text, to: outputURL)
         } catch {
             logger?.log("写入歌词 .lrc 失败(\(outputURL.lastPathComponent))：\(error.localizedDescription)", level: .warning)
         }

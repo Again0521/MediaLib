@@ -67,7 +67,6 @@ public final class MediaRepository {
 
     public func replaceRemoteItems(sourcePathPrefix: String, with items: [MediaItem]) throws {
         let sourcePathPrefix = Self.normalizedSourcePathPrefix(sourcePathPrefix)
-        let sourcePathLikePattern = Self.escapedLikeChildPattern(for: sourcePathPrefix)
         let keepIDs = Set(items.map(\.id))
         try database.transaction {
             // media_items 上有全局 UNIQUE(file_path) 索引。远端（如 Emby）删除再重连时，
@@ -114,11 +113,11 @@ public final class MediaRepository {
             try database.execute(
                 """
                 DELETE FROM media_items
-                WHERE (source_path = ? OR source_path LIKE ? ESCAPE '\\')
+                WHERE \(Self.literalChildPrefixPredicate(for: "source_path"))
                   AND id NOT IN (SELECT id FROM remote_keep_ids)
                 """,
                 // The slash boundary keeps `emby://host/source` from deleting `emby://host/source2`.
-                bindings: [.text(sourcePathPrefix), .text(sourcePathLikePattern)]
+                bindings: Self.literalChildPrefixBindings(for: sourcePathPrefix)
             )
             try database.execute("DELETE FROM remote_keep_ids")
         }
@@ -176,8 +175,8 @@ public final class MediaRepository {
     public func deleteItems(sourcePathPrefix: String) throws {
         let sourcePathPrefix = Self.normalizedSourcePathPrefix(sourcePathPrefix)
         try database.execute(
-            "DELETE FROM media_items WHERE source_path = ? OR source_path LIKE ? ESCAPE '\\'",
-            bindings: [.text(sourcePathPrefix), .text(Self.escapedLikeChildPattern(for: sourcePathPrefix))]
+            "DELETE FROM media_items WHERE \(Self.literalChildPrefixPredicate(for: "source_path"))",
+            bindings: Self.literalChildPrefixBindings(for: sourcePathPrefix)
         )
     }
 
@@ -213,8 +212,8 @@ public final class MediaRepository {
 
     public func deleteItems(filePathPrefix: String, sourcePath: String) throws {
         try database.execute(
-            "DELETE FROM media_items WHERE source_path = ? AND (file_path = ? OR file_path LIKE ? ESCAPE '\\')",
-            bindings: [.text(sourcePath), .text(filePathPrefix), .text(Self.escapedLikeChildPattern(for: filePathPrefix))]
+            "DELETE FROM media_items WHERE source_path = ? AND \(Self.literalChildPrefixPredicate(for: "file_path"))",
+            bindings: [.text(sourcePath)] + Self.literalChildPrefixBindings(for: filePathPrefix)
         )
     }
 
@@ -640,8 +639,13 @@ public final class MediaRepository {
         return normalized
     }
 
-    private static func escapedLikeChildPattern(for prefix: String) -> String {
-        "\(escapedLikeLiteral(prefix))/%"
+    private static func literalChildPrefixPredicate(for column: String) -> String {
+        "(\(column) = ? OR substr(\(column), 1, ?) = ?)"
+    }
+
+    private static func literalChildPrefixBindings(for prefix: String) -> [SQLiteValue] {
+        let childPrefix = "\(prefix)/"
+        return [.text(prefix), .int(Int64(childPrefix.count)), .text(childPrefix)]
     }
 
     private static func escapedLikeContainsPattern(for value: String) -> String {

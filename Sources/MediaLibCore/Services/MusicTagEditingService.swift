@@ -140,7 +140,13 @@ public enum MusicTagEditingError: LocalizedError {
 }
 
 public final class MusicTagEditingService {
+    typealias FFmpegResult = (succeeded: Bool, stderr: String)
+    typealias FFmpegRunner = @Sendable (URL, [String], TimeInterval) -> FFmpegResult
+
     private let logger: LoggingService?
+    private let ffmpegExecutableURLProvider: @Sendable () -> URL?
+    private let ffmpegRunner: FFmpegRunner
+
     private static let writableExtensions: Set<String> = [
         "aac", "aif", "aiff", "flac", "m4a", "mp3", "ogg", "opus", "wav", "wv"
     ]
@@ -150,6 +156,20 @@ public final class MusicTagEditingService {
 
     public init(logger: LoggingService? = nil) {
         self.logger = logger
+        self.ffmpegExecutableURLProvider = { Self.ffmpegExecutableURL() }
+        self.ffmpegRunner = { ffmpegURL, arguments, timeout in
+            Self.runFFmpeg(ffmpegURL: ffmpegURL, arguments: arguments, timeout: timeout)
+        }
+    }
+
+    init(
+        logger: LoggingService? = nil,
+        ffmpegExecutableURLProvider: @escaping @Sendable () -> URL?,
+        ffmpegRunner: @escaping FFmpegRunner
+    ) {
+        self.logger = logger
+        self.ffmpegExecutableURLProvider = ffmpegExecutableURLProvider
+        self.ffmpegRunner = ffmpegRunner
     }
 
     public func canWriteFileTags(for item: MediaItem) -> Bool {
@@ -169,95 +189,116 @@ public final class MusicTagEditingService {
         guard Self.writableExtensions.contains(ext) else {
             throw MusicTagEditingError.unsupportedFormat(ext.isEmpty ? "unknown" : ext)
         }
-        guard let ffmpegURL = Self.ffmpegExecutableURL() else {
+        guard let ffmpegURL = ffmpegExecutableURLProvider() else {
             throw MusicTagEditingError.ffmpegUnavailable
         }
 
-        let task = Task.detached(priority: .utility) { [logger] in
-            let fileManager = FileManager.default
-            guard fileManager.fileExists(atPath: inputURL.path) else {
-                throw MusicTagEditingError.missingFile
-            }
-            let directoryURL = inputURL.deletingLastPathComponent()
-            guard fileManager.isWritableFile(atPath: inputURL.path),
-                  fileManager.isWritableFile(atPath: directoryURL.path) else {
-                throw MusicTagEditingError.fileNotWritable
-            }
-
-            let originalAttributes = try? fileManager.attributesOfItem(atPath: inputURL.path)
-            let token = UUID().uuidString
-            let tempURL = directoryURL.appendingPathComponent(".\(inputURL.deletingPathExtension().lastPathComponent).medialib-tagging-\(token).\(ext)")
-            try? fileManager.removeItem(at: tempURL)
-
-            let artworkURL = Self.localArtworkURL(from: draft.artworkPath)
-            let canEmbedArtwork = artworkURL != nil && Self.artworkWritableExtensions.contains(ext)
-            var result = Self.runFFmpeg(
-                ffmpegURL: ffmpegURL,
-                arguments: Self.ffmpegArguments(
+        do {
+            return try await BlockingIOExecutor.run { [ffmpegRunner] in
+                try Self.writeFileTags(
+                    draft: draft,
                     inputURL: inputURL,
-                    artworkURL: canEmbedArtwork ? artworkURL : nil,
+                    fileExtension: ext,
+                    ffmpegURL: ffmpegURL,
+                    ffmpegRunner: ffmpegRunner
+                )
+            }
+        } catch let error as MusicTagEditingError {
+            if case .ffmpegFailed(let message) = error {
+                logger?.log("音乐标签写入失败：\(inputURL.path) \(message)", level: .warning)
+            }
+            throw error
+        }
+    }
+
+    private static func writeFileTags(
+        draft: MusicTagDraft,
+        inputURL: URL,
+        fileExtension ext: String,
+        ffmpegURL: URL,
+        ffmpegRunner: FFmpegRunner
+    ) throws -> MusicTagWriteReport {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: inputURL.path) else {
+            throw MusicTagEditingError.missingFile
+        }
+        let directoryURL = inputURL.deletingLastPathComponent()
+        guard fileManager.isWritableFile(atPath: inputURL.path),
+              fileManager.isWritableFile(atPath: directoryURL.path) else {
+            throw MusicTagEditingError.fileNotWritable
+        }
+
+        let originalAttributes = try? fileManager.attributesOfItem(atPath: inputURL.path)
+        let token = UUID().uuidString
+        let tempURL = directoryURL.appendingPathComponent(".\(inputURL.deletingPathExtension().lastPathComponent).medialib-tagging-\(token).\(ext)")
+        try? fileManager.removeItem(at: tempURL)
+
+        let artworkURL = Self.localArtworkURL(from: draft.artworkPath)
+        let canEmbedArtwork = artworkURL != nil && Self.artworkWritableExtensions.contains(ext)
+        var result = ffmpegRunner(
+            ffmpegURL,
+            Self.ffmpegArguments(
+                inputURL: inputURL,
+                artworkURL: canEmbedArtwork ? artworkURL : nil,
+                outputURL: tempURL,
+                draft: draft,
+                fileExtension: ext
+            ),
+            90
+        )
+        var warning: String?
+        if !result.succeeded, canEmbedArtwork {
+            try? fileManager.removeItem(at: tempURL)
+            result = ffmpegRunner(
+                ffmpegURL,
+                Self.ffmpegArguments(
+                    inputURL: inputURL,
+                    artworkURL: nil,
                     outputURL: tempURL,
                     draft: draft,
                     fileExtension: ext
                 ),
-                timeout: 90
+                90
             )
-            var warning: String?
-            if !result.succeeded, canEmbedArtwork {
-                try? fileManager.removeItem(at: tempURL)
-                result = Self.runFFmpeg(
-                    ffmpegURL: ffmpegURL,
-                    arguments: Self.ffmpegArguments(
-                        inputURL: inputURL,
-                        artworkURL: nil,
-                        outputURL: tempURL,
-                        draft: draft,
-                        fileExtension: ext
-                    ),
-                    timeout: 90
-                )
-                warning = result.succeeded ? "封面写入失败，已只写入文字标签。" : nil
-            }
-            guard result.succeeded else {
-                try? fileManager.removeItem(at: tempURL)
-                logger?.log("音乐标签写入失败：\(inputURL.path) \(result.stderr)", level: .warning)
-                throw MusicTagEditingError.ffmpegFailed(result.stderr)
-            }
-            guard let attributes = try? fileManager.attributesOfItem(atPath: tempURL.path),
-                  let size = attributes[.size] as? NSNumber,
-                  size.int64Value > 0 else {
-                try? fileManager.removeItem(at: tempURL)
-                throw MusicTagEditingError.outputMissing
-            }
-
-            let backupName = ".\(inputURL.lastPathComponent).medialib-tag-backup-\(token)"
-            let resultingURL = try fileManager.replaceItemAt(
-                inputURL,
-                withItemAt: tempURL,
-                backupItemName: backupName,
-                options: []
-            )
-            let backupURL = directoryURL.appendingPathComponent(backupName)
-            try? fileManager.removeItem(at: backupURL)
-
-            var restoreAttributes: [FileAttributeKey: Any] = [:]
-            if let permissions = originalAttributes?[.posixPermissions] {
-                restoreAttributes[.posixPermissions] = permissions
-            }
-            if let modificationDate = originalAttributes?[.modificationDate] {
-                restoreAttributes[.modificationDate] = modificationDate
-            }
-            if !restoreAttributes.isEmpty {
-                try? fileManager.setAttributes(restoreAttributes, ofItemAtPath: inputURL.path)
-            }
-
-            return MusicTagWriteReport(
-                filePath: resultingURL?.path ?? inputURL.path,
-                updatedFieldCount: draft.writableMetadataPairs.count + (canEmbedArtwork && warning == nil ? 1 : 0),
-                warning: warning
-            )
+            warning = result.succeeded ? "封面写入失败，已只写入文字标签。" : nil
         }
-        return try await task.value
+        guard result.succeeded else {
+            try? fileManager.removeItem(at: tempURL)
+            throw MusicTagEditingError.ffmpegFailed(result.stderr)
+        }
+        guard let attributes = try? fileManager.attributesOfItem(atPath: tempURL.path),
+              let size = attributes[.size] as? NSNumber,
+              size.int64Value > 0 else {
+            try? fileManager.removeItem(at: tempURL)
+            throw MusicTagEditingError.outputMissing
+        }
+
+        let backupName = ".\(inputURL.lastPathComponent).medialib-tag-backup-\(token)"
+        let resultingURL = try fileManager.replaceItemAt(
+            inputURL,
+            withItemAt: tempURL,
+            backupItemName: backupName,
+            options: []
+        )
+        let backupURL = directoryURL.appendingPathComponent(backupName)
+        try? fileManager.removeItem(at: backupURL)
+
+        var restoreAttributes: [FileAttributeKey: Any] = [:]
+        if let permissions = originalAttributes?[.posixPermissions] {
+            restoreAttributes[.posixPermissions] = permissions
+        }
+        if let modificationDate = originalAttributes?[.modificationDate] {
+            restoreAttributes[.modificationDate] = modificationDate
+        }
+        if !restoreAttributes.isEmpty {
+            try? fileManager.setAttributes(restoreAttributes, ofItemAtPath: inputURL.path)
+        }
+
+        return MusicTagWriteReport(
+            filePath: resultingURL?.path ?? inputURL.path,
+            updatedFieldCount: draft.writableMetadataPairs.count + (canEmbedArtwork && warning == nil ? 1 : 0),
+            warning: warning
+        )
     }
 
     private func localFileURL(for item: MediaItem) -> URL? {
@@ -268,7 +309,7 @@ public final class MusicTagEditingService {
     }
 
     private static func localArtworkURL(from path: String?) -> URL? {
-        guard let path, !path.isEmpty, !path.hasPrefix("http") else { return nil }
+        guard let path, !path.isEmpty, !isHTTPURLString(path) else { return nil }
         let url = URL(fileURLWithPath: path)
         let ext = url.pathExtension.lowercased()
         guard ["jpg", "jpeg", "png", "webp"].contains(ext),
@@ -276,6 +317,13 @@ public final class MusicTagEditingService {
             return nil
         }
         return url
+    }
+
+    private static func isHTTPURLString(_ value: String) -> Bool {
+        guard let scheme = URLComponents(string: value)?.scheme?.lowercased() else {
+            return false
+        }
+        return scheme == "http" || scheme == "https"
     }
 
     private static func ffmpegArguments(

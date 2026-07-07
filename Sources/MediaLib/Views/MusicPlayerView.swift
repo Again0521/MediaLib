@@ -782,11 +782,12 @@ struct MusicPlayerView: View {
               TimedLyricLine.bestTimingSource(in: parsedLines) == .estimated,
               !parsedLines.isEmpty,
               let filePath = currentItem.filePath,
-              !currentItem.isRemoteResource,
-              FileManager.default.fileExists(atPath: filePath) else { return }
+              !currentItem.isRemoteResource else { return }
 
         let targetItem = currentItem
         lyricsAlignmentTask = Task {
+            guard await MusicLyricsLoader.localFileExists(atPath: filePath),
+                  !Task.isCancelled else { return }
             let aligned = await Task.detached(priority: .utility) {
                 await LyricAlignmentService.alignedLines(
                     for: targetItem,
@@ -814,9 +815,7 @@ struct MusicPlayerView: View {
         let targetItem = currentItem
         lyricsLoadTask = Task { @MainActor in
             setLyrics("暂无歌词")
-            let text = await Task.detached(priority: .utility) {
-                await Self.loadLyrics(for: targetItem)
-            }.value
+            let text = await MusicLyricsLoader.loadLyrics(for: targetItem)
             guard !Task.isCancelled,
                   appState.activePlayerItem?.id == targetItem.id else {
                 return
@@ -881,32 +880,6 @@ struct MusicPlayerView: View {
                 backdropAnimationReady = true
             }
         }
-    }
-
-    nonisolated private static func loadLyrics(for item: MediaItem) async -> String {
-        guard let filePath = item.filePath else { return "暂无歌词" }
-        let url = URL(fileURLWithPath: filePath)
-        let directory = url.deletingLastPathComponent()
-        let basename = url.deletingPathExtension().lastPathComponent
-        let candidates = [
-            directory.appendingPathComponent("\(basename).lrc"),
-            directory.appendingPathComponent("\(basename).txt")
-        ]
-
-        for candidate in candidates where FileManager.default.fileExists(atPath: candidate.path) {
-            if let text = try? String(contentsOf: candidate, encoding: .utf8),
-               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return text
-            }
-        }
-
-        let metadata = await AudioMetadataReader().metadata(for: url)
-        if let embeddedLyrics = metadata.lyrics?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !embeddedLyrics.isEmpty {
-            return embeddedLyrics
-        }
-
-        return "暂无歌词\n\n可将同名 .lrc 或 .txt 歌词文件放在歌曲旁边，MediaLIB 会自动显示。"
     }
 
     fileprivate static func cleanedLyrics(_ text: String) -> String {

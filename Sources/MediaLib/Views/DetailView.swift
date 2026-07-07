@@ -665,11 +665,15 @@ struct DetailView: View {
         }
         fileExists = nil
         Task { @MainActor in
-            let exists = await Task.detached(priority: .utility) {
-                FileManager.default.fileExists(atPath: filePath)
-            }.value
+            let exists = await Self.localFileExists(atPath: filePath)
             guard fileStatusPath == filePath else { return }
             fileExists = exists
+        }
+    }
+
+    nonisolated static func localFileExists(atPath path: String) async -> Bool {
+        await BlockingIOExecutor.run {
+            FileManager.default.fileExists(atPath: path)
         }
     }
 }

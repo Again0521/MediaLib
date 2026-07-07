@@ -40,23 +40,32 @@ final class LoggingServiceAuditTests: XCTestCase {
         XCTAssertEqual(LoggingService.redact(msg, homeDirectoryPath: "/"), msg, "当主目录配置为根目录或异常情况时，不应盲目全局替换斜杠")
     }
 
+    func testLogCreatesMissingDirectoryBeforeWriting() throws {
+        let logDirectory = tempDir
+            .appendingPathComponent("Nested", isDirectory: true)
+            .appendingPathComponent("Logs", isDirectory: true)
+        let logger = LoggingService(logDirectory: logDirectory)
+
+        logger.log("启动日志目录缺失时仍应落盘")
+        logger.flush()
+
+        let logFile = logger.exportURL()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: logFile.path))
+        let contents = try String(contentsOf: logFile, encoding: .utf8)
+        XCTAssertTrue(contents.contains("启动日志目录缺失时仍应落盘"))
+    }
+
     /// 测试海量并发写日志触发文件滚动，严格约束落盘体积上限
     func testHighVolumeConcurrentLoggingTriggersRotationWithoutOOM() throws {
         let maxBytes = 64 * 1024 // 限流 64KB
         let logger = LoggingService(logDirectory: tempDir, maxFileBytes: maxBytes)
-        
-        let expectation = XCTestExpectation(description: "异步高频日志处理完成")
         let longString = String(repeating: "A-Long-Log-Line-To-Fill-Disk-Space-", count: 20) // ~700 bytes
         
         DispatchQueue.concurrentPerform(iterations: 300) { i in
             logger.log("Concurrent log entry #\(i): \(longString)")
         }
-        
-        // 给予底层 serial queue 充足异步刷盘时间
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) {
-            expectation.fulfill()
-        }
-        wait(for: [expectation], timeout: 3.0)
+
+        logger.flush()
         
         let logFile = logger.exportURL()
         let backupFile = logFile.appendingPathExtension("1")

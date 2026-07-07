@@ -19,7 +19,7 @@ struct AppAlert: Identifiable {
 }
 
 /// 自定义封面 / 背景图的目标类型。
-enum VideoArtworkKind {
+enum VideoArtworkKind: Sendable {
     case poster
     case backdrop
 }
@@ -108,44 +108,36 @@ private struct PendingFloatingNotice: Sendable {
 }
 
 private actor ScanIncrementalLibraryPublisher {
-    private let minimumInterval: TimeInterval
-    private let minimumItemCount: Int
     private let publish: @Sendable () async -> Void
-    private var pendingIDs = Set<String>()
-    private var lastPublishedAt = Date.distantPast
+    private var policy: PendingIDBatchPublishPolicy
 
     init(
         minimumInterval: TimeInterval = 1.2,
         minimumItemCount: Int = 18,
         publish: @escaping @Sendable () async -> Void
     ) {
-        self.minimumInterval = minimumInterval
-        self.minimumItemCount = minimumItemCount
+        self.policy = PendingIDBatchPublishPolicy(
+            minimumInterval: minimumInterval,
+            minimumItemCount: minimumItemCount
+        )
         self.publish = publish
     }
 
     func record(_ ids: Set<String>) async {
-        pendingIDs.formUnion(ids)
-        let shouldPublish = pendingIDs.count >= minimumItemCount ||
-            Date().timeIntervalSince(lastPublishedAt) >= minimumInterval
-        if shouldPublish {
-            await flush()
+        let now = Date()
+        if policy.record(ids, now: now) {
+            await flush(now: now)
         }
     }
 
     func flush() async {
-        guard !pendingIDs.isEmpty else { return }
-        pendingIDs.removeAll()
-        lastPublishedAt = Date()
+        await flush(now: Date())
+    }
+
+    private func flush(now: Date) async {
+        guard policy.flush(now: now) else { return }
         await publish()
     }
-}
-
-private struct ArtworkWarmupProgressRecord: Codable, Sendable {
-    var sourceID: String
-    var completedURLs: [String]
-    var totalCount: Int
-    var updatedAt: Date
 }
 
 struct VideoManualCollectionCreationRequest: Identifiable, Equatable {
@@ -188,36 +180,18 @@ struct HomeStatsSnapshot {
 
 private final class ScanProgressThrottler: @unchecked Sendable {
     private let lock = NSLock()
-    private var lastPublishDate = Date.distantPast
-    private var lastProcessedFiles = -1
+    private var policy = ScanProgressPublishPolicy()
 
     func reset() {
         lock.lock()
-        lastPublishDate = .distantPast
-        lastProcessedFiles = -1
+        policy.reset()
         lock.unlock()
     }
 
     func shouldPublish(_ progress: ScanProgress) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-
-        let isTerminal = progress.status != "running" ||
-            progress.errorMessage != nil ||
-            progress.processedFiles >= progress.totalFiles
-        let isFirst = lastProcessedFiles < 0 || progress.processedFiles == 0
-        let step = max(8, max(progress.totalFiles, 1) / 220)
-        let advancedEnough = progress.processedFiles - lastProcessedFiles >= step
-        let now = Date()
-        let waitedEnough = now.timeIntervalSince(lastPublishDate) >= 0.18
-
-        guard isTerminal || isFirst || advancedEnough || waitedEnough else {
-            return false
-        }
-
-        lastPublishDate = now
-        lastProcessedFiles = progress.processedFiles
-        return true
+        return policy.shouldPublish(progress)
     }
 }
 
@@ -225,21 +199,12 @@ private final class ScanProgressThrottler: @unchecked Sendable {
 /// 避免远程缓存任务把主线程和浮动任务列表拖进高频刷新路径。
 private final class VideoCacheProgressThrottler: @unchecked Sendable {
     private let lock = NSLock()
-    private var lastPublishDate = Date.distantPast
-    private var lastProgress: Double = -1
+    private var policy = FractionalProgressPublishPolicy()
 
     func shouldPublish(_ progress: Double) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-
-        let clamped = min(max(progress, 0), 1)
-        let isTerminal = clamped >= 1
-        let advancedEnough = clamped - lastProgress >= 0.01
-        let waitedEnough = Date().timeIntervalSince(lastPublishDate) >= 0.18
-        guard isTerminal || advancedEnough || waitedEnough else { return false }
-        lastProgress = clamped
-        lastPublishDate = Date()
-        return true
+        return policy.shouldPublish(progress)
     }
 }
 
@@ -341,11 +306,6 @@ struct MusicTagApplyReport: Sendable, Hashable {
 }
 
 // LRCLibLyricsSearchResult 已随歌词获取移到 AppState+MetadataSupplement.swift。
-
-private struct LibraryClassificationHint: Sendable {
-    var libraryName: String?
-    var collectionType: String?
-}
 
 private struct VideoCacheJob {
     var item: MediaItem
@@ -605,6 +565,7 @@ final class AppState: ObservableObject {
     private var activeScanSourceID: String?
     private var scanRunID = UUID()
     private var fileEventDebounceTask: Task<Void, Never>?
+    private var localFileEventMonitorConfigurationID = UUID()
     private var pendingFileEventPaths: [String: Set<String>] = [:]
     private var pendingFullScanSourceIDs: Set<String> = []
     private var remountingNetworkSourceIDs: Set<String> = []
@@ -662,6 +623,7 @@ final class AppState: ObservableObject {
     private var didRestoreMusicQueue = false
     private var embyPlaybackSyncTasks: [String: Task<Void, Never>] = [:]
     private var restoredArtworkWarmupTasks: [BackgroundTaskSnapshot] = []
+    private let backgroundTaskPersistence = BackgroundTaskPersistenceScheduler()
     private var embyPlaySessionIDs: [String: String] = [:]
     private var playbackClearRevisionByItemID: [String: Date] = [:]
     /// B2 Scrobbling：当前待结算的听歌候选（开始播放即记录，达到时长门槛后 track.scrobble）。
@@ -855,6 +817,7 @@ final class AppState: ObservableObject {
     deinit {
         version122MaintenanceTask?.cancel()
         libraryReloadTask?.cancel()
+        backgroundTaskPersistence.cancel()
         detailEnrichmentTasks.values.forEach { $0.cancel() }
         networkPathMonitor?.cancel()
         if let appDidBecomeActiveObserver {
@@ -1729,25 +1692,10 @@ final class AppState: ObservableObject {
     }
 
     private func rebuildVideoSeriesCacheStates() {
-        var states: [String: VideoSeriesCacheState] = [:]
-        states.reserveCapacity(cachedChildrenByParentID.count)
-        for (parentID, children) in cachedChildrenByParentID {
-            let candidates = children.filter { cacheableVideoCandidate($0) || cachedVideoEntriesByItemID[$0.id] != nil }
-            guard !candidates.isEmpty else { continue }
-            let cachedCount = candidates.reduce(into: 0) { count, child in
-                if cachedVideoEntriesByItemID[child.id] != nil {
-                    count += 1
-                }
-            }
-            if cachedCount == 0 {
-                states[parentID] = VideoSeriesCacheState.none
-            } else if cachedCount == candidates.count {
-                states[parentID] = .complete
-            } else {
-                states[parentID] = .partial
-            }
-        }
-        cachedVideoSeriesStatesByID = states
+        cachedVideoSeriesStatesByID = VideoOfflinePolicy.seriesCacheStates(
+            childrenByParentID: cachedChildrenByParentID,
+            cachedItemIDs: Set(cachedVideoEntriesByItemID.keys)
+        )
     }
 
     func cachedVideoScopeIDs(in items: [MediaItem]) -> Set<String> {
@@ -1965,18 +1913,22 @@ final class AppState: ObservableObject {
             alert = AppAlert(title: "缓存位置不可用", message: "视频缓存清单暂不可用，请重启 MediaLIB 后重试。")
             return
         }
-        do {
-            try store.setCustomCacheDirectoryPath(url?.path)
-            settings.videoCacheDirectoryPath = url?.path
-            saveSettings()
-            updateVideoCacheStorageSummary()
-            showFloatingNotice(
-                title: url == nil ? "已恢复默认缓存位置" : "视频缓存位置已更新",
-                message: videoCacheDirectoryDisplayPath,
-                kind: .success
-            )
-        } catch {
-            showError("缓存位置更新失败", error)
+        let path = url?.path
+        Task { @MainActor [weak self] in
+            do {
+                try await store.setCustomCacheDirectoryPathAsync(path)
+                guard let self else { return }
+                settings.videoCacheDirectoryPath = path
+                saveSettings()
+                await refreshVideoCacheEntriesAsync()
+                showFloatingNotice(
+                    title: url == nil ? "已恢复默认缓存位置" : "视频缓存位置已更新",
+                    message: videoCacheDirectoryDisplayPath,
+                    kind: .success
+                )
+            } catch {
+                self?.showError("缓存位置更新失败", error)
+            }
         }
     }
 
@@ -1995,16 +1947,19 @@ final class AppState: ObservableObject {
             )
             return
         }
-        do {
-            let removed = try store.remove(itemIDs: itemIDs)
-            refreshVideoCacheEntries()
-            showFloatingNotice(
-                title: removed.count > 1 ? "系列缓存已删除" : "缓存文件已删除",
-                message: hidesDetail ? nil : item.title,
-                kind: .success
-            )
-        } catch {
-            showError("缓存删除失败", error)
+        Task { @MainActor [weak self] in
+            do {
+                let removed = try await store.removeAsync(itemIDs: itemIDs)
+                guard let self else { return }
+                await refreshVideoCacheEntriesAsync()
+                showFloatingNotice(
+                    title: removed.count > 1 ? "系列缓存已删除" : "缓存文件已删除",
+                    message: hidesDetail ? nil : item.title,
+                    kind: .success
+                )
+            } catch {
+                self?.showError("缓存删除失败", error)
+            }
         }
     }
 
@@ -2135,18 +2090,16 @@ final class AppState: ObservableObject {
 
         Task { [weak self] in
             do {
-                let cacheResult = try await BlockingIOExecutor.run {
-                    try store?.runMaintenance(
+                let cacheResult = try await store?.runMaintenanceAsync(
                         validItemIDs: validItemIDs,
                         byteLimit: byteLimit,
                         cleanupHint: cleanupHint
                     )
-                }
                 await MainActor.run {
                     guard let self else { return }
                     self.updateBackgroundTask(id: taskID, progress: 0.62, detail: "正在清理任务历史")
-                    self.refreshVideoCacheEntries()
                 }
+                await self?.refreshVideoCacheEntriesAsync()
 
                 let removedArtworkDirectories = await BlockingIOExecutor.run {
                     Self.removeEmptyArtworkCacheDirectories(in: directories?.cache)
@@ -2372,21 +2325,14 @@ final class AppState: ObservableObject {
     }
 
     private func trimInactiveBackgroundTaskHistory(existingInactiveCount: Int) -> Int {
-        let activeTasks = backgroundTasks.filter(\.state.isActive)
-        let inactiveTasks = backgroundTasks
-            .filter { !$0.state.isActive }
-            .sorted { lhs, rhs in
-                (lhs.finishedAt ?? lhs.startedAt) > (rhs.finishedAt ?? rhs.startedAt)
-            }
-        let keptInactive = Array(inactiveTasks.prefix(24))
-        let nextTasks = (activeTasks + keptInactive).sorted { lhs, rhs in
-            lhs.startedAt > rhs.startedAt
+        let trimmed = BackgroundTaskListPolicy.trimmingInactiveHistory(
+            from: backgroundTasks,
+            existingInactiveCount: existingInactiveCount
+        )
+        if trimmed.removedCount > 0 {
+            backgroundTasks = trimmed.tasks
         }
-        let removed = max(existingInactiveCount - keptInactive.count, 0)
-        if removed > 0 {
-            backgroundTasks = nextTasks
-        }
-        return removed
+        return trimmed.removedCount
     }
 
     nonisolated private static func removeEmptyArtworkCacheDirectories(in cacheDirectory: URL?) -> Int {
@@ -2437,11 +2383,7 @@ final class AppState: ObservableObject {
     }
 
     private func duplicateKey(for item: MediaItem) -> String {
-        let normalizedTitle = item.title
-            .lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .joined()
-        return "\(item.type.rawValue)-\(normalizedTitle)-\(item.year.map(String.init) ?? "unknown")"
+        MediaDuplicateKeyPolicy.duplicateKey(for: item)
     }
 
     func isPrivateItem(_ item: MediaItem) -> Bool {
@@ -2938,26 +2880,9 @@ final class AppState: ObservableObject {
     func rebuildDerivedItemCaches() {
         // Pass 1：建立父子索引，并从保险库根节点向下传播私密标记。
         // 保险库可能是“集合 -> 剧集 -> 单集”的多层结构，只看直接 parent 会漏掉更深的后代。
-        let privateCollectionIDs = Set(items.lazy.filter { $0.type == .privateCollection }.map(\.id))
-        var childrenByParentID: [String: [MediaItem]] = [:]
-        for item in items {
-            if let parentID = item.parentID {
-                childrenByParentID[parentID, default: []].append(item)
-            }
-        }
-
-        var privateItemIDs = privateCollectionIDs
-        var privateQueue = Array(privateCollectionIDs)
-        var privateQueueIndex = 0
-        while privateQueueIndex < privateQueue.count {
-            let parentID = privateQueue[privateQueueIndex]
-            privateQueueIndex += 1
-            for child in childrenByParentID[parentID] ?? [] {
-                if privateItemIDs.insert(child.id).inserted {
-                    privateQueue.append(child.id)
-                }
-            }
-        }
+        let hierarchy = MediaHierarchyPolicy.snapshot(for: items)
+        let childrenByParentID = hierarchy.childrenByParentID
+        let privateItemIDs = hierarchy.privateItemIDs
 
         // Pass 2：单次遍历分拣所有 item，同时收集统计数据。
         // 避免原来 12+ 次独立 filter/reduce 各自遍历全量数组。
@@ -3118,34 +3043,13 @@ final class AppState: ObservableObject {
         // 存储 Pass 2 结果
         cachedPrivateItemIDs = privateItemIDs
 
-        // 排序 children（季×集×标题）
-        cachedChildrenByParentID = childrenByParentID.mapValues { children in
-            children.sorted {
-                if ($0.seasonNumber ?? 0) != ($1.seasonNumber ?? 0) {
-                    return ($0.seasonNumber ?? 0) < ($1.seasonNumber ?? 0)
-                }
-                if ($0.episodeNumber ?? 0) != ($1.episodeNumber ?? 0) {
-                    return ($0.episodeNumber ?? 0) < ($1.episodeNumber ?? 0)
-                }
-                return $0.title.localizedStandardCompare($1.title) == .orderedAscending
-            }
-        }
+        cachedChildrenByParentID = MediaHierarchyPolicy.sortedChildrenByParentID(childrenByParentID)
         rebuildVideoSeriesCacheStates()
 
         cachedTopLevelItems = topLevelRaw.sorted { $0.updatedAt > $1.updatedAt }
         cachedPrivateTopLevelItems = privateTopLevelRaw.sorted { $0.updatedAt > $1.updatedAt }
         cachedItemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
-        cachedMusicTracks = musicTracksRaw.sorted { lhs, rhs in
-            let leftAlbum = lhs.album ?? ""
-            let rightAlbum = rhs.album ?? ""
-            if leftAlbum != rightAlbum {
-                return leftAlbum.localizedStandardCompare(rightAlbum) == .orderedAscending
-            }
-            if (lhs.trackNumber ?? 0) != (rhs.trackNumber ?? 0) {
-                return (lhs.trackNumber ?? 0) < (rhs.trackNumber ?? 0)
-            }
-            return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
-        }
+        cachedMusicTracks = MusicTrackProjectionPolicy.sortedByAlbumTrackAndTitle(musicTracksRaw)
         cachedMusicTracksByID = Dictionary(uniqueKeysWithValues: cachedMusicTracks.map { ($0.id, $0) })
         rebuildMusicSectionCaches()
         cachedEmbyTopLevelItems = embyTopLevelRaw.sorted { $0.updatedAt > $1.updatedAt }
@@ -3180,25 +3084,17 @@ final class AppState: ObservableObject {
             $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
         }
 
-        // #9 下一集：仅针对”用户已经看完过至少一集”的系列，展示其最后一个看完的集之后的那一具体集。
-        // 完全没看过任何一集的系列不进入这里（它们属于”未观看”），看到最后一集的系列也不再出现。
-        cachedNextUpItems = Array(cachedHomeVideoItems.compactMap { series -> MediaItem? in
-            guard let episodes = cachedChildrenByParentID[series.id], !episodes.isEmpty else { return nil }
-            func isFinished(_ ep: MediaItem) -> Bool { ep.watched || ep.playProgress >= watchedThreshold }
-            guard let lastFinishedIndex = episodes.lastIndex(where: isFinished) else { return nil }
-            let nextIndex = lastFinishedIndex + 1
-            guard episodes.indices.contains(nextIndex) else { return nil }
-            let next = episodes[nextIndex]
-            guard !isFinished(next) else { return nil }
-            return next
-        }.prefix(12))
+        cachedNextUpItems = HomeVideoProjectionPolicy.nextUpItems(
+            from: cachedHomeVideoItems,
+            childrenByParentID: cachedChildrenByParentID,
+            watchedThreshold: watchedThreshold,
+            limit: 12
+        )
 
-        let duplicateGroups = Dictionary(
-            grouping: cachedTopLevelItems.filter { !Self.sourcePathExcluded($0.sourcePath, in: healthExcludedSourcePaths) }
-        ) { duplicateKey(for: $0) }
-        cachedDuplicateTitleGroups = duplicateGroups.values
-            .filter { $0.count > 1 }
-            .sorted { $0[0].title.localizedStandardCompare($1[0].title) == .orderedAscending }
+        cachedDuplicateTitleGroups = MediaDuplicateKeyPolicy.duplicateTitleGroups(
+            in: cachedTopLevelItems,
+            excludingSourcePaths: healthExcludedSourcePaths
+        )
 
         cachedHomeStats = HomeStatsSnapshot(
             movieCount: movieCount,
@@ -3211,44 +3107,17 @@ final class AppState: ObservableObject {
             totalWatchedMinutes: totalWatchedMinutes
         )
 
-        // Tab/Section 可见性：用预先建立的 Set<MediaType> 做 O(1) 成员查询，
-        // 避免原来对 videoTopLevelItems 做 14 × O(n) 的 .contains { $0.type == .xxx }。
-        cachedAvailableHomeTabs = Set(HomeTab.allCases.filter { tab in
-            switch tab {
-            case .overview:
-                return true
-            case .nextUp:
-                return !cachedNextUpItems.isEmpty
-            case .continueWatching:
-                return !cachedContinueWatchingItems.isEmpty
-            case .offline:
-                return !cachedHomeOfflineVideoItems.isEmpty
-            case .recent:
-                return !cachedHomeVideoItems.isEmpty
-            case .movies:
-                return cachedHomeVideoItems.contains { $0.type == .movie }
-            case .tvShows:
-                return cachedHomeVideoItems.contains { $0.type == .tvShow }
-            case .anime:
-                return cachedHomeVideoItems.contains { $0.type == .anime }
-            case .documentaries:
-                return cachedHomeVideoItems.contains { $0.type == .documentary }
-            case .variety:
-                return cachedHomeVideoItems.contains { $0.type == .variety }
-            case .homeVideos:
-                return cachedHomeVideoItems.contains { $0.type == .homeVideo }
-            case .music:
-                return !cachedMusicTracks.isEmpty
-            case .other:
-                return cachedHomeVideoItems.contains { $0.type == .other }
-            case .favorites:
-                return cachedHomeVideoItems.contains { $0.type != .music && $0.favorite }
-            case .unwatched:
-                return cachedHomeVideoItems.contains { $0.type != .music && !$0.watched && $0.playProgress < settings.watchedThreshold }
-            case .privacy:
-                return !cachedPrivateTopLevelItems.isEmpty
-            }
-        })
+        cachedAvailableHomeTabs = HomeVideoProjectionPolicy.availableHomeTabs(
+            HomeTabAvailabilityInput(
+                homeVideoItems: cachedHomeVideoItems,
+                nextUpItems: cachedNextUpItems,
+                continueWatchingItems: cachedContinueWatchingItems,
+                offlineVideoItems: cachedHomeOfflineVideoItems,
+                musicTracks: cachedMusicTracks,
+                privateTopLevelItems: cachedPrivateTopLevelItems,
+                watchedThreshold: settings.watchedThreshold
+            )
+        )
 
         cachedVisibleVideoSections = VideoLibrarySection.allCases.filter { section in
             switch section {
@@ -3289,22 +3158,15 @@ final class AppState: ObservableObject {
             .albums: cachedMusicTracks,
             .artists: cachedMusicTracks,
             .playlists: [],
-            .recent: cachedMusicTracks
-                .filter { $0.lastPlayedAt != nil }
-                .sorted { ($0.lastPlayedAt ?? .distantPast) > ($1.lastPlayedAt ?? .distantPast) },
+            .recent: MusicTrackProjectionPolicy.recentlyPlayedTracks(cachedMusicTracks),
             .favorites: cachedMusicTracks.filter(\.favorite),
             .unmatched: cachedMusicTracks.filter {
                 ($0.artist?.isEmpty ?? true) || ($0.album?.isEmpty ?? true) || $0.metadataProvider == nil
             }
         ]
         cachedHomeMusicPlayableTracks = cachedMusicTracks.filter { $0.filePath != nil || $0.posterPath != nil }
-        cachedHomeContinueListeningTracks = Array(cachedMusicTracks
-            .filter { $0.lastPlayedAt != nil || ($0.playProgress > 0 && $0.playProgress < 0.98) }
-            .sorted { ($0.lastPlayedAt ?? $0.updatedAt) > ($1.lastPlayedAt ?? $1.updatedAt) }
-            .prefix(6))
-        cachedHomeMusicSignalTracks = cachedMusicTracks.filter {
-            ($0.playCount ?? 0) > 0 || $0.lastPlayedAt != nil || $0.favorite || ($0.userRating ?? 0) > 0
-        }
+        cachedHomeContinueListeningTracks = MusicTrackProjectionPolicy.continueListeningTracks(cachedMusicTracks, limit: 6)
+        cachedHomeMusicSignalTracks = MusicTrackProjectionPolicy.signalTracks(cachedMusicTracks)
         cachedMusicSmartTracksByPlaylistID.removeAll(keepingCapacity: true)
         // 播放次数递增（每次点击播放都会调用）故意跳过这里：内容修订号驱动音乐列表快照缓存 key，
         // 高频、非展示语义的字段变化不应让整页列表快照失效重建。见 incrementMusicPlayCountInMemory。
@@ -3328,114 +3190,37 @@ final class AppState: ObservableObject {
     }
 
     private static func isMissingCoreMetadata(_ item: MediaItem) -> Bool {
-        if item.type == .music {
-            return item.posterPath == nil ||
-                item.artist?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false ||
-                item.album?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
-        }
-        return item.posterPath == nil ||
-            item.year == nil ||
-            item.overview?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+        MediaMetadataCompletenessPolicy.isMissingCoreMetadata(item)
     }
 
     private static func classifiedEmbyTopLevelItem(_ item: MediaItem) -> MediaItem {
         guard isEmbyItem(item), item.parentID == nil, item.type != .music else { return item }
-        let hint: LibraryClassificationHint?
+        let hint: RemoteLibraryClassificationHint?
         if let sourcePath = item.sourcePath,
            let info = EmbyService.libraryInfo(from: sourcePath) {
-            hint = LibraryClassificationHint(libraryName: info.name, collectionType: info.collectionType)
+            hint = RemoteLibraryClassificationHint(libraryName: info.name, collectionType: info.collectionType)
         } else {
             hint = nil
         }
-        guard let type = inferredEmbyMediaType(for: item, hint: hint) else { return item }
+        let type = RemoteLibraryClassificationPolicy.inferredMediaType(for: item, hint: hint)
         var copy = item
         copy.type = type
         return copy
     }
 
-    private static func inferredEmbyMediaType(for item: MediaItem, hint: LibraryClassificationHint?) -> MediaType? {
-        if let fromName = inferMediaType(fromLibraryName: hint?.libraryName) {
-            return fromName
-        }
-        if let fromGenre = inferMediaType(fromGenre: item.genre) {
-            return fromGenre
-        }
-        if let fromCollection = inferMediaType(fromCollectionType: hint?.collectionType) {
-            return fromCollection
-        }
-        return item.type == .episode ? .tvShow : item.type
-    }
-
-    private static func inferMediaType(fromLibraryName name: String?) -> MediaType? {
-        guard let normalized = normalizedClassifierText(name), !normalized.isEmpty else { return nil }
-        let rules: [(MediaType, [String])] = [
-            (.anime, ["动漫", "动画", "番剧", "新番", "国漫", "日漫", "anime", "animation", "bangumi", "cartoon"]),
-            (.documentary, ["纪录", "纪实", "documentary", "docu"]),
-            (.variety, ["综艺", "真人秀", "脱口秀", "variety", "reality", "talk show", "talkshow"]),
-            (.homeVideo, ["其他视频", "家庭录像", "家庭视频", "家庭影像", "自拍视频", "生活录像", "home video", "homevideo", "homevideos", "home movie", "home movies", "other video", "other videos"]),
-            (.movie, ["电影", "影片", "影院", "movie", "movies", "film", "cinema"]),
-            (.tvShow, ["电视剧", "剧集", "连续剧", "美剧", "日剧", "韩剧", "英剧", "华语剧", "tv", "series", "drama", "shows"])
-        ]
-        return rules.first { _, keywords in keywords.contains { normalized.contains($0) } }?.0
-    }
-
-    private static func inferMediaType(fromCollectionType collectionType: String?) -> MediaType? {
-        guard let normalized = normalizedClassifierText(collectionType), !normalized.isEmpty else { return nil }
-        if normalized.contains("movies") || normalized == "movie" { return .movie }
-        if normalized.contains("homevideos") || normalized.contains("home video") || normalized.contains("homevideo") { return .homeVideo }
-        if normalized.contains("music") { return .music }
-        if normalized.contains("tvshows") || normalized.contains("series") { return .tvShow }
-        return nil
-    }
-
-    private static func inferMediaType(fromGenre genre: String?) -> MediaType? {
-        guard let normalized = normalizedClassifierText(genre), !normalized.isEmpty else { return nil }
-        let rules: [(MediaType, [String])] = [
-            (.anime, ["动画", "动漫", "animation", "anime"]),
-            (.documentary, ["纪录", "documentary"]),
-            (.variety, ["综艺", "真人秀", "脱口秀", "reality", "talk", "variety"]),
-            (.homeVideo, ["其他视频", "家庭录像", "家庭视频", "home video", "homevideo", "home movie", "other video"])
-        ]
-        return rules.first { _, keywords in keywords.contains { normalized.contains($0) } }?.0
-    }
-
-    private static func normalizedClassifierText(_ text: String?) -> String? {
-        guard let text else { return nil }
-        return (text.removingPercentEncoding ?? text)
-            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
-            .lowercased()
-    }
-
     private nonisolated static func playbackRecencySort(_ lhs: MediaItem, _ rhs: MediaItem) -> Bool {
-        (lhs.lastPlayedAt ?? lhs.updatedAt) > (rhs.lastPlayedAt ?? rhs.updatedAt)
+        MediaPlaybackRecencyPolicy.isMoreRecent(lhs, than: rhs)
     }
 
     /// 条目的来源路径是否落在"不参与健康检查"的来源里。
     nonisolated static func sourcePathExcluded(_ sourcePath: String?, in excludedPaths: [String]) -> Bool {
-        guard let sourcePath, !excludedPaths.isEmpty else { return false }
-        return excludedPaths.contains { isSourcePath(sourcePath, inside: $0) }
+        SourcePathPolicy.isExcluded(sourcePath, in: excludedPaths)
     }
 
     /// 来源归属判断必须有路径边界：`/Media/A` 不能匹配 `/Media/Anime`，
     /// `emby://server/source` 也不能匹配 `emby://server/source2`。所有来源过滤统一走这里。
     nonisolated static func isSourcePath(_ candidate: String?, inside sourceRoot: String) -> Bool {
-        guard let candidate, !sourceRoot.isEmpty else { return false }
-        let sourceRoot = normalizedSourceRoot(sourceRoot)
-        guard !sourceRoot.isEmpty else { return false }
-        if sourceRoot == "/" {
-            return candidate.hasPrefix("/")
-        }
-        return candidate == sourceRoot || candidate.hasPrefix("\(sourceRoot)/")
-    }
-
-    private nonisolated static func normalizedSourceRoot(_ sourceRoot: String) -> String {
-        var normalized = sourceRoot
-        while normalized.count > 1,
-              normalized.hasSuffix("/"),
-              !normalized.hasSuffix("://") {
-            normalized.removeLast()
-        }
-        return normalized
+        SourcePathPolicy.isSourcePath(candidate, inside: sourceRoot)
     }
 
     private func scheduleFileHealthRefresh() {
@@ -3456,66 +3241,16 @@ final class AppState: ObservableObject {
         let itemSnapshots = items
         let sourceSnapshots = sources
         let privateItemIDs = cachedPrivateItemIDs
-        // 不参与健康检查的来源：其失效文件与离线状态都不计入。
-        let healthExcludedPaths = sourceSnapshots.filter { !$0.includeInHealthCheck }.map(\.path)
 
-        fileHealthTask = Task { [itemSnapshots, sourceSnapshots, privateItemIDs, healthExcludedPaths, refreshID] in
+        fileHealthTask = Task { [itemSnapshots, sourceSnapshots, privateItemIDs, refreshID] in
             let healthStart = Date()
             // 全库逐条 stat（本库 5.4 万次、NAS 上单次可达秒级）是长阻塞 I/O，
             // 绝不能占协作线程池——否则音乐列表等轻量后台构建会排队数秒。
             let health = await BlockingIOExecutor.run {
-                let missingItemIDs = Set(itemSnapshots.compactMap { item -> String? in
-                    guard !privateItemIDs.contains(item.id),
-                          item.type != .music,
-                          let sourcePath = item.sourcePath,
-                          let source = sourceSnapshots
-                              .filter({
-                                  $0.includeInHealthCheck &&
-                                  Self.isSourcePath(sourcePath, inside: $0.path)
-                              })
-                              .max(by: { $0.path.count < $1.path.count }),
-                          !Self.sourcePathExcluded(sourcePath, in: healthExcludedPaths) else {
-                        return nil
-                    }
-
-                    let trimmedFilePath = item.filePath?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    if source.sourceKind.isRemoteMediaServer {
-                        return trimmedFilePath.isEmpty ? item.id : nil
-                    }
-
-                    guard !trimmedFilePath.isEmpty,
-                          !item.isRemoteResource,
-                          !FileManager.default.fileExists(atPath: trimmedFilePath) else {
-                        return nil
-                    }
-                    return item.id
-                })
-
-                let offlineSourceIDs = Set(sourceSnapshots.compactMap { source -> String? in
-                    // URL 媒体源没有磁盘路径，健康判定由可达性检查负责，不在此处标记离线。
-                    guard !source.sourceKind.isRemoteMediaServer,
-                          source.sourceKind != .url,
-                          source.includeInHealthCheck,
-                          !FileManager.default.fileExists(atPath: source.path) else {
-                        return nil
-                    }
-                    return source.id
-                })
-
-                let safeMissingItemIDs = Set(itemSnapshots.compactMap { item -> String? in
-                    guard missingItemIDs.contains(item.id) else { return nil }
-                    guard let sourcePath = item.sourcePath else { return item.id }
-                    let source = sourceSnapshots
-                        .filter { Self.isSourcePath(sourcePath, inside: $0.path) }
-                        .max { $0.path.count < $1.path.count }
-                    guard let source else { return item.id }
-                    return offlineSourceIDs.contains(source.id) ? nil : item.id
-                })
-
-                return (
-                    missingItemIDs: missingItemIDs,
-                    safeMissingItemIDs: safeMissingItemIDs,
-                    offlineSourceIDs: offlineSourceIDs
+                FileHealthEvaluator.evaluate(
+                    items: itemSnapshots,
+                    sources: sourceSnapshots,
+                    privateItemIDs: privateItemIDs
                 )
             }
 
@@ -3682,9 +3417,9 @@ final class AppState: ObservableObject {
     // MARK: - URL 视频媒体源
 
     /// 所有用户添加的 URL 视频聚合在这个虚拟来源路径下。
-    static let urlMediaSourcePath = "urlsource://local"
+    static let urlMediaSourcePath = URLSourcePolicy.mediaSourcePath
     /// 串流地址允许的协议（mpv 原生支持）。
-    static let urlMediaSchemes: Set<String> = ["http", "https", "rtsp", "rtmp", "rtp", "mms", "srt", "udp", "ftp"]
+    static let urlMediaSchemes = URLSourcePolicy.mediaSchemes
 
     /// 当前的 URL 媒体源容器（最多一个）。
     var urlMediaSource: MediaSource? {
@@ -3722,27 +3457,11 @@ final class AppState: ObservableObject {
 
     /// 校验并规范化用户输入的视频地址。
     func normalizedURLSourceString(_ raw: String) -> String? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              let comps = URLComponents(string: trimmed),
-              let scheme = comps.scheme?.lowercased(),
-              Self.urlMediaSchemes.contains(scheme),
-              (comps.host?.isEmpty == false) else {
-            return nil
-        }
-        return trimmed
+        URLSourcePolicy.normalizedURLString(raw)
     }
 
     private func defaultTitle(forURL urlString: String) -> String {
-        if let url = URL(string: urlString) {
-            let last = url.lastPathComponent
-            if !last.isEmpty, last != "/" {
-                let stem = (last as NSString).deletingPathExtension
-                return stem.isEmpty ? last : stem
-            }
-            if let host = url.host, !host.isEmpty { return host }
-        }
-        return "URL 视频"
+        URLSourcePolicy.defaultTitle(forURL: urlString)
     }
 
     @discardableResult
@@ -3783,15 +3502,7 @@ final class AppState: ObservableObject {
 
     /// 统计一段文本里有多少个不重复的可添加链接（支持每行一个的批量粘贴）。
     func addableURLCount(in raw: String) -> Int {
-        let lines = raw.split(whereSeparator: { $0.isNewline }).map(String.init)
-        let candidates = lines.isEmpty ? [raw] : lines
-        var seen = Set<String>()
-        for line in candidates {
-            if let normalized = normalizedURLSourceString(line) {
-                seen.insert(normalized)
-            }
-        }
-        return seen.count
+        URLSourcePolicy.addableURLCount(in: raw)
     }
 
     /// 批量添加链接：每行一个，自动去重、跳过无效和已存在项。返回新增数量。
@@ -3807,7 +3518,7 @@ final class AppState: ObservableObject {
         var newItems: [MediaItem] = []
         var seenIDs = Set(items.map(\.id))
         for line in lines {
-            guard let normalized = normalizedURLSourceString(line) else { continue }
+            guard let normalized = URLSourcePolicy.normalizedURLString(line) else { continue }
             let id = StableID.make(prefix: "url", value: normalized)
             guard seenIDs.insert(id).inserted else { continue }
             newItems.append(MediaItem(
@@ -3918,15 +3629,7 @@ final class AppState: ObservableObject {
             urlHealthMonitor.reset()
             return
         }
-        let probeItems = urlSourceItems.compactMap { item -> (id: String, url: URL)? in
-            guard let filePath = item.filePath,
-                  let url = URL(string: filePath),
-                  let scheme = url.scheme?.lowercased(),
-                  scheme == "http" || scheme == "https" else {
-                return nil
-            }
-            return (item.id, url)
-        }
+        let probeItems = URLSourcePolicy.probeItems(from: urlSourceItems)
         let liveIDs = Set(urlSourceItems.map(\.id))
         urlHealthMonitor.refresh(probeItems: probeItems, liveIDs: liveIDs) { [weak self] in
             self?.libraryRevision += 1
@@ -4017,27 +3720,30 @@ final class AppState: ObservableObject {
             alert = AppAlert(title: "无法导入封面", message: "应用数据目录不可用。")
             return
         }
-        let ext = sourceURL.pathExtension.isEmpty ? "jpg" : sourceURL.pathExtension.lowercased()
-        let suffix = kind == .poster ? "custom-poster" : "custom-backdrop"
-        let timestamp = Int(Date().timeIntervalSince1970)
-        let destURL = thumbnailsDir.appendingPathComponent("\(item.id)-\(suffix)-\(timestamp).\(ext)")
-        do {
-            try FileManager.default.createDirectory(at: thumbnailsDir, withIntermediateDirectories: true)
-            if let existing = try? FileManager.default.contentsOfDirectory(at: thumbnailsDir, includingPropertiesForKeys: nil) {
-                for old in existing where old.lastPathComponent.hasPrefix("\(item.id)-\(suffix)-") {
-                    try? FileManager.default.removeItem(at: old)
+
+        Task { [weak self] in
+            do {
+                let destURL = try await CustomArtworkFileImporter.importArtwork(
+                    itemID: item.id,
+                    sourceURL: sourceURL,
+                    thumbnailsDirectory: thumbnailsDir,
+                    kind: kind
+                )
+                await MainActor.run {
+                    guard let self else { return }
+                    ArtworkImageCache.invalidateMissing(path: destURL.path)
+                    switch kind {
+                    case .poster:
+                        self.applyMetadata(MediaMetadataUpdate(posterPath: destURL.path), to: item)
+                    case .backdrop:
+                        self.applyMetadata(MediaMetadataUpdate(backdropPath: destURL.path), to: item)
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self?.showError("封面导入失败", error)
                 }
             }
-            try FileManager.default.copyItem(at: sourceURL, to: destURL)
-            ArtworkImageCache.invalidateMissing(path: destURL.path)
-            switch kind {
-            case .poster:
-                applyMetadata(MediaMetadataUpdate(posterPath: destURL.path), to: item)
-            case .backdrop:
-                applyMetadata(MediaMetadataUpdate(backdropPath: destURL.path), to: item)
-            }
-        } catch {
-            showError("封面导入失败", error)
         }
     }
 
@@ -4142,7 +3848,7 @@ final class AppState: ObservableObject {
             let session = try await plexService.authenticate(serverURL: serverURL, token: trimmedToken)
             try sourceRepository?.save(source)
             sourceSaved = true
-            try remoteCredentialStore.save(
+            try await remoteCredentialStore.saveAsync(
                 RemoteSourceCredential(
                     kind: provider.credentialKind,
                     serverURL: session.serverURL.absoluteString,
@@ -4178,7 +3884,7 @@ final class AppState: ObservableObject {
                 } catch {
                     logger?.log("连接失败回滚：删除远程连接器账户失败(\(sourceID))：\(error.localizedDescription)", level: .warning)
                 }
-                remoteCredentialStore.delete(sourceID: sourceID)
+                await remoteCredentialStore.deleteAsync(sourceID: sourceID)
                 do {
                     try sourceRepository?.delete(id: sourceID)
                 } catch {
@@ -4256,7 +3962,7 @@ final class AppState: ObservableObject {
             )
             try sourceRepository?.save(source)
             sourceSaved = true
-            try remoteCredentialStore.save(
+            try await remoteCredentialStore.saveAsync(
                 RemoteSourceCredential(
                     kind: provider.credentialKind,
                     serverURL: session.serverURL.absoluteString,
@@ -4292,7 +3998,7 @@ final class AppState: ObservableObject {
                 } catch {
                     logger?.log("连接失败回滚：删除远程连接器账户失败(\(sourceID))：\(error.localizedDescription)", level: .warning)
                 }
-                remoteCredentialStore.delete(sourceID: sourceID)
+                await remoteCredentialStore.deleteAsync(sourceID: sourceID)
                 do {
                     try sourceRepository?.delete(id: sourceID)
                 } catch {
@@ -4519,7 +4225,7 @@ final class AppState: ObservableObject {
         try mediaDetailRepository?.prepareBackfill(
             mediaIDs: embyItems.filter { $0.parentID == nil && $0.type != .music }.map(\.id)
         )
-        scheduleEmbyArtworkWarmup(source: source, items: embyItems)
+        await scheduleEmbyArtworkWarmup(source: source, items: embyItems)
     }
 
     private func importPlexItems(source: MediaSource, session: PlexSession) async throws {
@@ -4537,7 +4243,7 @@ final class AppState: ObservableObject {
         try mediaDetailRepository?.prepareBackfill(
             mediaIDs: plexItems.filter { $0.parentID == nil && $0.type != .music }.map(\.id)
         )
-        scheduleEmbyArtworkWarmup(source: source, items: plexItems)
+        await scheduleEmbyArtworkWarmup(source: source, items: plexItems)
     }
 
     private func preservingLocalTraceForDisabledEmbySync(_ incoming: MediaItem) -> MediaItem {
@@ -4557,13 +4263,13 @@ final class AppState: ObservableObject {
         source: MediaSource,
         items: [MediaItem],
         resumingTaskID: UUID? = nil
-    ) {
+    ) async {
         let urls = artworkWarmupURLs(for: items)
         guard !urls.isEmpty else { return }
 
         embyArtworkWarmupTasks[source.id]?.cancel()
         let currentURLStrings = Set(urls.map(\.absoluteString))
-        let savedProgress = artworkWarmupProgressRecord(for: source.id)
+        let savedProgress = await artworkWarmupProgressRecord(for: source.id)
         var completedURLStrings = Set(savedProgress?.completedURLs ?? [])
         completedURLStrings.formIntersection(currentURLStrings)
 
@@ -4579,7 +4285,7 @@ final class AppState: ObservableObject {
         )
 
         guard !remainingURLs.isEmpty else {
-            clearArtworkWarmupProgress(sourceID: source.id)
+            await clearArtworkWarmupProgress(sourceID: source.id)
             updateBackgroundTask(
                 id: taskID,
                 progress: 1,
@@ -4589,7 +4295,7 @@ final class AppState: ObservableObject {
             return
         }
 
-        persistArtworkWarmupProgress(
+        await persistArtworkWarmupProgress(
             sourceID: source.id,
             completedURLs: completedURLStrings,
             totalCount: totalCount
@@ -4607,7 +4313,7 @@ final class AppState: ObservableObject {
                 )
                 if succeeded {
                     completed.insert(url.absoluteString)
-                    self.persistArtworkWarmupProgress(
+                    await self.persistArtworkWarmupProgress(
                         sourceID: source.id,
                         completedURLs: completed,
                         totalCount: totalCount
@@ -4628,10 +4334,10 @@ final class AppState: ObservableObject {
             }
             self.embyArtworkWarmupTasks[source.id] = nil
             if failed == 0 {
-                self.clearArtworkWarmupProgress(sourceID: source.id)
+                await self.clearArtworkWarmupProgress(sourceID: source.id)
                 self.finishBackgroundTask(id: taskID, errors: [])
             } else {
-                self.persistArtworkWarmupProgress(
+                await self.persistArtworkWarmupProgress(
                     sourceID: source.id,
                     completedURLs: completed,
                     totalCount: totalCount
@@ -4694,7 +4400,7 @@ final class AppState: ObservableObject {
         operation: (EmbySession) async throws -> T
     ) async throws -> T {
         let provider = Self.remoteConnectorProvider(for: source) ?? .emby
-        guard var credential = try remoteCredentialStore.load(sourceID: source.id),
+        guard var credential = try await remoteCredentialStore.loadAsync(sourceID: source.id),
               credential.kind == provider.credentialKind,
               let serverURL = URL(string: credential.serverURL),
               let accessToken = credential.accessToken,
@@ -4734,7 +4440,7 @@ final class AppState: ObservableObject {
             credential.username = refreshed.username
             credential.accessToken = refreshed.accessToken
             credential.userID = refreshed.userID
-            try remoteCredentialStore.save(credential, sourceID: source.id)
+            try await remoteCredentialStore.saveAsync(credential, sourceID: source.id)
             logger?.log("\(provider.displayName) token 已自动恢复：\(source.name)")
             return try await operation(refreshed)
         }
@@ -4744,7 +4450,7 @@ final class AppState: ObservableObject {
         for source: MediaSource,
         operation: (PlexSession) async throws -> T
     ) async throws -> T {
-        guard let credential = try remoteCredentialStore.load(sourceID: source.id),
+        guard let credential = try await remoteCredentialStore.loadAsync(sourceID: source.id),
               credential.kind == RemoteConnectorProvider.plex.credentialKind,
               let serverURL = URL(string: credential.serverURL),
               let accessToken = credential.accessToken,
@@ -5397,7 +5103,7 @@ final class AppState: ObservableObject {
         // 否则会把上次已经预热好的封面又全部抹掉、重头下载。
         // 兼容已经写过进度但还没来得及写 started 标记的旧任务：只要有 1.2.2 进度记录，
         // 就视为续跑，避免再次清空缓存导致从头下载。
-        let hasSavedProgress = !(artworkWarmupProgressRecord(for: progressKey)?.completedURLs.isEmpty ?? true)
+        let hasSavedProgress = !(await artworkWarmupProgressRecord(for: progressKey)?.completedURLs.isEmpty ?? true)
         let isResuming = defaults.bool(forKey: Self.version122ArtworkRebuildStartedKey) || hasSavedProgress
 
         let taskID = beginBackgroundTask(
@@ -5415,9 +5121,7 @@ final class AppState: ObservableObject {
         if !isResuming {
             // 首次：清掉整个进度文件（含各源旧的预热进度，与原行为一致）和旧的烘焙封面，
             // 然后立刻落一个“已启动”标记，确保即便清理后马上退出，下次也能从“继续”进入。
-            if let progressURL = artworkWarmupProgressURL {
-                try? FileManager.default.removeItem(at: progressURL)
-            }
+            await ArtworkWarmupProgressStore.removeFile(at: artworkWarmupProgressURL)
             await ArtworkImageCache.clearRemotePrebakedArtwork()
             posterRevision += 1
             defaults.set(true, forKey: Self.version122ArtworkRebuildStartedKey)
@@ -5427,7 +5131,7 @@ final class AppState: ObservableObject {
         guard !urls.isEmpty else {
             updateBackgroundTask(id: taskID, progress: 1, detail: "旧封面缓存已清理，当前没有远程封面")
             finishBackgroundTask(id: taskID, errors: [])
-            clearArtworkWarmupProgress(sourceID: progressKey)
+            await clearArtworkWarmupProgress(sourceID: progressKey)
             defaults.set(true, forKey: Self.version122ArtworkRebuildCompletedKey)
             versionMaintenanceLogger.info("Completed 1.2.2 remote artwork rebuild with no remote artwork")
             return
@@ -5435,12 +5139,12 @@ final class AppState: ObservableObject {
 
         // 读取上次进度，并与本次需要预热的 URL 取交集（媒体源可能已变化），跳过已完成的。
         let currentURLStrings = Set(urls.map(\.absoluteString))
-        var completedURLStrings = Set(artworkWarmupProgressRecord(for: progressKey)?.completedURLs ?? [])
+        var completedURLStrings = Set(await artworkWarmupProgressRecord(for: progressKey)?.completedURLs ?? [])
         completedURLStrings.formIntersection(currentURLStrings)
         let totalCount = urls.count
         let remainingURLs = urls.filter { !completedURLStrings.contains($0.absoluteString) }
 
-        persistArtworkWarmupProgress(
+        await persistArtworkWarmupProgress(
             sourceID: progressKey,
             completedURLs: completedURLStrings,
             totalCount: totalCount
@@ -5482,7 +5186,7 @@ final class AppState: ObservableObject {
                 // 与 Emby 预热一致：无论成功与否都记为已处理，保证可终止、不重复下载。
                 completedURLStrings.insert(urlString)
             }
-            persistArtworkWarmupProgress(
+            await persistArtworkWarmupProgress(
                 sourceID: progressKey,
                 completedURLs: completedURLStrings,
                 totalCount: totalCount
@@ -5501,7 +5205,7 @@ final class AppState: ObservableObject {
         // 失败的远程 URL 已按“已处理”写入进度，确保任务可终止；这里不把任务中心标成失败，
         // 避免 1.2.2 一次性维护长期留在失败列表。用户可通过对应来源刷新继续补图。
         finishBackgroundTask(id: taskID, errors: [])
-        clearArtworkWarmupProgress(sourceID: progressKey)
+        await clearArtworkWarmupProgress(sourceID: progressKey)
         defaults.set(true, forKey: Self.version122ArtworkRebuildCompletedKey)
         versionMaintenanceLogger.info(
             "Completed 1.2.2 remote artwork rebuild total=\(totalCount) failed=\(failures)"
@@ -5952,7 +5656,7 @@ final class AppState: ObservableObject {
         remountingNetworkSourceIDs.insert(source.id)
         defer { remountingNetworkSourceIDs.remove(source.id) }
 
-        guard let credential = try? remoteCredentialStore.load(sourceID: source.id),
+        guard let credential = try? await remoteCredentialStore.loadAsync(sourceID: source.id),
               let mountURL = networkMountURL(for: credential) else {
             return false
         }
@@ -6182,57 +5886,51 @@ final class AppState: ObservableObject {
 
     func clearCompletedBackgroundTasks() {
         backgroundTasks.removeAll { !$0.state.isActive }
+        persistBackgroundTasksIfPossible(immediate: true)
     }
 
     func clearBackgroundTask(id: UUID) {
         backgroundTasks.removeAll { task in
             task.id == id && !task.state.isActive
         }
+        persistBackgroundTasksIfPossible(immediate: true)
     }
 
     func canRetryBackgroundTask(_ task: BackgroundTaskSnapshot) -> Bool {
-        guard task.state == .failed,
-              !hasActiveRetryEquivalent(for: task) else {
-            return false
-        }
-        switch task.kind {
-        case .fullScan, .incrementalScan:
-            guard let source = backgroundTaskRetrySource(for: task),
-                  !source.sourceKind.isRemoteMediaServer else {
-                return false
-            }
-            return true
-        case .embySync:
-            guard let source = backgroundTaskRetrySource(for: task) else { return false }
-            return source.sourceKind.isRemoteMediaServer
-        case .artworkWarmup:
-            guard let source = backgroundTaskRetrySource(for: task),
-                  source.sourceKind.isRemoteMediaServer else {
-                return false
-            }
-            return items.contains { item in
+        let source = backgroundTaskRetrySource(for: task)
+        let item = backgroundTaskRetryItem(for: task)
+        let sourceIsRemoteMediaServer = source?.sourceKind.isRemoteMediaServer
+        let artworkWarmupHasSourceItems: Bool
+        if task.kind == .artworkWarmup, let source {
+            artworkWarmupHasSourceItems = items.contains { item in
                 guard let sourcePath = item.sourcePath else { return false }
                 return Self.isSourcePath(sourcePath, inside: source.path)
             }
-        case .cleanup:
-            return true
-        case .metadataSupplement:
-            return !isSupplementingMetadata
-        case .videoCache:
-            guard videoOfflineCacheStore != nil,
-                  let item = backgroundTaskRetryItem(for: task) else {
-                return false
-            }
-            return !videoCacheQualityChoices(for: item).isEmpty
-        case .keyframeStoryboard:
-            guard let item = backgroundTaskRetryItem(for: task) else { return false }
-            return canGenerateVideoFrameStoryboard(for: item)
-        case .markerAnalysis:
-            guard let item = backgroundTaskRetryItem(for: task) else { return false }
-            return canAnalyzeIntroOutroMarkers(for: item)
-        case .musicIndex:
-            return musicProjectionRepository != nil
+        } else {
+            artworkWarmupHasSourceItems = false
         }
+        let hasVideoCacheQualityChoices: Bool
+        if task.kind == .videoCache,
+           videoOfflineCacheStore != nil,
+           let item {
+            hasVideoCacheQualityChoices = !videoCacheQualityChoices(for: item).isEmpty
+        } else {
+            hasVideoCacheQualityChoices = false
+        }
+        return BackgroundTaskRetryPolicy.canRetry(
+            BackgroundTaskRetryPolicy.Input(
+                task: task,
+                activeTasks: backgroundTasks,
+                retrySourceIsRemoteMediaServer: sourceIsRemoteMediaServer,
+                artworkWarmupHasSourceItems: artworkWarmupHasSourceItems,
+                hasVideoCacheStore: videoOfflineCacheStore != nil,
+                hasVideoCacheQualityChoices: hasVideoCacheQualityChoices,
+                canGenerateKeyframeStoryboard: item.map { canGenerateVideoFrameStoryboard(for: $0) } ?? false,
+                canAnalyzeMarkers: item.map { canAnalyzeIntroOutroMarkers(for: $0) } ?? false,
+                hasMusicProjectionRepository: musicProjectionRepository != nil,
+                isSupplementingMetadata: isSupplementingMetadata
+            )
+        )
     }
 
     func retryBackgroundTask(_ task: BackgroundTaskSnapshot) {
@@ -6254,7 +5952,9 @@ final class AppState: ObservableObject {
                 guard let sourcePath = item.sourcePath else { return false }
                 return Self.isSourcePath(sourcePath, inside: source.path)
             }
-            scheduleEmbyArtworkWarmup(source: source, items: sourceItems)
+            Task { @MainActor [weak self] in
+                await self?.scheduleEmbyArtworkWarmup(source: source, items: sourceItems)
+            }
         case .cleanup:
             runOneClickCleanup()
         case .metadataSupplement:
@@ -6281,23 +5981,6 @@ final class AppState: ObservableObject {
     private func backgroundTaskRetryItem(for task: BackgroundTaskSnapshot) -> MediaItem? {
         guard let itemID = task.retryItemID else { return nil }
         return items.first { $0.id == itemID }
-    }
-
-    private func hasActiveRetryEquivalent(for task: BackgroundTaskSnapshot) -> Bool {
-        backgroundTasks.contains { candidate in
-            guard candidate.id != task.id,
-                  candidate.state.isActive,
-                  candidate.kind == task.kind else {
-                return false
-            }
-            if let sourceID = task.retrySourceID {
-                return candidate.retrySourceID == sourceID
-            }
-            if let itemID = task.retryItemID {
-                return candidate.retryItemID == itemID
-            }
-            return task.kind == .cleanup || task.kind == .metadataSupplement
-        }
     }
 
     func showFloatingNotice(
@@ -6470,10 +6153,7 @@ final class AppState: ObservableObject {
             hidesDetail: hidesDetail,
             retrySourceID: source.id
         )
-        backgroundTasks.insert(task, at: 0)
-        if backgroundTasks.count > 40 {
-            backgroundTasks.removeLast(backgroundTasks.count - 40)
-        }
+        backgroundTasks = BackgroundTaskListPolicy.inserting(task, into: backgroundTasks)
         showBackgroundTaskQueuedNotice(task)
         return task.id
     }
@@ -6496,54 +6176,16 @@ final class AppState: ObservableObject {
     }
 
     private nonisolated static func loadBackgroundTasks(from url: URL?) async -> [BackgroundTaskSnapshot]? {
-        await Task.detached(priority: .utility) {
-            guard let url,
-                  let data = try? Data(contentsOf: url),
-                  let decoded = try? JSONDecoder().decode([BackgroundTaskSnapshot].self, from: data) else {
-                return nil
-            }
-            return decoded
-        }.value
-    }
-
-    private func restoreBackgroundTasksIfPossible() {
-        guard let url = backgroundTasksURL,
-              let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode([BackgroundTaskSnapshot].self, from: data) else { return }
-        applyRestoredBackgroundTasks(decoded)
+        await BackgroundTaskPersistence.load(from: url)
     }
 
     private func applyRestoredBackgroundTasks(_ decoded: [BackgroundTaskSnapshot]) {
-        var resumableArtworkWarmupTasks: [BackgroundTaskSnapshot] = []
         isRestoringBackgroundTasks = true
-        backgroundTasks = decoded.prefix(60).map { task in
-            var restored = task
-            if restored.hidesDetail {
-                restored.title = restored.kind.title
-                restored.detail = nil
-            }
-            guard task.state.isActive else { return restored }
-            if task.kind == .artworkWarmup, task.retrySourceID != nil {
-                restored.state = .running
-                restored.finishedAt = nil
-                restored.isCancellable = false
-                if !restored.hidesDetail {
-                    restored.detail = "继续封面预热…"
-                }
-                resumableArtworkWarmupTasks.append(restored)
-                return restored
-            }
-            restored.state = .failed
-            restored.finishedAt = restored.finishedAt ?? Date()
-            restored.isCancellable = false
-            if !restored.hidesDetail {
-                restored.detail = "上次退出时任务尚未完成。"
-            }
-            return restored
-        }
+        let restored = BackgroundTaskListPolicy.restoredTasks(from: decoded)
+        backgroundTasks = restored.tasks
         isRestoringBackgroundTasks = false
-        restoredArtworkWarmupTasks = resumableArtworkWarmupTasks
-        persistBackgroundTasksIfPossible()
+        restoredArtworkWarmupTasks = restored.resumableArtworkWarmupTasks
+        persistBackgroundTasksIfPossible(immediate: true)
     }
 
     private func resumeRestoredArtworkWarmupTasksIfNeeded() {
@@ -6564,68 +6206,41 @@ final class AppState: ObservableObject {
                 finishBackgroundTask(id: task.id, errors: ["这个媒体源暂时没有可预热的封面。"])
                 continue
             }
-            scheduleEmbyArtworkWarmup(source: source, items: sourceItems, resumingTaskID: task.id)
+            Task { @MainActor [weak self] in
+                await self?.scheduleEmbyArtworkWarmup(source: source, items: sourceItems, resumingTaskID: task.id)
+            }
         }
     }
 
-    private func persistBackgroundTasksIfPossible() {
+    private func persistBackgroundTasksIfPossible(immediate: Bool = false) {
         guard !isRestoringBackgroundTasks, let url = backgroundTasksURL else { return }
-        let persisted = Array(backgroundTasks.prefix(60))
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(persisted)
-            try data.write(to: url, options: [.atomic])
-        } catch {
-            logger?.log("任务中心历史保存失败：\(error.localizedDescription)", level: .warning)
-        }
+        backgroundTaskPersistence.schedule(backgroundTasks, to: url, immediate: immediate)
     }
 
-    private func artworkWarmupProgressRecord(for sourceID: String) -> ArtworkWarmupProgressRecord? {
-        loadArtworkWarmupProgressRecords()[sourceID]
+    private func artworkWarmupProgressRecord(for sourceID: String) async -> ArtworkWarmupProgressRecord? {
+        await ArtworkWarmupProgressStore.record(for: sourceID, from: artworkWarmupProgressURL)
     }
 
     private func persistArtworkWarmupProgress(
         sourceID: String,
         completedURLs: Set<String>,
         totalCount: Int
-    ) {
-        var records = loadArtworkWarmupProgressRecords()
-        records[sourceID] = ArtworkWarmupProgressRecord(
-            sourceID: sourceID,
-            completedURLs: completedURLs.sorted(),
-            totalCount: totalCount,
-            updatedAt: Date()
-        )
-        saveArtworkWarmupProgressRecords(records)
-    }
-
-    private func clearArtworkWarmupProgress(sourceID: String) {
-        var records = loadArtworkWarmupProgressRecords()
-        guard records.removeValue(forKey: sourceID) != nil else { return }
-        saveArtworkWarmupProgressRecords(records)
-    }
-
-    private func loadArtworkWarmupProgressRecords() -> [String: ArtworkWarmupProgressRecord] {
-        guard let url = artworkWarmupProgressURL,
-              let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode([String: ArtworkWarmupProgressRecord].self, from: data) else {
-            return [:]
-        }
-        return decoded
-    }
-
-    private func saveArtworkWarmupProgressRecords(_ records: [String: ArtworkWarmupProgressRecord]) {
-        guard let url = artworkWarmupProgressURL else { return }
+    ) async {
         do {
-            if records.isEmpty {
-                try? FileManager.default.removeItem(at: url)
-                return
-            }
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(records)
-            try data.write(to: url, options: [.atomic])
+            try await ArtworkWarmupProgressStore.persist(
+                sourceID: sourceID,
+                completedURLs: completedURLs,
+                totalCount: totalCount,
+                to: artworkWarmupProgressURL
+            )
+        } catch {
+            logger?.log("封面预热进度保存失败：\(error.localizedDescription)", level: .warning)
+        }
+    }
+
+    private func clearArtworkWarmupProgress(sourceID: String) async {
+        do {
+            try await ArtworkWarmupProgressStore.clear(sourceID: sourceID, from: artworkWarmupProgressURL)
         } catch {
             logger?.log("封面预热进度保存失败：\(error.localizedDescription)", level: .warning)
         }
@@ -6655,10 +6270,7 @@ final class AppState: ObservableObject {
             retryItemID: retryItemID,
             retryQualityID: retryQualityID
         )
-        backgroundTasks.insert(task, at: 0)
-        if backgroundTasks.count > 40 {
-            backgroundTasks.removeLast(backgroundTasks.count - 40)
-        }
+        backgroundTasks = BackgroundTaskListPolicy.inserting(task, into: backgroundTasks)
         showBackgroundTaskQueuedNotice(task)
         return task.id
     }
@@ -6692,6 +6304,7 @@ final class AppState: ObservableObject {
         backgroundTasks[index].finishedAt = Date()
         backgroundTasks[index].isCancellable = false
         let task = backgroundTasks[index]
+        persistBackgroundTasksIfPossible(immediate: true)
         let failed = !errors.isEmpty
         let noticeTitle = failed ? "\(task.kind.title)遇到问题" : "\(task.kind.title)已完成"
         let noticeMessage = task.hidesDetail ? nil : (errors.first ?? task.title)
@@ -6737,6 +6350,7 @@ final class AppState: ObservableObject {
         if let detail, !backgroundTasks[index].hidesDetail {
             backgroundTasks[index].detail = detail
         }
+        persistBackgroundTasksIfPossible(immediate: true)
     }
 
     private func markBackgroundTaskCancelled(id: UUID, detail: String?) {
@@ -6747,6 +6361,7 @@ final class AppState: ObservableObject {
         if let detail, !backgroundTasks[index].hidesDetail {
             backgroundTasks[index].detail = detail
         }
+        persistBackgroundTasksIfPossible(immediate: true)
     }
 
     /// 首次启动引导完成 / 跳过后调用：标记完成，不再弹出。
@@ -6784,14 +6399,11 @@ final class AppState: ObservableObject {
     }
 
     private func markCancellableScanTasksCancelled() {
-        for index in backgroundTasks.indices
-            where backgroundTasks[index].state.isActive &&
-            backgroundTasks[index].isCancellable &&
-            (backgroundTasks[index].kind == .fullScan || backgroundTasks[index].kind == .incrementalScan) {
-            backgroundTasks[index].state = .cancelled
-            backgroundTasks[index].finishedAt = Date()
-            backgroundTasks[index].isCancellable = false
+        let cancelled = BackgroundTaskListPolicy.cancellingActiveScanTasks(in: backgroundTasks)
+        if cancelled.changed {
+            backgroundTasks = cancelled.tasks
         }
+        persistBackgroundTasksIfPossible(immediate: true)
     }
 
     private func cancelAllCancellableBackgroundTasks() {
@@ -6805,11 +6417,11 @@ final class AppState: ObservableObject {
         keyframeStoryboardTasks.removeAll()
         playbackMarkerAnalysisTasks.values.forEach { $0.cancel() }
         playbackMarkerAnalysisTasks.removeAll()
-        for index in backgroundTasks.indices where backgroundTasks[index].state.isActive && backgroundTasks[index].isCancellable {
-            backgroundTasks[index].state = .cancelled
-            backgroundTasks[index].finishedAt = Date()
-            backgroundTasks[index].isCancellable = false
+        let cancelled = BackgroundTaskListPolicy.cancellingAllActiveCancellableTasks(in: backgroundTasks)
+        if cancelled.changed {
+            backgroundTasks = cancelled.tasks
         }
+        persistBackgroundTasksIfPossible(immediate: true)
     }
 
     private func restartScanIfNeeded(for source: MediaSource) {
@@ -6890,6 +6502,21 @@ final class AppState: ObservableObject {
         return nil
     }
 
+    private func cachedPlayableItemAsync(for item: MediaItem) async -> MediaItem? {
+        guard let store = videoOfflineCacheStore else { return nil }
+        if let entry = await store.entryAsync(for: item.id) {
+            do {
+                try await store.markAccessedAsync(itemID: item.id)
+            } catch {
+                logger?.log("视频缓存访问标记失败(\(item.id))：\(error.localizedDescription)", level: .warning)
+            }
+            await updateVideoCacheStorageSummaryAsync()
+            return VideoOfflineCacheStore.itemWithCache(item, entry: entry)
+        }
+        await refreshVideoCacheEntriesAsync(pruningMissingFiles: true)
+        return nil
+    }
+
     private func refreshVideoCacheEntries(pruningMissingFiles: Bool = false) {
         guard let store = videoOfflineCacheStore else {
             if !cachedVideoEntriesByItemID.isEmpty {
@@ -6902,14 +6529,39 @@ final class AppState: ObservableObject {
         }
         do {
             let next = pruningMissingFiles ? try store.refreshEntriesPruningMissingFiles() : store.allEntries()
-            if next != cachedVideoEntriesByItemID {
-                cachedVideoEntriesByItemID = next
-                rebuildHomeOfflineVideoCache()
-                videoCacheRevision += 1
-            }
+            applyVideoCacheEntries(next)
             updateVideoCacheStorageSummary()
         } catch {
             logger?.log("刷新视频缓存清单失败：\(error.localizedDescription)", level: .warning)
+        }
+    }
+
+    private func refreshVideoCacheEntriesAsync(pruningMissingFiles: Bool = false) async {
+        guard let store = videoOfflineCacheStore else {
+            if !cachedVideoEntriesByItemID.isEmpty {
+                cachedVideoEntriesByItemID = [:]
+                rebuildHomeOfflineVideoCache()
+                videoCacheRevision += 1
+            }
+            videoCacheStorageSummary = VideoCacheStorageSummary(entryCount: 0, totalBytes: 0, byteLimit: nil)
+            return
+        }
+        do {
+            let next = pruningMissingFiles
+                ? try await store.refreshEntriesPruningMissingFilesAsync()
+                : await store.allEntriesAsync()
+            applyVideoCacheEntries(next)
+            await updateVideoCacheStorageSummaryAsync()
+        } catch {
+            logger?.log("刷新视频缓存清单失败：\(error.localizedDescription)", level: .warning)
+        }
+    }
+
+    private func applyVideoCacheEntries(_ next: [String: VideoCacheEntry]) {
+        if next != cachedVideoEntriesByItemID {
+            cachedVideoEntriesByItemID = next
+            rebuildHomeOfflineVideoCache()
+            videoCacheRevision += 1
         }
     }
 
@@ -6945,7 +6597,7 @@ final class AppState: ObservableObject {
             remoteURL: selectedURL,
             isTranscode: !selectedOption.isOriginal
         )
-        try removeExistingVideoCacheBeforeRedownload(itemID: item.id, taskID: taskID, store: store)
+        try await removeExistingVideoCacheBeforeRedownload(itemID: item.id, taskID: taskID, store: store)
         let progressThrottler = VideoCacheProgressThrottler()
         let (temporaryURL, response) = try await controller.download(from: selectedURL) { [weak self] progress in
             let fileFraction = Self.videoCacheFileFraction(progress)
@@ -7001,9 +6653,9 @@ final class AppState: ObservableObject {
             fileSize: fileSize,
             createdAt: Date()
         )
-        try store.upsert(entry)
-        refreshVideoCacheEntries()
-        enforceVideoCacheLimitIfNeeded()
+        try await store.upsertAsync(entry)
+        await refreshVideoCacheEntriesAsync()
+        await enforceVideoCacheLimitIfNeededAsync()
         updateBackgroundTask(
             id: taskID,
             progress: Double(itemIndex + 1) / Double(max(totalItems, 1)),
@@ -7069,12 +6721,12 @@ final class AppState: ObservableObject {
         itemID: String,
         taskID: UUID,
         store: VideoOfflineCacheStore
-    ) throws {
+    ) async throws {
         guard videoCacheJobs[taskID]?.cleanedItemIDs.contains(itemID) == false else { return }
-        let removed = try store.remove(itemIDs: [itemID])
+        let removed = try await store.removeAsync(itemIDs: [itemID])
         videoCacheJobs[taskID]?.cleanedItemIDs.insert(itemID)
         if !removed.isEmpty {
-            refreshVideoCacheEntries()
+            await refreshVideoCacheEntriesAsync()
         }
     }
 
@@ -7362,81 +7014,44 @@ final class AppState: ObservableObject {
         series: MediaItem,
         excluding queuedIDs: Set<String>
     ) -> [MediaItem] {
-        let episodes = children(for: series)
-            .filter(cacheableVideoCandidate)
-        guard !episodes.isEmpty else { return [] }
-
-        let planned: [MediaItem] = switch subscription.mode {
-        case .fullSeries:
-            episodes
-        case .nextEpisode:
-            Array(nextUnwatchedEpisodes(in: episodes).prefix(1))
-        case .nextUnwatched:
-            Array(nextUnwatchedEpisodes(in: episodes).prefix(max(subscription.episodeLimit, 1)))
-        case .season:
-            episodes.filter { episode in
-                guard let seasonNumber = subscription.seasonNumber else { return true }
-                return episode.seasonNumber == seasonNumber
-            }
-        }
-        return planned.filter {
-            !isVideoCached($0) &&
-            !queuedIDs.contains($0.id) &&
-            videoOfflineSubscriptionNetworkPolicyAllows(subscription.networkPolicy, item: $0)
-        }
+        VideoOfflinePolicy.subscriptionCandidates(
+            for: subscription,
+            episodes: children(for: series),
+            cachedItemIDs: Set(cachedVideoEntriesByItemID.keys),
+            queuedItemIDs: queuedIDs,
+            wifiAvailable: videoOfflineSubscriptionWiFiAvailable,
+            watchedThreshold: settings.watchedThreshold
+        )
     }
 
     private func videoOfflineSubscriptionSeasonNumber(from item: MediaItem, in series: MediaItem) -> Int? {
-        if item.type == .episode, let seasonNumber = item.seasonNumber {
-            return seasonNumber
-        }
-        let episodes = children(for: series)
-            .filter(cacheableVideoCandidate)
-        return nextUnwatchedEpisodes(in: episodes).first?.seasonNumber ?? episodes.first?.seasonNumber
+        VideoOfflinePolicy.preferredSubscriptionSeasonNumber(
+            for: item,
+            episodes: children(for: series),
+            watchedThreshold: settings.watchedThreshold
+        )
     }
 
     private func videoOfflineSubscriptionNetworkPolicyAllows(
         _ policy: VideoOfflineSubscriptionNetworkPolicy,
         item: MediaItem
     ) -> Bool {
-        switch policy {
-        case .allowRemote:
-            return true
-        case .wifiOnly:
-            return videoOfflineSubscriptionWiFiAvailable
-        case .localNetworkOnly:
-            guard let filePath = item.filePath,
-                  let url = URL(string: filePath),
-                  let host = url.host else {
-                return false
-            }
-            return Self.isLocalNetworkHost(host)
-        }
+        VideoOfflinePolicy.networkPolicyAllows(
+            policy,
+            item: item,
+            wifiAvailable: videoOfflineSubscriptionWiFiAvailable
+        )
     }
 
     private static func isLocalNetworkHost(_ host: String) -> Bool {
-        let normalized = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return false }
-        if normalized == "localhost" || normalized == "::1" || normalized.hasSuffix(".local") {
-            return true
-        }
-        if normalized.hasPrefix("fe80:") || normalized.hasPrefix("fd") {
-            return true
-        }
-        let octets = normalized.split(separator: ".").compactMap { Int(String($0)) }
-        guard octets.count == 4 else { return false }
-        switch (octets[0], octets[1]) {
-        case (10, _), (127, _), (192, 168):
-            return true
-        case (172, 16...31):
-            return true
-        default:
-            return false
-        }
+        VideoOfflinePolicy.isLocalNetworkHost(host)
     }
 
     private func nextUnwatchedEpisodes(in episodes: [MediaItem]) -> [MediaItem] {
-        episodes.filter { !($0.watched || $0.playProgress >= settings.watchedThreshold) }
+        VideoOfflinePolicy.nextUnwatchedEpisodes(
+            in: episodes,
+            watchedThreshold: settings.watchedThreshold
+        )
     }
 
     private func queuedVideoCacheItemIDs() -> Set<String> {
@@ -7466,26 +7081,36 @@ final class AppState: ObservableObject {
         videoCacheStorageSummary = store.storageSummary(byteLimit: Self.videoCacheByteLimit(from: settings.videoCacheSizeLimitGB))
     }
 
-    private func enforceVideoCacheLimitIfNeeded() {
+    private func updateVideoCacheStorageSummaryAsync() async {
+        guard let store = videoOfflineCacheStore else {
+            videoCacheStorageSummary = VideoCacheStorageSummary(entryCount: 0, totalBytes: 0, byteLimit: nil)
+            return
+        }
+        videoCacheStorageSummary = await store.storageSummaryAsync(
+            byteLimit: Self.videoCacheByteLimit(from: settings.videoCacheSizeLimitGB)
+        )
+    }
+
+    private func enforceVideoCacheLimitIfNeededAsync() async {
         guard let store = videoOfflineCacheStore,
               let byteLimit = Self.videoCacheByteLimit(from: settings.videoCacheSizeLimitGB) else {
-            updateVideoCacheStorageSummary()
+            await updateVideoCacheStorageSummaryAsync()
             return
         }
         let validItemIDs = Set(items.map(\.id))
         let cleanupHint = videoCacheCleanupHint()
         do {
-            let result = try store.runMaintenance(
+            let result = try await store.runMaintenanceAsync(
                 validItemIDs: validItemIDs,
                 byteLimit: byteLimit,
                 cleanupHint: cleanupHint
             )
-            refreshVideoCacheEntries()
+            await refreshVideoCacheEntriesAsync()
             if result.overLimitEntries > 0 {
                 logger?.log("视频缓存超过容量上限，已自动回收 \(result.overLimitEntries) 个缓存。", level: .info)
             }
         } catch {
-            updateVideoCacheStorageSummary()
+            await updateVideoCacheStorageSummaryAsync()
             logger?.log("视频缓存容量维护失败：\(error.localizedDescription)", level: .warning)
         }
     }
@@ -7537,13 +7162,7 @@ final class AppState: ObservableObject {
     }
 
     private func cacheableVideoCandidate(_ item: MediaItem) -> Bool {
-        guard item.type != .music,
-              let filePath = item.filePath,
-              let scheme = URL(string: filePath)?.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else {
-            return false
-        }
-        return true
+        VideoOfflinePolicy.isCacheableVideoCandidate(item)
     }
 
     private func uniqueCacheQualityChoices(from options: [VideoStreamQualityOption]) -> [VideoCacheQualityChoice] {
@@ -7912,13 +7531,7 @@ final class AppState: ObservableObject {
     }
 
     func uniqueMusicTracks(_ tracks: [MediaItem]) -> [MediaItem] {
-        var seen = Set<String>()
-        var result: [MediaItem] = []
-        for track in tracks where track.type == .music && track.filePath != nil {
-            guard seen.insert(track.id).inserted else { continue }
-            result.append(track)
-        }
-        return result
+        MusicTrackProjectionPolicy.uniquePlayableMusicTracks(tracks)
     }
 
     private func adjacentItem(to item: MediaItem, direction: Int) -> MediaItem? {
@@ -7963,16 +7576,19 @@ final class AppState: ObservableObject {
     // 随机播放洗牌袋 / 历史逻辑已抽到 MusicShuffleNavigator（见 adjacentItem 的 music 分支调用）。
 
     func openExternally(_ item: MediaItem) {
-        let playableItem = cachedPlayableItem(for: item) ?? item
-        guard let filePath = playableItem.filePath else {
-            alert = AppAlert(title: "无法打开外部播放器", message: "此媒体没有文件路径。")
-            return
-        }
-        do {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let playableItem = await cachedPlayableItemAsync(for: item) ?? item
+            guard let filePath = playableItem.filePath else {
+                alert = AppAlert(title: "无法打开外部播放器", message: "此媒体没有文件路径。")
+                return
+            }
             let path = playableItem.type == .music ? settings.musicExternalPlayerPath : settings.videoExternalPlayerPath
-            try externalPlayerService.open(filePath: filePath, preferredPlayerPath: path)
-        } catch {
-            showError("外部播放器不可用", error)
+            do {
+                try await externalPlayerService.openAsync(filePath: filePath, preferredPlayerPath: path)
+            } catch {
+                showError("外部播放器不可用", error)
+            }
         }
     }
 
@@ -9042,14 +8658,20 @@ final class AppState: ObservableObject {
 
     func createDatabaseBackup() {
         guard let database, let directories else { return }
-        do {
-            let backupURL = try database.createBackup(in: directories.databaseBackups)
-            alert = AppAlert(
-                title: "数据库备份完成",
-                message: "已创建一致性备份：\(backupURL.lastPathComponent)"
-            )
-        } catch {
-            showError("数据库备份失败", error)
+        Task { [weak self] in
+            do {
+                let backupURL = try await database.createBackupAsync(in: directories.databaseBackups)
+                await MainActor.run {
+                    self?.alert = AppAlert(
+                        title: "数据库备份完成",
+                        message: "已创建一致性备份：\(backupURL.lastPathComponent)"
+                    )
+                }
+            } catch {
+                await MainActor.run {
+                    self?.showError("数据库备份失败", error)
+                }
+            }
         }
     }
 
@@ -9104,8 +8726,30 @@ final class AppState: ObservableObject {
         }
     }
 
+    func setPrivacyPINAsync(_ pin: String) async -> Bool {
+        do {
+            try await privacyLockService.setPINAsync(pin)
+            settings.privacyPINEnabled = true
+            await settingsStore.saveAsync(settings)
+            privacyPINConfigured = true
+            privacyUnlocked = true
+            return true
+        } catch {
+            showError("隐私密码设置失败", error)
+            return false
+        }
+    }
+
     func verifyPrivacyPIN(_ pin: String) -> Bool {
         guard unlockPrivacyIfPINMatches(pin) else {
+            alert = AppAlert(title: "无法解锁", message: "密码不正确，请输入 4 到 8 位数字密码。")
+            return false
+        }
+        return true
+    }
+
+    func verifyPrivacyPINAsync(_ pin: String) async -> Bool {
+        guard await unlockPrivacyIfPINMatchesAsync(pin) else {
             alert = AppAlert(title: "无法解锁", message: "密码不正确，请输入 4 到 8 位数字密码。")
             return false
         }
@@ -9118,6 +8762,17 @@ final class AppState: ObservableObject {
         }
         settings.privacyPINEnabled = true
         settingsStore.save(settings)
+        privacyPINConfigured = true
+        privacyUnlocked = true
+        return true
+    }
+
+    func unlockPrivacyIfPINMatchesAsync(_ pin: String) async -> Bool {
+        guard await privacyLockService.verifyAsync(pin: pin) else {
+            return false
+        }
+        settings.privacyPINEnabled = true
+        await settingsStore.saveAsync(settings)
         privacyPINConfigured = true
         privacyUnlocked = true
         return true
@@ -9154,6 +8809,20 @@ final class AppState: ObservableObject {
         privacyLockService.removePIN()
         settings.privacyPINEnabled = false
         settingsStore.save(settings)
+        privacyPINConfigured = false
+        privacyUnlocked = false
+        clearDetailNavigation()
+        stopPlaybackIfPrivate()
+    }
+
+    func removePrivacyPINAsync() async {
+        guard privacyUnlocked else {
+            alert = AppAlert(title: "需要先解锁", message: "请先解锁\(settings.privacyVaultName)，再移除保险库密码。")
+            return
+        }
+        await privacyLockService.removePINAsync()
+        settings.privacyPINEnabled = false
+        await settingsStore.saveAsync(settings)
         privacyPINConfigured = false
         privacyUnlocked = false
         clearDetailNavigation()
@@ -9224,19 +8893,35 @@ final class AppState: ObservableObject {
     }
 
     private func configureLocalFileEventMonitoring() {
+        localFileEventMonitorConfigurationID = UUID()
+        let configurationID = localFileEventMonitorConfigurationID
         guard settings.automaticScanInterval != .disabled else {
             localFileEventMonitor.update(paths: [])
             return
         }
-        let paths = sources.compactMap { source -> String? in
-            guard source.autoScan,
-                  source.sourceKind == .local,
-                  FileAccessService.isReachableDirectory(source.path) else {
-                return nil
+        let sourceSnapshots = sources
+        Task { @MainActor [weak self] in
+            let paths = await Self.localFileEventMonitorPaths(in: sourceSnapshots)
+            guard let self,
+                  self.localFileEventMonitorConfigurationID == configurationID,
+                  self.settings.automaticScanInterval != .disabled else {
+                return
             }
-            return source.path
+            self.localFileEventMonitor.update(paths: paths)
         }
-        localFileEventMonitor.update(paths: paths)
+    }
+
+    nonisolated static func localFileEventMonitorPaths(in sources: [MediaSource]) async -> [String] {
+        await BlockingIOExecutor.run {
+            sources.compactMap { source -> String? in
+                guard source.autoScan,
+                      source.sourceKind == .local,
+                      FileAccessService.isReachableDirectory(source.path) else {
+                    return nil
+                }
+                return source.path
+            }
+        }
     }
 
     private func receiveLocalFileSystemChanges(_ changes: [LocalFileSystemChange]) {

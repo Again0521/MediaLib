@@ -120,22 +120,23 @@ public struct MediaSource: Identifiable, Codable, Hashable, Sendable {
     }
 
     public var sourceKind: MediaSourceKind {
-        if path.hasPrefix("urlsource://") {
+        let normalizedPath = path.lowercased()
+        if normalizedPath.hasPrefix("urlsource://") {
             return .url
         }
-        if path.hasPrefix("emby://") {
+        if normalizedPath.hasPrefix("emby://") {
             return .emby
         }
-        if path.hasPrefix("jellyfin://") {
+        if normalizedPath.hasPrefix("jellyfin://") {
             return .jellyfin
         }
-        if path.hasPrefix("plex://") {
+        if normalizedPath.hasPrefix("plex://") {
             return .plex
         }
-        if path.hasPrefix("smb://") {
+        if normalizedPath.hasPrefix("smb://") {
             return .smb
         }
-        if path.hasPrefix("ftp://") || path.hasPrefix("ftps://") {
+        if normalizedPath.hasPrefix("ftp://") || normalizedPath.hasPrefix("ftps://") {
             return .ftp
         }
         if name.hasPrefix("SMB ") {

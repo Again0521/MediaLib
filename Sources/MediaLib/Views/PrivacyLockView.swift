@@ -183,8 +183,8 @@ struct PrivacyLockView: View {
         entry.append(digit)
 
         if appState.privacyPINConfigured {
-            if PrivacyLockService.isValidPIN(entry), appState.unlockPrivacyIfPINMatches(entry) {
-                resetEntry(clearSetup: false)
+            if PrivacyLockService.isValidPIN(entry) {
+                unlockPIN(entry, reportFailure: false)
             }
             return
         }
@@ -202,11 +202,11 @@ struct PrivacyLockView: View {
 
     private func handleReturn() {
         if appState.privacyPINConfigured {
-            guard PrivacyLockService.isValidPIN(entry), appState.unlockPrivacyIfPINMatches(entry) else {
+            guard PrivacyLockService.isValidPIN(entry) else {
                 reportError("密码不正确，请重新输入。")
                 return
             }
-            resetEntry(clearSetup: false)
+            unlockPIN(entry, reportFailure: true)
             return
         }
 
@@ -230,8 +230,20 @@ struct PrivacyLockView: View {
     }
 
     private func createPIN(_ value: String) {
-        if appState.setPrivacyPIN(value) {
-            resetEntry(clearSetup: true)
+        Task { @MainActor in
+            if await appState.setPrivacyPINAsync(value) {
+                resetEntry(clearSetup: true)
+            }
+        }
+    }
+
+    private func unlockPIN(_ value: String, reportFailure: Bool) {
+        Task { @MainActor in
+            if await appState.unlockPrivacyIfPINMatchesAsync(value) {
+                resetEntry(clearSetup: false)
+            } else if reportFailure {
+                reportError("密码不正确，请重新输入。")
+            }
         }
     }
 

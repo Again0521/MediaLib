@@ -49,9 +49,13 @@ struct TraktService {
     let clientSecret: String
     private let base = "https://api.trakt.tv"
 
-    private var hasCredentials: Bool {
-        !clientID.trimmingCharacters(in: .whitespaces).isEmpty &&
-        !clientSecret.trimmingCharacters(in: .whitespaces).isEmpty
+    var hasCredentials: Bool {
+        Self.hasCredentials(clientID: clientID, clientSecret: clientSecret)
+    }
+
+    static func hasCredentials(clientID: String, clientSecret: String) -> Bool {
+        !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !clientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     // MARK: - 设备码授权

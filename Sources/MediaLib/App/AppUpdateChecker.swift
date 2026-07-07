@@ -17,6 +17,13 @@ struct AppUpdateInfo: Identifiable, Equatable {
     var id: String { tagName }
 }
 
+struct AppUpdateAssetCandidate: Equatable {
+    let name: String
+    let contentType: String
+    let size: Int
+    let browserDownloadURL: String
+}
+
 enum AppVersion {
     /// 打包版从 Info.plist 读取；swift run 裸二进制兜底用当前发布版本。
     static var current: String {
@@ -85,6 +92,68 @@ enum AppUpdateChecker {
         }
     }
 
+    static func latestReleaseInfo(fromGitHubReleasesJSON data: Data) throws -> AppUpdateInfo? {
+        let releases = try JSONDecoder().decode([GitHubRelease].self, from: data)
+        return latestReleaseInfo(from: releases)
+    }
+
+    static func releaseVersion(
+        tagName: String,
+        name: String?,
+        body: String?,
+        assetNames: [String]
+    ) -> String? {
+        let candidates = [
+            tagName,
+            name ?? "",
+            body ?? ""
+        ] + assetNames
+        return candidates.compactMap(AppVersion.extractVersion(from:)).first
+    }
+
+    static func preferredInstallAsset(from assets: [AppUpdateAssetCandidate]) -> AppUpdateAssetCandidate? {
+        guard let selectedIndex = preferredInstallAssetIndex(in: assets) else { return nil }
+        return assets[selectedIndex]
+    }
+
+    static func cleanedReleaseTitle(_ raw: String, version: String) -> String {
+        cleanReleaseTitle(raw, version: version)
+    }
+
+    static func parsedReleaseDate(_ text: String) -> Date? {
+        parseReleaseDate(text)
+    }
+
+    static func fallbackReleaseInfo(fromReleasePageHTML html: String) -> AppUpdateInfo? {
+        var seen = Set<String>()
+        let tags = regexCaptures(pattern: #"/Again0521/MediaLib/releases/tag/([^"?#<]+)"#, in: html).compactMap { raw -> String? in
+            let tag = raw.removingPercentEncoding ?? raw
+            guard !tag.isEmpty, seen.insert(tag).inserted else { return nil }
+            return tag
+        }
+        for tag in tags {
+            guard let version = AppVersion.extractVersion(from: tag) else { continue }
+            let releaseURL = URL(string: "https://github.com/Again0521/MediaLib/releases/tag/\(tag)") ?? repositoryPage
+            let assetPattern = #"/Again0521/MediaLib/releases/download/\#(NSRegularExpression.escapedPattern(for: tag))/([^"?#<]+?\.(?:dmg|zip))"#
+            let rawAssetName = regexCaptures(pattern: assetPattern, in: html).first
+            let assetName = rawAssetName.map { $0.removingPercentEncoding ?? $0 }
+            let downloadURL = rawAssetName.flatMap { URL(string: "https://github.com/Again0521/MediaLib/releases/download/\(tag)/\($0)") }
+            return AppUpdateInfo(
+                version: version,
+                tagName: tag,
+                title: "MediaLIB \(version)",
+                releaseNotes: "",
+                releaseURL: releaseURL,
+                downloadURL: downloadURL,
+                assetName: assetName,
+                assetSize: nil,
+                publishedAt: nil,
+                prerelease: tag.localizedCaseInsensitiveContains("beta")
+            )
+        }
+        return nil
+    }
+
     /// 拉取 releases 列表，从 tag/title/body/assets 中提取版本号，
     /// 并在可安装资产中选出版本号最大的发布。
     static func fetchLatestRelease() async throws -> AppUpdateInfo? {
@@ -139,8 +208,10 @@ enum AppUpdateChecker {
             }
             throw URLError(.badServerResponse)
         }
-        let releases = try JSONDecoder().decode([GitHubRelease].self, from: data)
+        return try latestReleaseInfo(fromGitHubReleasesJSON: data)
+    }
 
+    private static func latestReleaseInfo(from releases: [GitHubRelease]) -> AppUpdateInfo? {
         var best: (version: String, info: AppUpdateInfo)?
         for release in releases {
             guard !release.draft else { continue }
@@ -191,33 +262,7 @@ enum AppUpdateChecker {
             throw CheckerError.noReachableReleaseSource
         }
         guard let html = String(data: data, encoding: .utf8) else { return nil }
-        var seen = Set<String>()
-        let tags = regexCaptures(pattern: #"/Again0521/MediaLib/releases/tag/([^"?#<]+)"#, in: html).compactMap { raw -> String? in
-            let tag = raw.removingPercentEncoding ?? raw
-            guard !tag.isEmpty, seen.insert(tag).inserted else { return nil }
-            return tag
-        }
-        for tag in tags {
-            guard let version = AppVersion.extractVersion(from: tag) else { continue }
-            let releaseURL = URL(string: "https://github.com/Again0521/MediaLib/releases/tag/\(tag)") ?? repositoryPage
-            let assetPattern = #"/Again0521/MediaLib/releases/download/\#(NSRegularExpression.escapedPattern(for: tag))/([^"?#<]+?\.(?:dmg|zip))"#
-            let rawAssetName = regexCaptures(pattern: assetPattern, in: html).first
-            let assetName = rawAssetName.map { $0.removingPercentEncoding ?? $0 }
-            let downloadURL = rawAssetName.flatMap { URL(string: "https://github.com/Again0521/MediaLib/releases/download/\(tag)/\($0)") }
-            return AppUpdateInfo(
-                version: version,
-                tagName: tag,
-                title: "MediaLIB \(version)",
-                releaseNotes: "",
-                releaseURL: releaseURL,
-                downloadURL: downloadURL,
-                assetName: assetName,
-                assetSize: nil,
-                publishedAt: nil,
-                prerelease: tag.localizedCaseInsensitiveContains("beta")
-            )
-        }
-        return nil
+        return fallbackReleaseInfo(fromReleasePageHTML: html)
     }
 
     private static func regexCaptures(pattern: String, in text: String) -> [String] {
@@ -231,27 +276,35 @@ enum AppUpdateChecker {
     }
 
     private static func version(for release: GitHubRelease) -> String? {
-        let candidates = [
-            release.tagName,
-            release.name ?? "",
-            release.body ?? ""
-        ] + release.assets.map(\.name)
-        return candidates.compactMap(AppVersion.extractVersion(from:)).first
+        releaseVersion(
+            tagName: release.tagName,
+            name: release.name,
+            body: release.body,
+            assetNames: release.assets.map(\.name)
+        )
     }
 
     private static func preferredAsset(in assets: [GitHubAsset]) -> GitHubAsset? {
-        assets
-            .filter { !$0.browserDownloadURL.isEmpty }
-            .sorted { lhs, rhs in
-                let lhsRank = assetRank(lhs)
-                let rhsRank = assetRank(rhs)
-                if lhsRank != rhsRank { return lhsRank < rhsRank }
-                return lhs.size > rhs.size
-            }
-            .first { assetRank($0) < 100 }
+        let candidates = assets.map(\.candidate)
+        guard let selectedIndex = preferredInstallAssetIndex(in: candidates) else { return nil }
+        return assets[selectedIndex]
     }
 
-    private static func assetRank(_ asset: GitHubAsset) -> Int {
+    private static func preferredInstallAssetIndex(in assets: [AppUpdateAssetCandidate]) -> Int? {
+        assets
+            .enumerated()
+            .filter { !$0.element.browserDownloadURL.isEmpty }
+            .sorted { lhs, rhs in
+                let lhsRank = assetRank(lhs.element)
+                let rhsRank = assetRank(rhs.element)
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+                return lhs.element.size > rhs.element.size
+            }
+            .first { assetRank($0.element) < 100 }?
+            .offset
+    }
+
+    private static func assetRank(_ asset: AppUpdateAssetCandidate) -> Int {
         let name = asset.name.lowercased()
         let type = asset.contentType.lowercased()
         if name.hasSuffix(".dmg") || type.contains("diskimage") { return 0 }
@@ -317,5 +370,16 @@ private struct GitHubAsset: Decodable {
         case contentType = "content_type"
         case size
         case browserDownloadURL = "browser_download_url"
+    }
+}
+
+private extension GitHubAsset {
+    var candidate: AppUpdateAssetCandidate {
+        AppUpdateAssetCandidate(
+            name: name,
+            contentType: contentType,
+            size: size,
+            browserDownloadURL: browserDownloadURL
+        )
     }
 }

@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-public struct ExternalPlayer: Identifiable, Hashable {
+public struct ExternalPlayer: Identifiable, Hashable, Sendable {
     public var id: String { bundleIdentifier ?? path }
     public var name: String
     public var path: String
@@ -26,14 +26,22 @@ public enum ExternalPlayerError: LocalizedError {
 
 public final class ExternalPlayerService {
     private let workspace: NSWorkspace
+    private let fileExists: @Sendable (String) -> Bool
+    private let knownPlayersProvider: (@Sendable () -> [ExternalPlayer])?
     private let cacheLock = NSLock()
     private var cachedKnownPlayers: [ExternalPlayer]?
     private var cachedAvailablePlayersByCustomPath: [String: [ExternalPlayer]] = [:]
     private var workspaceObservers: [NSObjectProtocol] = []
     private var appActivationObserver: NSObjectProtocol?
 
-    public init(workspace: NSWorkspace = .shared) {
+    public init(
+        workspace: NSWorkspace = .shared,
+        fileExists: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
+        knownPlayersProvider: (@Sendable () -> [ExternalPlayer])? = nil
+    ) {
         self.workspace = workspace
+        self.fileExists = fileExists
+        self.knownPlayersProvider = knownPlayersProvider
         let center = workspace.notificationCenter
         workspaceObservers = [
             center.addObserver(
@@ -75,9 +83,8 @@ public final class ExternalPlayerService {
             cacheLock.unlock()
             return cachedKnownPlayers
         }
-        cacheLock.unlock()
 
-        let discovered = knownPlayerDefinitions.map { definition in
+        let discovered = knownPlayersProvider?() ?? knownPlayerDefinitions.map { definition in
             let discoveredURL = workspace.urlForApplication(withBundleIdentifier: definition.bundleIdentifier)
             return ExternalPlayer(
                 name: definition.name,
@@ -85,7 +92,6 @@ public final class ExternalPlayerService {
                 bundleIdentifier: definition.bundleIdentifier
             )
         }
-        cacheLock.lock()
         cachedKnownPlayers = discovered
         cacheLock.unlock()
         return discovered
@@ -100,8 +106,8 @@ public final class ExternalPlayerService {
         }
         cacheLock.unlock()
 
-        var players = knownPlayers.filter { FileManager.default.fileExists(atPath: $0.path) }
-        if let customPath, FileManager.default.fileExists(atPath: customPath) {
+        var players = knownPlayers.filter { fileExists($0.path) }
+        if let customPath, fileExists(customPath) {
             let customPlayer = ExternalPlayer(name: URL(fileURLWithPath: customPath).deletingPathExtension().lastPathComponent, path: customPath, bundleIdentifier: nil)
             if !players.contains(where: { $0.path == customPlayer.path }) {
                 players.append(customPlayer)
@@ -110,6 +116,38 @@ public final class ExternalPlayerService {
         cacheLock.lock()
         cachedAvailablePlayersByCustomPath[cacheKey] = players
         cacheLock.unlock()
+        return players
+    }
+
+    public func availablePlayersAsync(customPath: String? = nil) async -> [ExternalPlayer] {
+        let cacheKey = customPath ?? ""
+        if let cached = cachedAvailablePlayers(for: cacheKey) {
+            return cached
+        }
+
+        let discoveredPlayers = knownPlayers
+        let knownPaths = discoveredPlayers.map(\.path)
+        let existingKnownPaths = await existingPaths(knownPaths)
+        let customPathExists: Bool
+        if let customPath {
+            customPathExists = await pathExists(customPath)
+        } else {
+            customPathExists = false
+        }
+
+        var players = discoveredPlayers.filter { existingKnownPaths.contains($0.path) }
+        if let customPath, customPathExists {
+            let customPlayer = ExternalPlayer(
+                name: URL(fileURLWithPath: customPath).deletingPathExtension().lastPathComponent,
+                path: customPath,
+                bundleIdentifier: nil
+            )
+            if !players.contains(where: { $0.path == customPlayer.path }) {
+                players.append(customPlayer)
+            }
+        }
+
+        cacheAvailablePlayers(players, for: cacheKey)
         return players
     }
 
@@ -124,7 +162,7 @@ public final class ExternalPlayerService {
     public func open(filePath: String, preferredPlayerPath: String?) throws {
         let remoteURL = URL(string: filePath)
         let isRemote = ["http", "https"].contains(remoteURL?.scheme?.lowercased())
-        guard isRemote || FileManager.default.fileExists(atPath: filePath) else {
+        guard isRemote || fileExists(filePath) else {
             throw ExternalPlayerError.missingFile
         }
         let videoURL: URL
@@ -150,13 +188,79 @@ public final class ExternalPlayerService {
         }
     }
 
+    public func openAsync(filePath: String, preferredPlayerPath: String?) async throws {
+        let remoteURL = URL(string: filePath)
+        let isRemote = ["http", "https"].contains(remoteURL?.scheme?.lowercased())
+        if !isRemote {
+            guard await pathExists(filePath) else {
+                throw ExternalPlayerError.missingFile
+            }
+        }
+        let videoURL: URL
+        if isRemote {
+            guard let remoteURL else { throw ExternalPlayerError.invalidURL }
+            videoURL = remoteURL
+        } else {
+            videoURL = URL(fileURLWithPath: filePath)
+        }
+
+        if let preferredPlayerPath, !preferredPlayerPath.isEmpty {
+            try await openAsync(videoURL, withApplicationAtPath: preferredPlayerPath)
+            return
+        }
+
+        if isRemote, let player = await availablePlayersAsync().first {
+            try await openAsync(videoURL, withApplicationAtPath: player.path)
+            return
+        }
+
+        guard workspace.open(videoURL) else {
+            throw ExternalPlayerError.openFailed
+        }
+    }
+
     private func open(_ mediaURL: URL, withApplicationAtPath path: String) throws {
-        guard FileManager.default.fileExists(atPath: path) else {
+        guard fileExists(path) else {
             throw ExternalPlayerError.applicationNotFound(URL(fileURLWithPath: path).lastPathComponent)
         }
         let appURL = URL(fileURLWithPath: path)
         let configuration = NSWorkspace.OpenConfiguration()
         workspace.open([mediaURL], withApplicationAt: appURL, configuration: configuration)
+    }
+
+    private func openAsync(_ mediaURL: URL, withApplicationAtPath path: String) async throws {
+        guard await pathExists(path) else {
+            throw ExternalPlayerError.applicationNotFound(URL(fileURLWithPath: path).lastPathComponent)
+        }
+        let appURL = URL(fileURLWithPath: path)
+        let configuration = NSWorkspace.OpenConfiguration()
+        _ = try await workspace.open([mediaURL], withApplicationAt: appURL, configuration: configuration)
+    }
+
+    private func cachedAvailablePlayers(for cacheKey: String) -> [ExternalPlayer]? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return cachedAvailablePlayersByCustomPath[cacheKey]
+    }
+
+    private func cacheAvailablePlayers(_ players: [ExternalPlayer], for cacheKey: String) {
+        cacheLock.lock()
+        cachedAvailablePlayersByCustomPath[cacheKey] = players
+        cacheLock.unlock()
+    }
+
+    private func pathExists(_ path: String) async -> Bool {
+        let fileExists = self.fileExists
+        return await BlockingIOExecutor.run {
+            fileExists(path)
+        }
+    }
+
+    private func existingPaths(_ paths: [String]) async -> Set<String> {
+        let fileExists = self.fileExists
+        return await BlockingIOExecutor.run {
+            Set(paths.filter { fileExists($0) })
+        }
     }
 
     private var knownPlayerDefinitions: [(name: String, fallbackPath: String, bundleIdentifier: String)] {

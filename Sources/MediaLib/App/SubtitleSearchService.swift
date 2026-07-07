@@ -1,4 +1,5 @@
 import Foundation
+import MediaLibCore
 
 struct SubtitleResult: Identifiable, Hashable, Sendable {
     let id: String
@@ -40,6 +41,16 @@ enum SubtitleError: LocalizedError {
             return "字幕下载失败，请稍后重试。"
         }
     }
+}
+
+struct SubtitleSidecarIO: @unchecked Sendable {
+    var write: @Sendable (Data, URL) throws -> Void
+
+    static let fileSystem = SubtitleSidecarIO(
+        write: { data, url in
+            try data.write(to: url, options: .atomic)
+        }
+    )
 }
 
 struct SubtitleSearchService {
@@ -92,6 +103,7 @@ struct SubtitleSearchService {
 
     func downloadAndSave(fileID: Int, videoPath: String, apiKey: String) async throws -> URL {
         let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { throw SubtitleError.missingAPIKey }
         guard let url = URL(string: "\(Self.openSubsBase)/download") else { throw URLError(.badURL) }
 
         let body = try JSONEncoder().encode(["file_id": fileID])
@@ -109,14 +121,11 @@ struct SubtitleSearchService {
 
         let (subData, _) = try await URLSession.shared.data(from: dlURL)
 
-        let videoURL = URL(fileURLWithPath: videoPath)
-        let baseName = videoURL.deletingPathExtension().lastPathComponent
-        let dir = videoURL.deletingLastPathComponent()
-        let rawExt = URL(fileURLWithPath: info.file_name).pathExtension.lowercased()
-        let ext = rawExt.isEmpty ? "srt" : rawExt
-        let outputURL = dir.appendingPathComponent("\(baseName).\(ext)")
-        try subData.write(to: outputURL, options: .atomic)
-        return outputURL
+        return try await Self.saveSubtitleData(
+            subData,
+            videoPath: videoPath,
+            downloadedFileName: info.file_name
+        )
     }
 
     // MARK: - Unified multi-source search (free + configured)
@@ -152,7 +161,8 @@ struct SubtitleSearchService {
     func downloadOnline(result: OnlineSubtitleResult, videoPath: String, apiKey: String?) async throws -> URL {
         switch result.source {
         case .openSubtitles(let fileID):
-            guard let key = apiKey, !key.isEmpty else { throw SubtitleError.missingAPIKey }
+            guard let key = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !key.isEmpty else { throw SubtitleError.missingAPIKey }
             return try await downloadAndSave(fileID: fileID, videoPath: videoPath, apiKey: key)
         case .podnapisi(let id):
             return try await downloadPodnapisi(id: id, videoPath: videoPath)
@@ -187,12 +197,37 @@ struct SubtitleSearchService {
         guard (resp as? HTTPURLResponse)?.statusCode == 200, !data.isEmpty else {
             throw SubtitleError.downloadFailed
         }
-        let videoURL = URL(fileURLWithPath: videoPath)
-        let base = videoURL.deletingPathExtension().lastPathComponent
-        let dir = videoURL.deletingLastPathComponent()
-        let outputURL = dir.appendingPathComponent("\(base).srt")
-        try data.write(to: outputURL, options: .atomic)
+        return try await Self.saveSubtitleData(
+            data,
+            videoPath: videoPath,
+            downloadedFileName: nil
+        )
+    }
+
+    static func saveSubtitleData(
+        _ data: Data,
+        videoPath: String,
+        downloadedFileName: String?,
+        io: SubtitleSidecarIO = .fileSystem
+    ) async throws -> URL {
+        let outputURL = subtitleOutputURL(
+            videoPath: videoPath,
+            downloadedFileName: downloadedFileName
+        )
+        try await BlockingIOExecutor.run {
+            try io.write(data, outputURL)
+        }
         return outputURL
+    }
+
+    static func subtitleOutputURL(videoPath: String, downloadedFileName: String?) -> URL {
+        let videoURL = URL(fileURLWithPath: videoPath)
+        let baseName = videoURL.deletingPathExtension().lastPathComponent
+        let directory = videoURL.deletingLastPathComponent()
+        let rawExtension = downloadedFileName
+            .map { URL(fileURLWithPath: $0).pathExtension.lowercased() } ?? ""
+        let ext = rawExtension.isEmpty ? "srt" : rawExtension
+        return directory.appendingPathComponent("\(baseName).\(ext)")
     }
 
     private func podnapisiLang(_ language: String) -> String {

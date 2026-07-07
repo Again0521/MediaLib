@@ -47,6 +47,125 @@ final class AppSettingsSecretStorageTests: XCTestCase {
         XCTAssertEqual(decoded.tmdbLanguage, "en-US")
     }
 
+    func testAsyncSaveStoresSecretsOutsideUserDefaultsBlob() async throws {
+        var settings = AppSettings()
+        settings.openSubtitlesAPIKey = "opensubtitles-key"
+        settings.traktRefreshToken = "trakt-refresh"
+        settings.tmdbLanguage = "ja-JP"
+
+        let store = makeStore()
+        await store.saveAsync(settings)
+
+        let loaded = store.load()
+        XCTAssertEqual(loaded.openSubtitlesAPIKey, "opensubtitles-key")
+        XCTAssertEqual(loaded.traktRefreshToken, "trakt-refresh")
+        XCTAssertEqual(loaded.tmdbLanguage, "ja-JP")
+
+        let blob = try XCTUnwrap(defaults.data(forKey: blobKey))
+        let decoded = try JSONDecoder().decode(AppSettings.self, from: blob)
+        XCTAssertNil(decoded.openSubtitlesAPIKey)
+        XCTAssertNil(decoded.traktRefreshToken)
+        XCTAssertEqual(decoded.tmdbLanguage, "ja-JP")
+
+        let storedSecrets = await SecretStore(directory: tempDirectory).loadAsync()
+        XCTAssertEqual(storedSecrets["openSubtitlesAPIKey"], "opensubtitles-key")
+        XCTAssertEqual(storedSecrets["traktRefreshToken"], "trakt-refresh")
+    }
+
+    func testAsyncLoadAppliesStoredSecretsWhenSettingsBlobIsMissing() async {
+        let secretStore = SecretStore(directory: tempDirectory)
+        await secretStore.saveAsync([
+            "tmdbAPIKey": "stored-tmdb",
+            "lastfmSessionKey": "stored-lastfm-session"
+        ])
+        let store = AppSettingsStore(defaults: defaults, secretStore: secretStore)
+
+        let loaded = await store.loadAsync()
+
+        XCTAssertEqual(loaded.tmdbAPIKey, "stored-tmdb")
+        XCTAssertEqual(loaded.lastfmSessionKey, "stored-lastfm-session")
+        XCTAssertNil(defaults.data(forKey: blobKey))
+    }
+
+    func testAsyncLoadMigratesLegacyPlaintextBlobAndScrubsUserDefaults() async throws {
+        var legacy = AppSettings()
+        legacy.lastfmAPIKey = "legacy-lastfm-key"
+        legacy.traktClientSecret = "legacy-trakt-secret"
+        legacy.tmdbLanguage = "ko-KR"
+        defaults.set(try JSONEncoder().encode(legacy), forKey: blobKey)
+
+        let store = makeStore()
+        let loaded = await store.loadAsync()
+
+        XCTAssertEqual(loaded.lastfmAPIKey, "legacy-lastfm-key")
+        XCTAssertEqual(loaded.traktClientSecret, "legacy-trakt-secret")
+        XCTAssertEqual(loaded.tmdbLanguage, "ko-KR")
+
+        let migratedBlob = try XCTUnwrap(defaults.data(forKey: blobKey))
+        let decodedBlob = try JSONDecoder().decode(AppSettings.self, from: migratedBlob)
+        XCTAssertNil(decodedBlob.lastfmAPIKey)
+        XCTAssertNil(decodedBlob.traktClientSecret)
+        XCTAssertEqual(decodedBlob.tmdbLanguage, "ko-KR")
+
+        let stored = await SecretStore(directory: tempDirectory).loadAsync()
+        XCTAssertEqual(stored["lastfmAPIKey"], "legacy-lastfm-key")
+        XCTAssertEqual(stored["traktClientSecret"], "legacy-trakt-secret")
+    }
+
+    func testLoadScrubsLegacyPlaintextBlobEvenWhenSecretStoreAlreadyHasValues() throws {
+        let secretStore = SecretStore(directory: tempDirectory)
+        secretStore.save(["tmdbAPIKey": "stored-tmdb-key"])
+        var legacy = AppSettings()
+        legacy.tmdbAPIKey = "legacy-tmdb-key"
+        legacy.openSubtitlesAPIKey = "legacy-opensubtitles-key"
+        legacy.tmdbLanguage = "zh-Hans"
+        defaults.set(try JSONEncoder().encode(legacy), forKey: blobKey)
+
+        let store = AppSettingsStore(defaults: defaults, secretStore: secretStore)
+        let loaded = store.load()
+
+        XCTAssertEqual(loaded.tmdbAPIKey, "stored-tmdb-key")
+        XCTAssertEqual(loaded.openSubtitlesAPIKey, "legacy-opensubtitles-key")
+        XCTAssertEqual(loaded.tmdbLanguage, "zh-Hans")
+
+        let scrubbedBlob = try XCTUnwrap(defaults.data(forKey: blobKey))
+        let decodedBlob = try JSONDecoder().decode(AppSettings.self, from: scrubbedBlob)
+        XCTAssertNil(decodedBlob.tmdbAPIKey)
+        XCTAssertNil(decodedBlob.openSubtitlesAPIKey)
+        XCTAssertEqual(decodedBlob.tmdbLanguage, "zh-Hans")
+
+        let stored = secretStore.load()
+        XCTAssertEqual(stored["tmdbAPIKey"], "stored-tmdb-key")
+        XCTAssertEqual(stored["openSubtitlesAPIKey"], "legacy-opensubtitles-key")
+    }
+
+    func testAsyncLoadScrubsLegacyPlaintextBlobEvenWhenSecretStoreAlreadyHasValues() async throws {
+        let secretStore = SecretStore(directory: tempDirectory)
+        await secretStore.saveAsync(["traktAccessToken": "stored-trakt-access"])
+        var legacy = AppSettings()
+        legacy.traktAccessToken = "legacy-trakt-access"
+        legacy.traktRefreshToken = "legacy-trakt-refresh"
+        legacy.tmdbLanguage = "en-GB"
+        defaults.set(try JSONEncoder().encode(legacy), forKey: blobKey)
+
+        let store = AppSettingsStore(defaults: defaults, secretStore: secretStore)
+        let loaded = await store.loadAsync()
+
+        XCTAssertEqual(loaded.traktAccessToken, "stored-trakt-access")
+        XCTAssertEqual(loaded.traktRefreshToken, "legacy-trakt-refresh")
+        XCTAssertEqual(loaded.tmdbLanguage, "en-GB")
+
+        let scrubbedBlob = try XCTUnwrap(defaults.data(forKey: blobKey))
+        let decodedBlob = try JSONDecoder().decode(AppSettings.self, from: scrubbedBlob)
+        XCTAssertNil(decodedBlob.traktAccessToken)
+        XCTAssertNil(decodedBlob.traktRefreshToken)
+        XCTAssertEqual(decodedBlob.tmdbLanguage, "en-GB")
+
+        let stored = await secretStore.loadAsync()
+        XCTAssertEqual(stored["traktAccessToken"], "stored-trakt-access")
+        XCTAssertEqual(stored["traktRefreshToken"], "legacy-trakt-refresh")
+    }
+
     func testLegacyPlaintextBlobIsMigratedAndScrubbed() throws {
         // 模拟旧版本：把含明文 secret 的整个 AppSettings 直接写进 UserDefaults，secret 文件为空。
         var legacy = AppSettings()

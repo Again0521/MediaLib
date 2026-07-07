@@ -570,11 +570,14 @@ enum LyricAlignmentService {
               estimatedLines.allSatisfy({ $0.segments.isEmpty }),
               let filePath = item.filePath,
               !item.isRemoteResource,
-              FileManager.default.fileExists(atPath: filePath),
               estimatedLines.count <= audioConfig(for: algorithm).maxLineCount else { return nil }
+        let localFileExists = await localFileExists(atPath: filePath)
+        guard localFileExists else { return nil }
 
-        let key = cacheKey(item: item, filePath: filePath, lyricsText: lyricsText, algorithm: algorithm)
-        if let cached = cachedLines(for: key, estimatedLines: estimatedLines) {
+        let key = await cacheKey(item: item, filePath: filePath, lyricsText: lyricsText, algorithm: algorithm)
+        let cacheURL = await cacheURL(for: key)
+        if let cacheURL,
+           let cached = await cachedLines(from: cacheURL, estimatedLines: estimatedLines) {
             return cached
         }
 
@@ -585,14 +588,14 @@ enum LyricAlignmentService {
         ) else {
             return nil
         }
-        writeCache(lines: aligned, key: key)
+        if let cacheURL {
+            await writeCache(lines: aligned, to: cacheURL)
+        }
         return aligned
     }
 
-    private static func cachedLines(for key: String, estimatedLines: [TimedLyricLine]) -> [TimedLyricLine]? {
-        guard let url = cacheURL(for: key),
-              let data = try? Data(contentsOf: url),
-              let cached = try? JSONDecoder().decode(CachedLyricAlignment.self, from: data),
+    static func cachedLines(from url: URL, estimatedLines: [TimedLyricLine]) async -> [TimedLyricLine]? {
+        guard let cached = await readCachedPayload(from: url),
               cached.lines.count == estimatedLines.count else { return nil }
         let lines = cached.lines.map { line in
             TimedLyricLine(
@@ -608,8 +611,17 @@ enum LyricAlignmentService {
         return lines
     }
 
-    private static func writeCache(lines: [TimedLyricLine], key: String) {
-        guard let url = cacheURL(for: key) else { return }
+    private static func readCachedPayload(from url: URL) async -> CachedLyricAlignment? {
+        await BlockingIOExecutor.run {
+            guard let data = try? Data(contentsOf: url),
+                  let cached = try? JSONDecoder().decode(CachedLyricAlignment.self, from: data) else {
+                return nil
+            }
+            return cached
+        }
+    }
+
+    static func writeCache(lines: [TimedLyricLine], to url: URL) async {
         let cached = CachedLyricAlignment(
             version: 2,
             createdAt: Date(),
@@ -623,30 +635,47 @@ enum LyricAlignmentService {
                 )
             }
         )
-        guard let data = try? JSONEncoder().encode(cached) else { return }
-        try? data.write(to: url, options: .atomic)
+        await BlockingIOExecutor.run {
+            guard let data = try? JSONEncoder().encode(cached) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
     }
 
-    private static func cacheURL(for key: String) -> URL? {
-        guard let directories = try? FileAccessService.appDirectories() else { return nil }
-        let directory = directories.cache.appendingPathComponent("LyricAlignment", isDirectory: true)
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent("\(key).json")
+    static func cacheURL(for key: String) async -> URL? {
+        await BlockingIOExecutor.run {
+            guard let directories = try? FileAccessService.appDirectories() else { return nil }
+            let directory = directories.cache.appendingPathComponent("LyricAlignment", isDirectory: true)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            return directory.appendingPathComponent("\(key).json")
+        }
     }
 
-    private static func cacheKey(item: MediaItem, filePath: String, lyricsText: String, algorithm: LyricSyncAlgorithm) -> String {
-        let attributes = try? FileManager.default.attributesOfItem(atPath: filePath)
-        let size = (attributes?[.size] as? NSNumber)?.int64Value ?? item.fileSize ?? 0
-        let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+    static func cacheKey(item: MediaItem, filePath: String, lyricsText: String, algorithm: LyricSyncAlgorithm) async -> String {
+        let fingerprint = await fileFingerprint(filePath: filePath, fallbackSize: item.fileSize)
         return [
             "v\(audioConfig(for: algorithm).cacheVersion)",
             algorithm.rawValue,
             stableHash(item.id),
             stableHash(filePath),
-            String(size),
-            String(Int(modified.rounded())),
+            String(fingerprint.size),
+            String(Int(fingerprint.modified.rounded())),
             stableHash(lyricsText)
         ].joined(separator: "-")
+    }
+
+    private static func fileFingerprint(filePath: String, fallbackSize: Int64?) async -> LyricAlignmentFileFingerprint {
+        await BlockingIOExecutor.run {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: filePath)
+            let size = (attributes?[.size] as? NSNumber)?.int64Value ?? fallbackSize ?? 0
+            let modified = (attributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            return LyricAlignmentFileFingerprint(size: size, modified: modified)
+        }
+    }
+
+    private static func localFileExists(atPath path: String) async -> Bool {
+        await BlockingIOExecutor.run {
+            FileManager.default.fileExists(atPath: path)
+        }
     }
 
     private static func stableHash(_ text: String) -> String {
@@ -670,19 +699,24 @@ enum LyricAlignmentService {
     }
 }
 
-private struct CachedLyricAlignment: Codable {
+private struct LyricAlignmentFileFingerprint: Sendable {
+    var size: Int64
+    var modified: TimeInterval
+}
+
+private struct CachedLyricAlignment: Codable, Sendable {
     var version: Int
     var createdAt: Date
     var lines: [CachedLyricLine]
 }
 
-private struct CachedLyricLine: Codable {
+private struct CachedLyricLine: Codable, Sendable {
     var time: Double
     var text: String
     var segments: [CachedLyricSegment]
 }
 
-private struct CachedLyricSegment: Codable {
+private struct CachedLyricSegment: Codable, Sendable {
     var time: Double
     var text: String
     var durationHint: Double?

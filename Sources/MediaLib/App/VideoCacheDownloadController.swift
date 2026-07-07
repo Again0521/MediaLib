@@ -21,7 +21,7 @@ enum VideoCacheDownloadControlError: LocalizedError {
 }
 
 final class VideoCacheDownloadController: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    struct Progress: Sendable {
+    struct Progress: Sendable, Equatable {
         let fraction: Double?
         let receivedBytes: Int64
         let expectedBytes: Int64
@@ -163,28 +163,15 @@ final class VideoCacheDownloadController: NSObject, URLSessionDownloadDelegate, 
             lock.unlock()
             return
         }
-        let baseBytes = max(resumedByteCount, 0)
-        let reportedExpected = totalBytesExpectedToWrite
-        let reportedWritten = max(totalBytesWritten, 0)
-        let reportsAbsoluteBytes = baseBytes > 0 && reportedWritten >= baseBytes
-        let cumulativeReceived = reportsAbsoluteBytes ? reportedWritten : baseBytes + reportedWritten
-        let cumulativeExpected = Self.cumulativeExpectedBytes(
-            reportedExpected: reportedExpected,
-            baseBytes: baseBytes,
-            cumulativeReceived: cumulativeReceived,
+        let progress = Self.progressSnapshot(
+            reportedWritten: totalBytesWritten,
+            reportedExpected: totalBytesExpectedToWrite,
+            baseBytes: resumedByteCount,
             previousExpected: expectedByteCount
         )
-        if cumulativeExpected > 0 {
-            expectedByteCount = cumulativeExpected
+        if progress.expectedBytes > 0 {
+            expectedByteCount = progress.expectedBytes
         }
-        let progress = Progress(
-            fraction: cumulativeExpected > 0
-                ? Double(cumulativeReceived) / Double(cumulativeExpected)
-                : nil,
-            receivedBytes: cumulativeReceived,
-            expectedBytes: cumulativeExpected,
-            resumedBytes: baseBytes
-        )
         lastProgress = progress
         let handler = progressHandler
         lock.unlock()
@@ -260,12 +247,38 @@ final class VideoCacheDownloadController: NSObject, URLSessionDownloadDelegate, 
         continuation.resume(throwing: error)
     }
 
-    private static func fallbackResponse(for task: URLSessionDownloadTask) -> URLResponse {
+    static func fallbackResponse(for task: URLSessionDownloadTask) -> URLResponse {
         let url = task.originalRequest?.url ?? URL(fileURLWithPath: "/")
         return URLResponse(url: url, mimeType: nil, expectedContentLength: -1, textEncodingName: nil)
     }
 
-    private static func cumulativeExpectedBytes(
+    static func progressSnapshot(
+        reportedWritten: Int64,
+        reportedExpected: Int64,
+        baseBytes: Int64,
+        previousExpected: Int64
+    ) -> Progress {
+        let baseBytes = max(baseBytes, 0)
+        let reportedWritten = max(reportedWritten, 0)
+        let reportsAbsoluteBytes = baseBytes > 0 && reportedWritten >= baseBytes
+        let cumulativeReceived = reportsAbsoluteBytes ? reportedWritten : baseBytes + reportedWritten
+        let cumulativeExpected = cumulativeExpectedBytes(
+            reportedExpected: reportedExpected,
+            baseBytes: baseBytes,
+            cumulativeReceived: cumulativeReceived,
+            previousExpected: previousExpected
+        )
+        return Progress(
+            fraction: cumulativeExpected > 0
+                ? Double(cumulativeReceived) / Double(cumulativeExpected)
+                : nil,
+            receivedBytes: cumulativeReceived,
+            expectedBytes: cumulativeExpected,
+            resumedBytes: baseBytes
+        )
+    }
+
+    static func cumulativeExpectedBytes(
         reportedExpected: Int64,
         baseBytes: Int64,
         cumulativeReceived: Int64,
@@ -286,7 +299,7 @@ final class VideoCacheDownloadController: NSObject, URLSessionDownloadDelegate, 
         return max(baseBytes + reportedExpected, cumulativeReceived)
     }
 
-    private static func resumeByteCount(from data: Data) -> Int64 {
+    static func resumeByteCount(from data: Data) -> Int64 {
         guard let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
               let dictionary = plist as? [String: Any] else {
             return 0
