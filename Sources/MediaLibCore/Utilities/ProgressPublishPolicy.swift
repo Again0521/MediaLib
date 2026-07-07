@@ -64,7 +64,7 @@ public struct FractionalProgressPublishPolicy: Sendable {
     }
 
     public mutating func shouldPublish(_ progress: Double, now: Date = Date()) -> Bool {
-        let clamped = min(max(progress, 0), 1)
+        let clamped = Self.clampedProgress(progress)
         let isTerminal = clamped >= 1
         let advancedEnough = clamped - lastProgress >= minimumProgressStep
         let waitedEnough = now.timeIntervalSince(lastPublishDate) >= minimumInterval
@@ -72,5 +72,10 @@ public struct FractionalProgressPublishPolicy: Sendable {
         lastProgress = clamped
         lastPublishDate = now
         return true
+    }
+
+    static func clampedProgress(_ progress: Double) -> Double {
+        guard progress.isFinite else { return 0 }
+        return min(max(progress, 0), 1)
     }
 }
