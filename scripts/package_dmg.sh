@@ -1,14 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+resolve_script_dir() {
+  local source="${BASH_SOURCE[0]}"
+  local dir=""
+  while [[ -L "$source" ]]; do
+    dir="$(cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" != /* ]] && source="$dir/$source"
+  done
+  cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd
+}
+
+SCRIPT_DIR="$(resolve_script_dir)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 APP_NAME="MediaLib"
 DISPLAY_NAME="MediaLIB"
 BUNDLE_ID="com.local.MediaLib"
-VERSION="1.2.6"
-BUILD="62"
+VERSION="1.5.2"
+BUILD="77"
 DIST_DIR="$ROOT_DIR/dist"
-BUILD_ROOT="/private/tmp/MediaLib-package"
+ROOT_HASH="$(printf '%s' "$ROOT_DIR" | shasum -a 256 | awk '{print substr($1, 1, 12)}')"
+BUILD_ROOT="/private/tmp/MediaLib-package-$(id -u)-$ROOT_HASH"
 APP_BUNDLE="$BUILD_ROOT/$DISPLAY_NAME.app"
 APP_COPY="$DIST_DIR/$DISPLAY_NAME.app"
 LEGACY_APP_COPY="$DIST_DIR/$APP_NAME.app"
@@ -17,7 +30,18 @@ DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
 DMG_RW_PATH="$BUILD_ROOT/$APP_NAME-rw.dmg"
 DMG_MOUNT="$BUILD_ROOT/dmg-mount"
 DMG_BACKGROUND="$DMG_ROOT/.background/dmg-background.png"
-SWIFT_MODULE_CACHE="/private/tmp/MediaLib-package-module-cache"
+DMG_VOLUME_ICON="$DMG_ROOT/.VolumeIcon.icns"
+SWIFT_MODULE_CACHE="/private/tmp/MediaLib-package-module-cache-$(id -u)-$ROOT_HASH"
+SWIFT_BUILD_DIR="$BUILD_ROOT/swiftpm-build"
+
+if [[ "${MEDIALIB_PACKAGE_DMG_PRINT_PATHS_ONLY:-0}" == "1" ]]; then
+  printf 'SCRIPT_DIR=%s\n' "$SCRIPT_DIR"
+  printf 'ROOT_DIR=%s\n' "$ROOT_DIR"
+  printf 'BUILD_ROOT=%s\n' "$BUILD_ROOT"
+  printf 'SWIFT_MODULE_CACHE=%s\n' "$SWIFT_MODULE_CACHE"
+  printf 'SWIFT_BUILD_DIR=%s\n' "$SWIFT_BUILD_DIR"
+  exit 0
+fi
 
 strip_bundle_metadata() {
   local target="$1"
@@ -35,20 +59,39 @@ strip_bundle_metadata() {
 if [[ -d "/Applications/Xcode.app/Contents/Developer" ]]; then
   export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 fi
-rm -rf "$SWIFT_MODULE_CACHE"
-mkdir -p "$SWIFT_MODULE_CACHE"
+rm -rf "$SWIFT_MODULE_CACHE" "$BUILD_ROOT" "$APP_COPY" "$LEGACY_APP_COPY" "$DMG_PATH"
+mkdir -p "$SWIFT_MODULE_CACHE" "$SWIFT_BUILD_DIR"
 export CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE"
+
+swift_package_args=(
+  --package-path "$ROOT_DIR"
+  --scratch-path "$SWIFT_BUILD_DIR"
+  -c release
+)
 
 cd "$ROOT_DIR"
 
-swift scripts/generate_icon.swift
+swift "$ROOT_DIR/scripts/generate_icon.swift"
 
-swift build -c release --product "$APP_NAME"
+# macOS 会给源码里的图标资源(PNG/icns)悄悄挂上 com.apple.macl / com.apple.provenance 等扩展属性
+# （TCC 访问、下载来源标记等），SPM 打包资源 bundle 时会连同这些属性一起拷进 .build，随后
+# 内建的 codesign 步骤对含此类「detritus」的 bundle 会直接失败：
+#   "resource fork, Finder information, or similar detritus not allowed"
+# 因此在 swift build 之前，先把源码资源目录里的扩展属性清干净（每次都清，因为系统会反复挂回来）。
+find "$ROOT_DIR/Sources" -type d -name Resources -print0 2>/dev/null | while IFS= read -r -d '' res_dir; do
+  xattr -cr "$res_dir" 2>/dev/null || true
+done
+swift build "${swift_package_args[@]}" --product "$APP_NAME"
+SWIFT_PRODUCT_DIR="$(swift build "${swift_package_args[@]}" --show-bin-path)"
+SWIFT_PRODUCT_BINARY="$SWIFT_PRODUCT_DIR/$APP_NAME"
+if [[ ! -x "$SWIFT_PRODUCT_BINARY" ]]; then
+  echo "error: expected release product was not produced at $SWIFT_PRODUCT_BINARY" >&2
+  exit 1
+fi
 
-rm -rf "$BUILD_ROOT" "$APP_COPY" "$LEGACY_APP_COPY" "$DMG_PATH"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources" "$DMG_ROOT"
 
-cp "$ROOT_DIR/.build/release/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+cp "$SWIFT_PRODUCT_BINARY" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIcon.png" "$APP_BUNDLE/Contents/Resources/AppIcon.png"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIconDark.png" "$APP_BUNDLE/Contents/Resources/AppIconDark.png"
@@ -311,7 +354,8 @@ codesign --verify --deep --strict "$APP_BUNDLE"
 cp -R "$APP_BUNDLE" "$DMG_ROOT/$DISPLAY_NAME.app"
 strip_bundle_metadata "$DMG_ROOT/$DISPLAY_NAME.app"
 ln -s /Applications "$DMG_ROOT/Applications"
-swift scripts/generate_dmg_background.swift "$DMG_BACKGROUND"
+cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIcon.icns" "$DMG_VOLUME_ICON"
+swift "$ROOT_DIR/scripts/generate_dmg_background.swift" "$DMG_BACKGROUND"
 strip_bundle_metadata "$DMG_ROOT"
 DMG_SIZE_MB=$(du -sm "$DMG_ROOT" | awk '{print $1}')
 DMG_SIZE_MB=$((DMG_SIZE_MB + 96))
@@ -323,8 +367,10 @@ cleanup_dmg_mount() {
 }
 trap cleanup_dmg_mount EXIT
 ditto --noextattr --noqtn "$DMG_ROOT/" "$DMG_MOUNT/"
-python3 scripts/write_dmg_ds_store.py "$DMG_MOUNT"
+python3 "$ROOT_DIR/scripts/write_dmg_ds_store.py" "$DMG_MOUNT"
 SetFile -a V "$DMG_MOUNT/.background" 2>/dev/null || true
+SetFile -a C "$DMG_MOUNT" 2>/dev/null || true
+SetFile -a V "$DMG_MOUNT/.VolumeIcon.icns" 2>/dev/null || true
 bless --folder "$DMG_MOUNT" --openfolder "$DMG_MOUNT" 2>/dev/null || true
 sync
 hdiutil detach "$DMG_MOUNT" -quiet
