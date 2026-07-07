@@ -154,6 +154,53 @@ public struct MetadataCorrectionRecord: Identifiable, Codable, Hashable, Sendabl
     }
 }
 
+extension MetadataCorrectionRecord {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case batchID
+        case mediaID
+        case field
+        case oldValue
+        case newValue
+        case source
+        case createdAt
+        case undoneAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        self.init(
+            id: try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString,
+            batchID: try container.decodeIfPresent(String.self, forKey: .batchID) ?? "",
+            mediaID: try container.decodeIfPresent(String.self, forKey: .mediaID) ?? "",
+            field: Self.decodeStringBackedEnum(
+                MetadataCorrectionField.self,
+                forKey: .field,
+                in: container,
+                defaultValue: .title
+            ),
+            oldValue: try container.decodeIfPresent(String.self, forKey: .oldValue),
+            newValue: try container.decodeIfPresent(String.self, forKey: .newValue),
+            source: try container.decodeIfPresent(String.self, forKey: .source) ?? "",
+            createdAt: try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(),
+            undoneAt: try container.decodeIfPresent(Date.self, forKey: .undoneAt)
+        )
+    }
+
+    private static func decodeStringBackedEnum<T: RawRepresentable>(
+        _ type: T.Type,
+        forKey key: CodingKeys,
+        in container: KeyedDecodingContainer<CodingKeys>,
+        defaultValue: T
+    ) -> T where T.RawValue == String {
+        guard let rawValue = try? container.decodeIfPresent(String.self, forKey: key) else {
+            return defaultValue
+        }
+        return T(rawValue: rawValue) ?? defaultValue
+    }
+}
+
 public struct MetadataCorrectionBatchSummary: Identifiable, Codable, Hashable, Sendable {
     public var batchID: String
     public var mediaID: String
@@ -178,5 +225,36 @@ public struct MetadataCorrectionBatchSummary: Identifiable, Codable, Hashable, S
         self.createdAt = createdAt
         self.fieldCount = max(fieldCount, 0)
         self.fields = fields
+    }
+}
+
+extension MetadataCorrectionBatchSummary {
+    private enum CodingKeys: String, CodingKey {
+        case batchID
+        case mediaID
+        case source
+        case createdAt
+        case fieldCount
+        case fields
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        self.init(
+            batchID: try container.decodeIfPresent(String.self, forKey: .batchID) ?? "",
+            mediaID: try container.decodeIfPresent(String.self, forKey: .mediaID) ?? "",
+            source: try container.decodeIfPresent(String.self, forKey: .source) ?? "",
+            createdAt: try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(),
+            fieldCount: try container.decodeIfPresent(Int.self, forKey: .fieldCount) ?? 0,
+            fields: Self.decodeFields(in: container)
+        )
+    }
+
+    private static func decodeFields(in container: KeyedDecodingContainer<CodingKeys>) -> [MetadataCorrectionField] {
+        guard let rawValues = try? container.decodeIfPresent([String].self, forKey: .fields) else {
+            return []
+        }
+        return rawValues.compactMap(MetadataCorrectionField.init(rawValue:))
     }
 }

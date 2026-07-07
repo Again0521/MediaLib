@@ -140,3 +140,63 @@ public struct VideoOfflineSubscription: Identifiable, Codable, Hashable, Sendabl
         self.updatedAt = updatedAt
     }
 }
+
+extension VideoOfflineSubscription {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case seriesID
+        case seriesTitle
+        case mode
+        case episodeLimit
+        case seasonNumber
+        case qualityID
+        case enabled
+        case pausedUntil
+        case expiresAt
+        case networkPolicy
+        case createdAt
+        case updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        self.init(
+            id: try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString,
+            seriesID: try container.decodeIfPresent(String.self, forKey: .seriesID) ?? "",
+            seriesTitle: try container.decodeIfPresent(String.self, forKey: .seriesTitle) ?? "未命名系列",
+            mode: Self.decodeStringBackedEnum(
+                VideoOfflineSubscriptionMode.self,
+                forKey: .mode,
+                in: container,
+                defaultValue: .nextEpisode
+            ),
+            episodeLimit: try container.decodeIfPresent(Int.self, forKey: .episodeLimit) ?? 3,
+            seasonNumber: try container.decodeIfPresent(Int.self, forKey: .seasonNumber),
+            qualityID: try container.decodeIfPresent(String.self, forKey: .qualityID),
+            enabled: try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true,
+            pausedUntil: try container.decodeIfPresent(Date.self, forKey: .pausedUntil),
+            expiresAt: try container.decodeIfPresent(Date.self, forKey: .expiresAt),
+            networkPolicy: Self.decodeStringBackedEnum(
+                VideoOfflineSubscriptionNetworkPolicy.self,
+                forKey: .networkPolicy,
+                in: container,
+                defaultValue: .allowRemote
+            ),
+            createdAt: try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(),
+            updatedAt: try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        )
+    }
+
+    private static func decodeStringBackedEnum<T: RawRepresentable>(
+        _ type: T.Type,
+        forKey key: CodingKeys,
+        in container: KeyedDecodingContainer<CodingKeys>,
+        defaultValue: T
+    ) -> T where T.RawValue == String {
+        guard let rawValue = try? container.decodeIfPresent(String.self, forKey: key) else {
+            return defaultValue
+        }
+        return T(rawValue: rawValue) ?? defaultValue
+    }
+}

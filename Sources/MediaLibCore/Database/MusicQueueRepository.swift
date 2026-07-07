@@ -30,15 +30,15 @@ public final class MusicQueueRepository: @unchecked Sendable {
             """
         ) { row in
             row.string(0) ?? ""
-        }.filter { !$0.isEmpty }
+        }
 
         var snapshot = state
-        snapshot.itemIDs = itemIDs
+        snapshot.itemIDs = Self.normalizedItemIDs(itemIDs)
         return snapshot
     }
 
     public func save(_ snapshot: MusicQueueSnapshot) throws {
-        let itemIDs = uniqueItemIDs(snapshot.itemIDs)
+        let itemIDs = Self.normalizedItemIDs(snapshot.itemIDs)
         let updatedAt = Date()
 
         try database.transaction {
@@ -74,12 +74,13 @@ public final class MusicQueueRepository: @unchecked Sendable {
         }
     }
 
-    private func uniqueItemIDs(_ itemIDs: [String]) -> [String] {
+    private static func normalizedItemIDs(_ itemIDs: [String]) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
-        for itemID in itemIDs where !itemID.isEmpty {
-            guard seen.insert(itemID).inserted else { continue }
-            result.append(itemID)
+        for itemID in itemIDs {
+            let normalized = itemID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty, seen.insert(normalized).inserted else { continue }
+            result.append(normalized)
         }
         return result
     }

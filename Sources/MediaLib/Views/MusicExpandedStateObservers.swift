@@ -1,11 +1,12 @@
 import Combine
 import Foundation
+import MediaLibCore
 
 // 从 MusicPlayerView.swift 物理拆出（零行为变化）：音乐展开页的进度/音量/状态「投影观察者」。
 // 它们订阅 MpvPlayerController 的高频 @Published，按 Equatable 小状态去重后只驱动对应叶子视图，
 // 是高频刷新隔离的核心机制（勿改其去重/容差语义）。原为 MusicPlayerView.swift 内的 private 类型，
-// 拆出后改为模块内部可见；timelineDisplayTime 仍被 MusicPlayerView 内的迷你条观察者跨文件调用，故提升为 internal。
-// MpvPlayerController / PlaybackSeekState 同属 MediaLib 模块，无需 import。
+// 拆出后改为模块内部可见；seek 展示时间由 MediaLibCore 的 PlaybackClockPolicy 统一计算。
+// MpvPlayerController 在 App 层，PlaybackSeekState 已下沉至 MediaLibCore。
 struct MusicExpandedStatusState: Equatable {
     let errorMessage: String?
     let isPreparing: Bool
@@ -72,7 +73,7 @@ final class MusicExpandedProgressStateObserver: ObservableObject {
         errorMessage: String?,
         seekState: PlaybackSeekState?
     ) -> MusicExpandedProgressState {
-        let displayTime = timelineDisplayTime(currentTime: currentTime, seekState: seekState)
+        let displayTime = PlaybackClockPolicy.displayTime(currentTime: currentTime, seekState: seekState)
         return MusicExpandedProgressState(
             currentTime: displayTime,
             duration: duration,
@@ -81,18 +82,6 @@ final class MusicExpandedProgressStateObserver: ObservableObject {
             formattedCurrentTime: formatTime(displayTime),
             formattedDuration: duration > 0 ? formatTime(duration) : "--:--"
         )
-    }
-
-    static func timelineDisplayTime(currentTime: Double, seekState: PlaybackSeekState?) -> Double {
-        guard let seekState else { return currentTime }
-        switch seekState.phase {
-        case .scrubbing:
-            return seekState.presentationTime
-        case .seeking:
-            return seekState.presentationTime
-        case .settled:
-            return seekState.resolvedTime ?? currentTime
-        }
     }
 
     private static func formatTime(_ seconds: Double) -> String {

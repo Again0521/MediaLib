@@ -100,7 +100,7 @@ public struct MediaSource: Identifiable, Codable, Hashable, Sendable {
             id: try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString,
             name: try container.decode(String.self, forKey: .name),
             path: try container.decode(String.self, forKey: .path),
-            mediaType: try container.decodeIfPresent(MediaType.self, forKey: .mediaType) ?? .auto,
+            mediaType: Self.decodeStringBackedEnum(MediaType.self, from: container, forKey: .mediaType, default: .auto),
             recursive: try container.decodeIfPresent(Bool.self, forKey: .recursive) ?? true,
             autoScan: try container.decodeIfPresent(Bool.self, forKey: .autoScan) ?? true,
             minimumFileSize: try container.decodeIfPresent(Int64.self, forKey: .minimumFileSize) ?? 50 * 1024 * 1024,
@@ -112,7 +112,12 @@ public struct MediaSource: Identifiable, Codable, Hashable, Sendable {
             includeInMetadataFetch: try container.decodeIfPresent(Bool.self, forKey: .includeInMetadataFetch) ?? true,
             preferMetadataWriteToSource: try container.decodeIfPresent(Bool.self, forKey: .preferMetadataWriteToSource) ?? false,
             includeInHealthCheck: try container.decodeIfPresent(Bool.self, forKey: .includeInHealthCheck) ?? true,
-            remoteTraceSyncMode: try container.decodeIfPresent(RemoteTraceSyncMode.self, forKey: .remoteTraceSyncMode) ?? .bidirectional,
+            remoteTraceSyncMode: Self.decodeStringBackedEnum(
+                RemoteTraceSyncMode.self,
+                from: container,
+                forKey: .remoteTraceSyncMode,
+                default: .bidirectional
+            ),
             selectedEmbyLibraryIDs: try container.decodeIfPresent([String].self, forKey: .selectedEmbyLibraryIDs) ?? [],
             createdAt: try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(),
             updatedAt: try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
@@ -128,6 +133,18 @@ public struct MediaSource: Identifiable, Codable, Hashable, Sendable {
             result.append(trimmed)
         }
         return result
+    }
+
+    private static func decodeStringBackedEnum<T>(
+        _ type: T.Type,
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys,
+        default defaultValue: T
+    ) -> T where T: RawRepresentable, T.RawValue == String {
+        guard let rawValue = try? container.decodeIfPresent(String.self, forKey: key) else {
+            return defaultValue
+        }
+        return T(rawValue: rawValue) ?? defaultValue
     }
 
     public var url: URL {
@@ -154,10 +171,11 @@ public struct MediaSource: Identifiable, Codable, Hashable, Sendable {
         if normalizedPath.hasPrefix("ftp://") || normalizedPath.hasPrefix("ftps://") {
             return .ftp
         }
-        if name.hasPrefix("SMB ") {
+        let normalizedName = name.lowercased()
+        if normalizedName.hasPrefix("smb ") {
             return .smb
         }
-        if name.hasPrefix("FTP ") || name.hasPrefix("FTPS ") {
+        if normalizedName.hasPrefix("ftp ") || normalizedName.hasPrefix("ftps ") {
             return .ftp
         }
         return .local

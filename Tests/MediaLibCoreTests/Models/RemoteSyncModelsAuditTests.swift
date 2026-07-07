@@ -58,6 +58,84 @@ final class RemoteSyncModelsAuditTests: XCTestCase {
         XCTAssertEqual(RemoteConnectorProvider.iCloud.displayName, "iCloud")
     }
 
+    func testRemoteConnectorAccountDecoderDefaultsUnknownEnumFieldsAndKeepsData() throws {
+        let json = """
+        {
+          "id": "account-1",
+          "provider": "future-provider",
+          "accountLabel": "  Imported Account  ",
+          "serverURL": "https://media.example.test",
+          "username": "user-a",
+          "sourceID": "source-1",
+          "connectionMode": "future-mode",
+          "syncEnabled": true,
+          "capabilitiesJSON": "{\\"sync\\":true}",
+          "privacyNote": "private-note",
+          "createdAt": 100,
+          "updatedAt": 200,
+          "lastSyncedAt": 300
+        }
+        """.data(using: .utf8)!
+
+        let account = try JSONDecoder().decode(RemoteConnectorAccount.self, from: json)
+
+        XCTAssertEqual(account.id, "account-1")
+        XCTAssertEqual(account.provider, .emby)
+        XCTAssertEqual(account.accountLabel, "  Imported Account  ")
+        XCTAssertEqual(account.serverURL, "https://media.example.test")
+        XCTAssertEqual(account.username, "user-a")
+        XCTAssertEqual(account.sourceID, "source-1")
+        XCTAssertEqual(account.connectionMode, .library)
+        XCTAssertTrue(account.syncEnabled)
+        XCTAssertEqual(account.capabilitiesJSON, "{\"sync\":true}")
+        XCTAssertEqual(account.privacyNote, "private-note")
+        XCTAssertEqual(account.createdAt, Date(timeIntervalSinceReferenceDate: 100))
+        XCTAssertEqual(account.updatedAt, Date(timeIntervalSinceReferenceDate: 200))
+        XCTAssertEqual(account.lastSyncedAt, Date(timeIntervalSinceReferenceDate: 300))
+    }
+
+    func testSyncConflictDecoderDefaultsUnknownEnumFieldsAndKeepsData() throws {
+        let json = """
+        {
+          "id": "conflict-1",
+          "mediaID": "media-1",
+          "profileID": "profile-1",
+          "provider": "future-provider",
+          "accountID": "account-1",
+          "fieldName": "watched",
+          "localValue": "false",
+          "remoteValue": "true",
+          "localUpdatedAt": 10,
+          "remoteUpdatedAt": 20,
+          "status": "deferred",
+          "resolution": "future-resolution",
+          "errorMessage": "remote changed",
+          "createdAt": 30,
+          "updatedAt": 40,
+          "resolvedAt": 50
+        }
+        """.data(using: .utf8)!
+
+        let conflict = try JSONDecoder().decode(SyncConflict.self, from: json)
+
+        XCTAssertEqual(conflict.id, "conflict-1")
+        XCTAssertEqual(conflict.mediaID, "media-1")
+        XCTAssertEqual(conflict.profileID, "profile-1")
+        XCTAssertEqual(conflict.provider, .emby)
+        XCTAssertEqual(conflict.accountID, "account-1")
+        XCTAssertEqual(conflict.fieldName, "watched")
+        XCTAssertEqual(conflict.localValue, "false")
+        XCTAssertEqual(conflict.remoteValue, "true")
+        XCTAssertEqual(conflict.localUpdatedAt, Date(timeIntervalSinceReferenceDate: 10))
+        XCTAssertEqual(conflict.remoteUpdatedAt, Date(timeIntervalSinceReferenceDate: 20))
+        XCTAssertEqual(conflict.status, .pending)
+        XCTAssertNil(conflict.resolution)
+        XCTAssertEqual(conflict.errorMessage, "remote changed")
+        XCTAssertEqual(conflict.createdAt, Date(timeIntervalSinceReferenceDate: 30))
+        XCTAssertEqual(conflict.updatedAt, Date(timeIntervalSinceReferenceDate: 40))
+        XCTAssertEqual(conflict.resolvedAt, Date(timeIntervalSinceReferenceDate: 50))
+    }
+
     func testProfileMediaStateClampsFinitePlaybackValues() {
         let state = ProfileMediaState(
             profileID: "profile",

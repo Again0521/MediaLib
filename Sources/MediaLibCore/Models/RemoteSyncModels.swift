@@ -76,6 +76,67 @@ public struct RemoteConnectorAccount: Identifiable, Codable, Hashable, Sendable 
     }
 }
 
+extension RemoteConnectorAccount {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case provider
+        case accountLabel
+        case serverURL
+        case username
+        case sourceID
+        case connectionMode
+        case syncEnabled
+        case capabilitiesJSON
+        case privacyNote
+        case createdAt
+        case updatedAt
+        case lastSyncedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let provider = Self.decodeStringBackedEnum(
+            RemoteConnectorProvider.self,
+            forKey: .provider,
+            in: container,
+            defaultValue: .emby
+        )
+
+        self.init(
+            id: try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString,
+            provider: provider,
+            accountLabel: try container.decodeIfPresent(String.self, forKey: .accountLabel) ?? provider.displayName,
+            serverURL: try container.decodeIfPresent(String.self, forKey: .serverURL),
+            username: try container.decodeIfPresent(String.self, forKey: .username),
+            sourceID: try container.decodeIfPresent(String.self, forKey: .sourceID),
+            connectionMode: Self.decodeStringBackedEnum(
+                RemoteConnectorMode.self,
+                forKey: .connectionMode,
+                in: container,
+                defaultValue: .library
+            ),
+            syncEnabled: try container.decodeIfPresent(Bool.self, forKey: .syncEnabled) ?? false,
+            capabilitiesJSON: try container.decodeIfPresent(String.self, forKey: .capabilitiesJSON),
+            privacyNote: try container.decodeIfPresent(String.self, forKey: .privacyNote),
+            createdAt: try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(),
+            updatedAt: try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date(),
+            lastSyncedAt: try container.decodeIfPresent(Date.self, forKey: .lastSyncedAt)
+        )
+    }
+
+    private static func decodeStringBackedEnum<T: RawRepresentable>(
+        _ type: T.Type,
+        forKey key: CodingKeys,
+        in container: KeyedDecodingContainer<CodingKeys>,
+        defaultValue: T
+    ) -> T where T.RawValue == String {
+        guard let rawValue = try? container.decodeIfPresent(String.self, forKey: key) else {
+            return defaultValue
+        }
+        return T(rawValue: rawValue) ?? defaultValue
+    }
+}
+
 public enum SyncConflictStatus: String, Codable, CaseIterable, Identifiable, Sendable {
     case pending
     case resolved
@@ -145,6 +206,87 @@ public struct SyncConflict: Identifiable, Codable, Hashable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.resolvedAt = resolvedAt
+    }
+}
+
+extension SyncConflict {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case mediaID
+        case profileID
+        case provider
+        case accountID
+        case fieldName
+        case localValue
+        case remoteValue
+        case localUpdatedAt
+        case remoteUpdatedAt
+        case status
+        case resolution
+        case errorMessage
+        case createdAt
+        case updatedAt
+        case resolvedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        self.init(
+            id: try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString,
+            mediaID: try container.decodeIfPresent(String.self, forKey: .mediaID),
+            profileID: try container.decodeIfPresent(String.self, forKey: .profileID),
+            provider: Self.decodeStringBackedEnum(
+                RemoteConnectorProvider.self,
+                forKey: .provider,
+                in: container,
+                defaultValue: .emby
+            ),
+            accountID: try container.decodeIfPresent(String.self, forKey: .accountID),
+            fieldName: try container.decodeIfPresent(String.self, forKey: .fieldName) ?? "",
+            localValue: try container.decodeIfPresent(String.self, forKey: .localValue),
+            remoteValue: try container.decodeIfPresent(String.self, forKey: .remoteValue),
+            localUpdatedAt: try container.decodeIfPresent(Date.self, forKey: .localUpdatedAt),
+            remoteUpdatedAt: try container.decodeIfPresent(Date.self, forKey: .remoteUpdatedAt),
+            status: Self.decodeStringBackedEnum(
+                SyncConflictStatus.self,
+                forKey: .status,
+                in: container,
+                defaultValue: .pending
+            ),
+            resolution: Self.decodeOptionalStringBackedEnum(
+                SyncConflictResolution.self,
+                forKey: .resolution,
+                in: container
+            ),
+            errorMessage: try container.decodeIfPresent(String.self, forKey: .errorMessage),
+            createdAt: try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(),
+            updatedAt: try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date(),
+            resolvedAt: try container.decodeIfPresent(Date.self, forKey: .resolvedAt)
+        )
+    }
+
+    private static func decodeStringBackedEnum<T: RawRepresentable>(
+        _ type: T.Type,
+        forKey key: CodingKeys,
+        in container: KeyedDecodingContainer<CodingKeys>,
+        defaultValue: T
+    ) -> T where T.RawValue == String {
+        guard let rawValue = try? container.decodeIfPresent(String.self, forKey: key) else {
+            return defaultValue
+        }
+        return T(rawValue: rawValue) ?? defaultValue
+    }
+
+    private static func decodeOptionalStringBackedEnum<T: RawRepresentable>(
+        _ type: T.Type,
+        forKey key: CodingKeys,
+        in container: KeyedDecodingContainer<CodingKeys>
+    ) -> T? where T.RawValue == String {
+        guard let rawValue = try? container.decodeIfPresent(String.self, forKey: key) else {
+            return nil
+        }
+        return T(rawValue: rawValue)
     }
 }
 

@@ -9,14 +9,24 @@ public final class DatabaseManager: @unchecked Sendable {
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
     private let queueKey = DispatchSpecificKey<Bool>()
+    private let backupTimestampProvider: () -> String
     public let url: URL
 
     private var isOnQueue: Bool {
         DispatchQueue.getSpecific(key: queueKey) == true
     }
 
-    public init(url: URL, backupDirectory: URL? = nil) throws {
+    public convenience init(url: URL, backupDirectory: URL? = nil) throws {
+        try self.init(url: url, backupDirectory: backupDirectory, backupTimestampProvider: Self.backupTimestamp)
+    }
+
+    init(
+        url: URL,
+        backupDirectory: URL? = nil,
+        backupTimestampProvider: @escaping () -> String
+    ) throws {
         self.url = url
+        self.backupTimestampProvider = backupTimestampProvider
         let existingDatabase = FileManager.default.fileExists(atPath: url.path) &&
             ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0
         queue.setSpecific(key: queueKey, value: true)
@@ -138,7 +148,7 @@ public final class DatabaseManager: @unchecked Sendable {
         let safeReason = reason
             .lowercased()
             .map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-" }
-        let timestamp = Self.backupTimestamp()
+        let timestamp = backupTimestampProvider()
         let backupURL = directory.appendingPathComponent("MediaLib-\(String(safeReason))-\(timestamp).sqlite")
         try unsafeBackupCurrent(to: backupURL)
         return backupURL
@@ -1077,7 +1087,7 @@ public final class DatabaseManager: @unchecked Sendable {
     }
 
     private func unsafeBackupCurrent(to backupURL: URL) throws {
-        try? FileManager.default.removeItem(at: backupURL)
+        try Self.removeExistingBackupIfNeeded(at: backupURL)
         var destinationDB: OpaquePointer?
         let openResult = sqlite3_open_v2(
             backupURL.path,
@@ -1089,12 +1099,45 @@ public final class DatabaseManager: @unchecked Sendable {
             defer { sqlite3_close(destinationDB) }
             throw DatabaseError.backupFailed(Self.message(for: destinationDB))
         }
-        defer { sqlite3_close(destinationDB) }
-        try Self.copyDatabase(from: db, to: destinationDB)
-        let integrity = try Self.pragmaStrings("integrity_check", database: destinationDB)
-        guard integrity.count == 1, integrity.first?.lowercased() == "ok" else {
-            try? FileManager.default.removeItem(at: backupURL)
-            throw DatabaseError.integrityCheckFailed(integrity.joined(separator: "; "))
+        var openDestinationDB: OpaquePointer? = destinationDB
+        defer {
+            if let openDestinationDB {
+                sqlite3_close(openDestinationDB)
+            }
+        }
+        do {
+            try Self.copyDatabase(from: db, to: destinationDB)
+            let integrity = try Self.pragmaStrings("integrity_check", database: destinationDB)
+            guard integrity.count == 1, integrity.first?.lowercased() == "ok" else {
+                throw DatabaseError.integrityCheckFailed(integrity.joined(separator: "; "))
+            }
+        } catch {
+            sqlite3_close(destinationDB)
+            openDestinationDB = nil
+            try Self.removeFailedBackup(at: backupURL, originalErrorMessage: "\(error)")
+            throw error
+        }
+    }
+
+    private static func removeExistingBackupIfNeeded(at backupURL: URL) throws {
+        guard FileManager.default.fileExists(atPath: backupURL.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: backupURL)
+        } catch {
+            throw DatabaseError.backupFailed(
+                "无法替换已有备份文件 \(backupURL.lastPathComponent)：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private static func removeFailedBackup(at backupURL: URL, originalErrorMessage: String) throws {
+        guard FileManager.default.fileExists(atPath: backupURL.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: backupURL)
+        } catch {
+            throw DatabaseError.backupFailed(
+                "备份完整性检查失败（\(originalErrorMessage)），且无法清理失败备份 \(backupURL.lastPathComponent)：\(error.localizedDescription)"
+            )
         }
     }
 
@@ -1165,8 +1208,16 @@ public final class DatabaseManager: @unchecked Sendable {
             let rhs = (try? $1.resourceValues(forKeys: keys).contentModificationDate) ?? .distantPast
             return lhs > rhs
         }
+        var removalFailures: [String] = []
         for backup in backups.dropFirst(max(limit, 0)) {
-            try? FileManager.default.removeItem(at: backup)
+            do {
+                try FileManager.default.removeItem(at: backup)
+            } catch {
+                removalFailures.append("\(backup.lastPathComponent)：\(error.localizedDescription)")
+            }
+        }
+        guard removalFailures.isEmpty else {
+            throw DatabaseError.backupFailed("自动迁移备份清理失败：\(removalFailures.joined(separator: "；"))")
         }
     }
 

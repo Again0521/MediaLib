@@ -1,10 +1,11 @@
 import Combine
 import Foundation
+import MediaLibCore
 
 // 从 MusicPlayerView.swift 物理拆出（零行为变化）：迷你（收起态）播放条的进度/传输投影观察者。
 // 与展开页观察者同样的高频刷新隔离机制：订阅 MpvPlayerController 的 @Published，按 Equatable 小状态去重。
-// 复用 MusicExpandedProgressStateObserver.timelineDisplayTime（已是模块内部可见，跨文件调用安全）。
-// MpvPlayerController / PlaybackSeekState 同属 MediaLib 模块，无需 import。仅搬位置，不改去重/换算语义。
+// 复用 MediaLibCore 的 PlaybackClockPolicy，避免迷你条理解 seek phase。
+// MpvPlayerController 在 App 层，PlaybackSeekState 已下沉至 MediaLibCore。仅搬位置，不改去重/换算语义。
 struct MusicMiniCollapsedProgressState: Equatable {
     var progress: Double
     var progressBucket: Int
@@ -37,7 +38,7 @@ final class MusicMiniCollapsedProgressObserver: ObservableObject {
     }
 
     private static func makeState(currentTime: Double, duration: Double, seekState: PlaybackSeekState?) -> MusicMiniCollapsedProgressState {
-        let displayTime = MusicExpandedProgressStateObserver.timelineDisplayTime(
+        let displayTime = PlaybackClockPolicy.displayTime(
             currentTime: currentTime,
             seekState: seekState
         )

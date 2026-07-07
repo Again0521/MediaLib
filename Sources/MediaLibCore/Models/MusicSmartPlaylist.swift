@@ -117,3 +117,75 @@ public struct MusicSmartPlaylist: Identifiable, Codable, Hashable, Sendable {
         return parts.joined(separator: " · ")
     }
 }
+
+extension MusicSmartPlaylist {
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case filter
+        case recency
+        case sort
+        case limit
+        case createdAt
+        case updatedAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        self.init(
+            id: try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString,
+            name: try container.decodeIfPresent(String.self, forKey: .name) ?? "智能歌单",
+            filter: Self.decodeStringBackedEnum(
+                MusicSmartPlaylistFilter.self,
+                forKey: .filter,
+                in: container,
+                defaultValue: .any
+            ),
+            recency: Self.decodeIntBackedEnum(
+                MusicSmartPlaylistRecency.self,
+                forKey: .recency,
+                in: container,
+                defaultValue: .anytime
+            ),
+            sort: Self.decodeStringBackedEnum(
+                MusicSmartPlaylistSort.self,
+                forKey: .sort,
+                in: container,
+                defaultValue: .dateAddedDesc
+            ),
+            limit: Self.decodeIntBackedEnum(
+                MusicSmartPlaylistLimit.self,
+                forKey: .limit,
+                in: container,
+                defaultValue: .unlimited
+            ),
+            createdAt: try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date(),
+            updatedAt: try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        )
+    }
+
+    private static func decodeStringBackedEnum<T: RawRepresentable>(
+        _ type: T.Type,
+        forKey key: CodingKeys,
+        in container: KeyedDecodingContainer<CodingKeys>,
+        defaultValue: T
+    ) -> T where T.RawValue == String {
+        guard let rawValue = try? container.decodeIfPresent(String.self, forKey: key) else {
+            return defaultValue
+        }
+        return T(rawValue: rawValue) ?? defaultValue
+    }
+
+    private static func decodeIntBackedEnum<T: RawRepresentable>(
+        _ type: T.Type,
+        forKey key: CodingKeys,
+        in container: KeyedDecodingContainer<CodingKeys>,
+        defaultValue: T
+    ) -> T where T.RawValue == Int {
+        guard let rawValue = try? container.decodeIfPresent(Int.self, forKey: key) else {
+            return defaultValue
+        }
+        return T(rawValue: rawValue) ?? defaultValue
+    }
+}

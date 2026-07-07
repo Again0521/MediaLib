@@ -146,6 +146,48 @@ final class MusicTagEditingServiceAuditTests: XCTestCase {
         XCTAssertTrue(leftovers.isEmpty, "临时标签文件和备份文件必须在成功替换后清理干净")
     }
 
+    func testWriteReturnsWarningWhenReplacementBackupCleanupFails() async throws {
+        let directory = try makeTemporaryDirectory()
+        let inputURL = directory.appendingPathComponent("song.mp3")
+        try Data("original-audio".utf8).write(to: inputURL)
+        let token = "fixed-cleanup-token"
+        let backupURL = directory.appendingPathComponent(".song.mp3.medialib-tag-backup-\(token)")
+        let backupRemovalRecorder = URLCallRecorder()
+
+        let service = MusicTagEditingService(
+            ffmpegExecutableURLProvider: { URL(fileURLWithPath: "/usr/bin/ffmpeg-test-double") },
+            ffmpegRunner: { _, arguments, _ in
+                XCTAssertTrue(BlockingIOExecutor.isCurrentExecutionOnBlockingIOQueue())
+                guard let outputPath = arguments.last else {
+                    return (false, "missing output")
+                }
+                do {
+                    try Data("tagged-audio".utf8).write(to: URL(fileURLWithPath: outputPath))
+                    return (true, "")
+                } catch {
+                    return (false, error.localizedDescription)
+                }
+            },
+            tokenProvider: { token },
+            backupRemover: { url in
+                backupRemovalRecorder.append(url)
+                throw CocoaError(.fileWriteNoPermission)
+            }
+        )
+
+        let report = try await service.write(
+            MusicTagDraft(title: "Updated Song"),
+            to: makeMusicItem(fileURL: inputURL)
+        )
+
+        XCTAssertEqual(try Data(contentsOf: inputURL), Data("tagged-audio".utf8))
+        XCTAssertEqual(backupRemovalRecorder.urls, [backupURL])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path))
+        let warning = try XCTUnwrap(report.warning)
+        XCTAssertTrue(warning.contains("标签已写入，但临时备份清理失败"))
+        XCTAssertTrue(warning.contains(backupURL.lastPathComponent))
+    }
+
     func testWriteFallsBackToTextTagsWhenArtworkEmbeddingFails() async throws {
         let directory = try makeTemporaryDirectory()
         let inputURL = directory.appendingPathComponent("song.mp3")
@@ -371,5 +413,22 @@ private final class FFmpegCallRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return storedCalls
+    }
+}
+
+private final class URLCallRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedURLs: [URL] = []
+
+    func append(_ url: URL) {
+        lock.lock()
+        storedURLs.append(url)
+        lock.unlock()
+    }
+
+    var urls: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedURLs
     }
 }

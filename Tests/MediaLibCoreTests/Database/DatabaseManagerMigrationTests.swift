@@ -84,6 +84,27 @@ final class DatabaseManagerMigrationTests: XCTestCase {
         }
     }
 
+    func testCreateBackupReportsExistingBackupRemovalFailure() throws {
+        let timestamp = "20260707-010101-000"
+        let db = try DatabaseManager(url: dbURL, backupTimestampProvider: { timestamp })
+        let backupDir = workDir.appendingPathComponent("locked-backups", isDirectory: true)
+        try FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
+        let existingBackup = backupDir.appendingPathComponent("MediaLib-collision-\(timestamp).sqlite")
+        try Data("stale backup".utf8).write(to: existingBackup)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: backupDir.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: backupDir.path)
+        }
+
+        XCTAssertThrowsError(try db.createBackup(in: backupDir, reason: "collision")) { error in
+            guard case DatabaseError.backupFailed(let message) = error else {
+                return XCTFail("Expected backupFailed, got \(error)")
+            }
+            XCTAssertTrue(message.contains("无法替换已有备份文件"))
+            XCTAssertTrue(message.contains(existingBackup.lastPathComponent))
+        }
+    }
+
     func testOpeningOlderExistingDatabaseCreatesAutomaticPreMigrationBackup() throws {
         let oldVersion = DatabaseManager.currentSchemaVersion - 1
         do {
@@ -139,6 +160,46 @@ final class DatabaseManagerMigrationTests: XCTestCase {
         XCTAssertFalse(backupNames.contains("MediaLib-auto-pre-migration-old-0.sqlite"))
         XCTAssertFalse(backupNames.contains("MediaLib-auto-pre-migration-old-1.sqlite"))
         XCTAssertFalse(backupNames.contains("MediaLib-auto-pre-migration-old-2.sqlite"))
+    }
+
+    func testAutomaticMigrationReportsPruneRemoveFailure() throws {
+        let oldVersion = DatabaseManager.currentSchemaVersion - 1
+        do {
+            let db = try DatabaseManager(url: dbURL)
+            try db.execute("PRAGMA user_version = \(oldVersion)")
+        }
+        let backupDir = workDir.appendingPathComponent("locked-prune-backups", isDirectory: true)
+        try FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
+        for index in 0..<5 {
+            let oldBackup = backupDir.appendingPathComponent("MediaLib-auto-pre-migration-old-\(index).sqlite")
+            try Data("old-\(index)".utf8).write(to: oldBackup)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: Double(index + 10))],
+                ofItemAtPath: oldBackup.path
+            )
+        }
+        let lockedBackup = backupDir.appendingPathComponent("MediaLib-auto-pre-migration-locked.sqlite", isDirectory: true)
+        try FileManager.default.createDirectory(at: lockedBackup, withIntermediateDirectories: true)
+        try Data("locked".utf8).write(to: lockedBackup.appendingPathComponent("payload"))
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: lockedBackup.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedBackup.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedBackup.path)
+        }
+
+        XCTAssertThrowsError(
+            try DatabaseManager(
+                url: dbURL,
+                backupDirectory: backupDir,
+                backupTimestampProvider: { "20260707-010101-001" }
+            )
+        ) { error in
+            guard case DatabaseError.backupFailed(let message) = error else {
+                return XCTFail("Expected backupFailed, got \(error)")
+            }
+            XCTAssertTrue(message.contains("自动迁移备份清理失败"))
+            XCTAssertTrue(message.contains(lockedBackup.lastPathComponent))
+        }
     }
 
     private func automaticBackups(in directory: URL) throws -> [URL] {

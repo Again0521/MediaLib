@@ -152,10 +152,13 @@ public enum MusicTagEditingError: LocalizedError {
 public final class MusicTagEditingService {
     typealias FFmpegResult = (succeeded: Bool, stderr: String)
     typealias FFmpegRunner = @Sendable (URL, [String], TimeInterval) -> FFmpegResult
+    typealias BackupRemover = @Sendable (URL) throws -> Void
 
     private let logger: LoggingService?
     private let ffmpegExecutableURLProvider: @Sendable () -> URL?
     private let ffmpegRunner: FFmpegRunner
+    private let tokenProvider: @Sendable () -> String
+    private let backupRemover: BackupRemover
 
     private static let writableExtensions: Set<String> = [
         "aac", "aif", "aiff", "flac", "m4a", "mp3", "ogg", "opus", "wav", "wv"
@@ -170,16 +173,22 @@ public final class MusicTagEditingService {
         self.ffmpegRunner = { ffmpegURL, arguments, timeout in
             Self.runFFmpeg(ffmpegURL: ffmpegURL, arguments: arguments, timeout: timeout)
         }
+        self.tokenProvider = { UUID().uuidString }
+        self.backupRemover = { url in try FileManager.default.removeItem(at: url) }
     }
 
     init(
         logger: LoggingService? = nil,
         ffmpegExecutableURLProvider: @escaping @Sendable () -> URL?,
-        ffmpegRunner: @escaping FFmpegRunner
+        ffmpegRunner: @escaping FFmpegRunner,
+        tokenProvider: @escaping @Sendable () -> String = { UUID().uuidString },
+        backupRemover: @escaping BackupRemover = { url in try FileManager.default.removeItem(at: url) }
     ) {
         self.logger = logger
         self.ffmpegExecutableURLProvider = ffmpegExecutableURLProvider
         self.ffmpegRunner = ffmpegRunner
+        self.tokenProvider = tokenProvider
+        self.backupRemover = backupRemover
     }
 
     public func canWriteFileTags(for item: MediaItem) -> Bool {
@@ -204,13 +213,15 @@ public final class MusicTagEditingService {
         }
 
         do {
-            return try await BlockingIOExecutor.run { [ffmpegRunner] in
+            return try await BlockingIOExecutor.run { [ffmpegRunner, tokenProvider, backupRemover] in
                 try Self.writeFileTags(
                     draft: draft,
                     inputURL: inputURL,
                     fileExtension: ext,
                     ffmpegURL: ffmpegURL,
-                    ffmpegRunner: ffmpegRunner
+                    ffmpegRunner: ffmpegRunner,
+                    tokenProvider: tokenProvider,
+                    backupRemover: backupRemover
                 )
             }
         } catch let error as MusicTagEditingError {
@@ -226,7 +237,9 @@ public final class MusicTagEditingService {
         inputURL: URL,
         fileExtension ext: String,
         ffmpegURL: URL,
-        ffmpegRunner: FFmpegRunner
+        ffmpegRunner: FFmpegRunner,
+        tokenProvider: @escaping @Sendable () -> String,
+        backupRemover: BackupRemover
     ) throws -> MusicTagWriteReport {
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: inputURL.path) else {
@@ -239,7 +252,7 @@ public final class MusicTagEditingService {
         }
 
         let originalAttributes = try? fileManager.attributesOfItem(atPath: inputURL.path)
-        let token = UUID().uuidString
+        let token = tokenProvider()
         let tempURL = directoryURL.appendingPathComponent(".\(inputURL.deletingPathExtension().lastPathComponent).medialib-tagging-\(token).\(ext)")
         try? fileManager.removeItem(at: tempURL)
 
@@ -288,10 +301,19 @@ public final class MusicTagEditingService {
             inputURL,
             withItemAt: tempURL,
             backupItemName: backupName,
-            options: []
+            options: [.withoutDeletingBackupItem]
         )
         let backupURL = directoryURL.appendingPathComponent(backupName)
-        try? fileManager.removeItem(at: backupURL)
+        if fileManager.fileExists(atPath: backupURL.path) {
+            do {
+                try backupRemover(backupURL)
+            } catch {
+                warning = Self.appendingWarning(
+                    warning,
+                    "标签已写入，但临时备份清理失败：\(backupURL.lastPathComponent) \(error.localizedDescription)"
+                )
+            }
+        }
 
         var restoreAttributes: [FileAttributeKey: Any] = [:]
         if let permissions = originalAttributes?[.posixPermissions] {
@@ -309,6 +331,11 @@ public final class MusicTagEditingService {
             updatedFieldCount: draft.writableMetadataPairs.count + (canEmbedArtwork && warning == nil ? 1 : 0),
             warning: warning
         )
+    }
+
+    private static func appendingWarning(_ warning: String?, _ additional: String) -> String {
+        guard let warning, !warning.isEmpty else { return additional }
+        return "\(warning)；\(additional)"
     }
 
     private func localFileURL(for item: MediaItem) -> URL? {

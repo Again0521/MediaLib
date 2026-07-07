@@ -378,17 +378,33 @@ private enum DetailNavigationNode: Equatable, Sendable {
 
 @MainActor
 final class AppState: ObservableObject {
-    @Published var sources: [MediaSource] = []
-    @Published var items: [MediaItem] = []
+    let libraryDomain = LibraryDomainStore()
+    private var libraryDomainForwarding: AnyCancellable?
+    var sources: [MediaSource] {
+        get { libraryDomain.sources }
+        set { libraryDomain.replaceSources(newValue) }
+    }
+    var items: [MediaItem] {
+        get { libraryDomain.items }
+        set { libraryDomain.replaceItems(newValue) }
+    }
     @Published var settings: AppSettings
     @Published var selectedItem: MediaItem?
     @Published var selectedPersonID: String?
     @Published private(set) var detailReturnContext: DetailReturnContext?
     private var detailNavigationHistory: [DetailNavigationNode] = []
-    @Published var activePlayerItem: MediaItem?
+    let playbackSession = PlaybackSessionStore()
+    private var playbackSessionForwarding: AnyCancellable?
+    var activePlayerItem: MediaItem? {
+        get { playbackSession.activePlayerItem }
+        set { playbackSession.setActivePlayerItem(newValue) }
+    }
     /// 视频播放队列（播放器内剧集列表）：播放系列中的某一集时，
     /// 自动装入「当前集 + 之后的同系列剧集」；独立影片只含自身。
-    @Published var videoQueue: [MediaItem] = []
+    var videoQueue: [MediaItem] {
+        get { playbackSession.videoQueue }
+        set { playbackSession.replaceVideoQueue(newValue) }
+    }
     /// 「打开网络串流」输入弹窗。
     @Published var showingNetworkStreamPrompt = false
     /// 可用的新版本（驱动更新提示弹窗）。
@@ -399,11 +415,25 @@ final class AppState: ObservableObject {
     /// 第三次启动时弹出的赞赏邀请。
     @Published var showingSponsorPrompt = false
     @Published var quickPreviewItem: MediaItem?
-    @Published var scanProgress: ScanProgress?
-    @Published var isScanning = false
-    @Published var scanQueueCount = 0
-    @Published private(set) var backgroundTasks: [BackgroundTaskSnapshot] = [] {
-        didSet { persistBackgroundTasksIfPossible() }
+    let scanActivity = ScanActivityStore()
+    private var scanActivityForwarding: AnyCancellable?
+    var scanProgress: ScanProgress? {
+        get { scanActivity.progress }
+        set { scanActivity.setProgress(newValue) }
+    }
+    var isScanning: Bool {
+        get { scanActivity.isScanning }
+        set { scanActivity.setScanning(newValue) }
+    }
+    var scanQueueCount: Int {
+        get { scanActivity.queueCount }
+        set { scanActivity.setQueueCount(newValue) }
+    }
+    let taskCenter = TaskCenterStore()
+    private var taskCenterForwarding: AnyCancellable?
+    var backgroundTasks: [BackgroundTaskSnapshot] {
+        get { taskCenter.tasks }
+        set { taskCenter.replaceTasks(newValue) }
     }
     /// 剧集 TMDB 一键匹配进行中（驱动设置页按钮的进度态）。
     @Published var isMatchingTMDB = false
@@ -438,9 +468,20 @@ final class AppState: ObservableObject {
     @Published var startupError: String?
     @Published var privacyUnlocked = false
     @Published var privacyPINConfigured = false
-    @Published var musicQueue: [MediaItem] = []
-    @Published var musicRepeatMode: MusicRepeatMode = .sequential
-    @Published var musicShuffleEnabled = false
+    let musicQueueStore = MusicQueueStore()
+    private var musicQueueForwarding: AnyCancellable?
+    var musicQueue: [MediaItem] {
+        get { musicQueueStore.queue }
+        set { musicQueueStore.replaceQueue(newValue) }
+    }
+    var musicRepeatMode: MusicRepeatMode {
+        get { musicQueueStore.repeatMode }
+        set { musicQueueStore.setRepeatMode(newValue) }
+    }
+    var musicShuffleEnabled: Bool {
+        get { musicQueueStore.shuffleEnabled }
+        set { musicQueueStore.setShuffleEnabled(newValue) }
+    }
     // 随机播放的洗牌袋 + 历史已抽到 MusicShuffleNavigator（纯逻辑、可单测）。
     private let musicShuffleNavigator = MusicShuffleNavigator()
     // 音乐歌单（普通 + 智能）已抽到 MusicPlaylistStore；保留同名转发访问器使外部 API/视图零改。
@@ -461,8 +502,13 @@ final class AppState: ObservableObject {
     private var syncConflictForwarding: AnyCancellable?
     var pendingSyncConflictCount: Int { syncConflictStore.pendingCount }
     var pendingSyncConflicts: [SyncConflict] { syncConflictStore.pendingConflicts }
-    // internal-set（非 private(set)）：供拆到 AppState+TraktSync.swift 的方法写入。
-    @Published var remoteConnectorAccounts: [RemoteConnectorAccount] = []
+    // 远程连接器账号与连接态已抽到 RemoteConnectorStore；保留同名访问器使设置页和同步扩展零改。
+    let remoteConnectorStore = RemoteConnectorStore()
+    private var remoteConnectorForwarding: AnyCancellable?
+    var remoteConnectorAccounts: [RemoteConnectorAccount] {
+        get { remoteConnectorStore.accounts }
+        set { remoteConnectorStore.replaceAccounts(newValue) }
+    }
     @Published private(set) var detailMetadataGapsByMediaID: [String: Set<String>] = [:]
     @Published private(set) var detailSearchTermsByMediaID: [String: [String]] = [:]
     @Published private(set) var mediaSearchRevision = 0
@@ -471,28 +517,64 @@ final class AppState: ObservableObject {
     @Published var videoManualCollectionCreationRequest: VideoManualCollectionCreationRequest?
     @Published var videoOfflineSubscriptionLimitRequest: VideoOfflineSubscriptionLimitRequest?
     var musicSmartPlaylists: [MusicSmartPlaylist] { musicPlaylistStore.smartPlaylists }
-    @Published var playbackCommandRequest: PlaybackCommandRequest?
+    var playbackCommandRequest: PlaybackCommandRequest? {
+        get { playbackSession.playbackCommandRequest }
+        set { playbackSession.setPlaybackCommandRequest(newValue) }
+    }
     @Published var isFetchingMusicMetadata = false
     @Published var isSupplementingMetadata = false
-    @Published private(set) var isConnectingEmby = false
-    @Published private(set) var isConnectingJellyfin = false
-    @Published private(set) var isConnectingPlex = false
+    private(set) var isConnectingEmby: Bool {
+        get { remoteConnectorStore.isConnectingEmby }
+        set { remoteConnectorStore.setConnecting(.emby, newValue) }
+    }
+    private(set) var isConnectingJellyfin: Bool {
+        get { remoteConnectorStore.isConnectingJellyfin }
+        set { remoteConnectorStore.setConnecting(.jellyfin, newValue) }
+    }
+    private(set) var isConnectingPlex: Bool {
+        get { remoteConnectorStore.isConnectingPlex }
+        set { remoteConnectorStore.setConnecting(.plex, newValue) }
+    }
     private var version122MaintenanceTask: Task<Void, Never>?
     @Published var musicMetadataFetchProgress = ""
     @Published private(set) var isLibraryReloading = false
-    @Published private(set) var libraryRevision = 0
+    private(set) var libraryRevision: Int {
+        get { libraryDomain.libraryRevision }
+        set { libraryDomain.setLibraryRevision(newValue) }
+    }
     /// 仅在 reload() 完成（元数据/封面路径真实变化）时递增；文件存在性检查不会触发它。
     /// LocalPosterImage 的 cacheKey 改用此值，避免文件健康检查后触发全量图片重载。
-    @Published private(set) var posterRevision = 0
-    @Published private(set) var favoriteRevision = 0
-    @Published private(set) var watchlistRevision = 0
-    @Published private(set) var ratingRevision = 0
-    @Published private(set) var videoCacheRevision = 0
-    @Published private(set) var musicProjectionRevision = 0
+    private(set) var posterRevision: Int {
+        get { libraryDomain.posterRevision }
+        set { libraryDomain.setPosterRevision(newValue) }
+    }
+    private(set) var favoriteRevision: Int {
+        get { libraryDomain.favoriteRevision }
+        set { libraryDomain.setFavoriteRevision(newValue) }
+    }
+    private(set) var watchlistRevision: Int {
+        get { libraryDomain.watchlistRevision }
+        set { libraryDomain.setWatchlistRevision(newValue) }
+    }
+    private(set) var ratingRevision: Int {
+        get { libraryDomain.ratingRevision }
+        set { libraryDomain.setRatingRevision(newValue) }
+    }
+    private(set) var videoCacheRevision: Int {
+        get { libraryDomain.videoCacheRevision }
+        set { libraryDomain.setVideoCacheRevision(newValue) }
+    }
+    private(set) var musicProjectionRevision: Int {
+        get { libraryDomain.musicProjectionRevision }
+        set { libraryDomain.setMusicProjectionRevision(newValue) }
+    }
     /// 音乐内容修订号：仅当音乐曲目本身（曲目集合或其字段）真实变化时递增。
     /// 音乐库各子页面的快照缓存以它为失效键，避免视频/扫描等无关 libraryRevision
     /// 抖动把音乐列表快照全部打失效、每次切页都重新全量排序重建。
-    @Published private(set) var musicContentRevision = 0
+    private(set) var musicContentRevision: Int {
+        get { libraryDomain.musicContentRevision }
+        set { libraryDomain.setMusicContentRevision(newValue) }
+    }
     private var musicContentFingerprint = 0
     /// 详情横版剧照缓存修订号：后台补抓到新 backdrop 时递增，驱动首页 banner 换图。
     @Published private(set) var backdropRevision = 0
@@ -506,7 +588,10 @@ final class AppState: ObservableObject {
     var sakuraEasterEggShownThisLaunch = false
     var sakuraEasterEggTask: Task<Void, Never>?
     // 只在本次进程内记住队列弹层上次停留位置，避免跨启动恢复到旧队列偏移。
-    var musicQueueScrollAnchorID: String?
+    var musicQueueScrollAnchorID: String? {
+        get { musicQueueStore.scrollAnchorID }
+        set { musicQueueStore.scrollAnchorID = newValue }
+    }
     let directories: AppDirectories?
     // internal：供 AppState+SyncConflictResolution 等 extension 访问。
     let database: DatabaseManager?
@@ -798,8 +883,29 @@ final class AppState: ObservableObject {
         syncConflictForwarding = syncConflictStore.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        remoteConnectorForwarding = remoteConnectorStore.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         // 元数据校正计数/批次变化转发到 AppState，使设置页徽标/撤销列表照常刷新。
         metadataCorrectionForwarding = metadataCorrectionStore.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        taskCenter.onTasksChanged = { [weak self] _ in
+            self?.persistBackgroundTasksIfPossible()
+        }
+        taskCenterForwarding = taskCenter.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        scanActivityForwarding = scanActivity.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        musicQueueForwarding = musicQueueStore.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        playbackSessionForwarding = playbackSession.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        libraryDomainForwarding = libraryDomain.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
         configureNetworkPathMonitoring()
@@ -2734,8 +2840,7 @@ final class AppState: ObservableObject {
         reloadStart: Date
     ) {
         let applyStart = Date()
-        sources = snapshot.sources
-        items = snapshot.items
+        libraryDomain.replaceLibrary(sources: snapshot.sources, items: snapshot.items)
         musicPlaylistStore.replaceLoaded(
             playlists: snapshot.musicPlaylists,
             smartPlaylists: snapshot.musicSmartPlaylists
@@ -7419,7 +7524,7 @@ final class AppState: ObservableObject {
     }
 
     func sendPlaybackCommand(_ command: PlaybackCommand) {
-        playbackCommandRequest = PlaybackCommandRequest(command: command)
+        playbackSession.requestCommand(command)
     }
 
     func toggleMusicShuffle() {
@@ -7535,15 +7640,11 @@ final class AppState: ObservableObject {
     }
 
     private func adjacentItem(to item: MediaItem, direction: Int) -> MediaItem? {
-        let normalizedDirection = direction < 0 ? -1 : 1
-        let sequence: [MediaItem]
         if item.type == .music {
             prepareMusicQueue(for: item)
-            sequence = musicQueue
-            if musicRepeatMode == .repeatOne {
-                return item
-            }
-            if musicShuffleEnabled {
+            let sequence = musicQueue
+            if musicShuffleEnabled, musicRepeatMode != .repeatOne {
+                let normalizedDirection = direction < 0 ? -1 : 1
                 if normalizedDirection > 0 {
                     return musicShuffleNavigator.next(current: item, queue: sequence)
                 } else if let previous = musicShuffleNavigator.previous(current: item, queue: sequence) {
@@ -7551,28 +7652,36 @@ final class AppState: ObservableObject {
                 }
                 // 随机模式下若无历史可回溯，落回下方顺序逻辑（保持原「上一首」兜底行为）。
             }
-        } else if let parentID = item.parentID,
-                  let parent = items.first(where: { $0.id == parentID }) {
+            guard let targetID = PlaybackQueuePolicy.musicAdjacentItemID(
+                queueIDs: sequence.map(\.id),
+                currentItemID: item.id,
+                direction: direction,
+                repeatModeRawValue: musicRepeatMode.rawValue
+            ) else {
+                return nil
+            }
+            return sequence.first { $0.id == targetID } ?? (targetID == item.id ? item : nil)
+        }
+
+        let sequence: [MediaItem]
+        if let parentID = item.parentID,
+           let parent = items.first(where: { $0.id == parentID }) {
             sequence = children(for: parent)
         } else {
             sequence = topLevelItems.filter { $0.type != .music && $0.filePath != nil }
         }
-        guard let index = sequence.firstIndex(where: { $0.id == item.id }) else { return nil }
-        let targetIndex = index + normalizedDirection
-        if item.type == .music,
-           musicRepeatMode == .repeatAll,
-           !sequence.isEmpty {
-            if targetIndex < sequence.startIndex {
-                return sequence.last
-            }
-            if targetIndex >= sequence.endIndex {
-                return sequence.first
-            }
+        guard let targetID = PlaybackQueuePolicy.adjacentItemID(
+            queueIDs: sequence.map(\.id),
+            currentItemID: item.id,
+            direction: direction,
+            wraps: false
+        ) else {
+            return nil
         }
-        guard sequence.indices.contains(targetIndex) else { return nil }
-        return sequence[targetIndex]
+        return sequence.first { $0.id == targetID }
     }
 
+    // 顺序/循环相邻项策略已下沉到 MediaLibCore.PlaybackQueuePolicy；
     // 随机播放洗牌袋 / 历史逻辑已抽到 MusicShuffleNavigator（见 adjacentItem 的 music 分支调用）。
 
     func openExternally(_ item: MediaItem) {

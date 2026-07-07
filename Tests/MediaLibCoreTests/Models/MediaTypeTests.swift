@@ -30,6 +30,13 @@ final class MediaTypeTests: XCTestCase {
         XCTAssertNil(MediaType(rawValue: "definitely-not-a-type"))
     }
 
+    func testUnknownCodableRawValueDefaultsToOther() throws {
+        let data = #""futureSpatialVideo""#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(MediaType.self, from: data)
+
+        XCTAssertEqual(decoded, .other)
+    }
+
     func testAllCasesCoverKnownTypes() {
         let raws = Set(MediaType.allCases.map(\.rawValue))
         XCTAssertTrue(raws.isSuperset(of: ["movie", "tvShow", "music", "episode", "photo", "private"]))

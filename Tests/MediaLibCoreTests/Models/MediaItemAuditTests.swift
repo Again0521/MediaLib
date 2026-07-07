@@ -90,4 +90,37 @@ final class MediaItemAuditTests: XCTestCase {
         )
         XCTAssertTrue(watchedItem.hasPlaybackTrace, "明确 watched 标记仍应保留播放痕迹语义")
     }
+
+    /// 测试未来媒体类型不会让整条 JSON 媒体记录解码失败
+    func testDecoderDefaultsUnknownMediaTypeAndKeepsValidFields() throws {
+        let json = """
+        {
+          "id": "future-media",
+          "type": "spatialVideo",
+          "title": "Future Clip",
+          "playPosition": 12.5,
+          "playProgress": 0.25,
+          "watched": false,
+          "favorite": true,
+          "watchlist": true,
+          "createdAt": 1000,
+          "updatedAt": 2000,
+          "lastPlayedAt": 3000
+        }
+        """.data(using: .utf8)!
+
+        let item = try JSONDecoder().decode(MediaItem.self, from: json)
+
+        XCTAssertEqual(item.id, "future-media")
+        XCTAssertEqual(item.type, .other)
+        XCTAssertEqual(item.title, "Future Clip")
+        XCTAssertEqual(item.playPosition, 12.5)
+        XCTAssertEqual(item.playProgress, 0.25)
+        XCTAssertFalse(item.watched)
+        XCTAssertTrue(item.favorite)
+        XCTAssertTrue(item.watchlist)
+        XCTAssertEqual(item.createdAt, Date(timeIntervalSinceReferenceDate: 1000))
+        XCTAssertEqual(item.updatedAt, Date(timeIntervalSinceReferenceDate: 2000))
+        XCTAssertEqual(item.lastPlayedAt, Date(timeIntervalSinceReferenceDate: 3000))
+    }
 }

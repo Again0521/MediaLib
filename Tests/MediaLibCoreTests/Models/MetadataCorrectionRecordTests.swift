@@ -53,4 +53,55 @@ final class MetadataCorrectionRecordTests: XCTestCase {
         XCTAssertNil(MetadataCorrectionField.rating.encodedValue(from: item))
         XCTAssertNil(MetadataCorrectionField.userRating.encodedValue(from: item))
     }
+
+    func testRecordDecoderDefaultsUnknownFieldAndKeepsValidValues() throws {
+        let json = """
+        {
+          "id": "record-1",
+          "batchID": "batch-1",
+          "mediaID": "media-1",
+          "field": "futureField",
+          "oldValue": "old",
+          "newValue": "new",
+          "source": "tmdb",
+          "createdAt": 1000,
+          "undoneAt": 2000
+        }
+        """.data(using: .utf8)!
+
+        let record = try JSONDecoder().decode(MetadataCorrectionRecord.self, from: json)
+
+        XCTAssertEqual(record.id, "record-1")
+        XCTAssertEqual(record.batchID, "batch-1")
+        XCTAssertEqual(record.mediaID, "media-1")
+        XCTAssertEqual(record.field, .title)
+        XCTAssertEqual(record.oldValue, "old")
+        XCTAssertEqual(record.newValue, "new")
+        XCTAssertEqual(record.source, "tmdb")
+        XCTAssertEqual(record.createdAt, Date(timeIntervalSinceReferenceDate: 1000))
+        XCTAssertEqual(record.undoneAt, Date(timeIntervalSinceReferenceDate: 2000))
+    }
+
+    func testBatchSummaryDecoderFiltersUnknownFieldsAndClampsFieldCount() throws {
+        let json = """
+        {
+          "batchID": "batch-2",
+          "mediaID": "media-2",
+          "source": "manual",
+          "createdAt": 3000,
+          "fieldCount": -5,
+          "fields": ["title", "futureField", "rating", "futureScore"]
+        }
+        """.data(using: .utf8)!
+
+        let summary = try JSONDecoder().decode(MetadataCorrectionBatchSummary.self, from: json)
+
+        XCTAssertEqual(summary.batchID, "batch-2")
+        XCTAssertEqual(summary.mediaID, "media-2")
+        XCTAssertEqual(summary.source, "manual")
+        XCTAssertEqual(summary.createdAt, Date(timeIntervalSinceReferenceDate: 3000))
+        XCTAssertEqual(summary.fieldCount, 0)
+        XCTAssertEqual(summary.fields, [.title, .rating])
+        XCTAssertEqual(summary.id, "media-2-batch-2")
+    }
 }

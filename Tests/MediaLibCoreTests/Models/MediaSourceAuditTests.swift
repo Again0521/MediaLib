@@ -70,6 +70,13 @@ final class MediaSourceAuditTests: XCTestCase {
         XCTAssertEqual(MediaSource(name: "Test", path: "FTPS://server/share").sourceKind, .ftp)
     }
 
+    func testSourceKindClassifiesLegacyNamePrefixesCaseInsensitively() {
+        XCTAssertEqual(MediaSource(name: "smb 共享盘", path: "/Volumes/smb_mount").sourceKind, .smb)
+        XCTAssertEqual(MediaSource(name: "Smb Archive", path: "/Volumes/archive").sourceKind, .smb)
+        XCTAssertEqual(MediaSource(name: "ftp backup", path: "/Volumes/ftp_mount").sourceKind, .ftp)
+        XCTAssertEqual(MediaSource(name: "ftps secure backup", path: "/Volumes/ftps_mount").sourceKind, .ftp)
+    }
+
     func testSelectedEmbyLibraryIDsAreNormalizedOnInitializationDecodingAndMutation() throws {
         let source = MediaSource(
             name: "Emby",
@@ -91,5 +98,31 @@ final class MediaSourceAuditTests: XCTestCase {
         var mutated = MediaSource(name: "Mutable Emby", path: "emby://server")
         mutated.selectedEmbyLibraryIDs = ["  library-a", "library-b", "library-a ", "\t"]
         XCTAssertEqual(mutated.selectedEmbyLibraryIDs, ["library-a", "library-b"])
+    }
+
+    func testDecoderDefaultsOnlyUnknownEnumFieldsAndKeepsValidSourceData() throws {
+        let json = """
+        {
+          "id": "source-future",
+          "name": "Future Source",
+          "path": "emby://server",
+          "mediaType": "immersiveCinema",
+          "recursive": false,
+          "autoScan": false,
+          "remoteTraceSyncMode": "serverWins",
+          "selectedEmbyLibraryIDs": [" movies ", "movies", "shows"]
+        }
+        """
+
+        let source = try JSONDecoder().decode(MediaSource.self, from: Data(json.utf8))
+
+        XCTAssertEqual(source.id, "source-future")
+        XCTAssertEqual(source.name, "Future Source")
+        XCTAssertEqual(source.path, "emby://server")
+        XCTAssertEqual(source.mediaType, .auto)
+        XCTAssertFalse(source.recursive)
+        XCTAssertFalse(source.autoScan)
+        XCTAssertEqual(source.remoteTraceSyncMode, .bidirectional)
+        XCTAssertEqual(source.selectedEmbyLibraryIDs, ["movies", "shows"])
     }
 }

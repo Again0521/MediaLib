@@ -5935,7 +5935,7 @@ private struct MusicMiniSeekSlider: View {
     var body: some View {
         GeometryReader { proxy in
             let width = max(proxy.size.width, 1)
-            let progress = clamped(draggingProgress ?? normalizedProgress)
+            let progress = PlaybackTimelinePolicy.clampedUnit(draggingProgress ?? normalizedProgress)
             let fillWidth = max(width * CGFloat(progress), 0)
             let thumbRadius = thumbSize / 2
             let thumbX = min(max(fillWidth, thumbRadius), width - thumbRadius)
@@ -6021,8 +6021,12 @@ private struct MusicMiniSeekSlider: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         guard isEnabled else { return }
-                        let progress = clamped(Double(value.location.x / width))
-                        let target = progress * max(duration, 1)
+                        let progress = PlaybackTimelinePolicy.clampedUnit(Double(value.location.x / width))
+                        let target = PlaybackTimelinePolicy.timelineTime(
+                            forHorizontalPosition: Double(value.location.x),
+                            width: Double(width),
+                            duration: max(duration, 1)
+                        )
                         let wasDragging = draggingProgress != nil
                         draggingProgress = progress
                         if wasDragging {
@@ -6036,9 +6040,14 @@ private struct MusicMiniSeekSlider: View {
                             draggingProgress = nil
                             return
                         }
-                        let progress = clamped(Double(value.location.x / width))
                         draggingProgress = nil
-                        onSeek(progress * max(duration, 1))
+                        onSeek(
+                            PlaybackTimelinePolicy.timelineTime(
+                                forHorizontalPosition: Double(value.location.x),
+                                width: Double(width),
+                                duration: max(duration, 1)
+                            )
+                        )
                     }
             )
             .onAppear {
@@ -6096,10 +6105,6 @@ private struct MusicMiniSeekSlider: View {
     private var normalizedProgress: Double {
         guard duration.isFinite, duration > 0, currentTime.isFinite else { return 0 }
         return currentTime / duration
-    }
-
-    private func clamped(_ value: Double) -> Double {
-        min(max(value, 0), 1)
     }
 
     private func progressFillColor(isEnabled: Bool) -> Color {

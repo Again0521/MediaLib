@@ -7,7 +7,7 @@ import MediaLibCore   // TimedLyricLine 等已下沉至 Core
 // 经 TimedLyricLine.playbackPosition/progress 算出 Equatable 小状态后去重，只驱动歌词叶子视图。
 // 仅搬位置，去重/seek 相位/桶量化语义一字未改。原为 MusicPlayerView.swift 内的 private 类型，拆出后改为模块内部可见；
 // 消费它们的视图（MusicActiveKaraokeLyricLine / KaraokeLyricLine 等）仍在 MusicPlayerView，跨文件引用安全。
-// TimedLyricLine / MpvPlayerController / PlaybackSeekState 同属 MediaLib 模块，无需 import。
+// TimedLyricLine / PlaybackSeekState 已下沉至 MediaLibCore，MpvPlayerController 仍在 App 层。
 enum LyricLineHighlightMode: Equatable {
     case normal
     case fullLineDuringSeek
