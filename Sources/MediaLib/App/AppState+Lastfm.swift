@@ -5,7 +5,7 @@ import MediaLibCore
 // 从 AppState.swift 物理拆出（零行为变化）：Last.fm 听歌打卡（B2）领域。
 // 仍是同一个 AppState 类型的 extension（单一 ObservableObject 不变），只是把该领域的方法移到独立文件，
 // 便于维护与后续真正的 store 化。访问的存储属性（logger / pendingScrobble / lastfmPendingAuthToken /
-// isLastfmAuthorizing）已在主类放开为 internal；scrobbleMusicStart 也放开为 internal 供播放链路跨文件调用。
+// isLastfmAuthorizing facade）已在主类放开为 internal；scrobbleMusicStart 也放开为 internal 供播放链路跨文件调用。
 extension AppState {
     private var lastfmService: LastfmScrobbleService? {
         let key = settings.lastfmAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

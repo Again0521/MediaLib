@@ -208,7 +208,15 @@ private struct AddMediaSourceWizardSheet: View {
 
                 stepIndicator
 
-                detailsArea
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        detailsArea
+                    }
+                    .padding(.top, 4)
+                    .padding(.bottom, 16)
+                }
+                .frame(maxHeight: 460)
+                .scrollContentBackground(.hidden)
 
                 AppSheetActionFooter {
                     Button("取消", role: .cancel) {
@@ -402,7 +410,7 @@ private struct AddMediaSourceWizardSheet: View {
                     TextField("smb://nas.local/Media 或 ftp://192.168.1.10/Movies", text: $networkURL)
                         .glassFormField()
 
-                    Toggle("匿名登录", isOn: $networkAnonymous)
+                    Toggle("匿名登录", isOn: $networkAnonymous.animation(AppMotion.fast))
                         .toggleStyle(AppSwitchToggleStyle())
 
                     if !networkAnonymous {
@@ -1263,19 +1271,22 @@ private struct MediaTypeGridPicker: View {
     /// 已被外层 AppSheetSection 卡片包裹时传 false，避免卡中卡（双重白底+双重投影）。
     var showsCard: Bool = true
 
-    private let columns = Array(repeating: GridItem(.flexible(minimum: 118), spacing: 8), count: 3)
+    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 3)
 
     var body: some View {
-        let grid = LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+        let grid = LazyVGrid(columns: columns, alignment: .center, spacing: 8) {
             ForEach(mediaTypes, id: \.self) { type in
                 Button {
                     withAnimation(AppMotion.fast) {
                         selection = type
                     }
                 } label: {
-                    GlassCapsuleControl(isSelected: selection == type, height: 30, horizontalPadding: 10, enablePointerEdge: false) {
-                        Label(title(for: type), systemImage: icon(for: type))
-                            .frame(maxWidth: .infinity, alignment: .center)
+                    GlassCapsuleControl(isSelected: selection == type, height: 30, horizontalPadding: 10, enablePointerEdge: false, expandHorizontally: true) {
+                        HStack(alignment: .center, spacing: 6) {
+                            Image(systemName: icon(for: type))
+                            Text(title(for: type))
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
                     }
                 }
                 .buttonStyle(.plain)

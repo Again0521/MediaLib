@@ -27,6 +27,6 @@ final class MpvVideoFrameCommandEngine: VideoFrameCommandEngine {
     }
 
     func captureCurrentFrame(to targetURL: URL, mode: VideoScreenshotMode) throws {
-        try transport.command(["screenshot-to-file", targetURL.path, mode.mpvArgument])
+        try transport.command(["screenshot-to-file", targetURL.path, VideoScreenshotModePolicy.mpvArgument(for: mode)])
     }
 }

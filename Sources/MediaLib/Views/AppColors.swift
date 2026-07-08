@@ -2514,6 +2514,7 @@ struct GlassCapsuleControl<Content: View>: View {
     var tint: Color = AppColors.selectedGlassTint
     /// 禁用后不挂 onContinuousHover，适用于大量并排出现的筛选胶囊，降低指针事件订阅数量。
     var enablePointerEdge: Bool = true
+    var expandHorizontally: Bool = false
     @ViewBuilder var content: Content
     @State private var isHovering = false
 
@@ -2524,6 +2525,7 @@ struct GlassCapsuleControl<Content: View>: View {
         font: Font = .caption.weight(.semibold),
         tint: Color = AppColors.selectedGlassTint,
         enablePointerEdge: Bool = true,
+        expandHorizontally: Bool = false,
         @ViewBuilder content: () -> Content
     ) {
         self.isSelected = isSelected
@@ -2532,6 +2534,7 @@ struct GlassCapsuleControl<Content: View>: View {
         self.font = font
         self.tint = tint
         self.enablePointerEdge = enablePointerEdge
+        self.expandHorizontally = expandHorizontally
         self.content = content()
     }
 
@@ -2548,9 +2551,10 @@ struct GlassCapsuleControl<Content: View>: View {
         return content
             .font(font)
             .lineLimit(1)
-            .fixedSize(horizontal: true, vertical: false)
+            .fixedSize(horizontal: !expandHorizontally, vertical: false)
             .foregroundStyle(textColor)
             .padding(.horizontal, horizontalPadding)
+            .frame(maxWidth: expandHorizontally ? .infinity : nil)
             .frame(height: height)
             .layoutPriority(isSelected ? 1 : 0)
             .background(shape.fill(fill))

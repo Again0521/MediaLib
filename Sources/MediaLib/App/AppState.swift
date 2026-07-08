@@ -365,17 +365,6 @@ private extension RemoteConnectorProvider {
     }
 }
 
-struct DetailReturnContext: Equatable, Sendable {
-    let destinationID: String
-    let anchorID: String
-    let searchText: String?
-}
-
-private enum DetailNavigationNode: Equatable, Sendable {
-    case media(String)
-    case person(String)
-}
-
 @MainActor
 final class AppState: ObservableObject {
     let libraryDomain = LibraryDomainStore()
@@ -389,10 +378,19 @@ final class AppState: ObservableObject {
         set { libraryDomain.replaceItems(newValue) }
     }
     @Published var settings: AppSettings
-    @Published var selectedItem: MediaItem?
-    @Published var selectedPersonID: String?
-    @Published private(set) var detailReturnContext: DetailReturnContext?
-    private var detailNavigationHistory: [DetailNavigationNode] = []
+    let detailNavigation = DetailNavigationStore()
+    private var detailNavigationForwarding: AnyCancellable?
+    var selectedItem: MediaItem? {
+        get { detailNavigation.selectedItem }
+        set { detailNavigation.setSelectedItem(newValue) }
+    }
+    var selectedPersonID: String? {
+        get { detailNavigation.selectedPersonID }
+        set { detailNavigation.setSelectedPersonID(newValue) }
+    }
+    var detailReturnContext: DetailReturnContext? {
+        detailNavigation.detailReturnContext
+    }
     let playbackSession = PlaybackSessionStore()
     private var playbackSessionForwarding: AnyCancellable?
     var activePlayerItem: MediaItem? {
@@ -406,15 +404,38 @@ final class AppState: ObservableObject {
         set { playbackSession.replaceVideoQueue(newValue) }
     }
     /// 「打开网络串流」输入弹窗。
-    @Published var showingNetworkStreamPrompt = false
+    let networkStreamPrompt = NetworkStreamPromptStore()
+    private var networkStreamPromptForwarding: AnyCancellable?
+    var showingNetworkStreamPrompt: Bool {
+        get { networkStreamPrompt.isShowingPrompt }
+        set { networkStreamPrompt.setShowingPrompt(newValue) }
+    }
+    let appUpdateState = AppUpdateStateStore()
+    private var appUpdateStateForwarding: AnyCancellable?
     /// 可用的新版本（驱动更新提示弹窗）。
-    @Published var availableUpdate: AppUpdateInfo?
-    @Published var isCheckingForUpdates = false
+    var availableUpdate: AppUpdateInfo? {
+        get { appUpdateState.availableUpdate }
+        set { appUpdateState.setAvailableUpdate(newValue) }
+    }
+    var isCheckingForUpdates: Bool {
+        get { appUpdateState.isCheckingForUpdates }
+        set { appUpdateState.setCheckingForUpdates(newValue) }
+    }
     // internal（非 private）：供拆到 AppState+Updates.swift 的更新检查方法读写。
     var updateCheckTask: Task<Void, Never>?
     /// 第三次启动时弹出的赞赏邀请。
-    @Published var showingSponsorPrompt = false
-    @Published var quickPreviewItem: MediaItem?
+    let sponsorPrompt = SponsorPromptStore()
+    private var sponsorPromptForwarding: AnyCancellable?
+    var showingSponsorPrompt: Bool {
+        get { sponsorPrompt.isShowingInvite }
+        set { sponsorPrompt.setShowingInvite(newValue) }
+    }
+    let quickPreview = QuickPreviewStore()
+    private var quickPreviewForwarding: AnyCancellable?
+    var quickPreviewItem: MediaItem? {
+        get { quickPreview.item }
+        set { quickPreview.setItem(newValue) }
+    }
     let scanActivity = ScanActivityStore()
     private var scanActivityForwarding: AnyCancellable?
     var scanProgress: ScanProgress? {
@@ -436,7 +457,12 @@ final class AppState: ObservableObject {
         set { taskCenter.replaceTasks(newValue) }
     }
     /// 剧集 TMDB 一键匹配进行中（驱动设置页按钮的进度态）。
-    @Published var isMatchingTMDB = false
+    let tmdbMatchState = TMDBMatchStateStore()
+    private var tmdbMatchStateForwarding: AnyCancellable?
+    var isMatchingTMDB: Bool {
+        get { tmdbMatchState.isMatching }
+        set { tmdbMatchState.setMatching(newValue) }
+    }
     @Published var alert: AppAlert? {
         didSet {
             // AppAlert 是"纯告知"载体（仅标题/正文 + 一个"好"键），统一只走浮窗通知，
@@ -450,9 +476,19 @@ final class AppState: ObservableObject {
             }
         }
     }
-    @Published private(set) var floatingNotices: [AppFloatingNotice] = []
+    let floatingNoticeStore = FloatingNoticeStore()
+    private var floatingNoticeForwarding: AnyCancellable?
+    var floatingNotices: [AppFloatingNotice] {
+        get { floatingNoticeStore.notices }
+        set { floatingNoticeStore.replaceVisibleNotices(with: newValue) }
+    }
     /// 受限远程媒体服务器提示（白名单拒绝）；非 nil 时弹出专用面板。
-    @Published var embyRestrictionNotice: EmbyRestrictionNotice?
+    let embyRestrictionNoticeStore = EmbyRestrictionNoticeStore()
+    private var embyRestrictionNoticeForwarding: AnyCancellable?
+    var embyRestrictionNotice: EmbyRestrictionNotice? {
+        get { embyRestrictionNoticeStore.notice }
+        set { embyRestrictionNoticeStore.setNotice(newValue) }
+    }
     /// C2 批量操作：海报墙多选状态已抽到 SelectionStore（R1-ARCH-001 试水）。
     /// AppState 持有该 Store 并转发其 objectWillChange（见 init），下面的计算访问器
     /// 保持 `appState.isSelectionModeActive` / `appState.selectedItemIDs` 旧 API 不变（视图零改）。
@@ -461,13 +497,34 @@ final class AppState: ObservableObject {
     var isSelectionModeActive: Bool { selection.isSelectionModeActive }
     var selectedItemIDs: Set<String> { selection.selectedItemIDs }
     /// 配色切换计数：每次切换预设 +1，驱动整窗"加载过场"覆盖层在下层刷新界面，避免逐控件慢慢变色。
-    @Published var themeRevision = 0
+    let themeRefresh = ThemeRefreshStore()
+    private var themeRefreshForwarding: AnyCancellable?
+    var themeRevision: Int {
+        get { themeRefresh.themeRevision }
+        set { themeRefresh.setThemeRevision(newValue) }
+    }
     /// 音乐主题参数（MusicThemeConfig）刷新计数：用户「重新加载 / 恢复默认」后 +1，
     /// 触发音乐播放器主题子树按 .id 重建并重新读取 MusicThemeConfig.active（无需重启）。
-    @Published var musicThemeRevision = 0
-    @Published var startupError: String?
-    @Published var privacyUnlocked = false
-    @Published var privacyPINConfigured = false
+    var musicThemeRevision: Int {
+        get { themeRefresh.musicThemeRevision }
+        set { themeRefresh.setMusicThemeRevision(newValue) }
+    }
+    let startupErrorStore = StartupErrorStore()
+    private var startupErrorForwarding: AnyCancellable?
+    var startupError: String? {
+        get { startupErrorStore.message }
+        set { startupErrorStore.setMessage(newValue) }
+    }
+    let privacyLockState = PrivacyLockStateStore()
+    private var privacyLockStateForwarding: AnyCancellable?
+    var privacyUnlocked: Bool {
+        get { privacyLockState.isUnlocked }
+        set { privacyLockState.setUnlocked(newValue) }
+    }
+    var privacyPINConfigured: Bool {
+        get { privacyLockState.isPINConfigured }
+        set { privacyLockState.setPINConfigured(newValue) }
+    }
     let musicQueueStore = MusicQueueStore()
     private var musicQueueForwarding: AnyCancellable?
     var musicQueue: [MediaItem] {
@@ -488,8 +545,14 @@ final class AppState: ObservableObject {
     let musicPlaylistStore: MusicPlaylistStore
     private var musicPlaylistForwarding: AnyCancellable?
     var musicPlaylists: [MusicPlaylist] { musicPlaylistStore.playlists }
-    @Published var videoSmartCollections: [VideoSmartCollection] = []
-    @Published var videoManualCollections: [VideoManualCollection] = []
+    let videoCollectionStore: VideoCollectionStore
+    private var videoCollectionForwarding: AnyCancellable?
+    var videoSmartCollections: [VideoSmartCollection] {
+        videoCollectionStore.smartCollections
+    }
+    var videoManualCollections: [VideoManualCollection] {
+        videoCollectionStore.manualCollections
+    }
     @Published var videoOfflineSubscriptions: [VideoOfflineSubscription] = []
     // 元数据校正账本已抽到 MetadataCorrectionStore；保留同名转发访问器使外部 API/视图零改。
     let metadataCorrectionStore: MetadataCorrectionStore
@@ -509,20 +572,49 @@ final class AppState: ObservableObject {
         get { remoteConnectorStore.accounts }
         set { remoteConnectorStore.replaceAccounts(newValue) }
     }
-    @Published private(set) var detailMetadataGapsByMediaID: [String: Set<String>] = [:]
-    @Published private(set) var detailSearchTermsByMediaID: [String: [String]] = [:]
-    @Published private(set) var mediaSearchRevision = 0
+    let mediaSearchIndexState = MediaSearchIndexStateStore()
+    private var mediaSearchIndexForwarding: AnyCancellable?
+    private(set) var detailMetadataGapsByMediaID: [String: Set<String>] {
+        get { mediaSearchIndexState.detailMetadataGapsByMediaID }
+        set { mediaSearchIndexState.replaceDetailMetadataGaps(newValue) }
+    }
+    private(set) var detailSearchTermsByMediaID: [String: [String]] {
+        get { mediaSearchIndexState.detailSearchTermsByMediaID }
+        set { mediaSearchIndexState.replaceDetailSearchTerms(newValue) }
+    }
+    private(set) var mediaSearchRevision: Int {
+        get { mediaSearchIndexState.revision }
+        set { mediaSearchIndexState.setRevision(newValue) }
+    }
     private var mediaSearchFieldsCacheRevision = -1
     private var mediaSearchFieldsCache: [String: [String?]] = [:]
-    @Published var videoManualCollectionCreationRequest: VideoManualCollectionCreationRequest?
-    @Published var videoOfflineSubscriptionLimitRequest: VideoOfflineSubscriptionLimitRequest?
+    let videoManualCollectionCreation = VideoManualCollectionCreationStore()
+    private var videoManualCollectionCreationForwarding: AnyCancellable?
+    var videoManualCollectionCreationRequest: VideoManualCollectionCreationRequest? {
+        get { videoManualCollectionCreation.request }
+        set { videoManualCollectionCreation.setRequest(newValue) }
+    }
+    let videoOfflineSubscriptionLimit = VideoOfflineSubscriptionLimitStore()
+    private var videoOfflineSubscriptionLimitForwarding: AnyCancellable?
+    var videoOfflineSubscriptionLimitRequest: VideoOfflineSubscriptionLimitRequest? {
+        get { videoOfflineSubscriptionLimit.request }
+        set { videoOfflineSubscriptionLimit.setRequest(newValue) }
+    }
     var musicSmartPlaylists: [MusicSmartPlaylist] { musicPlaylistStore.smartPlaylists }
     var playbackCommandRequest: PlaybackCommandRequest? {
         get { playbackSession.playbackCommandRequest }
         set { playbackSession.setPlaybackCommandRequest(newValue) }
     }
-    @Published var isFetchingMusicMetadata = false
-    @Published var isSupplementingMetadata = false
+    let musicMetadataActivity = MusicMetadataActivityStore()
+    private var musicMetadataActivityForwarding: AnyCancellable?
+    var isFetchingMusicMetadata: Bool {
+        get { musicMetadataActivity.isFetching }
+        set { musicMetadataActivity.setFetching(newValue) }
+    }
+    var isSupplementingMetadata: Bool {
+        get { musicMetadataActivity.isSupplementing }
+        set { musicMetadataActivity.setSupplementing(newValue) }
+    }
     private(set) var isConnectingEmby: Bool {
         get { remoteConnectorStore.isConnectingEmby }
         set { remoteConnectorStore.setConnecting(.emby, newValue) }
@@ -536,7 +628,10 @@ final class AppState: ObservableObject {
         set { remoteConnectorStore.setConnecting(.plex, newValue) }
     }
     private var version122MaintenanceTask: Task<Void, Never>?
-    @Published var musicMetadataFetchProgress = ""
+    var musicMetadataFetchProgress: String {
+        get { musicMetadataActivity.fetchProgress }
+        set { musicMetadataActivity.setFetchProgress(newValue) }
+    }
     @Published private(set) var isLibraryReloading = false
     private(set) var libraryRevision: Int {
         get { libraryDomain.libraryRevision }
@@ -583,9 +678,17 @@ final class AppState: ObservableObject {
     @Published private(set) var videoCacheStorageSummary = VideoCacheStorageSummary(entryCount: 0, totalBytes: 0, byteLimit: nil)
     @Published private(set) var videoOfflineSubscriptionWiFiAvailable = false
     // 播放歌名含「アゲイン」的歌曲时触发一次轻量樱花动效，仅限本次启动首次播放。
-    @Published var sakuraEasterEggActive = false
+    let sakuraEasterEggState = SakuraEasterEggStateStore()
+    private var sakuraEasterEggStateForwarding: AnyCancellable?
+    var sakuraEasterEggActive: Bool {
+        get { sakuraEasterEggState.isActive }
+        set { sakuraEasterEggState.setActive(newValue) }
+    }
     // internal（非 private）：供拆到 AppState+ExternalPlayback.swift 的彩蛋触发方法读写。
-    var sakuraEasterEggShownThisLaunch = false
+    var sakuraEasterEggShownThisLaunch: Bool {
+        get { sakuraEasterEggState.shownThisLaunch }
+        set { sakuraEasterEggState.setShownThisLaunch(newValue) }
+    }
     var sakuraEasterEggTask: Task<Void, Never>?
     // 只在本次进程内记住队列弹层上次停留位置，避免跨启动恢复到旧队列偏移。
     var musicQueueScrollAnchorID: String? {
@@ -600,8 +703,7 @@ final class AppState: ObservableObject {
     let mediaRepository: MediaRepository?
     // musicPlaylistRepository / musicSmartPlaylistRepository 已移入 MusicPlaylistStore 持有。
     private let musicQueueRepository: MusicQueueRepository?
-    private let videoSmartCollectionRepository: VideoSmartCollectionRepository?
-    private let videoManualCollectionRepository: VideoManualCollectionRepository?
+    // videoSmartCollectionRepository / videoManualCollectionRepository 已移入 VideoCollectionStore 持有。
     private let videoOfflineSubscriptionRepository: VideoOfflineSubscriptionRepository?
     private let playbackMarkerRepository: PlaybackMarkerRepository?
     // metadataCorrectionRepository 已移入 MetadataCorrectionStore 持有。
@@ -718,7 +820,12 @@ final class AppState: ObservableObject {
     /// 配色等高频设置变更的防抖落盘任务。
     var settingsPersistTask: Task<Void, Never>?   // internal：AppState+MusicTheme extension 跨文件访问
     /// 正在进行 Last.fm 授权/连接操作。
-    @Published var isLastfmAuthorizing = false
+    let lastfmAuthorizationState = LastfmAuthorizationStateStore()
+    private var lastfmAuthorizationForwarding: AnyCancellable?
+    var isLastfmAuthorizing: Bool {
+        get { lastfmAuthorizationState.isAuthorizing }
+        set { lastfmAuthorizationState.setAuthorizing(newValue) }
+    }
 
     func presentDetail(
         _ item: MediaItem,
@@ -726,66 +833,34 @@ final class AppState: ObservableObject {
         anchorID: String,
         searchText: String? = nil
     ) {
-        let normalizedSearchText = searchText?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        detailNavigationHistory.removeAll()
-        selectedPersonID = nil
-        // 先切入详情，再发布返回上下文，避免仍挂载的来源页把“打开详情”误判成“正在返回”并提前消费。
-        selectedItem = item
-        detailReturnContext = DetailReturnContext(
-            destinationID: destinationID,
+        detailNavigation.presentDetail(
+            item,
+            from: destinationID,
             anchorID: anchorID,
-            searchText: normalizedSearchText?.isEmpty == false ? normalizedSearchText : nil
+            searchText: searchText
         )
     }
 
     func presentRelatedDetail(_ item: MediaItem) {
-        if let selectedItem, selectedItem.id != item.id {
-            detailNavigationHistory.append(.media(selectedItem.id))
-        } else if let selectedPersonID {
-            detailNavigationHistory.append(.person(selectedPersonID))
-        }
-        selectedPersonID = nil
-        self.selectedItem = item
+        detailNavigation.presentRelatedDetail(item)
     }
 
     func presentPersonDetail(_ personID: String) {
-        if let selectedItem {
-            detailNavigationHistory.append(.media(selectedItem.id))
-        } else if let selectedPersonID, selectedPersonID != personID {
-            detailNavigationHistory.append(.person(selectedPersonID))
-        }
-        selectedItem = nil
-        selectedPersonID = personID
+        detailNavigation.presentPersonDetail(personID)
     }
 
     func dismissDetail() {
-        guard let previous = detailNavigationHistory.popLast() else {
-            selectedItem = nil
-            selectedPersonID = nil
-            return
-        }
-        switch previous {
-        case .media(let id):
-            selectedPersonID = nil
-            selectedItem = items.first(where: { $0.id == id })
-        case .person(let id):
-            selectedItem = nil
-            selectedPersonID = id
+        detailNavigation.dismissDetail { id in
+            items.first { $0.id == id }
         }
     }
 
     func consumeDetailReturnContext(destinationID: String, anchorID: String) {
-        guard detailReturnContext?.destinationID == destinationID,
-              detailReturnContext?.anchorID == anchorID else { return }
-        detailReturnContext = nil
+        detailNavigation.consumeReturnContext(destinationID: destinationID, anchorID: anchorID)
     }
 
     func clearDetailNavigation() {
-        detailNavigationHistory.removeAll()
-        detailReturnContext = nil
-        selectedItem = nil
-        selectedPersonID = nil
+        detailNavigation.clear()
     }
 
     init() {
@@ -796,7 +871,7 @@ final class AppState: ObservableObject {
         }
         self.settings = loadedSettings
         self.configuredWatchedThreshold = loadedSettings.watchedThreshold
-        self.privacyPINConfigured = loadedSettings.privacyPINEnabled && privacyLockService.hasPIN()
+        self.privacyLockState.setPINConfigured(loadedSettings.privacyPINEnabled && privacyLockService.hasPIN())
         // 首帧前就把用户配色写入全局色板，避免启动闪一帧默认配色。
         AppColors.activeTheme = AppThemeResolver.resolve(for: loadedSettings)
 
@@ -811,8 +886,10 @@ final class AppState: ObservableObject {
             self.sourceRepository = SourceRepository(database: database)
             self.mediaRepository = MediaRepository(database: database)
             self.musicQueueRepository = MusicQueueRepository(database: database)
-            self.videoSmartCollectionRepository = VideoSmartCollectionRepository(database: database)
-            self.videoManualCollectionRepository = VideoManualCollectionRepository(database: database)
+            self.videoCollectionStore = VideoCollectionStore(
+                smartRepository: VideoSmartCollectionRepository(database: database),
+                manualRepository: VideoManualCollectionRepository(database: database)
+            )
             self.videoOfflineSubscriptionRepository = VideoOfflineSubscriptionRepository(database: database)
             self.musicPlaylistStore = MusicPlaylistStore(
                 repository: MusicPlaylistRepository(database: database),
@@ -852,8 +929,7 @@ final class AppState: ObservableObject {
             self.sourceRepository = nil
             self.mediaRepository = nil
             self.musicQueueRepository = nil
-            self.videoSmartCollectionRepository = nil
-            self.videoManualCollectionRepository = nil
+            self.videoCollectionStore = VideoCollectionStore(smartRepository: nil, manualRepository: nil)
             self.videoOfflineSubscriptionRepository = nil
             self.musicPlaylistStore = MusicPlaylistStore(repository: nil, smartRepository: nil)
             self.playbackMarkerRepository = nil
@@ -875,6 +951,30 @@ final class AppState: ObservableObject {
         musicPlaylistForwarding = musicPlaylistStore.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        videoCollectionForwarding = videoCollectionStore.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        videoManualCollectionCreationForwarding = videoManualCollectionCreation.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        videoOfflineSubscriptionLimitForwarding = videoOfflineSubscriptionLimit.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        networkStreamPromptForwarding = networkStreamPrompt.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        quickPreviewForwarding = quickPreview.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        appUpdateStateForwarding = appUpdateState.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        sponsorPromptForwarding = sponsorPrompt.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        startupErrorForwarding = startupErrorStore.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         // URL 链接健康结果变化转发到 AppState，使健康徽标/失效列表照常刷新。
         urlHealthForwarding = urlHealthMonitor.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
@@ -884,6 +984,9 @@ final class AppState: ObservableObject {
             self?.objectWillChange.send()
         }
         remoteConnectorForwarding = remoteConnectorStore.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        embyRestrictionNoticeForwarding = embyRestrictionNoticeStore.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
         // 元数据校正计数/批次变化转发到 AppState，使设置页徽标/撤销列表照常刷新。
@@ -896,6 +999,9 @@ final class AppState: ObservableObject {
         taskCenterForwarding = taskCenter.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        tmdbMatchStateForwarding = tmdbMatchState.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
         scanActivityForwarding = scanActivity.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -906,6 +1012,36 @@ final class AppState: ObservableObject {
             self?.objectWillChange.send()
         }
         libraryDomainForwarding = libraryDomain.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        detailNavigationForwarding = detailNavigation.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        musicMetadataActivityForwarding = musicMetadataActivity.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        privacyLockStateForwarding = privacyLockState.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        floatingNoticeForwarding = floatingNoticeStore.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        sakuraEasterEggStateForwarding = sakuraEasterEggState.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        onboardingReplayForwarding = onboardingReplay.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        lastfmAuthorizationForwarding = lastfmAuthorizationState.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        traktSyncActivityForwarding = traktSyncActivity.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        themeRefreshForwarding = themeRefresh.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        mediaSearchIndexForwarding = mediaSearchIndexState.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
         configureNetworkPathMonitoring()
@@ -1277,24 +1413,17 @@ final class AppState: ObservableObject {
     }
 
     func videoSmartCollection(id: String) -> VideoSmartCollection? {
-        videoSmartCollections.first { $0.id == id }
+        videoCollectionStore.smartCollection(id: id)
     }
 
     @discardableResult
     func saveVideoSmartCollection(_ collection: VideoSmartCollection, notify: Bool = true) -> VideoSmartCollection? {
-        guard let videoSmartCollectionRepository else { return nil }
-        let isNew = !videoSmartCollections.contains { $0.id == collection.id }
         do {
-            let saved = try videoSmartCollectionRepository.save(collection)
-            if let index = videoSmartCollections.firstIndex(where: { $0.id == saved.id }) {
-                videoSmartCollections[index] = saved
-            } else {
-                videoSmartCollections.insert(saved, at: 0)
-            }
-            videoSmartCollections.sort { $0.updatedAt > $1.updatedAt }
+            guard let result = try videoCollectionStore.saveSmart(collection) else { return nil }
+            let saved = result.saved
             libraryRevision += 1
             if notify {
-                let title = isNew ? "智能集合已创建" : "智能集合已保存"
+                let title = result.isNew ? "智能集合已创建" : "智能集合已保存"
                 deliverTaskNotice(
                     title: title,
                     message: saved.name,
@@ -1317,11 +1446,10 @@ final class AppState: ObservableObject {
     }
 
     func deleteVideoSmartCollection(_ collection: VideoSmartCollection) {
-        guard let videoSmartCollectionRepository else { return }
         do {
-            try videoSmartCollectionRepository.delete(id: collection.id)
-            videoSmartCollections.removeAll { $0.id == collection.id }
-            libraryRevision += 1
+            if try videoCollectionStore.deleteSmart(id: collection.id) {
+                libraryRevision += 1
+            }
         } catch {
             showError("智能集合删除失败", error)
         }
@@ -1342,19 +1470,17 @@ final class AppState: ObservableObject {
     // MARK: - 手动视频集合
 
     func videoManualCollection(id: String) -> VideoManualCollection? {
-        videoManualCollections.first { $0.id == id }
+        videoCollectionStore.manualCollection(id: id)
     }
 
     @discardableResult
     func saveVideoManualCollection(_ collection: VideoManualCollection, notify: Bool = true) -> VideoManualCollection? {
-        guard let videoManualCollectionRepository else { return nil }
-        let isNew = !videoManualCollections.contains { $0.id == collection.id }
         do {
-            let saved = try videoManualCollectionRepository.save(collection)
-            upsertVideoManualCollectionInMemory(saved)
+            guard let result = try videoCollectionStore.saveManual(collection) else { return nil }
+            let saved = result.saved
             libraryRevision += 1
             if notify {
-                let title = isNew ? "集合已创建" : "集合已保存"
+                let title = result.isNew ? "集合已创建" : "集合已保存"
                 deliverTaskNotice(
                     title: title,
                     message: saved.name,
@@ -1383,24 +1509,22 @@ final class AppState: ObservableObject {
 
     func requestVideoManualCollectionCreation(items: [MediaItem]) {
         let itemIDs = uniqueVideoCollectionItemIDs(items)
-        guard !itemIDs.isEmpty else { return }
-        videoManualCollectionCreationRequest = VideoManualCollectionCreationRequest(itemIDs: itemIDs)
+        videoManualCollectionCreation.requestCreation(itemIDs: itemIDs)
     }
 
     func cancelVideoManualCollectionCreation(_ request: VideoManualCollectionCreationRequest) {
-        guard videoManualCollectionCreationRequest?.id == request.id else { return }
-        videoManualCollectionCreationRequest = nil
+        videoManualCollectionCreation.clearIfCurrent(request)
     }
 
     @discardableResult
     func finishVideoManualCollectionCreation(_ request: VideoManualCollectionCreationRequest, name: String) -> VideoManualCollection? {
-        guard videoManualCollectionCreationRequest?.id == request.id else { return nil }
+        guard videoManualCollectionCreation.isCurrent(request) else { return nil }
         let collection = createVideoManualCollectionAndNotify(
             name: name,
             itemIDs: request.itemIDs,
             successTitle: "已创建集合并加入"
         )
-        videoManualCollectionCreationRequest = nil
+        videoManualCollectionCreation.clear()
         return collection
     }
 
@@ -1425,13 +1549,11 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func createVideoManualCollection(name: String, itemIDs: [String]) -> VideoManualCollection? {
-        guard let videoManualCollectionRepository else { return nil }
         do {
-            let collection = try videoManualCollectionRepository.create(
+            guard let collection = try videoCollectionStore.createManual(
                 name: name,
                 itemIDs: itemIDs
-            )
-            upsertVideoManualCollectionInMemory(collection)
+            ) else { return nil }
             libraryRevision += 1
             return collection
         } catch {
@@ -1447,11 +1569,10 @@ final class AppState: ObservableObject {
     }
 
     func deleteVideoManualCollection(_ collection: VideoManualCollection) {
-        guard let videoManualCollectionRepository else { return }
         do {
-            try videoManualCollectionRepository.delete(id: collection.id)
-            videoManualCollections.removeAll { $0.id == collection.id }
-            libraryRevision += 1
+            if try videoCollectionStore.deleteManual(id: collection.id) {
+                libraryRevision += 1
+            }
         } catch {
             showError("集合删除失败", error)
         }
@@ -1470,12 +1591,10 @@ final class AppState: ObservableObject {
     }
 
     func addToVideoManualCollection(_ items: [MediaItem], collectionID: String) {
-        guard let videoManualCollectionRepository else { return }
         let itemIDs = uniqueVideoCollectionItemIDs(items)
         guard !itemIDs.isEmpty else { return }
         do {
-            if let updated = try videoManualCollectionRepository.add(itemIDs: itemIDs, toCollectionID: collectionID) {
-                upsertVideoManualCollectionInMemory(updated)
+            if let updated = try videoCollectionStore.addManual(itemIDs: itemIDs, toCollectionID: collectionID) {
                 libraryRevision += 1
                 showFloatingNotice(title: "已加入集合", message: updated.name, kind: .success)
             }
@@ -1485,12 +1604,10 @@ final class AppState: ObservableObject {
     }
 
     func removeFromVideoManualCollection(_ items: [MediaItem], collectionID: String) {
-        guard let videoManualCollectionRepository else { return }
         let itemIDs = uniqueVideoCollectionItemIDs(items)
         guard !itemIDs.isEmpty else { return }
         do {
-            if let updated = try videoManualCollectionRepository.remove(itemIDs: itemIDs, fromCollectionID: collectionID) {
-                upsertVideoManualCollectionInMemory(updated)
+            if let updated = try videoCollectionStore.removeManual(itemIDs: itemIDs, fromCollectionID: collectionID) {
                 libraryRevision += 1
                 showFloatingNotice(title: "已从集合移除", message: updated.name, kind: .info)
             }
@@ -1500,31 +1617,33 @@ final class AppState: ObservableObject {
     }
 
     func canReorderVideoManualCollection(_ items: [MediaItem], collectionID: String, operation: VideoManualCollectionReorderOperation) -> Bool {
-        guard let collection = videoManualCollection(id: collectionID) else { return false }
         let itemIDs = uniqueVideoCollectionItemIDs(items)
-        return reorderedVideoManualCollectionItemIDs(collection.itemIDs, movingItemIDs: itemIDs, operation: operation) != collection.itemIDs
+        return videoCollectionStore.canReorderManual(
+            itemIDs: itemIDs,
+            collectionID: collectionID,
+            operation: operation
+        )
     }
 
     func reorderVideoManualCollection(_ items: [MediaItem], collectionID: String, operation: VideoManualCollectionReorderOperation) {
-        guard let videoManualCollectionRepository else { return }
         let itemIDs = uniqueVideoCollectionItemIDs(items)
         guard !itemIDs.isEmpty else { return }
         do {
-            guard var collection = try videoManualCollectionRepository.fetch(id: collectionID) else { return }
-            let reordered = reorderedVideoManualCollectionItemIDs(collection.itemIDs, movingItemIDs: itemIDs, operation: operation)
-            guard reordered != collection.itemIDs else { return }
-            collection.itemIDs = reordered
-            let saved = try videoManualCollectionRepository.save(collection)
-            upsertVideoManualCollectionInMemory(saved)
-            libraryRevision += 1
-            showFloatingNotice(title: "集合顺序已更新", message: saved.name, kind: .success)
+            if let saved = try videoCollectionStore.reorderManual(
+                itemIDs: itemIDs,
+                collectionID: collectionID,
+                operation: operation
+            ) {
+                libraryRevision += 1
+                showFloatingNotice(title: "集合顺序已更新", message: saved.name, kind: .success)
+            }
         } catch {
             showError("调整集合顺序失败", error)
         }
     }
 
     func collections(containing item: MediaItem) -> [VideoManualCollection] {
-        videoManualCollections.filter { $0.itemIDs.contains(item.id) }
+        videoCollectionStore.manualCollections(containing: item.id)
     }
 
     func videoManualCollectionPreviewItems(_ collection: VideoManualCollection, limit: Int = 4) -> [MediaItem] {
@@ -1558,18 +1677,6 @@ final class AppState: ObservableObject {
         item.type != .music && item.type != .privateCollection && !Self.isRemoteMediaServerItem(item)
     }
 
-    private func upsertVideoManualCollectionInMemory(_ collection: VideoManualCollection) {
-        if let index = videoManualCollections.firstIndex(where: { $0.id == collection.id }) {
-            videoManualCollections[index] = collection
-        } else {
-            videoManualCollections.insert(collection, at: 0)
-        }
-        videoManualCollections.sort { lhs, rhs in
-            if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
-            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-        }
-    }
-
     private func uniqueVideoCollectionItemIDs(_ items: [MediaItem]) -> [String] {
         var seen = Set<String>()
         var result: [String] = []
@@ -1578,14 +1685,6 @@ final class AppState: ObservableObject {
             result.append(item.id)
         }
         return result
-    }
-
-    private func reorderedVideoManualCollectionItemIDs(
-        _ currentIDs: [String],
-        movingItemIDs: [String],
-        operation: VideoManualCollectionReorderOperation
-    ) -> [String] {
-        VideoManualCollection.reorderedItemIDs(currentIDs, movingItemIDs: movingItemIDs, operation: operation)
     }
 
     // MARK: - 音乐智能歌单
@@ -1848,7 +1947,7 @@ final class AppState: ObservableObject {
             return
         }
         let existing = videoOfflineSubscription(for: series)
-        videoOfflineSubscriptionLimitRequest = VideoOfflineSubscriptionLimitRequest(
+        videoOfflineSubscriptionLimit.presentRequest(
             itemID: item.id,
             seriesTitle: series.title,
             qualityID: qualityID,
@@ -1862,7 +1961,7 @@ final class AppState: ObservableObject {
         episodeLimit: Int
     ) {
         guard let item = items.first(where: { $0.id == request.itemID }) else {
-            videoOfflineSubscriptionLimitRequest = nil
+            videoOfflineSubscriptionLimit.clearIfCurrent(request)
             alert = AppAlert(title: "无法开启自动缓存", message: "这个系列已不在当前媒体库中。")
             return
         }
@@ -1872,7 +1971,7 @@ final class AppState: ObservableObject {
             episodeLimit: episodeLimit,
             qualityID: request.qualityID
         )
-        videoOfflineSubscriptionLimitRequest = nil
+        videoOfflineSubscriptionLimit.clearIfCurrent(request)
     }
 
     func saveVideoOfflineSubscription(
@@ -2845,8 +2944,10 @@ final class AppState: ObservableObject {
             playlists: snapshot.musicPlaylists,
             smartPlaylists: snapshot.musicSmartPlaylists
         )
-        videoSmartCollections = snapshot.videoSmartCollections
-        videoManualCollections = snapshot.videoManualCollections
+        videoCollectionStore.replaceLoaded(
+            smartCollections: snapshot.videoSmartCollections,
+            manualCollections: snapshot.videoManualCollections
+        )
         videoOfflineSubscriptions = snapshot.videoOfflineSubscriptions
         metadataCorrectionStore.replaceLoaded(
             countsByMediaID: snapshot.metadataCorrectionCountsByMediaID,
@@ -6125,7 +6226,7 @@ final class AppState: ObservableObject {
 
     private func presentFloatingNotice(_ pending: PendingFloatingNotice) {
         let notice = pending.notice
-        floatingNotices = [notice]
+        floatingNoticeStore.present(notice)
         floatingNoticeDismissTasks[notice.id]?.cancel()
         floatingNoticeDismissTasks[notice.id] = Task { [weak self] in
             do {
@@ -6143,7 +6244,7 @@ final class AppState: ObservableObject {
         floatingNoticeDismissTasks[id]?.cancel()
         floatingNoticeDismissTasks[id] = nil
         floatingNoticeQueue.removeAll { $0.notice.id == id }
-        floatingNotices.removeAll { $0.id == id }
+        floatingNoticeStore.remove(id: id)
         presentNextFloatingNoticeIfNeeded()
     }
 
@@ -6477,9 +6578,14 @@ final class AppState: ObservableObject {
     }
 
     /// 设置页「重新查看引导」：驱动 ContentView 再次弹出引导。
-    @Published var onboardingReplayRequested = false
+    let onboardingReplay = OnboardingReplayStore()
+    private var onboardingReplayForwarding: AnyCancellable?
+    var onboardingReplayRequested: Bool {
+        get { onboardingReplay.isReplayRequested }
+        set { onboardingReplay.setReplayRequested(newValue) }
+    }
     func replayOnboarding() {
-        onboardingReplayRequested = true
+        onboardingReplay.requestReplay()
     }
 
     /// 设置页开关：开启时立即向系统申请通知授权；被拒则回退关闭并提示。
@@ -7873,8 +7979,16 @@ final class AppState: ObservableObject {
 
     // MARK: - Trakt 同步（Phase 4）
 
-    @Published var isTraktConnecting = false
-    @Published var isImportingTraktState = false
+    let traktSyncActivity = TraktSyncActivityStore()
+    private var traktSyncActivityForwarding: AnyCancellable?
+    var isTraktConnecting: Bool {
+        get { traktSyncActivity.isConnecting }
+        set { traktSyncActivity.setConnecting(newValue) }
+    }
+    var isImportingTraktState: Bool {
+        get { traktSyncActivity.isImporting }
+        set { traktSyncActivity.setImporting(newValue) }
+    }
     // internal（非 private）：供拆到 AppState+TraktSync.swift 的方法读写。
     var traktPollTask: Task<Void, Never>?
 
@@ -8826,8 +8940,7 @@ final class AppState: ObservableObject {
             try privacyLockService.setPIN(pin)
             settings.privacyPINEnabled = true
             settingsStore.save(settings)
-            privacyPINConfigured = true
-            privacyUnlocked = true
+            privacyLockState.configurePINAndUnlock()
             return true
         } catch {
             showError("隐私密码设置失败", error)
@@ -8840,8 +8953,7 @@ final class AppState: ObservableObject {
             try await privacyLockService.setPINAsync(pin)
             settings.privacyPINEnabled = true
             await settingsStore.saveAsync(settings)
-            privacyPINConfigured = true
-            privacyUnlocked = true
+            privacyLockState.configurePINAndUnlock()
             return true
         } catch {
             showError("隐私密码设置失败", error)
@@ -8871,8 +8983,7 @@ final class AppState: ObservableObject {
         }
         settings.privacyPINEnabled = true
         settingsStore.save(settings)
-        privacyPINConfigured = true
-        privacyUnlocked = true
+        privacyLockState.configurePINAndUnlock()
         return true
     }
 
@@ -8882,8 +8993,7 @@ final class AppState: ObservableObject {
         }
         settings.privacyPINEnabled = true
         await settingsStore.saveAsync(settings)
-        privacyPINConfigured = true
-        privacyUnlocked = true
+        privacyLockState.configurePINAndUnlock()
         return true
     }
 
@@ -8891,9 +9001,9 @@ final class AppState: ObservableObject {
         Task { @MainActor in
             do {
                 let unlocked = try await privacyLockService.unlockWithBiometrics()
-                privacyUnlocked = unlocked
+                privacyLockState.setUnlocked(unlocked)
                 if unlocked {
-                    privacyPINConfigured = true
+                    privacyLockState.setPINConfigured(true)
                 }
                 if !unlocked {
                     alert = AppAlert(title: "无法解锁", message: "Touch ID 未完成验证。")
@@ -8905,7 +9015,7 @@ final class AppState: ObservableObject {
     }
 
     func lockPrivacy() {
-        privacyUnlocked = false
+        privacyLockState.lock()
         clearDetailNavigation()
         stopPlaybackIfPrivate()
     }
@@ -8918,8 +9028,7 @@ final class AppState: ObservableObject {
         privacyLockService.removePIN()
         settings.privacyPINEnabled = false
         settingsStore.save(settings)
-        privacyPINConfigured = false
-        privacyUnlocked = false
+        privacyLockState.clearPINConfiguration()
         clearDetailNavigation()
         stopPlaybackIfPrivate()
     }
@@ -8932,8 +9041,7 @@ final class AppState: ObservableObject {
         await privacyLockService.removePINAsync()
         settings.privacyPINEnabled = false
         await settingsStore.saveAsync(settings)
-        privacyPINConfigured = false
-        privacyUnlocked = false
+        privacyLockState.clearPINConfiguration()
         clearDetailNavigation()
         stopPlaybackIfPrivate()
     }
@@ -8960,7 +9068,7 @@ final class AppState: ObservableObject {
         var reason: String?
         if case EmbyServiceError.clientRestricted(_, let detail) = error { reason = detail }
         logger?.log("远程受限服务器（白名单）：\(serverHost) — \(reason ?? "未知原因")", level: .error)
-        embyRestrictionNotice = EmbyRestrictionNotice(
+        embyRestrictionNoticeStore.presentNotice(
             serverHost: serverHost,
             reason: reason,
             identity: embyService.clientIdentity()
@@ -9127,7 +9235,7 @@ final class AppState: ObservableObject {
         let apiKey = settings.tmdbAPIKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !apiKey.isEmpty else { return }
 
-        isMatchingTMDB = true
+        tmdbMatchState.begin()
         let service = MetadataSearchService()
         let language = settings.tmdbLanguage.isEmpty ? "zh-CN" : settings.tmdbLanguage
         let videoThreshold = settings.metadataMatchTolerance.videoThreshold
@@ -9157,7 +9265,7 @@ final class AppState: ObservableObject {
             matched += 1
         }
 
-        isMatchingTMDB = false
+        tmdbMatchState.finish()
         if !silent {
             let reviewNote = lowConfidence > 0
                 ? "；另有 \(lowConfidence) 部置信度偏低已跳过，可在「片库健康 → 补充」手动复核。"

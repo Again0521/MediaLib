@@ -62,37 +62,6 @@ enum VideoWindowSizing {
 /// 播放开始持锁、暂停或关闭窗口立即释放；只挂在视频 PlayerView 上，音乐不受影响。
 // VideoPlaybackSleepGuard 已物理拆分到 PlayerControllerSupport.swift（零行为变化）。
 
-enum PerceptualVolumeScale {
-    /// 1.0 = 线性映射（滑杆位置 == 音量百分比），与 IINA/VLC 一致。
-    /// 旧值 1.65 让低音量区占据过长滑程，「加 10% 听感却没变化」。
-    /// 音乐与视频音量条都经由本刻度换算，保持两边手感一致。
-    private static let exponent: Double = 1.0
-
-    static func sliderValue(fromLinear volume: Double) -> Double {
-        exponent == 1.0
-            ? min(max(volume, 0), 1)
-            : pow(min(max(volume, 0), 1), 1 / exponent)
-    }
-
-    static func linearVolume(fromSlider value: Double) -> Double {
-        exponent == 1.0
-            ? min(max(value, 0), 1)
-            : pow(min(max(value, 0), 1), exponent)
-    }
-
-    static func adjustedVolume(_ volume: Float, direction: Int, sliderStep: Double = 0.055) -> Float {
-        let slider = sliderValue(fromLinear: Double(volume))
-        let nextSlider = min(max(slider + Double(direction) * sliderStep, 0), 1)
-        return Float(linearVolume(fromSlider: nextSlider))
-    }
-}
-
-enum PlayerABLoopSelection: Equatable {
-    case start(Double)
-    case range(Double, Double)
-    case cleared
-}
-
 struct PlayerPlaybackReport {
     enum Phase: Equatable {
         case started

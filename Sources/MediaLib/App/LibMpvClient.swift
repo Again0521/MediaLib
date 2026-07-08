@@ -258,7 +258,8 @@ final class LibMpvClient {
         try setOptionString("keepaspect-window", "yes")
         try setOptionString("audio-display", "no")
         try setOptionString("sub-auto", "fuzzy")
-        try setOptionString("hwdec", hardwareDecodingMode.mpvValue)
+        let hardwareDecodingProperty = VideoPlaybackPropertyPolicy.hardwareDecodingProperty(for: hardwareDecodingMode)
+        try setOptionString(hardwareDecodingProperty.name, hardwareDecodingProperty.value)
         try setOptionString("vo", "libmpv")
         if networkMemoryBufferingEnabled {
             applyNetworkMemoryBufferingOptions()

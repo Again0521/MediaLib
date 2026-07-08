@@ -1648,43 +1648,89 @@ final class MpvPlayerController: ObservableObject {
         to client: LibMpvClient,
         loopCommandEngine: VideoLoopCommandEngine? = nil
     ) {
-        client.setDouble("audio-delay", audioDelay)
-        client.setDouble("sub-delay", subtitleDelay)
-        client.setDouble("sub-scale", subtitleScale)
-        client.setDouble("sub-pos", subtitlePosition)
-        client.setString("video-aspect-override", aspectOverride.mpvValue)
-        client.setDouble("panscan", cropMode.panscanValue)
-        client.setString("deinterlace", deinterlaceMode.mpvValue)
-        client.setString("video-rotate", rotationMode.mpvValue)
-        client.setString("hwdec", hardwareDecodingMode.mpvValue)
+        applyTimingAdjustments(to: client)
+        applyVideoPlaybackProperties(to: client)
         applyDebandMode(to: client)
         applyColorAdjustments(to: client)
         applySubtitleStyle(to: client)
         rebuildVideoFilterChain(to: client)
         rebuildAudioFilterChain(to: client)
-        client.setString("tone-mapping", toneMappingMode.rawValue)
-        client.setFlag("audio-pitch-correction", pitchCorrectionEnabled)
+        applyToneMapping(to: client)
+        applyPitchCorrection(to: client)
         let loopCommandEngine = loopCommandEngine ?? videoLoopCommandEngine
         loopCommandEngine?.setLoopCurrentItem(loopCurrentItem)
         client.setNetworkMemoryBufferingEnabled(videoMemoryBufferingEnabled)
         loopCommandEngine?.setABLoop(start: abLoopStart, end: abLoopEnd)
     }
 
+    private func applyVideoPlaybackProperties(to client: LibMpvClient) {
+        for property in VideoPlaybackPropertyPolicy.playbackProperties(
+            aspectOverride: aspectOverride,
+            cropMode: cropMode,
+            deinterlaceMode: deinterlaceMode,
+            rotationMode: rotationMode,
+            hardwareDecodingMode: hardwareDecodingMode
+        ) {
+            apply(property, to: client)
+        }
+    }
+
+    private func apply(_ property: VideoPlaybackProperty, to client: LibMpvClient) {
+        switch property {
+        case let .string(property):
+            apply(property, to: client)
+        case let .double(property):
+            apply(property, to: client)
+        }
+    }
+
+    private func apply(_ property: VideoPlaybackStringProperty, to client: LibMpvClient) {
+        client.setString(property.name, property.value)
+    }
+
+    private func apply(_ property: VideoPlaybackDoubleProperty, to client: LibMpvClient) {
+        client.setDouble(property.name, property.value)
+    }
+
+    private func applyTimingAdjustments(to client: LibMpvClient) {
+        for property in VideoTimingAdjustmentPolicy.properties(
+            audioDelay: audioDelay,
+            subtitleDelay: subtitleDelay,
+            subtitleScale: subtitleScale,
+            subtitlePosition: subtitlePosition
+        ) {
+            apply(property, to: client)
+        }
+    }
+
+    private func apply(_ property: VideoTimingAdjustmentProperty, to client: LibMpvClient) {
+        client.setDouble(property.name, property.value)
+    }
+
+    private func applyPitchCorrection(to client: LibMpvClient) {
+        apply(VideoPitchCorrectionPolicy.property(enabled: pitchCorrectionEnabled), to: client)
+    }
+
+    private func apply(_ property: VideoPitchCorrectionProperty, to client: LibMpvClient) {
+        client.setFlag(property.name, property.enabled)
+    }
+
     /// 统一合成 vf 链：清晰度档位的缩放滤镜在最前，之后依次是翻转、锐化、降噪。
     /// vf 是单一字符串属性，任何一处直接 set 都会覆盖其它滤镜，必须统一从这里重建。
     private func rebuildVideoFilterChain(to client: LibMpvClient) {
-        var filters: [String] = []
-        if let qualityFilter = baseVideoFilter, !qualityFilter.isEmpty {
-            filters.append(qualityFilter)
-        }
-        filters.append(contentsOf: flipMode.mpvFilters)
-        if let sharpen = sharpenMode.mpvFilter {
-            filters.append(sharpen)
-        }
-        if let denoise = denoiseMode.mpvFilter {
-            filters.append(denoise)
-        }
-        client.setString("vf", filters.joined(separator: ","))
+        apply(
+            VideoFilterChainPolicy.property(
+                baseVideoFilter: baseVideoFilter,
+                flipMode: flipMode,
+                sharpenMode: sharpenMode,
+                denoiseMode: denoiseMode
+            ),
+            to: client
+        )
+    }
+
+    private func apply(_ property: VideoFilterChainProperty, to client: LibMpvClient) {
+        client.setString(property.name, property.value)
     }
 
     func setFlipMode(_ mode: VideoFlipMode) {
@@ -1710,7 +1756,9 @@ final class MpvPlayerController: ObservableObject {
 
     func setToneMappingMode(_ mode: VideoToneMappingMode) {
         toneMappingMode = mode
-        libMpvClient?.setString("tone-mapping", mode.rawValue)
+        if let client = libMpvClient {
+            apply(VideoToneMappingPolicy.property(for: mode), to: client)
+        }
     }
 
     func setVideoMemoryBufferingEnabled(_ enabled: Bool) {
@@ -1718,7 +1766,7 @@ final class MpvPlayerController: ObservableObject {
         libMpvClient?.setNetworkMemoryBufferingEnabled(enabled)
     }
 
-    /// 视频音频均衡器（lavfi firequalizer，按音乐均衡器同一组 5 段预设）。
+    /// 视频音频均衡器（按音乐均衡器同一组 5 段预设）。
     func setVideoEqualizer(enabled: Bool, preset: MusicEqualizerPreset) {
         videoEqualizerEnabled = enabled
         videoEqualizerPreset = preset
@@ -1728,25 +1776,36 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func rebuildAudioFilterChain(to client: LibMpvClient) {
-        guard videoEqualizerEnabled, !videoEqualizerPreset.isFlat else {
-            client.setString("af", "")
-            return
-        }
-        let frequencies: [Double] = [60, 230, 910, 3600, 14000]
-        let entries = zip(frequencies, videoEqualizerPreset.gainsDB)
-            .map { String(format: "entry(%.0f,%.1f)", $0, $1) }
-            .joined(separator: ";")
-        client.setString("af", "lavfi=[firequalizer=gain_entry='\(entries)']")
+        apply(VideoAudioFilterPolicy.property(enabled: videoEqualizerEnabled, preset: videoEqualizerPreset), to: client)
+    }
+
+    private func apply(_ property: VideoAudioFilterProperty, to client: LibMpvClient) {
+        client.setString(property.name, property.value)
+    }
+
+    private func applyToneMapping(to client: LibMpvClient) {
+        apply(VideoToneMappingPolicy.property(for: toneMappingMode), to: client)
+    }
+
+    private func apply(_ property: VideoToneMappingProperty, to client: LibMpvClient) {
+        client.setString(property.name, property.value)
     }
 
     private func applySubtitleStyle(to client: LibMpvClient) {
-        client.setString("sub-font", subtitleStyle.fontName ?? "sans-serif")
-        client.setFlag("sub-bold", subtitleStyle.bold)
-        client.setString("sub-color", subtitleStyle.colorPreset.mpvColor)
-        client.setDouble("sub-border-size", subtitleStyle.borderSize)
-        // mpv 颜色为 #AARRGGBB；不透明度 0 时给全透明背景等价于关闭背景底。
-        let backgroundAlpha = Int((VideoSubtitleStyle.clampBackground(subtitleStyle.backgroundOpacity) * 255).rounded())
-        client.setString("sub-back-color", String(format: "#%02X000000", backgroundAlpha))
+        for property in VideoSubtitleStylePolicy.playbackProperties(for: subtitleStyle) {
+            apply(property, to: client)
+        }
+    }
+
+    private func apply(_ property: VideoSubtitleStyleProperty, to client: LibMpvClient) {
+        switch property {
+        case let .string(name, value):
+            client.setString(name, value)
+        case let .flag(name, value):
+            client.setFlag(name, value)
+        case let .double(name, value):
+            client.setDouble(name, value)
+        }
     }
 
     func setSubtitleStyle(_ style: VideoSubtitleStyle) {
@@ -1757,11 +1816,9 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func applyColorAdjustments(to client: LibMpvClient) {
-        client.setDouble("brightness", colorAdjustments.brightness)
-        client.setDouble("contrast", colorAdjustments.contrast)
-        client.setDouble("saturation", colorAdjustments.saturation)
-        client.setDouble("gamma", colorAdjustments.gamma)
-        client.setDouble("hue", colorAdjustments.hue)
+        for property in VideoColorAdjustmentPolicy.properties(for: colorAdjustments) {
+            client.setDouble(property.name, property.value)
+        }
     }
 
     func setColorAdjustments(_ adjustments: VideoColorAdjustments) {
@@ -1773,52 +1830,72 @@ final class MpvPlayerController: ObservableObject {
 
     func setPitchCorrection(_ enabled: Bool) {
         pitchCorrectionEnabled = enabled
-        libMpvClient?.setFlag("audio-pitch-correction", enabled)
+        if let client = libMpvClient {
+            apply(VideoPitchCorrectionPolicy.property(enabled: enabled), to: client)
+        }
     }
 
     func setAudioDelay(_ value: Double) {
         audioDelay = AppSettings.clampedVideoSyncDelay(value)
-        libMpvClient?.setDouble("audio-delay", audioDelay)
+        if let client = libMpvClient {
+            apply(VideoTimingAdjustmentPolicy.audioDelayProperty(audioDelay), to: client)
+        }
     }
 
     func setSubtitleDelay(_ value: Double) {
         subtitleDelay = AppSettings.clampedVideoSyncDelay(value)
-        libMpvClient?.setDouble("sub-delay", subtitleDelay)
+        if let client = libMpvClient {
+            apply(VideoTimingAdjustmentPolicy.subtitleDelayProperty(subtitleDelay), to: client)
+        }
     }
 
     func setSubtitleScale(_ value: Double) {
         subtitleScale = AppSettings.clampedVideoSubtitleScale(value)
-        libMpvClient?.setDouble("sub-scale", subtitleScale)
+        if let client = libMpvClient {
+            apply(VideoTimingAdjustmentPolicy.subtitleScaleProperty(subtitleScale), to: client)
+        }
     }
 
     func setSubtitlePosition(_ value: Double) {
         subtitlePosition = AppSettings.clampedVideoSubtitlePosition(value)
-        libMpvClient?.setDouble("sub-pos", subtitlePosition)
+        if let client = libMpvClient {
+            apply(VideoTimingAdjustmentPolicy.subtitlePositionProperty(subtitlePosition), to: client)
+        }
     }
 
     func setAspectOverride(_ mode: VideoAspectOverride) {
         aspectOverride = mode
-        libMpvClient?.setString("video-aspect-override", mode.mpvValue)
+        if let client = libMpvClient {
+            apply(VideoPlaybackPropertyPolicy.aspectOverrideProperty(for: mode), to: client)
+        }
     }
 
     func setCropMode(_ mode: VideoCropMode) {
         cropMode = mode
-        libMpvClient?.setDouble("panscan", mode.panscanValue)
+        if let client = libMpvClient {
+            apply(VideoPlaybackPropertyPolicy.cropPanscanProperty(for: mode), to: client)
+        }
     }
 
     func setDeinterlaceMode(_ mode: VideoDeinterlaceMode) {
         deinterlaceMode = mode
-        libMpvClient?.setString("deinterlace", mode.mpvValue)
+        if let client = libMpvClient {
+            apply(VideoPlaybackPropertyPolicy.deinterlaceProperty(for: mode), to: client)
+        }
     }
 
     func setRotationMode(_ mode: VideoRotationMode) {
         rotationMode = mode
-        libMpvClient?.setString("video-rotate", mode.mpvValue)
+        if let client = libMpvClient {
+            apply(VideoPlaybackPropertyPolicy.rotationProperty(for: mode), to: client)
+        }
     }
 
     func setHardwareDecodingMode(_ mode: VideoHardwareDecodingMode) {
         hardwareDecodingMode = mode
-        libMpvClient?.setString("hwdec", mode.mpvValue)
+        if let client = libMpvClient {
+            apply(VideoPlaybackPropertyPolicy.hardwareDecodingProperty(for: mode), to: client)
+        }
     }
 
     func setDebandMode(_ mode: VideoDebandMode) {
@@ -1828,10 +1905,18 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func applyDebandMode(to client: LibMpvClient) {
-        client.setFlag("deband", debandMode.isEnabled)
-        client.setDouble("deband-threshold", debandMode.threshold)
-        client.setDouble("deband-range", debandMode.range)
-        client.setDouble("deband-grain", debandMode.grain)
+        for property in VideoDebandPolicy.playbackProperties(for: debandMode) {
+            apply(property, to: client)
+        }
+    }
+
+    private func apply(_ property: VideoDebandProperty, to client: LibMpvClient) {
+        switch property {
+        case let .flag(name, value):
+            client.setFlag(name, value)
+        case let .double(name, value):
+            client.setDouble(name, value)
+        }
     }
 
     func setLoopCurrentItem(_ enabled: Bool) {
@@ -1842,20 +1927,20 @@ final class MpvPlayerController: ObservableObject {
     @discardableResult
     func cycleABLoopPoint() -> PlayerABLoopSelection {
         let time = clampedTimelineTime(currentTime)
-        if abLoopStart == nil || (abLoopStart != nil && abLoopEnd != nil) {
-            setABLoop(start: time, end: nil)
-            return .start(time)
+        let selection = PlaybackABLoopPolicy.cycleSelection(
+            currentTime: time,
+            start: abLoopStart,
+            end: abLoopEnd
+        )
+        switch selection {
+        case .start(let start):
+            setABLoop(start: start, end: nil)
+        case .range(let start, let end):
+            setABLoop(start: start, end: end)
+        case .cleared:
+            setABLoop(start: nil, end: nil)
         }
-        guard let start = abLoopStart else {
-            setABLoop(start: time, end: nil)
-            return .start(time)
-        }
-        if time <= start + 0.20 {
-            setABLoop(start: time, end: nil)
-            return .start(time)
-        }
-        setABLoop(start: start, end: time)
-        return .range(start, time)
+        return selection
     }
 
     func clearABLoop() {

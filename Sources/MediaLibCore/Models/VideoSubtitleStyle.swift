@@ -2,15 +2,14 @@ import Foundation
 
 /// 字幕样式（字体 / 粗体 / 颜色 / 描边 / 背景）。
 ///
-/// 对应 libmpv 的 `sub-font` / `sub-bold` / `sub-color` / `sub-border-size` / `sub-back-color`，
 /// 主流播放器（IINA / VLC / PotPlayer）都提供同类自定义。与 `VideoColorAdjustments` 一样
-/// 用独立可编码结构承载，避免在 AppSettings 上铺开零散字段。
+/// 用独立可编码结构承载，避免在 AppSettings 上铺开零散字段；具体播放器属性映射归 App 层策略负责。
 public struct VideoSubtitleStyle: Codable, Equatable, Hashable {
-    /// 字体族名；nil 表示跟随播放器默认（mpv 的 `sans-serif`）。
+    /// 字体族名；nil 表示跟随播放器默认字体。
     public var fontName: String?
     public var bold: Bool
     public var colorPreset: VideoSubtitleColorPreset
-    /// 描边粗细，对应 `sub-border-size`，mpv 默认 3。
+    /// 描边粗细，默认 3。
     public var borderSize: Double
     /// 背景底不透明度 0…0.8，0 表示无背景底。
     public var backgroundOpacity: Double
@@ -79,14 +78,4 @@ public enum VideoSubtitleColorPreset: String, Codable, CaseIterable, Identifiabl
         }
     }
 
-    /// mpv `sub-color` 颜色值（#RRGGBB）。
-    public var mpvColor: String {
-        switch self {
-        case .white: return "#FFFFFF"
-        case .yellow: return "#F5D547"
-        case .cyan: return "#7FE3E8"
-        case .green: return "#8FE388"
-        case .orange: return "#F5A14B"
-        }
-    }
 }

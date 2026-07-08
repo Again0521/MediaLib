@@ -30,15 +30,14 @@ extension AppState {
         }
 
         let service = MetadataSearchService()
-        isFetchingMusicMetadata = true
-        musicMetadataFetchProgress = "准备补充 \(tracks.count) 首"
-        defer { isFetchingMusicMetadata = false }
+        musicMetadataActivity.beginFetching(progress: "准备补充 \(tracks.count) 首")
+        defer { musicMetadataActivity.finishFetching() }
 
         var updatedCount = 0
         var lowConfidence = 0
         for (index, track) in tracks.enumerated() {
             if Task.isCancelled { break }
-            musicMetadataFetchProgress = "\(index + 1)/\(tracks.count) \(track.title)"
+            musicMetadataActivity.setFetchProgress("\(index + 1)/\(tracks.count) \(track.title)")
             let query = [track.artist, track.title]
                 .compactMap { $0?.isEmpty == false ? $0 : nil }
                 .joined(separator: " ")
@@ -101,9 +100,11 @@ extension AppState {
         }
 
         reload()
-        musicMetadataFetchProgress = lowConfidence > 0
-            ? "完成 \(updatedCount)/\(tracks.count) 首（\(lowConfidence) 首置信度偏低已跳过）"
-            : "完成 \(updatedCount)/\(tracks.count) 首"
+        musicMetadataActivity.setFetchProgress(
+            lowConfidence > 0
+                ? "完成 \(updatedCount)/\(tracks.count) 首（\(lowConfidence) 首置信度偏低已跳过）"
+                : "完成 \(updatedCount)/\(tracks.count) 首"
+        )
     }
 
     private func needsMusicMetadataSupplement(_ track: MediaItem) -> Bool {
@@ -148,8 +149,8 @@ extension AppState {
         taskID: UUID
     ) async {
         guard !isSupplementingMetadata else { return }
-        isSupplementingMetadata = true
-        defer { isSupplementingMetadata = false }
+        musicMetadataActivity.beginSupplementing()
+        defer { musicMetadataActivity.finishSupplementing() }
 
         let total = max(videoCandidates.count + musicCandidates.count, 1)
         let service = MetadataSearchService()

@@ -2,9 +2,9 @@ import Foundation
 
 /// 画面色彩微调（亮度 / 对比度 / 饱和度 / 伽马 / 色相）。
 ///
-/// 对应 libmpv 的 `brightness` / `contrast` / `saturation` / `gamma` / `hue` 五个属性，
 /// 取值范围均为 -100…100，0 表示原始画面。主流播放器（VLC / PotPlayer / IINA）都提供
-/// 类似的「视频均衡器」，这里以一个独立可编码结构承载，避免在 AppSettings 上铺开五个零散字段。
+/// 类似的「视频均衡器」，这里以一个独立可编码结构承载，避免在 AppSettings 上铺开五个零散字段；
+/// 具体播放器属性映射归 App 层策略负责。
 public struct VideoColorAdjustments: Codable, Equatable, Hashable {
     public var brightness: Double
     public var contrast: Double
@@ -51,7 +51,7 @@ public struct VideoColorAdjustments: Codable, Equatable, Hashable {
         brightness == 0 && contrast == 0 && saturation == 0 && gamma == 0 && hue == 0
     }
 
-    /// 将单个分量限制在合法范围内，并取整（libmpv 这些属性接受整数）。
+    /// 将单个分量限制在合法范围内，并取整。
     public static func clamp(_ value: Double) -> Double {
         guard value.isFinite else { return 0 }
         return min(max(value.rounded(), range.lowerBound), range.upperBound)

@@ -190,17 +190,6 @@ public enum VideoAspectOverride: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    public var mpvValue: String {
-        switch self {
-        case .source: return "no"
-        case .square: return "1:1"
-        case .fourByThree: return "4:3"
-        case .sixteenByNine: return "16:9"
-        case .sixteenByTen: return "16:10"
-        case .twentyOneByNine: return "21:9"
-        case .cinemaScope: return "2.39:1"
-        }
-    }
 }
 
 public enum VideoCropMode: String, Codable, CaseIterable, Identifiable {
@@ -220,14 +209,6 @@ public enum VideoCropMode: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    public var panscanValue: Double {
-        switch self {
-        case .none: return 0
-        case .gentle: return 0.18
-        case .balanced: return 0.42
-        case .fill: return 1
-        }
-    }
 }
 
 public enum VideoDeinterlaceMode: String, Codable, CaseIterable, Identifiable {
@@ -245,13 +226,6 @@ public enum VideoDeinterlaceMode: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    public var mpvValue: String {
-        switch self {
-        case .off: return "no"
-        case .auto: return "auto"
-        case .on: return "yes"
-        }
-    }
 }
 
 public enum VideoRotationMode: String, Codable, CaseIterable, Identifiable {
@@ -271,15 +245,6 @@ public enum VideoRotationMode: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    public var mpvValue: String {
-        switch self {
-        // mpv 的 `no` 会明确忽略文件旋转元数据；`0` 才是保留源旋转并不追加额外角度。
-        case .source: return "0"
-        case .clockwise90: return "90"
-        case .rotate180: return "180"
-        case .counterclockwise90: return "270"
-        }
-    }
 }
 
 public enum VideoTrackpadGestureSensitivity: String, Codable, CaseIterable, Identifiable {
@@ -356,13 +321,6 @@ public enum VideoHardwareDecodingMode: String, Codable, CaseIterable, Identifiab
         }
     }
 
-    public var mpvValue: String {
-        switch self {
-        case .safe: return "auto-safe"
-        case .automatic: return "auto"
-        case .off: return "no"
-        }
-    }
 }
 
 public enum VideoDebandMode: String, Codable, CaseIterable, Identifiable {
@@ -380,36 +338,9 @@ public enum VideoDebandMode: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    public var isEnabled: Bool {
-        self != .off
-    }
-
-    public var threshold: Double {
-        switch self {
-        case .off: return 64
-        case .light: return 32
-        case .strong: return 48
-        }
-    }
-
-    public var range: Double {
-        switch self {
-        case .off: return 16
-        case .light: return 12
-        case .strong: return 18
-        }
-    }
-
-    public var grain: Double {
-        switch self {
-        case .off: return 48
-        case .light: return 24
-        case .strong: return 36
-        }
-    }
 }
 
-/// HDR 色调映射曲线（libmpv `tone-mapping`），SDR 显示器观看 HDR 片源时生效。
+/// HDR 色调映射曲线，SDR 显示器观看 HDR 片源时生效。
 public enum VideoToneMappingMode: String, Codable, CaseIterable, Identifiable {
     case auto
     case bt2390 = "bt.2390"
@@ -487,7 +418,7 @@ public enum VideoPlaybackEndAction: String, Codable, CaseIterable, Identifiable 
     }
 }
 
-/// 镜像翻转（libmpv vf `hflip` / `vflip`）。
+/// 镜像翻转。
 public enum VideoFlipMode: String, Codable, CaseIterable, Identifiable {
     case none
     case horizontal
@@ -505,17 +436,9 @@ public enum VideoFlipMode: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    public var mpvFilters: [String] {
-        switch self {
-        case .none: return []
-        case .horizontal: return ["hflip"]
-        case .vertical: return ["vflip"]
-        case .both: return ["hflip", "vflip"]
-        }
-    }
 }
 
-/// 画面锐化（libmpv 经 lavfi 桥接的 `unsharp` 滤镜）。
+/// 画面锐化。
 public enum VideoSharpenMode: String, Codable, CaseIterable, Identifiable {
     case off
     case light
@@ -533,17 +456,9 @@ public enum VideoSharpenMode: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    public var mpvFilter: String? {
-        switch self {
-        case .off: return nil
-        case .light: return "unsharp=la=0.4"
-        case .medium: return "unsharp=la=0.8"
-        case .strong: return "unsharp=la=1.2"
-        }
-    }
 }
 
-/// 画面降噪（libmpv 经 lavfi 桥接的 `hqdn3d` 滤镜）。
+/// 画面降噪。
 public enum VideoDenoiseMode: String, Codable, CaseIterable, Identifiable {
     case off
     case light
@@ -561,14 +476,6 @@ public enum VideoDenoiseMode: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    public var mpvFilter: String? {
-        switch self {
-        case .off: return nil
-        case .light: return "hqdn3d=2:1.5:3:2.25"
-        case .medium: return "hqdn3d=4:3:6:4.5"
-        case .strong: return "hqdn3d=7:5:10:7.5"
-        }
-    }
 }
 
 public enum VideoScreenshotMode: String, Codable, CaseIterable, Identifiable {
@@ -586,13 +493,6 @@ public enum VideoScreenshotMode: String, Codable, CaseIterable, Identifiable {
         }
     }
 
-    public var mpvArgument: String {
-        switch self {
-        case .subtitles: return "subtitles"
-        case .video: return "video"
-        case .window: return "window"
-        }
-    }
 }
 
 public struct VideoShortcutModifiers: OptionSet, Codable, Hashable, Sendable {
@@ -1462,7 +1362,7 @@ public struct AppSettings: Codable, Hashable {
     public var updateRemindersDisabled: Bool
     /// HDR 色调映射曲线。
     public var videoToneMappingMode: VideoToneMappingMode
-    /// 视频音频均衡器开关（libmpv af 链，复用音乐均衡器预设）。
+    /// 视频音频均衡器开关（复用音乐均衡器预设）。
     public var videoEqualizerEnabled: Bool
     /// 视频音频均衡器预设。
     public var videoEqualizerPreset: MusicEqualizerPreset
@@ -1520,11 +1420,11 @@ public struct AppSettings: Codable, Hashable {
     public var videoLoopCurrentItem: Bool
     /// 画面色彩微调（亮度 / 对比度 / 饱和度 / 伽马 / 色相）。
     public var videoColorAdjustments: VideoColorAdjustments
-    /// 变速播放时保持音调（libmpv `audio-pitch-correction`），默认开启。
+    /// 变速播放时保持音调，默认开启。
     public var videoPitchCorrectionEnabled: Bool
     /// 字幕样式（字体 / 粗体 / 颜色 / 描边 / 背景）。
     public var videoSubtitleStyle: VideoSubtitleStyle
-    /// 视频音量增强倍率 1.0…2.0（libmpv `volume-max` 路径），1.0 表示不增强。
+    /// 视频音量增强倍率 1.0…2.0，1.0 表示不增强。
     public var videoVolumeBoost: Double
     public var enabledHomeTabs: [HomeTab]
     public var videoDefaultPlayer: DefaultPlayer

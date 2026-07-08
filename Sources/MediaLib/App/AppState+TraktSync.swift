@@ -8,7 +8,7 @@ private struct TraktImportReport {
 }
 
 // Trakt 同步（Phase 4）从 AppState.swift 拆到本文件，直接缩小那个超大文件（R1-ARCH-001 头号债务）。
-// 纯文件搬运，方法体逐字不变。stored 属性（isTraktConnecting / isImportingTraktState / traktPollTask）
+// 纯文件搬运，方法体逐字不变。stored 属性（isTraktConnecting / isImportingTraktState facade / traktPollTask）
 // 仍留在 AppState 主体；本文件含 traktService / isTraktConnected 两个计算属性与全部 Trakt 方法。
 // 放宽到 internal 的成员：traktPollTask / remoteConnectorAccounts / remoteConnectorAccountRepository /
 // cachedPrivateItemIDs（AppState 主体内），以及有组外调用者的 traktAccountRecord / withValidTraktToken /
