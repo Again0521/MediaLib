@@ -2,9 +2,14 @@ import SwiftUI
 
 struct EmptyStateView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let title: String
     let systemImage: String
     let message: String
+
+    /// 空态出现时的柔和入场（淡入 + 轻上浮）：空态往往在数据刷新后瞬间顶替内容，
+    /// 内建入场让所有页面的空态都不再硬弹出；Reduce Motion 时直接呈现终态。
+    @State private var hasAppeared = false
 
     var body: some View {
         VStack(spacing: 14) {
@@ -64,6 +69,15 @@ struct EmptyStateView: View {
         .frame(maxWidth: .infinity, minHeight: AppCardMetrics.emptyStateMinimumHeight)
         .padding(32)
         .accessibilityElement(children: .combine)
+        .opacity(hasAppeared ? 1 : 0)
+        .offset(y: hasAppeared ? 0 : 10)
+        .onAppear {
+            if reduceMotion {
+                hasAppeared = true
+            } else {
+                withAnimation(AppMotion.standard) { hasAppeared = true }
+            }
+        }
     }
 }
 

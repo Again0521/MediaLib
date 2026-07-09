@@ -63,6 +63,7 @@ enum AlbumThumbnailSize: String, CaseIterable, Identifiable {
 struct AlbumLibraryView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var systemPhotoLibrary: SystemPhotoLibraryStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let section: AlbumLibrarySection
 
     /// 当前在全屏查看器中的条目下标（指向 `items`）。nil 表示查看器关闭。
@@ -175,6 +176,12 @@ struct AlbumLibraryView: View {
                     }
                 }
                 .pageContainer()
+                // 本地相册 ↔ 系统照片来源切换、内容 ↔ 空态之间交叉淡入淡出；
+                // 网格内部滚动与照片加载不受影响（key 不含条目内容）。
+                .animation(
+                    reduceMotion ? nil : AppMotion.standard,
+                    value: "\(contentSource.rawValue)|\(items.isEmpty)"
+                )
             }
             // 用 simultaneousGesture 而非 gesture：捏合缩放不再与控制条按钮的点击/悬停竞争，
             // 避免落在「本地相册 / 系统照片」按钮上的点击被手势识别器拦截或转交到下方网格。

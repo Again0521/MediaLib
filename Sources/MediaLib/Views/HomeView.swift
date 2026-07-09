@@ -1197,10 +1197,17 @@ struct HomeView: View {
         switch tab {
         case .overview:
             if focusedVividCollection == nil {
+                let modules = orderedHomeModules
                 VStack(alignment: .leading, spacing: HomeVividTokens.moduleSpacing) {
-                    ForEach(orderedHomeModules) { module in
+                    ForEach(Array(modules.enumerated()), id: \.element) { moduleIndex, module in
                         vividOverviewModuleContent(module)
                             .id("home-module-\(module.rawValue)")
+                            // 首次进入首页时模块逐块浮入（blockStagger + 逐项 delay）；
+                            // 从详情返回（有锚点恢复）或 Reduce Motion 时直接呈现终态。
+                            .modifier(HomeModuleEntranceModifier(
+                                index: moduleIndex,
+                                staggerEnabled: activeReturnContext == nil
+                            ))
                     }
                 }
             } else {
@@ -3894,5 +3901,32 @@ struct ScanProgressView: View {
         }
         .padding(14)
         .staticSurfaceBackground()
+    }
+}
+
+/// 首页模块入场：首次进入时按模块顺序做淡入 + 轻上浮的 stagger（AppMotion.blockStagger），
+/// delay 封顶 6 档避免长首页底部模块等待过久；从详情返回或 Reduce Motion 时直接呈现终态。
+private struct HomeModuleEntranceModifier: ViewModifier {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let index: Int
+    let staggerEnabled: Bool
+    @State private var appeared = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(appeared ? 1 : 0)
+            .offset(y: appeared || reduceMotion ? 0 : 12)
+            .onAppear {
+                guard !appeared else { return }
+                if reduceMotion || !staggerEnabled {
+                    appeared = true
+                } else {
+                    withAnimation(
+                        AppMotion.blockStagger.delay(Double(min(index, 6)) * AppAuroraMetrics.blockStaggerStep)
+                    ) {
+                        appeared = true
+                    }
+                }
+            }
     }
 }

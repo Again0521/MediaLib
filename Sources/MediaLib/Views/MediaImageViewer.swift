@@ -218,8 +218,7 @@ struct MediaImageViewer: View {
             }
             .padding(16)
             .frame(width: 280, alignment: .leading)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay { RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.16), lineWidth: 0.8) }
+            .modifier(ViewerInfoPanelChrome())
             .padding(.top, 42)
             .padding(.trailing, 20)
             .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -242,7 +241,7 @@ struct MediaImageViewer: View {
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(tint)
                 .frame(width: 26, height: 26)
-                .background(.white.opacity(0.13), in: Circle())
+                .modifier(ViewerCircleChrome())
         }
         .buttonStyle(.plain)
     }
@@ -592,5 +591,33 @@ private struct ViewerThumbnail: View {
         }
         .opacity(isCurrent ? 1 : 0.6)
         .contentShape(Rectangle())
+    }
+}
+
+// MARK: - 查看器浮动 chrome（macOS 26+ 原生液态玻璃，旧系统保持原样式）
+
+/// 查看器圆形按钮底色：图片查看器的控件浮在静态照片之上，是 Apple 液态玻璃
+/// 的标准使用场景（内容之上的控件层）；照片不逐帧重绘，玻璃背景采样成本固定，
+/// 不会触发播放器弹层那类 WindowServer 每帧重算模糊的问题。
+private struct ViewerCircleChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular.interactive(), in: Circle())
+        } else {
+            content.background(.white.opacity(0.13), in: Circle())
+        }
+    }
+}
+
+/// 信息面板底色：macOS 26+ 用原生液态玻璃替代 ultraThinMaterial + 手绘描边。
+private struct ViewerInfoPanelChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        } else {
+            content
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay { RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(.white.opacity(0.16), lineWidth: 0.8) }
+        }
     }
 }

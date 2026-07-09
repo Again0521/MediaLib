@@ -10,6 +10,24 @@ private enum SettingsControlMetrics {
     static let wideControlWidth: CGFloat = 430
 }
 
+/// 设置 List 的“刻意结构动画”通行证：List 上有禁用隐式动画的滚动性能闸，
+/// 开关/选择器联动行的显隐动画必须带此标记才能通过（macOS 14+；更早系统保持瞬时）。
+@available(macOS 14.0, *)
+private struct SettingsExplicitAnimationKey: TransactionKey {
+    static let defaultValue = false
+}
+
+/// 用带通行证的动画事务写入设置：驱动条件行以 List 行插入/移除动画显隐。
+private func withSettingsRevealAnimation(_ body: () -> Void) {
+    if #available(macOS 14.0, *) {
+        var transaction = Transaction(animation: AppMotion.standard)
+        transaction[SettingsExplicitAnimationKey.self] = true
+        withTransaction(transaction, body)
+    } else {
+        body()
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var systemPhotoLibrary: SystemPhotoLibraryStore
@@ -55,6 +73,11 @@ struct SettingsView: View {
             .preferStaticGlassSurfaces(true)
             .suppressListHighlight()
             .transaction { transaction in
+                // 历史滚动优化：禁用设置 List 的隐式动画（主题 ripple、滚动重排）。
+                // 带通行证的刻意结构动画（联动行显隐）放行，其余照旧扼杀。
+                if #available(macOS 14.0, *), transaction[SettingsExplicitAnimationKey.self] {
+                    return
+                }
                 transaction.animation = nil
             }
         }
@@ -82,12 +105,13 @@ struct SettingsView: View {
     }
 
     // 设置分组行：860pt 居中最大宽度 + 上下内边距构成 24pt 间距，清除 List 默认行样式。
+    // 横向留白统一读 pageHorizontal（曾写死 34，窄窗口下与页头的 32 差 2pt 造成左边线不齐）。
     @ViewBuilder
     private func settingsRow<Content: View>(topPadding: CGFloat = 12, @ViewBuilder _ content: () -> Content) -> some View {
         content()
             .frame(maxWidth: 860, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
-            .padding(.horizontal, 34)
+            .padding(.horizontal, AppSpacing.pageHorizontal)
             .listRowInsets(EdgeInsets(top: topPadding, leading: 0, bottom: 12, trailing: 0))
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
@@ -100,8 +124,11 @@ struct SettingsView: View {
             SettingsRow(title: "视频播放器", systemImage: "play.rectangle") {
                 Picker("视频播放器", selection: Binding(get: {
                     appState.settings.videoDefaultPlayer
-                }, set: {
-                    appState.settings.videoDefaultPlayer = $0
+                }, set: { value in
+                    // 带通行证的动画事务：外部播放器路径行随选择显隐时走行插入动画。
+                    withSettingsRevealAnimation {
+                        appState.settings.videoDefaultPlayer = value
+                    }
                     appState.saveSettings()
                 })) {
                     ForEach(DefaultPlayer.allCases) { player in
@@ -228,8 +255,10 @@ struct SettingsView: View {
             SettingsRow(title: "音乐播放器", systemImage: "music.note") {
                 Picker("音乐播放器", selection: Binding(get: {
                     appState.settings.musicDefaultPlayer
-                }, set: {
-                    appState.settings.musicDefaultPlayer = $0
+                }, set: { value in
+                    withSettingsRevealAnimation {
+                        appState.settings.musicDefaultPlayer = value
+                    }
                     appState.saveSettings()
                 })) {
                     ForEach(DefaultPlayer.allCases) { player in
@@ -314,7 +343,7 @@ struct SettingsView: View {
                 SettingsDescription(text: "按歌曲已有的 ReplayGain / R128 标签均衡音量，并保留峰值保护。不会修改音乐文件。")
 
                 SettingsRow(title: "跨曲过渡", systemImage: "arrow.right.to.line.compact") {
-                    Picker("跨曲过渡", selection: binding(\.musicTransitionMode)) {
+                    Picker("跨曲过渡", selection: revealBinding(\.musicTransitionMode)) {
                         ForEach(MusicTransitionMode.allCases) { mode in
                             Text(appState.localized(mode.displayName)).tag(mode)
                         }
@@ -552,7 +581,7 @@ struct SettingsView: View {
             SettingsSubsectionHeader(title: "音乐信息", systemImage: "music.note.list")
 
             SettingsRow(title: "音乐数据源", systemImage: "music.note.list") {
-                Picker("音乐数据源", selection: binding(\.musicMetadataProvider)) {
+                Picker("音乐数据源", selection: revealBinding(\.musicMetadataProvider)) {
                     ForEach(MusicMetadataProvider.allCases) { provider in
                         Text(appState.localized(provider.displayName)).tag(provider)
                     }
@@ -631,7 +660,10 @@ struct SettingsView: View {
             Toggle("", isOn: Binding(get: {
                 appState.settings.lastfmScrobblingEnabled
             }, set: { value in
-                appState.settings.lastfmScrobblingEnabled = value
+                // 带通行证的动画事务：下方 API Key / Secret / 授权行随开关以行插入动画显隐。
+                withSettingsRevealAnimation {
+                    appState.settings.lastfmScrobblingEnabled = value
+                }
                 appState.saveSettings()
             }))
             .labelsHidden()
@@ -1097,6 +1129,18 @@ struct SettingsView: View {
             appState.settings[keyPath: keyPath]
         } set: { newValue in
             appState.settings[keyPath: keyPath] = newValue
+            appState.saveSettings()
+        }
+    }
+
+    /// 会驱动条件子行显隐的设置写入：带通行证动画事务，联动行以行插入/移除动画出现。
+    private func revealBinding<T>(_ keyPath: WritableKeyPath<AppSettings, T>) -> Binding<T> {
+        Binding {
+            appState.settings[keyPath: keyPath]
+        } set: { newValue in
+            withSettingsRevealAnimation {
+                appState.settings[keyPath: keyPath] = newValue
+            }
             appState.saveSettings()
         }
     }
@@ -1888,13 +1932,22 @@ private func weightedTextLength(_ text: String) -> CGFloat {
 }
 
 struct SettingsToggleRow: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let title: String
     let systemImage: String
     var isOn: Binding<Bool>
 
     var body: some View {
         SettingsRow(title: title, systemImage: systemImage) {
-            Toggle("", isOn: isOn)
+            // 开关写入带通行证的动画事务：均衡器、封面发光等随开关显隐的子设置行
+            // 以 List 行插入/移除动画出现（穿过设置 List 的隐式动画闸）；Reduce Motion 保持瞬时。
+            Toggle("", isOn: Binding(get: { isOn.wrappedValue }, set: { value in
+                if reduceMotion {
+                    isOn.wrappedValue = value
+                } else {
+                    withSettingsRevealAnimation { isOn.wrappedValue = value }
+                }
+            }))
                 .labelsHidden()
                 .toggleStyle(AppSwitchToggleStyle())
         }

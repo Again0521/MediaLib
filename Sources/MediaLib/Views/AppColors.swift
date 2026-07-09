@@ -409,6 +409,15 @@ enum AppMotion {
         .opacity.combined(with: .scale(scale: 0.995, anchor: .top))
     }
 
+    /// 详情/人物页进出场：进入时自下方轻浮入表达“下钻一层”，退出只做淡出（退出快于进入）。
+    /// 供主内容区 ZStack 在 selectedItem / selectedPersonID 切换时使用，Reduce Motion 由调用处置空动画。
+    static var detailInsertion: AnyTransition {
+        .asymmetric(
+            insertion: .opacity.combined(with: .offset(y: 12)),
+            removal: .opacity
+        )
+    }
+
     static var floatingBar: AnyTransition {
         .move(edge: .bottom).combined(with: .opacity)
     }

@@ -4,6 +4,7 @@ import SwiftUI
 /// 全局统一搜索结果：跨视频 / 音乐一框搜（拼音/首字母/模糊，复用 PinyinSearchMatcher），按类别分组展示。
 struct GlobalSearchView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let query: String
     /// 点击结果：视频→打开详情，音乐→播放（由 ContentView 决定）。
     let onSelect: (MediaItem) -> Void
@@ -146,6 +147,7 @@ struct GlobalSearchView: View {
                     subtitle: "按电影、剧集、音乐等分类并发搜索，命中后会立即显示。",
                     systemImage: "magnifyingglass"
                 )
+                .transition(.opacity)
             } else if total == 0 {
                 EmptyStateView(
                     title: "无匹配结果",
@@ -153,9 +155,11 @@ struct GlobalSearchView: View {
                     message: "支持标题与拼音、演员和角色、题材、简介、电视网、制作公司、年份及具体剧集名称。"
                 )
                 .staticSurfaceBackground(cornerRadius: 22)
+                .transition(.opacity)
             } else {
                 ForEach(groups) { group in
                     groupSection(group)
+                        .transition(.opacity.combined(with: .offset(y: 8)))
                 }
                 if isSearching {
                     SearchProgressStatusCard(
@@ -163,13 +167,22 @@ struct GlobalSearchView: View {
                         subtitle: "已显示先命中的结果，其余分类和更多字段仍在增量匹配。",
                         systemImage: "magnifyingglass"
                     )
+                    .transition(.opacity)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // 增量搜索的“加载卡 → 分组结果 → 空态”三态切换柔和过渡：
+        // 新命中的分组自下方轻浮入，收尾时加载卡淡出，不再硬弹。
+        .animation(reduceMotion ? nil : AppMotion.standard, value: groupTransitionKey)
         .task(id: searchTaskID) {
             await rebuildGroups()
         }
+    }
+
+    /// 只随“显示哪些分组 + 是否仍在搜索”变化，行内内容更新不触发整块动画。
+    private var groupTransitionKey: String {
+        "\(groups.map(\.id).joined(separator: ","))|\(isSearching)"
     }
 
     private func groupSection(_ group: Group) -> some View {

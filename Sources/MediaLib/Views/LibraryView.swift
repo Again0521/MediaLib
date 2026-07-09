@@ -203,6 +203,10 @@ private enum LibrarySortOrder: String, Sendable {
 
 struct LibraryView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 内容“呼吸”透明度：任何内容口径变化（分区、观看筛选、排序、题材、搜索、缓存开关）
+    /// 都以同一节奏轻降透明度再渐入，替代之前只有观看筛选触发相变入场的“动画不统一”。
+    @State private var contentBreathOpacity: Double = 1
     let destination: SidebarDestination
     @State private var searchText: String
     @State private var committedSearchText: String
@@ -235,8 +239,18 @@ struct LibraryView: View {
         _returnContentReady = State(initialValue: initialReturnAnchorID == nil)
     }
 
+    /// 内容口径键：值变化即代表“展示的是另一批内容”，驱动统一的呼吸渐入。
+    private var contentRevisionKey: String {
+        "\(destination.id)|\(watchFilter.rawValue)|\(sortMode.rawValue)|\(sortOrder.rawValue)|\(genreFilter)|\(cachedOnly)|\(committedSearchText)"
+    }
+
     var body: some View {
         let displayedItems = currentItems
+        // 载入骨架 / 空态 / 海报墙三态标识：只驱动三者之间的柔和交叉过渡，
+        // 网格内部的数据更新不会触发整页动画。
+        let contentPhase: String = (isPreparingVisibleItems || visibleItemsAreOutOfDate) && displayedItems.isEmpty
+            ? "loading"
+            : (displayedItems.isEmpty ? "empty" : "content")
 
         Group {
             if (isPreparingVisibleItems || visibleItemsAreOutOfDate) && displayedItems.isEmpty {
@@ -285,7 +299,7 @@ struct LibraryView: View {
                         }
                     }
                 }
-                .opacity(returnContentReady ? 1 : 0)
+                .opacity(returnContentReady ? contentBreathOpacity : 0)
                 .overlay(alignment: .bottom) {
                     if appState.isSelectionModeActive {
                         batchActionBar(for: displayedItems)
@@ -297,6 +311,18 @@ struct LibraryView: View {
                 // 进入/退出多选模式的状态可能来自右键菜单等非 withAnimation 路径，
                 // 在容器上补显式动画绑定，保证浮栏始终以滑入/滑出过渡而不是硬切。
                 .animation(AppMotion.panel, value: appState.isSelectionModeActive)
+                .transition(.opacity)
+            }
+        }
+        // 骨架→内容→空态之间交叉淡入淡出，替代刷新完成瞬间的硬切。
+        .animation(reduceMotion ? nil : AppMotion.standard, value: contentPhase)
+        // 统一的内容呼吸：任何筛选/排序/分区/搜索变化都走同一节奏的轻渐入，
+        // 保证“进页、切筛选、换排序”观感一致，而不是只有观看筛选有入场动画。
+        .onChange(of: contentRevisionKey) { _ in
+            guard !reduceMotion else { return }
+            withAnimation(nil) { contentBreathOpacity = 0.34 }
+            DispatchQueue.main.async {
+                withAnimation(AppMotion.standard) { contentBreathOpacity = 1 }
             }
         }
         .suppressListHighlight()

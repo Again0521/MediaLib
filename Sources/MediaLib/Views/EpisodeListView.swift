@@ -7,6 +7,7 @@ import SwiftUI
 struct EpisodeRowView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let episode: MediaItem
     let selected: Bool
     @State private var isHovering = false
@@ -140,6 +141,9 @@ struct EpisodeRowView: View {
         .onChange(of: suppressHoverDuringScroll) { suppressing in
             if suppressing { isHovering = false }
         }
+        // 选中态（左侧锚点条、描边、低透明底、勾选圆点）随选中变化柔和过渡；
+        // hover 已由 appInteractiveSurface 内部动画，这里只补 selected。
+        .animation(reduceMotion ? nil : AppMotion.listHover, value: selected)
     }
 
     /// 缩略图：在 120×68 的封面上叠加观看状态——已看打勾+轻微压暗，半途看显示底部进度条。

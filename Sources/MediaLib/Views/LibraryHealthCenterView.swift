@@ -1276,6 +1276,7 @@ private struct DashboardRingCard: View {
     let progress: Double
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 13) {
@@ -1289,6 +1290,8 @@ private struct DashboardRingCard: View {
                         style: StrokeStyle(lineWidth: 6, lineCap: .round)
                     )
                     .rotationEffect(.degrees(-90))
+                    // 重新检查后圆环推进到新值而不是跳变；Reduce Motion 直接取终值。
+                    .animation(reduceMotion ? nil : AppMotion.standard, value: progress)
                 AppGlyph(systemImage: systemImage, size: 18)
                     .foregroundStyle(tint)
             }
@@ -1303,6 +1306,9 @@ private struct DashboardRingCard: View {
                     .font(.title3.weight(.bold))
                     .monospacedDigit()
                     .lineLimit(1)
+                    // 数值滚动过渡（monospacedDigit 保证不引起布局位移）。
+                    .contentTransition(.numericText())
+                    .animation(reduceMotion ? nil : AppMotion.standard, value: value)
                 Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)

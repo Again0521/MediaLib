@@ -574,6 +574,15 @@ struct MusicLibraryView: View {
     @State private var lyricsRefreshTask: Task<Void, Never>?
     @State private var collectionReturnAnchorID: String?
     @State private var collectionAnchorRestoreTask: Task<Void, Never>?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 内容“呼吸”透明度：与片库页同一节奏（见 LibraryView.contentBreathOpacity）。
+    @State private var contentBreathOpacity: Double = 1
+
+    /// 内容口径键：排序/筛选/分区/进出专辑与艺术家 drilldown 变化时驱动统一渐入。
+    /// 不含逐字变化的 searchText，避免输入过程闪烁。
+    private var contentRevisionKey: String {
+        "\(section.id)|\(sortMode.rawValue)|\(sortOrder.rawValue)|\(filterMode.rawValue)|\(drilldown?.id ?? "-")"
+    }
 
     var body: some View {
         Group {
@@ -585,6 +594,14 @@ struct MusicLibraryView: View {
                 fixedHeaderScrollableBody
             } else {
                 scrollingBody
+            }
+        }
+        .opacity(contentBreathOpacity)
+        .onChange(of: contentRevisionKey) { _ in
+            guard !reduceMotion else { return }
+            withAnimation(nil) { contentBreathOpacity = 0.34 }
+            DispatchQueue.main.async {
+                withAnimation(AppMotion.standard) { contentBreathOpacity = 1 }
             }
         }
         .suppressListHighlight()
@@ -3284,11 +3301,14 @@ private enum RemoteMusicTab: String, CaseIterable, Identifiable {
 
 struct RemoteMusicLibraryView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let sourceID: String
 
     @State private var tab: RemoteMusicTab = .songs
     @State private var drilldown: MusicCollectionDrilldown?
     @State private var playlistCreationRequest: MusicPlaylistCreationRequest?
+    /// 内容“呼吸”透明度：歌曲/专辑/艺术家/最近分区切换、进出 drilldown 时与本地音乐页同节奏渐入。
+    @State private var contentBreathOpacity: Double = 1
 
     private var source: MediaSource? {
         appState.sources.first { $0.id == sourceID }
@@ -3314,6 +3334,14 @@ struct RemoteMusicLibraryView: View {
                 drilldownBody(drilldown)
             } else {
                 mainBody
+            }
+        }
+        .opacity(contentBreathOpacity)
+        .onChange(of: "\(tab.rawValue)|\(drilldown?.id ?? "-")") { _ in
+            guard !reduceMotion else { return }
+            withAnimation(nil) { contentBreathOpacity = 0.34 }
+            DispatchQueue.main.async {
+                withAnimation(AppMotion.standard) { contentBreathOpacity = 1 }
             }
         }
         .background(AppPageBackground())

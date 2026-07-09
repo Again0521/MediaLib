@@ -19,7 +19,16 @@ private extension RemoteConnectorProvider {
 
 struct SourcesView: View {
     @EnvironmentObject private var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showingAddSourceWizard = false
+
+    /// 来源布局键：扫描进度卡的出现/消失、来源增删、在“已连接/已断开”分组间迁移时
+    /// 驱动柔和过渡；行内状态文字更新不参与。
+    private var sourcesLayoutKey: String {
+        let connected = connectedSources.map(\.id).joined(separator: ",")
+        let disconnected = disconnectedSources.map(\.id).joined(separator: ",")
+        return "\(appState.isScanning)|\(connected)|\(disconnected)"
+    }
 
     var body: some View {
         ScrollView {
@@ -34,6 +43,7 @@ struct SourcesView: View {
 
                 if let progress = appState.scanProgress, appState.isScanning {
                     ScanProgressView(progress: progress)
+                        .transition(.opacity.combined(with: .offset(y: -8)))
                 }
 
                 if appState.sources.isEmpty {
@@ -68,6 +78,8 @@ struct SourcesView: View {
                 }
             }
             .pageContainer()
+            // 扫描进度卡滑入滑出、来源增删与分组迁移的布局变化柔和过渡。
+            .animation(reduceMotion ? nil : AppMotion.standard, value: sourcesLayoutKey)
         }
         .suppressHoverEffectsDuringScroll()
         .background(AppPageBackground())

@@ -1376,6 +1376,8 @@ struct ContentView: View {
                 } else if let selectedPersonID = appState.selectedPersonID {
                     PersonDetailView(personID: selectedPersonID)
                         .environmentObject(appState)
+                        .id(selectedPersonID)
+                        .transition(AppMotion.detailInsertion)
                 } else if let selectedItem = appState.selectedItem {
                     let destination = selection ?? .home
                     DetailView(
@@ -1383,11 +1385,29 @@ struct ContentView: View {
                         sourceTitle: title(for: destination),
                         sourceSystemImage: destination.systemImage
                     )
+                    .id(selectedItem.id)
+                    .transition(AppMotion.detailInsertion)
                 } else {
                     detailView(for: selection ?? .home)
+                        .transition(AppMotion.pageInsertion)
                 }
             }
+            // 主内容区唯一的转场闸：侧栏切页淡入 + 轻缩放，详情/人物页下钻浮入、返回淡出，
+            // 全部替代旧硬切。key 只随“显示哪一层内容”变化，页面内部状态更新不会触发整页重入场。
+            .animation(reduceMotion ? nil : AppMotion.page, value: detailTransitionKey)
         }
+    }
+
+    /// 主内容区转场键：startupError / 人物页 / 条目详情 / 普通页面（含保险库锁定态翻转）。
+    private var detailTransitionKey: String {
+        if appState.startupError != nil { return "startup-error" }
+        if let personID = appState.selectedPersonID { return "person:\(personID)" }
+        if let item = appState.selectedItem { return "item:\(item.id)" }
+        let destination = selection ?? .home
+        if case .video(.privacy) = destination {
+            return "page:\(destination.id):\(appState.canDisplayPrivateItems ? "unlocked" : "locked")"
+        }
+        return "page:\(destination.id)"
     }
 
     private var musicMiniPlayerLeadingInset: CGFloat {
@@ -2757,6 +2777,9 @@ private struct SidebarSelectableRow<Label: View>: View {
         .listRowSeparator(.hidden)
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hovering)
+        // 选中 wash（蓝粉渐变 + hairline）随选择切换柔和过渡，替代旧硬切；
+        // 字重不可动画属性照常瞬时切换，不受影响。
+        .animation(reduceMotion ? nil : AppMotion.listHover, value: selected)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 }

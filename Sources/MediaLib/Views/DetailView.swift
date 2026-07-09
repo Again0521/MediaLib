@@ -268,6 +268,9 @@ struct DetailView: View {
                     .font(.caption.weight(.bold))
                     .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(expanded ? 90 : 0))
+                    // 只给箭头补旋转过渡：季行本体保持 disablesAnimations 的瞬时插入
+                    // （大量剧集行做布局动画会重新触发滚动抽搐），叶子级 animation 不受其影响。
+                    .animation(AppMotion.fast, value: expanded)
                 Text(group.title)
                     .font(.headline.weight(.semibold))
                 Text("\(group.episodes.count) 集")
