@@ -52,7 +52,12 @@ struct EpisodeRowView: View {
                         Text("路径未记录")
                             .foregroundStyle(.orange)
                     } else if episode.isRemoteResource {
-                        Text(episode.metadataProvider == "Emby" ? "Emby 流媒体" : "远程资源")
+                        // 用实际提供方名（Emby / Jellyfin / Plex）标注流媒体来源，而非只认 Emby。
+                        if EmbyService.isMediaServerSourcePath(episode.sourcePath), let provider = episode.metadataProvider, !provider.isEmpty {
+                            Text("\(provider) 流媒体")
+                        } else {
+                            Text("远程资源")
+                        }
                     }
                     if cached {
                         Text("已缓存")

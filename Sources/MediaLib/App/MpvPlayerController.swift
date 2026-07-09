@@ -2777,7 +2777,10 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func reportPlayback(_ phase: PlayerPlaybackReport.Phase, force: Bool = false) {
-        guard let item, item.metadataProvider == "Emby", item.externalID != nil else { return }
+        // ★不能只判 "Emby"：Jellyfin/Plex 条目的 metadataProvider 是 "Jellyfin"/"Plex"，之前会被这条
+        // guard 直接挡掉，导致 Jellyfin 和 Plex 的播放进度**从不回传服务端**。改判「是否远程媒体服务器条目」，
+        // 上层 AppState.syncEmbyPlayback 内部已按 sourceKind 分派 Emby/Jellyfin/Plex 各自的上报接口。
+        guard let item, EmbyService.isMediaServerSourcePath(item.sourcePath), item.externalID != nil else { return }
         let now = Date()
         if phase == .started {
             guard !didReportPlaybackStart else { return }

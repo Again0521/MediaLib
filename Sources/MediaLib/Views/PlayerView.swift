@@ -120,7 +120,9 @@ enum RemoteVideoQualityPlanner {
               let sourceSize = VideoAspectRatioResolver.sizeFromResolution(item.resolution) else {
             return []
         }
-        if item.isRemoteResource, item.metadataProvider == "Emby", let originalURL = URL(string: originalPath) {
+        // Emby 与 Jellyfin 共用同一套 Emby 转码取流接口，转码画质选项应当一致；之前只判 "Emby"
+        // 导致 Jellyfin 远程视频拿不到任何转码画质选项。Plex 走另一套接口，不在此分支。
+        if item.isRemoteResource, EmbyService.isEmbyCompatibleProvider(item.metadataProvider), let originalURL = URL(string: originalPath) {
             return embyOptions(for: item, originalURLString: originalPath, originalURL: originalURL, sourceSize: sourceSize)
         }
         let mountedNetworkFile = knownMountedNetworkFile ?? isMountedNetworkFile(for: item)

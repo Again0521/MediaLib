@@ -28,13 +28,16 @@ enum EmbyServiceError: LocalizedError {
     case requestFailed(statusCode: Int)
 
     var errorDescription: String? {
+        // ★这套错误 Emby 与 Jellyfin 共用（都走 EmbyService），文案必须中性，
+        // 不能写死"Emby"——否则 Jellyfin 源同步失败时任务/提示里会串出"Emby"字样。
+        // 具体平台名由上层 `provider.displayName` 拼进任务标题，这里只描述现象。
         switch self {
         case .authenticationExpired:
-            return "Emby 登录已失效，需要重新认证。"
+            return "远程媒体库登录已失效，需要重新认证。"
         case .clientRestricted:
             return "该远程服务器可能限制第三方客户端接入。请联系管理员将 MediaLIB 加入白名单。"
         case .requestFailed(let statusCode):
-            return "Emby 请求失败（HTTP \(statusCode)），请检查服务器状态和网络连接。"
+            return "远程媒体库请求失败（HTTP \(statusCode)），请检查服务器状态和网络连接。"
         }
     }
 }
@@ -395,6 +398,20 @@ struct EmbyService {
         guard let value else { return false }
         let lowercased = value.lowercased()
         return lowercased.hasPrefix("emby://") || lowercased.hasPrefix("jellyfin://") || lowercased.hasPrefix("plex://")
+    }
+
+    /// 是否为「Emby 兼容」远程源（Emby 或 Jellyfin）——两者播放上报、转码取流走完全相同的 Emby API，
+    /// 应当被同等对待；Plex 用另一套 API（由各自的 PlexService 分支处理），不包含在内。
+    static func isEmbyCompatibleSourcePath(_ value: String?) -> Bool {
+        guard let value else { return false }
+        let lowercased = value.lowercased()
+        return lowercased.hasPrefix("emby://") || lowercased.hasPrefix("jellyfin://")
+    }
+
+    /// 按 `metadataProvider` 判断是否 Emby 兼容（Emby / Jellyfin）。转码取流走 Emby API 的判断用它更稳：
+    /// 有些条目（如仅带流地址 filePath 的远程视频）不一定填了 emby:// 的 sourcePath，但 metadataProvider 一定准确。
+    static func isEmbyCompatibleProvider(_ provider: String?) -> Bool {
+        provider == "Emby" || provider == "Jellyfin"
     }
 
     static func shouldContinueItemPagination(

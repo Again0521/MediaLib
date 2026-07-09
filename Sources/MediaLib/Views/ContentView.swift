@@ -2026,6 +2026,11 @@ struct ContentView: View {
             } else {
                 EmptyStateView(title: "智能歌单不存在", systemImage: "music.note.list", message: "该智能歌单可能已被删除。")
             }
+        case .embySection(let sourceID, .music):
+            // 远程媒体服务器的「音乐」分区改用音乐列表页（歌曲/专辑/艺术家/最近播放控制栏切换），
+            // 而非视频海报网格 LibraryView。
+            RemoteMusicLibraryView(sourceID: sourceID)
+                .id(destination.id)
         case .embySection, .embyLibrary, .smartCollection, .manualCollection:
             LibraryView(
                 destination: destination,

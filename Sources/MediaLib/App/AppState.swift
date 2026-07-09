@@ -2985,6 +2985,7 @@ final class AppState: ObservableObject {
         configureAutomaticScan()
         configureAutomaticTMDBMatch()
         scheduleVersion122MaintenanceIfNeeded()
+        scheduleRemoteMusicMetadataMigrationIfNeeded()
         logPerformance("reload.schedule background followups[\(reason)]: \(Self.milliseconds(since: healthStart))ms")
         libraryRevision += 1
         posterRevision += 1
@@ -5150,6 +5151,11 @@ final class AppState: ObservableObject {
         "MediaLib.migration.1.2.2.remoteArtworkRebuild.completed"
     private static let version122MaintenanceCompletedKey =
         "MediaLib.migration.1.2.2.maintenance.completed"
+    /// 一次性：把「旧版本导入、缺专辑/艺术家字段」的远程音乐重新同步一次，让新的远程音乐列表
+    /// （专辑 / 艺术家目录）对老用户也能正常分组。仅当确有缺字段的远程音乐时才触发重扫；
+    /// 数据已完整的用户与全新安装用户直接标记完成、不发任何多余网络请求。
+    private static let remoteMusicMetadataMigrationKey =
+        "MediaLib.migration.remoteMusicMetadata.completed"
     /// 标记“旧缓存已清理 + 任务已启动过一次”：用于在重新预热中途退出后，
     /// 下次启动时**继续**而不是再次清空已经预热好的封面、重头来过。
     private static let version122ArtworkRebuildStartedKey =
@@ -5160,6 +5166,32 @@ final class AppState: ObservableObject {
 
     /// 1.2.2 及以后首次启动只运行这一轮维护。两个任务串行执行，避免元数据网络请求、
     /// 封面下载和图片解码同时争抢资源；完整结束后写入永久标记，不在后续版本自动重跑。
+    /// 老用户迁移：为「缺专辑/艺术家字段」的远程音乐做一次性重扫，让新的远程音乐列表能正常按专辑/艺术家分组。
+    /// 只在确有缺字段的远程音乐时才触发对应来源的重新同步；新装用户或数据已完整的用户直接标记完成、零多余请求。
+    private func scheduleRemoteMusicMetadataMigrationIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.remoteMusicMetadataMigrationKey) else { return }
+
+        let staleSourceIDs = Set(items.compactMap { item -> String? in
+            guard item.type == .music,
+                  Self.isEmbyItem(item),
+                  (item.album?.isEmpty ?? true),
+                  (item.artist?.isEmpty ?? true) else { return nil }
+            return sources.first {
+                $0.sourceKind.isRemoteMediaServer && Self.isSourcePath(item.sourcePath, inside: $0.path)
+            }?.id
+        })
+
+        // 一次性标记：即使离线导致本轮重扫没成功，也不反复触发；后续用户手动/自动刷新会补上，
+        // 新音乐列表在字段补齐前也能优雅降级（专辑/艺术家目录先按已有数据显示）。
+        defaults.set(true, forKey: Self.remoteMusicMetadataMigrationKey)
+
+        guard !staleSourceIDs.isEmpty else { return }
+        let staleSources = sources.filter { staleSourceIDs.contains($0.id) }
+        logger?.log("远程音乐库升级：重新同步 \(staleSources.count) 个含旧音乐数据的来源以补齐专辑/艺术家信息。")
+        refreshEmbySources(staleSources)
+    }
+
     private func scheduleVersion122MaintenanceIfNeeded() {
         guard version122MaintenanceTask == nil else { return }
         let defaults = UserDefaults.standard
@@ -5207,7 +5239,7 @@ final class AppState: ObservableObject {
         }
         let taskID = beginBackgroundTask(
             kind: .metadataSupplement,
-            title: "1.2.2 视频元数据核验",
+            title: "影视元数据核验与补全",
             detail: "正在检查 \(candidates.count) 个影视项目",
             progress: 0,
             isCancellable: false
@@ -5314,7 +5346,7 @@ final class AppState: ObservableObject {
 
         let taskID = beginBackgroundTask(
             kind: .artworkWarmup,
-            title: "1.2.2 封面重新预热",
+            title: "远程封面重新生成",
             detail: isResuming ? "正在恢复上次的预热进度" : "正在清理旧封面缓存",
             progress: 0,
             isCancellable: false
@@ -6669,7 +6701,7 @@ final class AppState: ObservableObject {
                     let preparedItem = try await self.prepareEmbyItemForPlayback(item)
                     self.playPreparedItem(preparedItem, preserveSelection: preserveSelection)
                 } catch {
-                    let host = self.embySource(for: item).map(AppState.embyServerHost(for:)) ?? (item.sourcePath ?? "Emby")
+                    let host = self.embySource(for: item).map(AppState.embyServerHost(for:)) ?? (item.sourcePath ?? "远程服务器")
                     if !self.presentEmbyRestrictionIfNeeded(error, serverHost: host) {
                         self.showError("远程播放准备失败", error)
                     }

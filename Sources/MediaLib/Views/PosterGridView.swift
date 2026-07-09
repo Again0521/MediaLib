@@ -730,19 +730,23 @@ struct PosterImage: View {
     let mediaType: MediaType?
     let cacheTargetSize: CGSize?
     let contentMode: ContentMode
+    /// `.fit` 模式下留白的底色（非正方形封面缩放后四周填充色）。默认浅面板色；音乐封面传 .white。
+    let fitBackground: Color
 
     init(
         path: String?,
         title: String,
         mediaType: MediaType? = nil,
         cacheTargetSize: CGSize? = nil,
-        contentMode: ContentMode = .fill
+        contentMode: ContentMode = .fill,
+        fitBackground: Color = AppColors.cleanPanelFill
     ) {
         self.path = path
         self.title = title
         self.mediaType = mediaType
         self.cacheTargetSize = cacheTargetSize
         self.contentMode = contentMode
+        self.fitBackground = fitBackground
     }
 
     var body: some View {
@@ -767,9 +771,9 @@ struct PosterImage: View {
     @ViewBuilder
     private func posterContent(targetSize: CGSize) -> some View {
         if let remoteURL = remoteURL {
-            RemotePosterImage(url: remoteURL, title: title, targetSize: targetSize, contentMode: contentMode, placeholder: AnyView(placeholder))
+            RemotePosterImage(url: remoteURL, title: title, targetSize: targetSize, contentMode: contentMode, fitBackground: fitBackground, placeholder: AnyView(placeholder))
         } else {
-            LocalPosterImage(path: path, title: title, targetSize: targetSize, contentMode: contentMode, placeholder: AnyView(placeholder))
+            LocalPosterImage(path: path, title: title, targetSize: targetSize, contentMode: contentMode, fitBackground: fitBackground, placeholder: AnyView(placeholder))
         }
     }
 
@@ -805,6 +809,7 @@ private struct RemotePosterImage: View {
     let title: String
     let targetSize: CGSize
     let contentMode: ContentMode
+    var fitBackground: Color = AppColors.cleanPanelFill
     let placeholder: AnyView
     @State private var image: NSImage?
 
@@ -841,7 +846,7 @@ private struct RemotePosterImage: View {
     private func posterImage(_ displayImage: NSImage) -> some View {
         ZStack {
             if contentMode == .fit {
-                AppColors.cleanPanelFill
+                fitBackground
             }
             Group {
                 if contentMode == .fit {
@@ -907,6 +912,7 @@ private struct LocalPosterImage: View {
     let title: String
     let targetSize: CGSize
     let contentMode: ContentMode
+    var fitBackground: Color = AppColors.cleanPanelFill
     let placeholder: AnyView
     @State private var image: NSImage?
 
@@ -946,7 +952,7 @@ private struct LocalPosterImage: View {
     private func posterImage(_ displayImage: NSImage) -> some View {
         ZStack {
             if contentMode == .fit {
-                AppColors.cleanPanelFill
+                fitBackground
             }
             Group {
                 if contentMode == .fit {

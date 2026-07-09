@@ -254,9 +254,9 @@ struct LibraryView: View {
             } else if displayedItems.isEmpty {
                 staticPage {
                     EmptyStateView(
-                        title: "暂无\(title)",
-                        systemImage: headerSystemImage,
-                        message: "接入媒体源并完成扫描后，内容会自动归入此页。"
+                        title: emptyStateTitle,
+                        systemImage: emptyStateSystemImage,
+                        message: emptyStateMessage
                     )
                     .frame(maxWidth: .infinity, minHeight: 420)
                 }
@@ -650,6 +650,41 @@ struct LibraryView: View {
             return remoteLibraryHeaderSystemImage(title: title)
         default:
             return destination.systemImage
+        }
+    }
+
+    // 空态文案随当前观看筛选变化：筛选为「全部」时用页面标题（如「暂无电影」）；
+    // 选中「正在观看」「想看」「喜欢」等筛选时，标题/副标题/图标都改为该筛选语义
+    // （如「暂无正在观看」），避免误显示「暂无收藏」之类不匹配的文案。
+    private var emptyStateTitle: String {
+        watchFilter == .all ? "暂无\(title)" : "暂无\(watchFilter.title)"
+    }
+
+    private var emptyStateSystemImage: String {
+        switch watchFilter {
+        case .all: return headerSystemImage
+        case .watching: return "play.circle"
+        case .unwatched: return "circle"
+        case .watched: return "checkmark.circle"
+        case .watchlist: return "bookmark"
+        case .favorites: return "heart"
+        }
+    }
+
+    private var emptyStateMessage: String {
+        switch watchFilter {
+        case .all:
+            return "接入媒体源并完成扫描后，内容会自动归入此页。"
+        case .watching:
+            return "开始播放并留有进度后，正在观看的内容会显示在这里。"
+        case .unwatched:
+            return "这里没有未观看的内容，看完的会移出此筛选。"
+        case .watched:
+            return "还没有已观看的记录，看过的内容会归入这里。"
+        case .watchlist:
+            return "把想看的内容加入想看清单后，会显示在这里。"
+        case .favorites:
+            return "点按爱心收藏后，喜欢的内容会显示在这里。"
         }
     }
 

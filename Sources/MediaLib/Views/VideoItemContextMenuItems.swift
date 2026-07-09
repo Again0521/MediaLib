@@ -54,7 +54,10 @@ struct VideoItemContextMenuItems: View {
             Label(item.favorite ? "取消喜欢" : "喜欢", systemImage: item.favorite ? "heart.slash" : "heart")
         }
 
-        if item.metadataProvider != "Emby" {
+        // 远程媒体服务器（Emby/Jellyfin/Plex）的分类由服务端媒体库决定，不允许本地"重新分类"。
+        // ★不能只判 metadataProvider == "Emby"：Jellyfin 条目的 provider 是 "Jellyfin"，Plex 是 "Plex"，
+        // 之前的字符串判等会漏掉它们、错误地给远程条目显示"重新分类"。改用统一的远程源路径判断。
+        if !EmbyService.isMediaServerSourcePath(item.sourcePath) {
             Menu {
                 ForEach(Self.reclassificationTypes, id: \.self) { type in
                     Button {

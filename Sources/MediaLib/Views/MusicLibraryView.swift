@@ -385,7 +385,11 @@ private enum MusicLibrarySnapshotBuilder {
                 // 它初始化时会对路径 stat（判断目录性），歌曲在 NAS 上时一次就是一个
                 // 网络往返——实测 315 首 × 每首 2 次 ≈ 2.1 秒，NAS 睡眠时更以数十秒计，
                 // 正是音乐列表长期「正在载入」的元凶。
-                fileName: track.filePath.map { displayNameWithoutKnownExtension(($0 as NSString).lastPathComponent) },
+                // 远程条目的 filePath 是流地址（stream.mp3?Static=true&DeviceId=…），拿来当副标题很难看；
+                // 远程音乐一律不显示文件名副标题（本地音乐照旧显示真实文件名）。
+                fileName: track.isRemoteResource
+                    ? nil
+                    : track.filePath.map { displayNameWithoutKnownExtension(($0 as NSString).lastPathComponent) },
                 artistText: musicDisplayArtist(track.artist),
                 albumText: musicDisplayAlbum(track.album),
                 hasLocalLyrics: MusicLyricsPresenceCache.cachedHasLyrics(filePath: track.filePath) ?? false,
@@ -1545,6 +1549,7 @@ private struct MusicSongListView: View {
     let rows: [MusicTrackRowModel]
     var showsHistoryAction: Bool = false
     var showsResetPlayCountAction: Bool = false
+    var showsMetadataActions: Bool = true
     // 设置后：在该列表里播放某首歌会把队列替换为这些歌曲（用于专辑/艺术家详情页）。
     var queueContext: [MediaItem]? = nil
     let onSearchMetadata: (MediaItem) -> Void
@@ -1568,6 +1573,7 @@ private struct MusicSongListView: View {
                                 row: row,
                                 showsHistoryAction: showsHistoryAction,
                                 showsResetPlayCountAction: showsResetPlayCountAction,
+                                showsMetadataActions: showsMetadataActions,
                                 queueContext: queueContext,
                                 onSearchMetadata: onSearchMetadata,
                                 onCreatePlaylist: onCreatePlaylist
@@ -2142,6 +2148,9 @@ private struct MusicSongRow: View {
     let row: MusicTrackRowModel
     var showsHistoryAction: Bool = false
     var showsResetPlayCountAction: Bool = false
+    /// 远程媒体服务器（Emby/Jellyfin/Plex）音乐传 false：隐藏「获取音乐信息 / 重新分类」等
+    /// 本地元数据补充/分类操作——这些对远程条目不适用，右键里也不该出现。
+    var showsMetadataActions: Bool = true
     var queueContext: [MediaItem]? = nil
     let onSearchMetadata: (MediaItem) -> Void
     let onCreatePlaylist: (MusicPlaylistCreationRequest) -> Void
@@ -2239,29 +2248,31 @@ private struct MusicSongRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 58, alignment: .trailing)
 
-            Button {
-                onSearchMetadata(row.track)
-            } label: {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 30, height: 30)
-                    .contentShape(Circle())
+            if showsMetadataActions {
+                Button {
+                    onSearchMetadata(row.track)
+                } label: {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 30, height: 30)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(hoverActive ? AppColors.selectedGlassTint.opacity(0.92) : Color.secondary)
+                .background {
+                    Circle()
+                        .fill(Color.white.opacity(hoverActive ? (colorScheme == .dark ? 0.12 : 0.46) : (colorScheme == .dark ? 0.06 : 0.16)))
+                }
+                .overlay {
+                    Circle().stroke(
+                        hoverActive ? AppColors.edgeLightStroke(colorScheme, depth: 1.0, intensity: 0.92) : LinearGradient(colors: [AppColors.cleanPanelBorder, AppColors.cleanPanelBorder], startPoint: .topLeading, endPoint: .bottomTrailing),
+                        lineWidth: 1
+                    )
+                }
+                // 首页风格：行内动作 hover 浮现，静态列表不铺满每行的按钮噪声（透明度渐显，不改布局）。
+                .opacity(hoverActive ? 1 : 0)
+                .help("立即获取音乐信息")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(hoverActive ? AppColors.selectedGlassTint.opacity(0.92) : Color.secondary)
-            .background {
-                Circle()
-                    .fill(Color.white.opacity(hoverActive ? (colorScheme == .dark ? 0.12 : 0.46) : (colorScheme == .dark ? 0.06 : 0.16)))
-            }
-            .overlay {
-                Circle().stroke(
-                    hoverActive ? AppColors.edgeLightStroke(colorScheme, depth: 1.0, intensity: 0.92) : LinearGradient(colors: [AppColors.cleanPanelBorder, AppColors.cleanPanelBorder], startPoint: .topLeading, endPoint: .bottomTrailing),
-                    lineWidth: 1
-                )
-            }
-            // 首页风格：行内动作 hover 浮现，静态列表不铺满每行的按钮噪声（透明度渐显，不改布局）。
-            .opacity(hoverActive ? 1 : 0)
-            .help("立即获取音乐信息")
 
             if let onRemoveFromPlaylist {
                 Button {
@@ -2380,26 +2391,30 @@ private struct MusicSongRow: View {
                     Label("从歌单移出", systemImage: "minus.circle")
                 }
             }
-            Button {
-                onSearchMetadata(row.track)
-            } label: {
-                Label("获取音乐信息", systemImage: "tag.circle")
+            if showsMetadataActions {
+                Button {
+                    onSearchMetadata(row.track)
+                } label: {
+                    Label("获取音乐信息", systemImage: "tag.circle")
+                }
             }
             Button {
                 appState.toggleFavorite(row.track)
             } label: {
                 Label(row.track.favorite ? "取消收藏" : "收藏", systemImage: row.track.favorite ? "heart.slash" : "heart")
             }
-            Menu {
-                ForEach([MediaType.movie, .tvShow, .anime, .documentary, .variety, .homeVideo, .other, .privateCollection], id: \.self) { type in
-                    Button {
-                        appState.reclassify(row.track, as: type)
-                    } label: {
-                        Label(type.displayName, systemImage: type.systemImage)
+            if showsMetadataActions {
+                Menu {
+                    ForEach([MediaType.movie, .tvShow, .anime, .documentary, .variety, .homeVideo, .other, .privateCollection], id: \.self) { type in
+                        Button {
+                            appState.reclassify(row.track, as: type)
+                        } label: {
+                            Label(type.displayName, systemImage: type.systemImage)
+                        }
                     }
+                } label: {
+                    Label("重新分类", systemImage: "tray.and.arrow.down")
                 }
-            } label: {
-                Label("重新分类", systemImage: "tray.and.arrow.down")
             }
         }
     }
@@ -2421,7 +2436,8 @@ private struct MusicRowArtwork: View {
                     .foregroundStyle(.white.opacity(0.92))
             }
         } else {
-            PosterImage(path: path, title: title, mediaType: .music)
+            // 非正方形封面缩放至完整显示（不裁切），四周留白填白。
+            PosterImage(path: path, title: title, mediaType: .music, contentMode: .fit, fitBackground: .white)
         }
     }
 
@@ -2477,7 +2493,7 @@ private struct ReferenceMusicGradientArtwork: View {
             if usesDefaultArtwork {
                 gradientArtwork
             } else {
-                PosterImage(path: posterPath, title: title, mediaType: .music, cacheTargetSize: cacheTargetSize)
+                PosterImage(path: posterPath, title: title, mediaType: .music, cacheTargetSize: cacheTargetSize, contentMode: .fit, fitBackground: .white)
                     .overlay {
                         RadialGradient(
                             colors: [.white.opacity(0.20), .clear],
@@ -3069,7 +3085,9 @@ private struct MusicPlaylistCard: View {
                 path: latestTrack.posterPath,
                 title: latestTrack.title,
                 mediaType: .music,
-                cacheTargetSize: CGSize(width: 104, height: 104)
+                cacheTargetSize: CGSize(width: 104, height: 104),
+                contentMode: .fit,
+                fitBackground: .white
             )
             .frame(width: 52, height: 52)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -3232,5 +3250,306 @@ struct MusicSmartPlaylistDetailView: View {
                 onCreatePlaylist: { playlistCreationRequest = $0 }
             )
         }
+    }
+}
+
+
+// MARK: - 远程媒体服务器（Emby / Jellyfin / Plex）音乐库页面
+//
+// 排版与设计**完全复用本地音乐页面**：控制栏用同款 AppAdaptiveControlBar + 胶囊；专辑用 MusicAlbumCard、
+// 艺术家用 MusicArtistRow（同一套网格 MusicCollectionGridMetrics）；歌曲/最近用 MusicSongListView；
+// 专辑/艺术家下钻用 MusicCollectionTrackList。区别仅两点：① 用页内控制栏切「歌曲/专辑/艺术家/最近播放」
+// 取代本地的侧栏分区导航；② 远程条目不提供元数据补充（MusicSongRow.showsMetadataActions = false）。
+
+private enum RemoteMusicTab: String, CaseIterable, Identifiable {
+    case songs, albums, artists, recent
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .songs: return "歌曲"
+        case .albums: return "专辑"
+        case .artists: return "艺术家"
+        case .recent: return "最近播放"
+        }
+    }
+    var systemImage: String {
+        switch self {
+        case .songs: return "music.note"
+        case .albums: return "square.stack"
+        case .artists: return "person.2"
+        case .recent: return "clock"
+        }
+    }
+}
+
+struct RemoteMusicLibraryView: View {
+    @EnvironmentObject private var appState: AppState
+    let sourceID: String
+
+    @State private var tab: RemoteMusicTab = .songs
+    @State private var drilldown: MusicCollectionDrilldown?
+    @State private var playlistCreationRequest: MusicPlaylistCreationRequest?
+
+    private var source: MediaSource? {
+        appState.sources.first { $0.id == sourceID }
+    }
+    private var tracks: [MediaItem] {
+        appState.embyItems(for: .music, sourceID: sourceID)
+    }
+    private var recentTracks: [MediaItem] {
+        tracks
+            .filter { $0.lastPlayedAt != nil }
+            .sorted { ($0.lastPlayedAt ?? .distantPast) > ($1.lastPlayedAt ?? .distantPast) }
+    }
+    private var albumGroups: [MusicAlbumGroup] {
+        RemoteMusicGrouping.albumGroups(sourceID: sourceID, tracks: tracks)
+    }
+    private var artistGroups: [MusicArtistGroup] {
+        RemoteMusicGrouping.artistGroups(sourceID: sourceID, tracks: tracks)
+    }
+
+    var body: some View {
+        Group {
+            if let drilldown {
+                drilldownBody(drilldown)
+            } else {
+                mainBody
+            }
+        }
+        .background(AppPageBackground())
+        .navigationTitle("音乐")
+        .sheet(item: $playlistCreationRequest) { request in
+            MusicPlaylistCreationSheet(
+                request: request,
+                onCreate: { name in
+                    appState.createMusicPlaylist(name: name, tracks: request.tracks)
+                    playlistCreationRequest = nil
+                },
+                onCancel: { playlistCreationRequest = nil }
+            )
+            .environmentObject(appState)
+        }
+    }
+
+    private var mainBody: some View {
+        VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
+            PageHeader(
+                title: "音乐",
+                subtitle: "\(source?.name ?? "远程媒体库") · \(tracks.count) 首",
+                systemImage: "emby.music"
+            ) {
+                Button {
+                    appState.replaceMusicQueueAndPlay(tracks)
+                } label: {
+                    Label("播放全部", systemImage: "play.fill")
+                }
+                .disabled(tracks.isEmpty)
+                if let source {
+                    Button {
+                        appState.scan(source)
+                    } label: {
+                        Label("扫描", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(appState.isScanning)
+                }
+            }
+            .padding(.horizontal, AppSpacing.pageHorizontal)
+            .padding(.top, AppSpacing.pageVertical)
+
+            // 控制栏：与本地音乐页同款 AppAdaptiveControlBar + 胶囊（此处胶囊是「分区切换」而非筛选）。
+            AppAdaptiveControlBar {
+                HStack(spacing: 8) {
+                    ForEach(RemoteMusicTab.allCases) { item in
+                        Button {
+                            withAnimation(AppMotion.fast) { tab = item }
+                        } label: {
+                            GlassCapsuleControl(isSelected: tab == item, enablePointerEdge: false) {
+                                Label(item.title, systemImage: item.systemImage)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            } trailing: {
+                EmptyView()
+            }
+            .padding(.horizontal, AppSpacing.pageHorizontal)
+
+            content
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch tab {
+        case .songs:
+            songList(for: tracks)
+        case .recent:
+            if recentTracks.isEmpty {
+                emptyState("还没有播放记录", systemImage: "clock")
+            } else {
+                songList(for: recentTracks)
+            }
+        case .albums:
+            if albumGroups.isEmpty {
+                emptyState("暂无专辑", systemImage: "square.stack")
+            } else {
+                ScrollView {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: MusicCollectionGridMetrics.album.minimumItemWidth), spacing: MusicCollectionGridMetrics.album.columnSpacing)],
+                        alignment: .leading,
+                        spacing: MusicCollectionGridMetrics.album.rowBottomInset
+                    ) {
+                        ForEach(albumGroups) { album in
+                            MusicAlbumCard(
+                                album: album,
+                                showsResetPlayCountAction: false,
+                                onOpen: { withAnimation(AppMotion.fast) { drilldown = .album(album, RemoteMusicGrouping.tracks(inAlbum: album, from: tracks)) } },
+                                onPlay: { appState.replaceMusicQueueAndPlay(RemoteMusicGrouping.tracks(inAlbum: album, from: tracks)) },
+                                onCreatePlaylist: { playlistCreationRequest = $0 },
+                                onResetPlayCounts: {},
+                                tracksProvider: { RemoteMusicGrouping.tracks(inAlbum: album, from: tracks) }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, AppSpacing.pageHorizontal)
+                    .padding(.top, MusicCollectionGridMetrics.album.firstRowTopInset)
+                    .padding(.bottom, 28)
+                }
+                .suppressHoverEffectsDuringScroll()
+            }
+        case .artists:
+            if artistGroups.isEmpty {
+                emptyState("暂无艺术家", systemImage: "person.2")
+            } else {
+                ScrollView {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: MusicCollectionGridMetrics.artist.minimumItemWidth), spacing: MusicCollectionGridMetrics.artist.columnSpacing)],
+                        alignment: .leading,
+                        spacing: MusicCollectionGridMetrics.artist.rowBottomInset
+                    ) {
+                        ForEach(artistGroups) { artist in
+                            MusicArtistRow(
+                                artist: artist,
+                                showsResetPlayCountAction: false,
+                                onOpen: { withAnimation(AppMotion.fast) { drilldown = .artist(artist, RemoteMusicGrouping.tracks(inArtist: artist, from: tracks)) } },
+                                onPlay: { appState.replaceMusicQueueAndPlay(RemoteMusicGrouping.tracks(inArtist: artist, from: tracks)) },
+                                onCreatePlaylist: { playlistCreationRequest = $0 },
+                                onResetPlayCounts: {},
+                                tracksProvider: { RemoteMusicGrouping.tracks(inArtist: artist, from: tracks) }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, AppSpacing.pageHorizontal)
+                    .padding(.top, MusicCollectionGridMetrics.artist.firstRowTopInset)
+                    .padding(.bottom, 28)
+                }
+                .suppressHoverEffectsDuringScroll()
+            }
+        }
+    }
+
+    private func songList(for list: [MediaItem]) -> some View {
+        MusicSongListView(
+            rows: MusicLibrarySnapshotBuilder.rowModels(from: list),
+            showsMetadataActions: false,     // 远程音乐不提供元数据补充
+            queueContext: list,
+            onSearchMetadata: { _ in },
+            onCreatePlaylist: { playlistCreationRequest = $0 }
+        )
+        // 与本地音乐页 standaloneLongListBody 一致：歌曲列表内容左右缩进 pageHorizontal，
+        // 否则远程页歌曲列表贴边、与上方专辑/艺术家网格及控制栏错位。
+        .padding(.horizontal, AppSpacing.pageHorizontal)
+    }
+
+    // 专辑/艺术家下钻：复用本地同款 MusicCollectionTrackList（歌单相关回调对专辑/艺术家为空实现）。
+    private func drilldownBody(_ drilldown: MusicCollectionDrilldown) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            MusicCollectionTrackList(
+                collection: drilldown,
+                rows: MusicLibrarySnapshotBuilder.rowModels(from: drilldown.tracks),
+                onBack: { withAnimation(AppMotion.fast) { self.drilldown = nil } },
+                onPlayAll: { appState.replaceMusicQueueAndPlay(drilldown.tracks) },
+                onSearchMetadata: { _ in },
+                onCreatePlaylist: { playlistCreationRequest = $0 },
+                onRenamePlaylist: { _ in },
+                onDeletePlaylist: { _ in },
+                onRemoveFromPlaylist: { _, _ in },
+                onReplacePlaylistItems: { _, _ in }
+            )
+        }
+        .padding(.horizontal, AppSpacing.pageHorizontal)
+        .padding(.top, AppSpacing.pageVertical)
+    }
+
+    private func emptyState(_ text: String, systemImage: String) -> some View {
+        EmptyStateView(title: text, systemImage: systemImage, message: "扫描后，该来源的音乐会归类到这里。")
+            .staticSurfaceBackground(cornerRadius: 22)
+            .padding(.horizontal, AppSpacing.pageHorizontal)
+            .padding(.bottom, AppSpacing.headerToControls)
+    }
+}
+
+/// 从远程音乐条目在内存里就地构建与本地一致的 MusicAlbumGroup / MusicArtistGroup，
+/// 让远程音乐页能直接复用 MusicAlbumCard / MusicArtistRow（远程音乐不进全局音乐索引，故本地投影里没有）。
+private enum RemoteMusicGrouping {
+    static func albumGroups(sourceID: String, tracks: [MediaItem]) -> [MusicAlbumGroup] {
+        let grouped = Dictionary(grouping: tracks) { musicDisplayAlbum($0.album) }
+        return grouped.map { title, groupTracks in
+            let artist = musicDisplayArtist(groupTracks.first?.artist)
+            let summary = MusicAlbumSummary(
+                id: "emby-album|\(sourceID)|\(title)",
+                title: title,
+                artist: artist,
+                titleKey: title.lowercased(),
+                artistKey: artist.lowercased(),
+                trackCount: groupTracks.count,
+                favoriteCount: groupTracks.filter(\.favorite).count,
+                remoteCount: groupTracks.count,
+                playCount: groupTracks.reduce(0) { $0 + ($1.playCount ?? 0) },
+                totalDuration: groupTracks.compactMap(\.duration).reduce(0, +),
+                coverPath: cover(from: groupTracks),
+                latestUpdatedAt: groupTracks.map(\.updatedAt).max() ?? .distantPast,
+                trackIDs: groupTracks.map(\.id)
+            )
+            return MusicAlbumGroup(summary: summary)
+        }
+        .sorted { $0.summary.title.localizedStandardCompare($1.summary.title) == .orderedAscending }
+    }
+
+    static func artistGroups(sourceID: String, tracks: [MediaItem]) -> [MusicArtistGroup] {
+        let grouped = Dictionary(grouping: tracks) { musicDisplayArtist($0.artist) }
+        return grouped.map { name, groupTracks in
+            let albumKeys = Set(groupTracks.map { musicDisplayAlbum($0.album).lowercased() })
+            let summary = MusicArtistSummary(
+                id: "emby-artist|\(sourceID)|\(name)",
+                name: name,
+                nameKey: name.lowercased(),
+                trackCount: groupTracks.count,
+                albumCount: albumKeys.count,
+                favoriteCount: groupTracks.filter(\.favorite).count,
+                remoteCount: groupTracks.count,
+                playCount: groupTracks.reduce(0) { $0 + ($1.playCount ?? 0) },
+                coverPath: cover(from: groupTracks),
+                latestUpdatedAt: groupTracks.map(\.updatedAt).max() ?? .distantPast,
+                trackIDs: groupTracks.map(\.id)
+            )
+            return MusicArtistGroup(summary: summary)
+        }
+        .sorted { $0.summary.name.localizedStandardCompare($1.summary.name) == .orderedAscending }
+    }
+
+    static func tracks(inAlbum album: MusicAlbumGroup, from tracks: [MediaItem]) -> [MediaItem] {
+        let ids = Set(album.summary.trackIDs)
+        return MusicTrackProjectionPolicy.sortedByAlbumTrackAndTitle(tracks.filter { ids.contains($0.id) })
+    }
+
+    static func tracks(inArtist artist: MusicArtistGroup, from tracks: [MediaItem]) -> [MediaItem] {
+        let ids = Set(artist.summary.trackIDs)
+        return MusicTrackProjectionPolicy.sortedByAlbumTrackAndTitle(tracks.filter { ids.contains($0.id) })
+    }
+
+    private static func cover(from tracks: [MediaItem]) -> String? {
+        tracks.first { !($0.posterPath?.hasSuffix("-default.jpg") ?? true) }?.posterPath ?? tracks.first?.posterPath
     }
 }
