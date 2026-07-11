@@ -381,11 +381,12 @@ enum AppMotion {
     static let immediate = Animation.spring(response: 0.26, dampingFraction: 0.86)
     static let fast = Animation.spring(response: 0.30, dampingFraction: 0.79)
     static let standard = Animation.spring(response: 0.40, dampingFraction: 0.80)
-    static let page = Animation.spring(response: 0.50, dampingFraction: 0.82)
+    // 页面只做短促交叉淡入：导航需要立即响应，不能带通用弹簧的起步迟滞或回弹。
+    static let page = Animation.easeOut(duration: 0.22)
     static let panel = Animation.spring(response: 0.48, dampingFraction: 0.80, blendDuration: 0.06)
     static let notice = Animation.spring(response: 0.42, dampingFraction: 0.78, blendDuration: 0.04)
-    static let sidebar = Animation.spring(response: 0.46, dampingFraction: 0.82)
-    static let sidebarSelection = Animation.easeOut(duration: 0.001)
+    static let sidebar = Animation.spring(response: 0.24, dampingFraction: 0.88, blendDuration: 0.01)
+    static let sidebarSelection = Animation.easeOut(duration: 0.10)
 
     // —— 活力语义色彩新增（普通页面用，均需在调用处尊重 Reduce Motion）——
     // 统计数字递增：Reduce Motion 时调用处直接取终值、不使用本动画。
@@ -395,9 +396,9 @@ enum AppMotion {
     // 区块入场：配合 AppAuroraMetrics.blockStaggerStep 做逐项 delay。
     static let blockStagger = Animation.spring(response: 0.42, dampingFraction: 0.86)
 
-    // #4 音乐展开/收起是重点：把弹簧调得更紧凑（response 0.56→0.46），缩短重合成阶段的时长，
-    // 在不改变“弹性展开”观感的前提下，让动画期间需要绘制的总帧数更少、掉帧更不明显。
-    static let musicPlayer = Animation.spring(response: 0.40, dampingFraction: 0.90, blendDuration: 0.0)
+    // 音乐展开/收起由封面 shared geometry 承担空间连续性：高阻尼短弹簧可跟随连续点击，
+    // 不在终点回弹，也不让重型整窗合成拖得过长。
+    static let musicPlayer = Animation.spring(response: 0.32, dampingFraction: 0.92, blendDuration: 0.0)
     static let lyric = Animation.spring(response: 0.74, dampingFraction: 0.91, blendDuration: 0.14)
     // 歌词行级透明度/模糊切换：高阻尼（0.94）接近临界，无明显过冲；response 缩短使切换更利落，
     // 配合 lyricScroll 的长缓动平移，整体呈现平移渐变感而非”抛掷”感。
@@ -405,9 +406,7 @@ enum AppMotion {
     // 歌词整列滚动：不用弹簧，改为 Apple Music 式的长缓动平移，避免自动居中时出现“抛过去”的力感。
     static let lyricScroll = Animation.timingCurve(0.20, 0.0, 0.0, 1.0, duration: 0.68)
 
-    static var pageInsertion: AnyTransition {
-        .opacity.combined(with: .scale(scale: 0.995, anchor: .top))
-    }
+    static var pageInsertion: AnyTransition { .opacity }
 
     /// 详情/人物页进出场：进入时自下方轻浮入表达“下钻一层”，退出只做淡出（退出快于进入）。
     /// 供主内容区 ZStack 在 selectedItem / selectedPersonID 切换时使用，Reduce Motion 由调用处置空动画。
@@ -425,10 +424,9 @@ enum AppMotion {
     static var musicPlayerExpansion: AnyTransition {
         // 全屏专辑底板必须从第一帧就占满窗口；几何焦点交给封面 matchedGeometryEffect
         // 和展开页内部 entrance 动画表达，外层只做透明度过渡。
-        // 白条安全性依据：expand/minimize 全程由 musicTransitionShieldActive 的不透明专辑底色盾
-        // 先行盖住整窗（含标题栏），因此插入/移除阶段的半透明帧只会与同色系盾底混合，
-        // 不会露出 AppKit 标题栏或桌面。不要在这里 scale 整个播放器：SwiftUI overlay 的
-        // 布局边界是内容区，整页缩放/裁剪会重新露出标题栏或产生矩形幕布感。
+        // 窗口底色与标题栏透明化由 AppKit guard 同步处理，不再在封面上方压不透明盾层，
+        // 保留 mini -> expanded 的 shared geometry。不要在这里 scale 整个播放器：SwiftUI overlay
+        // 的布局边界是内容区，整页缩放/裁剪会重新露出标题栏或产生矩形幕布感。
         return .asymmetric(
             insertion: .opacity,
             removal: .opacity
@@ -2662,6 +2660,137 @@ struct AppPageBackground: View {
             )
         }
         .ignoresSafeArea()
+    }
+}
+
+/// 固定标题/吸顶列名下方的滚动遮罩：使用系统材质做窗口内高斯模糊，
+/// 再叠一层极淡的页面底色渐隐，遮住内容从固定区域下穿过时的硬边。
+///
+/// 注意：不能对 `NSVisualEffectView` 整体使用 SwiftUI `.mask`。那会先把材质离屏栅格化，
+/// 从而失去实时的窗口内背景采样，只剩下一块不透明的浅色遮罩。
+struct AppScrollEdgeBlurMask: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    var cornerRadius: CGFloat = 0
+    var bottomFadeHeight: CGFloat = 20
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            if reduceTransparency {
+                AppColors.pageBackground
+            } else {
+                // `underWindowBackground` 保留窗口内背景的透过与模糊；`.headerView`
+                // 在浅色主题会额外叠加厚实的白底，不适合覆盖在可滚动设置内容之上。
+                AppWindowVisualEffectBackground(material: .underWindowBackground, blendingMode: .withinWindow)
+
+                LinearGradient(
+                    colors: [
+                        .clear,
+                        AppColors.pageBackground.opacity(colorScheme == .dark ? 0.045 : 0.025),
+                        AppColors.pageBackground.opacity(colorScheme == .dark ? 0.10 : 0.055)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .allowsHitTesting(false)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        .overlay(alignment: .bottom) {
+            LinearGradient(
+                colors: [
+                    .clear,
+                    AppColors.pageBackground.opacity(colorScheme == .dark ? 0.08 : 0.045)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: bottomFadeHeight)
+            .allowsHitTesting(false)
+        }
+    }
+}
+
+/// 固定标题区的滚动硬遮罩（当前仅设置页使用）：原生材质从窗口最顶（含隐藏标题栏那条安全区）
+/// 铺到标题区下缘，底边为硬边、无渐隐过渡；范围由 `solidExtension` 决定（相对内容区顶部）。
+///
+/// 材质实现经过实机对比试验（条纹文本三方案）确定：
+/// - NSVisualEffectView 无 mask：不透明灰幕布，不可用；
+/// - NSVisualEffectView + maskImage：backdrop 采样被破坏，只剩不模糊的淡灰渐变；
+/// - SwiftUI 原生 Material（全不透明度）：高斯模糊保持实时采样 ✓（本实现）。
+/// ★刚性约束：不得对材质加 `.opacity(<1)`——与 NSVisualEffectView 的 alphaValue 规则相同，
+/// 任何低于 1 的不透明度都会让系统放弃 backdrop 模糊，只剩不模糊的淡色（实机验证过）。
+/// `ultraThinMaterial` 本身带有冷灰基色，因此必须覆以与页面相同的底色，避免固定区成为
+/// 一块独立灰幕；该覆层位于材质之上，不会中断其背景采样。
+/// 设置标题与音乐列表吸顶列名共用的窗口内模糊材质。保持材质本身完整不降透明度，
+/// 仅以同页底色调和冷灰基调，避免两处固定表面出现不同的白度和模糊力度。
+struct AppPageTitleMaterialSurface: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        Group {
+            if reduceTransparency {
+                Color(nsColor: .windowBackgroundColor)
+            } else {
+                ZStack {
+                    Rectangle().fill(.ultraThinMaterial)
+                    // 材质本体偏冷灰。用同一页面底色覆盖到足以消除色差，保留一小部分
+                    // 材质透过量来模糊从固定区域下穿过的滚动内容。
+                    AppColors.pageBackground.opacity(0.70)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+struct AppPageTitleBlurBand: View {
+    var solidExtension: CGFloat = 0
+
+    var body: some View {
+        GeometryReader { proxy in
+            let topInset = proxy.safeAreaInsets.top
+            AppPageTitleMaterialSurface()
+                .frame(height: topInset + solidExtension)
+                .offset(y: -topInset)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+struct AppWindowVisualEffectBackground: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .contentBackground
+    var blendingMode: NSVisualEffectView.BlendingMode = .withinWindow
+    var state: NSVisualEffectView.State = .active
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = material
+        view.blendingMode = blendingMode
+        view.state = state
+        view.isEmphasized = false
+        view.wantsLayer = true
+        view.layer?.masksToBounds = true
+        view.layer?.isOpaque = false
+        view.layer?.backgroundColor = NSColor.clear.cgColor
+        return view
+    }
+
+    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
+        if nsView.material != material {
+            nsView.material = material
+        }
+        if nsView.blendingMode != blendingMode {
+            nsView.blendingMode = blendingMode
+        }
+        if nsView.state != state {
+            nsView.state = state
+        }
+        nsView.isEmphasized = false
+        nsView.layer?.isOpaque = false
+        nsView.layer?.backgroundColor = NSColor.clear.cgColor
     }
 }
 

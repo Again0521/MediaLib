@@ -12,9 +12,53 @@ for type in MediaType.allCases {
     check(!type.displayName.isEmpty, "MediaType display name should not be empty")
 }
 check(MediaType.privateCollection.rawValue == "private", "Privacy media type should use stable raw value")
+let playbackReference = Date(timeIntervalSince1970: 1_700_000_000)
+let earlierRecentVideo = MediaItem(
+    id: "recent-video-earlier",
+    type: .tvShow,
+    title: "Earlier Video",
+    lastPlayedAt: playbackReference
+)
+let latestRecentMusic = MediaItem(
+    id: "recent-music-latest",
+    type: .music,
+    title: "Latest Music",
+    lastPlayedAt: playbackReference.addingTimeInterval(120)
+)
+let latestRecentVideo = MediaItem(
+    id: "recent-video-latest",
+    type: .movie,
+    title: "Latest Video",
+    lastPlayedAt: playbackReference.addingTimeInterval(60)
+)
+check(
+    MediaPlaybackRecencyPolicy.recentNonMusicItems(
+        [earlierRecentVideo, latestRecentMusic, latestRecentVideo],
+        limit: 12
+    ).map(\.id) == ["recent-video-latest", "recent-video-earlier"],
+    "Home recent playback should exclude music and preserve non-music recency order"
+)
 check(AppSettings.defaultHomeTabs.contains(.overview), "Default home tabs should include overview")
 check(AppSettings.defaultHomeTabs.contains(.offline), "Default home tabs should include offline entry")
 check(AppSettings().enabledHomeTabs.count >= 8, "Home should expose expanded configurable tabs")
+let homeLayoutAllowedIDs = ["hero", "stats", "recent", "favorites"]
+let normalizedHomeLayout = HomeModuleLayoutPolicy.normalizedOrder(
+    storedIDs: ["recent", "hero", "unknown", "recent"],
+    allowedIDs: homeLayoutAllowedIDs
+)
+check(normalizedHomeLayout == ["recent", "hero", "stats", "favorites"], "Home layout should retain valid saved order, remove duplicates, and append new modules")
+check(
+    HomeModuleLayoutPolicy.moving("favorites", before: "hero", in: normalizedHomeLayout) == ["recent", "favorites", "hero", "stats"],
+    "Home layout should move a module before its drop target without losing entries"
+)
+check(
+    HomeModuleLayoutPolicy.appending("stats", to: normalizedHomeLayout) == ["recent", "hero", "favorites", "stats"],
+    "Restored home modules should be appended without duplicating or disturbing existing order"
+)
+check(
+    HomeModuleLayoutPolicy.normalizedHiddenIDs(storedIDs: ["hero", "unknown", "hero"], allowedIDs: homeLayoutAllowedIDs) == ["hero"],
+    "Home layout should ignore unknown hidden module ids"
+)
 check(AppSettings().themePreset == .classic, "New installs should default to the clear blue theme")
 check(AppSettings().musicPlayerVisualScheme == .liuli, "New installs should default to the Liuli music player")
 check(AppThemePreset.allCases.count == 8, "Theme picker should expose seven curated presets plus custom")

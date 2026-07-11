@@ -190,6 +190,9 @@ struct AirPlayRoutePickerControl: View {
     var size: CGFloat = 30
     var cornerRadius: CGFloat = 15
     var useGlassBackground = true
+    /// 迷你播放器使用父卡片提供的统一模糊底，因此按钮只保留半透明白色控件面，
+    /// 避免每个小圆再叠一层液态玻璃。
+    var usesMiniFrostedSurface = false
     var glowStrength: Double = 1
     var onRoutesWillBegin: (() -> Void)?
     var onRoutesDidEnd: (() -> Void)?
@@ -199,10 +202,11 @@ struct AirPlayRoutePickerControl: View {
 
         ZStack {
             if useGlassBackground {
-                Circle()
-                    .fill(.regularMaterial)
-                Circle()
-                    .fill(
+                if usesMiniFrostedSurface {
+                    Circle().fill(Color.white.opacity(colorScheme == .dark ? 0.14 : 0.46))
+                } else {
+                    Circle().fill(.regularMaterial)
+                    Circle().fill(
                         LinearGradient(
                             colors: [
                                 .white.opacity(colorScheme == .dark ? 0.15 : 0.58),
@@ -213,6 +217,7 @@ struct AirPlayRoutePickerControl: View {
                             endPoint: .bottomTrailing
                         )
                     )
+                }
             }
 
             AirPlayRoutePickerButton(
@@ -247,22 +252,15 @@ struct AirPlayRoutePickerControl: View {
             if useGlassBackground {
                 Circle()
                     .stroke(
-                        LinearGradient(
-                            colors: [
-                                .white.opacity(colorScheme == .dark ? 0.30 : 0.78),
-                                lightTint.opacity(colorScheme == .dark ? 0.30 : 0.38),
-                                .white.opacity(colorScheme == .dark ? 0.10 : 0.34)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
+                        usesMiniFrostedSurface
+                            ? Color.white.opacity(colorScheme == .dark ? 0.18 : 0.70)
+                            : Color.white.opacity(colorScheme == .dark ? 0.30 : 0.78),
                         lineWidth: 1
                     )
             }
         }
-        .shadow(color: lightTint.opacity((colorScheme == .dark ? 0.14 : 0.11) * glowStrength), radius: 10 + 5 * glowStrength, y: 5)
-        .shadow(color: .black.opacity(colorScheme == .dark ? 0.16 : 0.052), radius: 10, y: 5)
-        .pointerLiquidEdge(cornerRadius: cornerRadius, tint: lightTint, intensity: 1.06 * glowStrength)
+        .shadow(color: .black.opacity(colorScheme == .dark ? 0.16 : (usesMiniFrostedSurface ? 0.05 : 0.052)), radius: usesMiniFrostedSurface ? 4 : 10, y: usesMiniFrostedSurface ? 2 : 5)
+        .pointerLiquidEdge(cornerRadius: cornerRadius, tint: lightTint, intensity: usesMiniFrostedSurface ? 0 : 1.06 * glowStrength)
         .help("隔空播放")
         .accessibilityLabel("隔空播放")
     }

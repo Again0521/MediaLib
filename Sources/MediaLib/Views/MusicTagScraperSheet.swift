@@ -59,12 +59,14 @@ private enum MusicTagCandidateStatus: Hashable {
     }
 
     var tint: Color {
+        // 状态色统一读主题派生 token（此前 .matched 用固定系统蓝 .accentColor，
+        // 不随配色主题变化，与其它页面的状态语义色不一致）。
         switch self {
         case .ready: return .secondary
-        case .matched: return .accentColor
-        case .noMatch: return .orange
-        case .applied, .written: return .green
-        case .failed: return .red
+        case .matched: return AppColors.accent
+        case .noMatch: return AppColors.warning
+        case .applied, .written: return AppColors.success
+        case .failed: return AppColors.error
         }
     }
 

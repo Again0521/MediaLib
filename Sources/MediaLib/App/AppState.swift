@@ -767,6 +767,9 @@ final class AppState: ObservableObject {
     private var cachedMusicAlbumSummaries: [MusicAlbumSummary] = []
     private var cachedMusicArtistSummaries: [MusicArtistSummary] = []
     private var cachedMusicProjectionRebuiltAt: Date?
+    /// 首页专用的公开音乐投影：本地音乐和远程媒体服务器音乐合并，
+    /// 但不改变音乐侧栏的本地库索引与来源归属。
+    private var cachedHomeMusicTracks: [MediaItem] = []
     private var cachedHomeMusicPlayableTracks: [MediaItem] = []
     private var cachedHomeContinueListeningTracks: [MediaItem] = []
     private var cachedHomeMusicSignalTracks: [MediaItem] = []
@@ -1234,6 +1237,11 @@ final class AppState: ObservableObject {
 
     var homeMusicPlayableTracks: [MediaItem] {
         cachedHomeMusicPlayableTracks
+    }
+
+    /// 首页的全部公开音乐条目，包含本地与已连接远程来源；保险库条目在构建派生缓存时已被排除。
+    var homeMusicTracks: [MediaItem] {
+        cachedHomeMusicTracks
     }
 
     var homeContinueListeningTracks: [MediaItem] {
@@ -3256,10 +3264,10 @@ final class AppState: ObservableObject {
         cachedTopLevelItems = topLevelRaw.sorted { $0.updatedAt > $1.updatedAt }
         cachedPrivateTopLevelItems = privateTopLevelRaw.sorted { $0.updatedAt > $1.updatedAt }
         cachedItemsByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        cachedEmbyTopLevelItems = embyTopLevelRaw.sorted { $0.updatedAt > $1.updatedAt }
         cachedMusicTracks = MusicTrackProjectionPolicy.sortedByAlbumTrackAndTitle(musicTracksRaw)
         cachedMusicTracksByID = Dictionary(uniqueKeysWithValues: cachedMusicTracks.map { ($0.id, $0) })
         rebuildMusicSectionCaches()
-        cachedEmbyTopLevelItems = embyTopLevelRaw.sorted { $0.updatedAt > $1.updatedAt }
         // 相册按拍摄日期（扫描时写入 createdAt）倒序，最新在前，照片 App 习惯。
         cachedAlbumItems = albumRaw.sorted { $0.createdAt > $1.createdAt }
         cachedHomeVideoItems = (cachedTopLevelItems + cachedEmbyTopLevelItems.filter { $0.type != .music })
@@ -3371,9 +3379,21 @@ final class AppState: ObservableObject {
                 ($0.artist?.isEmpty ?? true) || ($0.album?.isEmpty ?? true) || $0.metadataProvider == nil
             }
         ]
-        cachedHomeMusicPlayableTracks = cachedMusicTracks.filter { $0.filePath != nil || $0.posterPath != nil }
-        cachedHomeContinueListeningTracks = MusicTrackProjectionPolicy.continueListeningTracks(cachedMusicTracks, limit: 6)
-        cachedHomeMusicSignalTracks = MusicTrackProjectionPolicy.signalTracks(cachedMusicTracks)
+        // 首页不应被本地音乐库边界限制：合并已连接远程来源的公开音乐，但保持
+        // cachedMusicTracks 仅服务于本地音乐页，避免远程来源在侧栏中重复出现。
+        var seenHomeMusicIDs = Set<String>()
+        let remoteMusic = cachedEmbyTopLevelItems.filter { $0.type == .music }
+        cachedHomeMusicTracks = (cachedMusicTracks + remoteMusic)
+            .filter { seenHomeMusicIDs.insert($0.id).inserted }
+            .sorted { lhs, rhs in
+                let left = lhs.lastPlayedAt ?? lhs.updatedAt
+                let right = rhs.lastPlayedAt ?? rhs.updatedAt
+                if left != right { return left > right }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+        cachedHomeMusicPlayableTracks = cachedHomeMusicTracks.filter { $0.filePath != nil || $0.posterPath != nil }
+        cachedHomeContinueListeningTracks = MusicTrackProjectionPolicy.continueListeningTracks(cachedHomeMusicTracks, limit: 6)
+        cachedHomeMusicSignalTracks = MusicTrackProjectionPolicy.signalTracks(cachedHomeMusicTracks)
         cachedMusicSmartTracksByPlaylistID.removeAll(keepingCapacity: true)
         // 播放次数递增（每次点击播放都会调用）故意跳过这里：内容修订号驱动音乐列表快照缓存 key，
         // 高频、非展示语义的字段变化不应让整页列表快照失效重建。见 incrementMusicPlayCountInMemory。

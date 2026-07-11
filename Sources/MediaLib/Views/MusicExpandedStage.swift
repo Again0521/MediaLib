@@ -32,6 +32,9 @@ struct MusicExpandedStage: View {
     private var entrancePhase: Int { context.entrancePhase }
     private var glassLayerReady: Bool { context.artworkReady }
     private var isWujie: Bool { variant.isWujie }
+    /// 封面是展开/收起的唯一几何锚点，必须全程可见（matched geometry 依赖它承担空间连续性）；
+    /// 标题/控制栏等其余组件在封面落位（phase>=1）后才渐显，收起时先于封面渐隐。
+    private var identityContentVisible: Bool { reduceMotion || entrancePhase >= 1 }
 
     var body: some View {
         GeometryReader { geometry in
@@ -92,15 +95,14 @@ struct MusicExpandedStage: View {
                     if layout.stackedLayout {
                         ScrollView {
                             VStack(spacing: 28) {
+                                // 面板整体不再做入场透明度门控：封面必须从第一帧就可见（几何锚点），
+                                // 标题/控制栏的渐显在面板内部各自完成。
                                 schemeIdentityPanel(
                                     posterSize: min(layout.posterSize, 230),
                                     glowReach: layout.albumGlowReach,
                                     controlsLight: layout.controlsLight
                                 )
                                     .frame(maxWidth: 360)
-                                    .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
-                                    .offset(y: reduceMotion || entrancePhase >= 1 ? 0 : 18)
-                                    .scaleEffect(reduceMotion || entrancePhase >= 1 ? 1 : 0.982)
 
                                 if lyricsPanelReady {
                                     schemeLyricsPanel(light: layout.lyricsLight)
@@ -119,6 +121,8 @@ struct MusicExpandedStage: View {
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
+                        // 面板整体不再做入场透明度门控：封面必须从第一帧就可见（几何锚点），
+                        // 标题/控制栏的渐显在面板内部各自完成。
                         schemeIdentityPanel(
                             posterSize: layout.posterSize,
                             glowReach: layout.albumGlowReach,
@@ -126,8 +130,6 @@ struct MusicExpandedStage: View {
                         )
                             .frame(width: layout.leftRect.width, height: layout.leftRect.height - wujieContentDrop, alignment: .center)
                             .offset(x: layout.leftRect.minX + wujieSideInset, y: layout.leftRect.minY + wujieContentDrop)
-                            .opacity(reduceMotion || entrancePhase >= 1 ? 1 : 0)
-                            .scaleEffect(reduceMotion || entrancePhase >= 1 ? 1 : 0.982, anchor: .center)
 
                         if lyricsPanelReady {
                             let lyricsColumnWidth = layout.lyricsRect.width - wujieSideInset
@@ -231,7 +233,9 @@ struct MusicExpandedStage: View {
             controller: controller,
             palette: albumPalette,
             posterSize: posterSize,
-            coverGlowEnabled: context.coverGlowEnabled
+            coverGlowEnabled: context.coverGlowEnabled,
+            contentVisible: identityContentVisible,
+            transitionNamespace: transitionNamespace
         )
     }
 
@@ -298,9 +302,14 @@ struct MusicExpandedStage: View {
                 .shadow(color: Color.black.opacity(colorScheme == .dark ? 0.12 : 0.04), radius: 5, y: 2)
             }
             .frame(maxHeight: 82)
+            // 封面落位后标题才浮现（收起时先行渐隐），封面本体不参与门控。
+            .opacity(identityContentVisible ? 1 : 0)
+            .offset(y: identityContentVisible ? 0 : 14)
 
             MusicExpandedControls(item: currentItem, controller: controller, palette: albumPalette, light: controlsLight)
                 .layoutPriority(1)
+                .opacity(identityContentVisible ? 1 : 0)
+                .offset(y: identityContentVisible ? 0 : 18)
 
             Spacer(minLength: 0)
         }

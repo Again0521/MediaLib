@@ -792,6 +792,7 @@ struct HomeVividPosterRow: View {
     let actionTint: Color
     let items: [MediaItem]
     var variant: HomeVividPosterVariant = .poster
+    var emptyMessage: String = "接入媒体源并完成扫描后，这里会出现内容。"
     let metadata: (MediaItem) -> String
     let onSelect: (MediaItem) -> Void
     var action: (() -> Void)? = nil
@@ -818,7 +819,7 @@ struct HomeVividPosterRow: View {
                 action: action
             )
             if displayItems.isEmpty {
-                HomeVividEmptyCard(message: "接入媒体源并完成扫描后，这里会出现内容。")
+                HomeVividEmptyCard(message: emptyMessage)
             } else {
                 // 横向海报条：原生支持双指拖动 + 鼠标长按拖动；空闲时自动轮播，悬停/拖动即暂停。
                 ScrollViewReader { proxy in

@@ -95,6 +95,9 @@ final class DetailNavigationStore: ObservableObject {
     }
 
     func clear() {
+        guard !navigationHistory.isEmpty || detailReturnContext != nil || selectedItem != nil || selectedPersonID != nil else {
+            return
+        }
         navigationHistory.removeAll()
         detailReturnContext = nil
         selectedItem = nil

@@ -10,6 +10,16 @@ private enum SettingsControlMetrics {
     static let wideControlWidth: CGFloat = 430
 }
 
+private enum SettingsHeaderChrome {
+    // 固定区只容纳标题、副标题及其与首个分组之间的留白（190→172：按用户反馈略微收紧
+    // 标题与首个设置分组的间距）。
+    static let height: CGFloat = 172
+    // 标题区硬遮罩的下缘（相对内容区顶部）：只盖到标题+副标题下方一点点，
+    // 不延伸到与首个分组之间的整段留白，底边硬切、无渐隐。
+    // 遮罩常驻显示（静止时也在），避免滚动途中突然出现的观感。
+    static let scrollMaskHeight: CGFloat = 122
+}
+
 /// 设置 List 的“刻意结构动画”通行证：List 上有禁用隐式动画的滚动性能闸，
 /// 开关/选择器联动行的显隐动画必须带此标记才能通过（macOS 14+；更早系统保持瞬时）。
 @available(macOS 14.0, *)
@@ -36,17 +46,17 @@ struct SettingsView: View {
     @State private var showingSyncConflictQueue = false
     @State private var showingMetadataHistory = false
     @State private var autoStartMusicMetadataConsole = false
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            SettingsHeader()
-                .padding(.horizontal, AppSpacing.pageHorizontal)
-                .padding(.top, AppSpacing.pageVertical)
-                .padding(.bottom, AppSpacing.headerToControls)
-
+        ZStack(alignment: .topLeading) {
             // 设置分组继续使用原生 List 虚拟化；标题区移出 List，避免 List 行内边距和
             // 普通页面的 pageContainer 链路不一致，造成标题位置偏移。
             List {
+                Color.clear
+                    .frame(height: SettingsHeaderChrome.height - 8)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+
                 settingsRow(topPadding: 0) { appearanceSettings }
                 settingsRow { videoPlaybackSettings }
                 settingsRow { musicPlaybackSettings }
@@ -80,6 +90,22 @@ struct SettingsView: View {
                 }
                 transaction.animation = nil
             }
+
+            // 标题区硬遮罩：常驻显示（静止时也在，不做滚动门控，避免滑动途中突然出现），
+            // 从窗口最顶盖到标题+副标题下方一点点，底边硬切不做渐隐。
+            // 材质必须全不透明度：加 .opacity 会让系统放弃 backdrop 模糊（Apple 材质规则），
+            // ultraThinMaterial 本身就是官方最透的模糊档位。
+            AppPageTitleBlurBand(solidExtension: SettingsHeaderChrome.scrollMaskHeight)
+                .zIndex(1)
+
+            SettingsHeader()
+                .padding(.horizontal, AppSpacing.pageHorizontal)
+                .padding(.top, AppSpacing.pageVertical)
+                .padding(.bottom, AppSpacing.headerToControls)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+                .frame(height: SettingsHeaderChrome.height, alignment: .topLeading)
+                .allowsHitTesting(false)
+                .zIndex(2)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(AppPageBackground())

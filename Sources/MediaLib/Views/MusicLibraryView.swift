@@ -1603,7 +1603,7 @@ private struct MusicSongListView: View {
                         Color.clear.frame(height: listBottomInset)
                     } header: {
                         // 点击列名行即回到顶部（取代原右下角的返回顶部按钮）。
-                        MusicSongHeader()
+                        MusicSongHeader(trailingActionColumns: trailingActionColumns)
                             .padding(.horizontal, 6)
                             .padding(.top, 4)
                             .padding(.bottom, 6)
@@ -1626,6 +1626,10 @@ private struct MusicSongListView: View {
 
     private var listBottomInset: CGFloat {
         appState.activePlayerItem?.type == .music ? 106 : 16
+    }
+
+    private var trailingActionColumns: Int {
+        showsMetadataActions ? 1 : 0
     }
 }
 
@@ -2128,7 +2132,17 @@ private struct MusicSongHeader: View {
         // 与 MusicSongRow 的 .padding(.horizontal, 8) 对齐，列头与行内容零偏移。
         .padding(.horizontal, 8)
         .frame(height: 34)
-        .staticSurfaceBackground(cornerRadius: 12, thickness: 0.88)
+        .background {
+            // 与设置页固定标题完全同源的材质：列表内容从列名下穿过时保留同样的
+            // 高斯模糊与白度，不再混用 underWindowBackground 形成两种“玻璃”。
+            AppPageTitleMaterialSurface()
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(AppColors.refCardBorder.opacity(colorScheme == .dark ? 0.82 : 0.95), lineWidth: 1)
+                .allowsHitTesting(false)
+        }
         .overlay(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(
@@ -3305,6 +3319,9 @@ struct RemoteMusicLibraryView: View {
     let sourceID: String
 
     @State private var tab: RemoteMusicTab = .songs
+    @State private var searchText = ""
+    @State private var sortMode: MusicSortMode = .title
+    @State private var sortOrder: MusicSortOrder = .primary
     @State private var drilldown: MusicCollectionDrilldown?
     @State private var playlistCreationRequest: MusicPlaylistCreationRequest?
     /// 内容“呼吸”透明度：歌曲/专辑/艺术家/最近分区切换、进出 drilldown 时与本地音乐页同节奏渐入。
@@ -3316,16 +3333,25 @@ struct RemoteMusicLibraryView: View {
     private var tracks: [MediaItem] {
         appState.embyItems(for: .music, sourceID: sourceID)
     }
-    private var recentTracks: [MediaItem] {
-        tracks
-            .filter { $0.lastPlayedAt != nil }
-            .sorted { ($0.lastPlayedAt ?? .distantPast) > ($1.lastPlayedAt ?? .distantPast) }
+    private var currentTracks: [MediaItem] {
+        let scoped = tab == .recent ? tracks.filter(\.hasPlaybackTrace) : tracks
+        return RemoteMusicOrdering.tracks(scoped, query: searchText, mode: sortMode, order: sortOrder)
     }
     private var albumGroups: [MusicAlbumGroup] {
-        RemoteMusicGrouping.albumGroups(sourceID: sourceID, tracks: tracks)
+        RemoteMusicOrdering.albums(
+            RemoteMusicGrouping.albumGroups(sourceID: sourceID, tracks: tracks),
+            query: searchText,
+            mode: sortMode,
+            order: sortOrder
+        )
     }
     private var artistGroups: [MusicArtistGroup] {
-        RemoteMusicGrouping.artistGroups(sourceID: sourceID, tracks: tracks)
+        RemoteMusicOrdering.artists(
+            RemoteMusicGrouping.artistGroups(sourceID: sourceID, tracks: tracks),
+            query: searchText,
+            mode: sortMode,
+            order: sortOrder
+        )
     }
 
     var body: some View {
@@ -3342,6 +3368,14 @@ struct RemoteMusicLibraryView: View {
             withAnimation(nil) { contentBreathOpacity = 0.34 }
             DispatchQueue.main.async {
                 withAnimation(AppMotion.standard) { contentBreathOpacity = 1 }
+            }
+        }
+        .onChange(of: tab) { _ in
+            // 每个子页只暴露与自身数据模型兼容的排序项；切页时若沿用了上一页的
+            // 专属排序（例如艺术家的“作品数量”），立即回退到名称，避免标题和数据脱节。
+            if !availableSortModes.contains(sortMode) {
+                sortMode = .title
+                sortOrder = .primary
             }
         }
         .background(AppPageBackground())
@@ -3363,15 +3397,10 @@ struct RemoteMusicLibraryView: View {
         VStack(alignment: .leading, spacing: AppSpacing.headerToControls) {
             PageHeader(
                 title: "音乐",
-                subtitle: "\(source?.name ?? "远程媒体库") · \(tracks.count) 首",
+                subtitle: "\(source?.name ?? "远程媒体库") · \(currentItemCount) \(currentItemUnit)",
                 systemImage: "emby.music"
             ) {
-                Button {
-                    appState.replaceMusicQueueAndPlay(tracks)
-                } label: {
-                    Label("播放全部", systemImage: "play.fill")
-                }
-                .disabled(tracks.isEmpty)
+                GlassSearchField(placeholder: "搜索音乐", text: $searchText, minWidth: 158, maxWidth: 226)
                 if let source {
                     Button {
                         appState.scan(source)
@@ -3380,11 +3409,21 @@ struct RemoteMusicLibraryView: View {
                     }
                     .disabled(appState.isScanning)
                 }
+                if tab == .recent {
+                    Button(role: .destructive) {
+                        appState.clearPlaybackHistory(currentTracks)
+                    } label: {
+                        Label("清除记录", systemImage: "clock.badge.xmark")
+                            .foregroundStyle(.red)
+                    }
+                    .disabled(currentTracks.isEmpty)
+                }
             }
             .padding(.horizontal, AppSpacing.pageHorizontal)
             .padding(.top, AppSpacing.pageVertical)
 
-            // 控制栏：与本地音乐页同款 AppAdaptiveControlBar + 胶囊（此处胶囊是「分区切换」而非筛选）。
+            // 远程音乐与本地同用一条控制栏：左侧控制当前展示的数据分区，右侧控制排序；
+            // 页面不再提供本地没有的「播放全部」动作。
             AppAdaptiveControlBar {
                 HStack(spacing: 8) {
                     ForEach(RemoteMusicTab.allCases) { item in
@@ -3399,7 +3438,15 @@ struct RemoteMusicLibraryView: View {
                     }
                 }
             } trailing: {
-                EmptyView()
+                GlassMenuButton(title: "\(sortMode.title(for: mappedLocalSection)) · \(sortOrder.titleSuffix)") {
+                    ForEach(availableSortModes) { mode in
+                        Button {
+                            selectSortMode(mode)
+                        } label: {
+                            Label(mode.title(for: mappedLocalSection), systemImage: sortMode == mode ? sortOrder.systemImage : "circle")
+                        }
+                    }
+                }
             }
             .padding(.horizontal, AppSpacing.pageHorizontal)
 
@@ -3411,12 +3458,12 @@ struct RemoteMusicLibraryView: View {
     private var content: some View {
         switch tab {
         case .songs:
-            songList(for: tracks)
+            songList(for: currentTracks)
         case .recent:
-            if recentTracks.isEmpty {
+            if currentTracks.isEmpty {
                 emptyState("还没有播放记录", systemImage: "clock")
             } else {
-                songList(for: recentTracks)
+                songList(for: currentTracks)
             }
         case .albums:
             if albumGroups.isEmpty {
@@ -3480,6 +3527,7 @@ struct RemoteMusicLibraryView: View {
     private func songList(for list: [MediaItem]) -> some View {
         MusicSongListView(
             rows: MusicLibrarySnapshotBuilder.rowModels(from: list),
+            showsHistoryAction: tab == .recent,
             showsMetadataActions: false,     // 远程音乐不提供元数据补充
             queueContext: list,
             onSearchMetadata: { _ in },
@@ -3515,6 +3563,121 @@ struct RemoteMusicLibraryView: View {
             .staticSurfaceBackground(cornerRadius: 22)
             .padding(.horizontal, AppSpacing.pageHorizontal)
             .padding(.bottom, AppSpacing.headerToControls)
+    }
+
+    private var mappedLocalSection: MusicLibrarySection {
+        switch tab {
+        case .songs: return .songs
+        case .albums: return .albums
+        case .artists: return .artists
+        case .recent: return .recent
+        }
+    }
+
+    private var availableSortModes: [MusicSortMode] {
+        switch tab {
+        case .songs, .recent:
+            return [.title, .artist, .album, .mostPlayed, .recent, .duration]
+        case .albums:
+            return [.title, .artist, .recent, .mostPlayed]
+        case .artists:
+            return [.title, .workCount, .mostPlayed]
+        }
+    }
+
+    private var currentItemCount: Int {
+        switch tab {
+        case .songs, .recent: return currentTracks.count
+        case .albums: return albumGroups.count
+        case .artists: return artistGroups.count
+        }
+    }
+
+    private var currentItemUnit: String {
+        switch tab {
+        case .songs, .recent: return "首"
+        case .albums: return "张"
+        case .artists: return "位"
+        }
+    }
+
+    private func selectSortMode(_ mode: MusicSortMode) {
+        if sortMode == mode {
+            sortOrder.toggle()
+        } else {
+            sortMode = mode
+            sortOrder = .primary
+        }
+    }
+}
+
+private enum RemoteMusicOrdering {
+    static func tracks(_ tracks: [MediaItem], query: String, mode: MusicSortMode, order: MusicSortOrder) -> [MediaItem] {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filtered = normalized.isEmpty ? tracks : tracks.filter {
+            PinyinSearchMatcher.matches(query: normalized, in: [$0.title, $0.artist ?? "", $0.album ?? ""])
+        }
+        return filtered.sorted { lhs, rhs in
+            let comparison: ComparisonResult
+            switch mode {
+            case .artist:
+                comparison = compare(lhs.artist ?? "", rhs.artist ?? "")
+            case .album:
+                comparison = compare(lhs.album ?? "", rhs.album ?? "")
+            case .recent:
+                comparison = compare(lhs.lastPlayedAt ?? lhs.updatedAt, rhs.lastPlayedAt ?? rhs.updatedAt)
+            case .duration:
+                comparison = compare(lhs.duration ?? 0, rhs.duration ?? 0)
+            case .mostPlayed:
+                comparison = compare(lhs.playCountValue, rhs.playCountValue)
+            default:
+                comparison = compare(lhs.title, rhs.title)
+            }
+            if comparison == .orderedSame {
+                return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            }
+            return order == .primary ? comparison == .orderedAscending : comparison == .orderedDescending
+        }
+    }
+
+    static func albums(_ albums: [MusicAlbumGroup], query: String, mode: MusicSortMode, order: MusicSortOrder) -> [MusicAlbumGroup] {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filtered = normalized.isEmpty ? albums : albums.filter {
+            PinyinSearchMatcher.matches(query: normalized, in: [$0.summary.title, $0.summary.artist])
+        }
+        return filtered.sorted { lhs, rhs in
+            let comparison: ComparisonResult
+            switch mode {
+            case .artist: comparison = compare(lhs.summary.artist, rhs.summary.artist)
+            case .recent: comparison = compare(lhs.latestUpdatedAt, rhs.latestUpdatedAt)
+            case .mostPlayed: comparison = compare(lhs.playCount, rhs.playCount)
+            default: comparison = compare(lhs.summary.title, rhs.summary.title)
+            }
+            return order == .primary ? comparison != .orderedDescending : comparison == .orderedDescending
+        }
+    }
+
+    static func artists(_ artists: [MusicArtistGroup], query: String, mode: MusicSortMode, order: MusicSortOrder) -> [MusicArtistGroup] {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filtered = normalized.isEmpty ? artists : artists.filter { PinyinSearchMatcher.matches(query: normalized, in: [$0.name]) }
+        return filtered.sorted { lhs, rhs in
+            let comparison: ComparisonResult
+            switch mode {
+            case .workCount: comparison = compare(lhs.trackCount, rhs.trackCount)
+            case .mostPlayed: comparison = compare(lhs.playCount, rhs.playCount)
+            default: comparison = compare(lhs.name, rhs.name)
+            }
+            return order == .primary ? comparison != .orderedDescending : comparison == .orderedDescending
+        }
+    }
+
+    private static func compare<T: Comparable>(_ lhs: T, _ rhs: T) -> ComparisonResult {
+        if lhs == rhs { return .orderedSame }
+        return lhs < rhs ? .orderedAscending : .orderedDescending
+    }
+
+    private static func compare(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        lhs.localizedCaseInsensitiveCompare(rhs)
     }
 }
 

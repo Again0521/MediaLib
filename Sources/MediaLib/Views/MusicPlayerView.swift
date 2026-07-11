@@ -617,6 +617,8 @@ struct MusicPlayerView: View {
     @State private var paletteLoadTask: Task<Void, Never>?
     @State private var backdropAnimationTask: Task<Void, Never>?
     @State private var entranceAnimationTask: Task<Void, Never>?
+    @State private var minimizeSequenceTask: Task<Void, Never>?
+    @State private var isMinimizing = false
     @State private var backdropAnimationReady = false
     @State private var glassLayerReady = false  // 重型封面纹理延迟出现；轻量玻璃底从首帧常驻，避免断层
     @State private var entrancePhase = 0
@@ -660,7 +662,7 @@ struct MusicPlayerView: View {
             userIsBrowsingLyrics: $userIsBrowsingLyrics,
             controller: controller,
             fetchLyrics: { Task { await fetchLyrics() } },
-            requestMinimize: onRequestMinimize,
+            requestMinimize: { beginMinimizeSequence() },
             pauseLyricAutoScroll: pauseLyricAutoScroll
         )
     }
@@ -713,10 +715,12 @@ struct MusicPlayerView: View {
             paletteLoadTask?.cancel()
             backdropAnimationTask?.cancel()
             entranceAnimationTask?.cancel()
+            minimizeSequenceTask?.cancel()
             resumeAutoScrollTask?.cancel()
             glassLayerReady = false
             backdropAnimationReady = false
             entrancePhase = 0
+            isMinimizing = false
         }
         .overlay {
             RawKeyCaptureView { key in
@@ -848,20 +852,45 @@ struct MusicPlayerView: View {
 
     private func startEntranceAnimation() {
         entranceAnimationTask?.cancel()
+        minimizeSequenceTask?.cancel()
+        isMinimizing = false
         guard !reduceMotion else {
             entrancePhase = 2
             return
         }
         entrancePhase = 0
         entranceAnimationTask = Task { @MainActor in
-            do { try await Task.sleep(nanoseconds: 30_000_000) } catch { return }
+            // 以封面为视觉锚点：mini→展开的封面 shared geometry 弹簧（AppMotion.musicPlayer，
+            // response 0.32）先飞至落位，其余组件等封面基本落定后才开始渐显——
+            // phase 1（发光/标题/控制栏/收起按钮）在 0.30s 跟上，phase 2（歌词/频谱）再错开一拍。
+            do { try await Task.sleep(nanoseconds: 300_000_000) } catch { return }
             withAnimation(AppMotion.panel) {
                 entrancePhase = 1
             }
-            do { try await Task.sleep(nanoseconds: 60_000_000) } catch { return }
+            do { try await Task.sleep(nanoseconds: 140_000_000) } catch { return }
             withAnimation(AppMotion.panel) {
                 entrancePhase = 2
             }
+        }
+    }
+
+    /// 收起与展开互为镜像：先把封面以外的组件渐隐（entrancePhase 归 0），
+    /// 短暂停后再触发真正的收起——此时画面上只剩封面，由 matched geometry 飞回底栏。
+    private func beginMinimizeSequence() {
+        guard !isMinimizing else { return }
+        guard !reduceMotion else {
+            onRequestMinimize()
+            return
+        }
+        isMinimizing = true
+        entranceAnimationTask?.cancel()
+        withAnimation(.easeOut(duration: 0.20)) {
+            entrancePhase = 0
+        }
+        minimizeSequenceTask = Task { @MainActor in
+            do { try await Task.sleep(nanoseconds: 230_000_000) } catch { return }
+            guard !Task.isCancelled else { return }
+            onRequestMinimize()
         }
     }
 
@@ -5132,7 +5161,7 @@ struct MusicMiniPlayerBar: View {
                     .padding(5)
                     .frame(width: 72, height: 72, alignment: .center)
                     .background {
-                        MusicMiniPlayerGlassSurface(palette: miniChromePalette, cornerRadius: 18)
+                        MusicMiniPlayerFrostedSurface(cornerRadius: 18)
                     }
                     .transition(.asymmetric(
                         insertion: .opacity.combined(with: .move(edge: .trailing)),
@@ -5142,7 +5171,7 @@ struct MusicMiniPlayerBar: View {
             } else {
                 expandedMiniBar
                     .background {
-                        MusicMiniPlayerGlassSurface(palette: miniChromePalette, cornerRadius: 18)
+                        MusicMiniPlayerFrostedSurface(cornerRadius: 18)
                     }
                     .transition(.asymmetric(
                         insertion: .opacity.combined(with: .scale(scale: 0.985, anchor: .trailing)),
@@ -5172,8 +5201,6 @@ struct MusicMiniPlayerBar: View {
             let showsTrackText = availableWidth >= 590
 
             ZStack {
-                MusicMiniNeutralGlassLightLayer()
-
                 HStack(spacing: 12) {
                     trackSummaryButton(showText: showsTrackText)
                         .frame(
@@ -5343,130 +5370,28 @@ private struct MusicMiniCollapsedProgressRing: View {
 
 // 迷你条收起态进度投影观察者已物理拆分到 MusicMiniStateObservers.swift（零行为变化）。
 
-private struct MusicMiniNeutralGlassLightLayer: View {
+/// 迷你播放器不再作为液态玻璃孤岛：模糊由整张白色半透明卡片提供，
+/// 控制键只在这张卡片上形成轻量白色面，避免多层反光与高光相互叠加。
+private struct MusicMiniPlayerFrostedSurface: View {
     @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        GeometryReader { proxy in
-            let reach = max(proxy.size.width * 0.72, 520)
-
-            ZStack(alignment: .leading) {
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(colorScheme == .dark ? 0.060 : 0.18),
-                        AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.045 : 0.12),
-                        AppColors.pointerLightTint.opacity(colorScheme == .dark ? 0.030 : 0.060),
-                        .clear
-                    ],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-
-                Rectangle()
-                    .fill(
-                        RadialGradient(
-                            colors: [
-                                Color.white.opacity(colorScheme == .dark ? 0.075 : 0.24),
-                                AppColors.solarLightTint.opacity(colorScheme == .dark ? 0.055 : 0.14),
-                                .clear
-                            ],
-                            center: UnitPoint(x: 0.07, y: 0.06),
-                            startRadius: 0,
-                            endRadius: reach * 0.48
-                        )
-                    )
-            }
-            .frame(width: proxy.size.width, height: proxy.size.height)
-            .blendMode(.screen)
-            .opacity(colorScheme == .dark ? 0.36 : 0.48)
-            .allowsHitTesting(false)
-        }
-    }
-}
-
-private struct MusicMiniPlayerGlassSurface: View {
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
-    @Environment(\.preferStaticGlassSurfaces) private var preferStaticGlassSurfaces
-    @Environment(\.glassPerformanceMode) private var glassPerformanceMode
-    let palette: AlbumColorPalette
     let cornerRadius: CGFloat
-
-    private var samplesPointer: Bool {
-        !reduceMotion &&
-        !suppressHoverDuringScroll &&
-        !preferStaticGlassSurfaces &&
-        glassPerformanceMode.allowsPointerSampling
-    }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        // 底栏跟随首页卡片语义材质：真实窗口高斯模糊打底，上层用 refCardBg/refCardBorder
-        // 建立稳定层级，避免暗色模式出现亮白玻璃压过文字。
         let isDark = colorScheme == .dark
-        let material: NSVisualEffectView.Material = isDark ? .hudWindow : .popover
-        let cardOpacity: Double = isDark ? 0.88 : 0.76
-        let innerTintOpacity: Double = isDark ? 0.22 : 0.16
-        let sheenGradient = LinearGradient(
-            colors: [
-                .white.opacity(isDark ? 0.070 : 0.30),
-                AppColors.solarLightTint.opacity(isDark ? 0.040 : 0.095),
-                palette.primary.color.opacity(isDark ? 0.028 : 0.036),
-                .clear
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        let strokeGradient = LinearGradient(
-            colors: [
-                .white.opacity(isDark ? 0.18 : 0.62),
-                AppColors.refCardBorder.opacity(isDark ? 0.95 : 0.86),
-                palette.accent.color.opacity(isDark ? 0.10 : 0.12)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
 
-        return AppKitVisualEffectBackground(material: material, blendingMode: .withinWindow)
+        return AppKitVisualEffectBackground(material: isDark ? .hudWindow : .underWindowBackground, blendingMode: .withinWindow)
             .clipShape(shape)
             .overlay {
-                shape.fill(AppColors.refCardBg.opacity(cardOpacity))
+                // 不使用对角高光与专辑色散射；只保留白色半透明纸感与真实窗口内模糊。
+                shape.fill(Color.white.opacity(isDark ? 0.12 : 0.56))
             }
             .overlay {
-                shape.fill(AppColors.refSearchFill.opacity(innerTintOpacity))
-                    .blendMode(isDark ? .normal : .screen)
-            }
-            .overlay {
-                shape.fill(sheenGradient)
-                    .blendMode(.screen)
-            }
-            .overlay {
-                shape.strokeBorder(strokeGradient, lineWidth: 1)
-            }
-            .overlay {
-                if samplesPointer {
-                    LyricsCardEffectLayerView(
-                        cornerRadius: cornerRadius,
-                        intensity: isDark ? 0.46 : 0.58,
-                        colorScheme: colorScheme,
-                        isEnabled: true,
-                        edgeDepth: isDark ? 0.30 : 0.38,
-                        tintColor: palette.primary.nsColor,
-                        role: .mini
-                    )
-                    .allowsHitTesting(false)
-                }
+                shape.strokeBorder(Color.white.opacity(isDark ? 0.16 : 0.76), lineWidth: 0.9)
             }
             .background {
-                GlassPanelShadowLayer(
-                    palette: palette,
-                    colorScheme: colorScheme,
-                    cornerRadius: cornerRadius,
-                    tintStrength: isDark ? 0.32 : 0.42,
-                    role: .mini
-                )
-                .allowsHitTesting(false)
+                shape.fill(.clear)
+                    .shadow(color: .black.opacity(isDark ? 0.18 : 0.075), radius: 14, y: 7)
             }
     }
 }
@@ -5577,10 +5502,9 @@ private struct MusicMiniTransportControls: View {
                     controller.configureMusic(item: item, settings: appState.settings)
                 }
             } label: {
-                MusicPrimaryPlayButtonLabel(isPlaying: state.isPlaying)
+                MusicMiniPrimaryPlayButtonLabel(isPlaying: state.isPlaying)
             }
             .buttonStyle(.plain)
-            .pointerLiquidEdge(cornerRadius: 17, tint: palette.accent.color, intensity: 1.08)
             .disabled(state.isPreparing)
 
             Button {
@@ -5590,7 +5514,7 @@ private struct MusicMiniTransportControls: View {
             }
             .disabled(!state.canControl)
         }
-        .buttonStyle(MusicIconButtonStyle(palette: palette, size: 30, cornerRadius: 15))
+        .buttonStyle(MusicIconButtonStyle(palette: palette, size: 30, cornerRadius: 15, surface: .mini))
     }
 
     private func playPreviousTrack() {
@@ -5650,6 +5574,26 @@ private struct MusicMiniPresetSpectrum: View {
         .onDisappear {
             controller.setAudioSpectrumVisualizationActive(false)
         }
+    }
+}
+
+/// 迷你播放器的主播放键：与白色半透明控件一致，不再使用液态玻璃的彩色厚高光。
+private struct MusicMiniPrimaryPlayButtonLabel: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let isPlaying: Bool
+
+    var body: some View {
+        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+            .font(.system(size: 14, weight: .bold))
+            .foregroundStyle(colorScheme == .dark ? .white : Color.black.opacity(0.84))
+            .frame(width: 34, height: 34)
+            .background {
+                Circle().fill(Color.white.opacity(colorScheme == .dark ? 0.22 : 0.64))
+            }
+            .overlay {
+                Circle().strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.16 : 0.78), lineWidth: 0.8)
+            }
+            .shadow(color: .black.opacity(colorScheme == .dark ? 0.14 : 0.055), radius: 4, y: 2)
     }
 }
 
@@ -5861,9 +5805,9 @@ private struct MusicMiniProgressControl: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            MusicRepeatModeButton(size: 30, palette: palette)
+            MusicRepeatModeButton(size: 30, palette: palette, surface: .mini)
 
-            MusicShuffleButton(size: 30, palette: palette)
+            MusicShuffleButton(size: 30, palette: palette, surface: .mini)
 
             MusicMiniProgressTimeline(controller: controller, palette: palette)
                 .layoutPriority(2)
@@ -6123,7 +6067,7 @@ private struct MusicMiniUtilityControls: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            MusicQueueButton(item: item, palette: palette, size: 30, glowStrength: 1.12)
+            MusicQueueButton(item: item, palette: palette, size: 30, glowStrength: 1.12, surface: .mini)
 
             AirPlayRoutePickerControl(
                 session: controller.routePickerSession,
@@ -6133,6 +6077,7 @@ private struct MusicMiniUtilityControls: View {
                 lightTint: Color(nsColor: NSColor(calibratedRed: 0.00, green: 0.34, blue: 0.76, alpha: 1.0)),
                 size: 30,
                 cornerRadius: 15,
+                usesMiniFrostedSurface: true,
                 glowStrength: 0.92,
                 onRoutesWillBegin: {
                     controller.prepareForMusicAirPlayRouteSelection()
@@ -6142,7 +6087,7 @@ private struct MusicMiniUtilityControls: View {
                 }
             )
 
-            MusicFavoriteButton(item: item, palette: palette, size: 30, glowStrength: 0.78)
+            MusicFavoriteButton(item: item, palette: palette, size: 30, glowStrength: 0.78, surface: .mini)
 
             MusicMiniVolumeButton(controller: controller, palette: palette)
 
@@ -6152,7 +6097,7 @@ private struct MusicMiniUtilityControls: View {
                 Image(systemName: "xmark")
                     .frame(width: 30, height: 30)
             }
-            .buttonStyle(MusicIconButtonStyle(palette: palette, size: 30, cornerRadius: 15, glowStrength: 0.48))
+            .buttonStyle(MusicIconButtonStyle(palette: palette, size: 30, cornerRadius: 15, glowStrength: 0.48, surface: .mini))
             .help("关闭播放器")
         }
     }
@@ -6178,7 +6123,7 @@ private struct MusicMiniVolumeButton: View {
                 .frame(width: 30, height: 30)
                 .contentShape(Circle())
         }
-        .buttonStyle(MusicIconButtonStyle(palette: palette, size: 30, cornerRadius: 15, glowStrength: 0.62))
+        .buttonStyle(MusicIconButtonStyle(palette: palette, size: 30, cornerRadius: 15, glowStrength: 0.62, surface: .mini))
         .disabled(!volumeObserver.state.canControl)
         .popover(isPresented: $showVolumeControl, arrowEdge: .bottom) {
             VStack(alignment: .leading, spacing: 12) {
@@ -6561,6 +6506,7 @@ private struct MusicQueueButton: View {
     let palette: AlbumColorPalette
     var size: CGFloat = 30
     var glowStrength: Double = 1
+    var surface: MusicIconButtonSurface = .liuli
     @State private var showQueue = false
 
     var body: some View {
@@ -6571,7 +6517,7 @@ private struct MusicQueueButton: View {
                 .frame(width: size, height: size)
                 .contentShape(Circle())
         }
-        .buttonStyle(MusicIconButtonStyle(palette: palette, size: size, cornerRadius: size / 2, glowStrength: glowStrength))
+        .buttonStyle(MusicIconButtonStyle(palette: palette, size: size, cornerRadius: size / 2, glowStrength: glowStrength, surface: surface))
         .popover(isPresented: $showQueue, arrowEdge: .bottom) {
             MusicQueuePopover(currentItem: item, palette: palette)
                 .environmentObject(appState)
@@ -6585,6 +6531,7 @@ private struct MusicShuffleButton: View {
     @EnvironmentObject private var appState: AppState
     var size: CGFloat = 30
     var palette: AlbumColorPalette?
+    var surface: MusicIconButtonSurface = .liuli
 
     var body: some View {
         Button {
@@ -6597,7 +6544,12 @@ private struct MusicShuffleButton: View {
                 palette: palette
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(MusicIconButtonStyle(
+            palette: palette ?? .fallback,
+            size: size,
+            cornerRadius: size / 2,
+            surface: surface
+        ))
         .help(appState.musicShuffleEnabled ? "关闭随机播放" : "随机播放")
         .accessibilityLabel(appState.musicShuffleEnabled ? "关闭随机播放" : "随机播放")
     }
@@ -6607,6 +6559,7 @@ private struct MusicRepeatModeButton: View {
     @EnvironmentObject private var appState: AppState
     var size: CGFloat = 30
     var palette: AlbumColorPalette?
+    var surface: MusicIconButtonSurface = .liuli
 
     var body: some View {
         Button {
@@ -6619,7 +6572,12 @@ private struct MusicRepeatModeButton: View {
                 palette: palette
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(MusicIconButtonStyle(
+            palette: palette ?? .fallback,
+            size: size,
+            cornerRadius: size / 2,
+            surface: surface
+        ))
         .help(appState.musicRepeatMode.title)
         .accessibilityLabel(appState.musicRepeatMode.title)
     }
@@ -6631,6 +6589,7 @@ private struct MusicFavoriteButton: View {
     let palette: AlbumColorPalette
     var size: CGFloat = 30
     var glowStrength: Double = 1
+    var surface: MusicIconButtonSurface = .liuli
 
     var body: some View {
         Button {
@@ -6641,10 +6600,17 @@ private struct MusicFavoriteButton: View {
                 .foregroundStyle(item.favorite ? Color.red : AppColors.refSecondaryText)
                 .frame(width: size, height: size)
         }
-        .buttonStyle(MusicIconButtonStyle(palette: palette, size: size, cornerRadius: size / 2, glowStrength: glowStrength))
+        .buttonStyle(MusicIconButtonStyle(palette: palette, size: size, cornerRadius: size / 2, glowStrength: glowStrength, surface: surface))
         .help(item.favorite ? "取消喜欢" : "我喜欢")
         .accessibilityLabel(item.favorite ? "取消喜欢" : "我喜欢")
     }
+}
+
+private enum MusicIconButtonSurface: Equatable {
+    /// 琉璃展开页：和 AirPlay 取同一层级的原生 material + 专辑色调，不再用近乎不透明白底。
+    case liuli
+    /// 迷你底栏：由父卡片负责实时模糊，按钮只提供轻量白色半透明面。
+    case mini
 }
 
 private struct MusicIconButtonStyle: ButtonStyle {
@@ -6654,6 +6620,7 @@ private struct MusicIconButtonStyle: ButtonStyle {
     var size: CGFloat = 30
     var cornerRadius: CGFloat = 15
     var glowStrength: Double = 1
+    var surface: MusicIconButtonSurface = .liuli
 
     func makeBody(configuration: Configuration) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -6661,50 +6628,51 @@ private struct MusicIconButtonStyle: ButtonStyle {
 
         configuration.label
             .frame(width: size, height: size)
-            // 底栏和展开页有多枚图标按钮，逐个使用实时 material 会产生多块离屏 backdrop 模糊。
-            // 这里改用实色磨砂底，保留接近的玻璃观感并避免额外离屏通道。
-            .background(
-                shape.fill(AppColors.refSearchFill.opacity(colorScheme == .dark ? 0.82 : 0.96))
-            )
-            .background(
-                shape.fill(palette.albumGlassBaseColor(for: colorScheme).opacity((colorScheme == .dark ? 0.16 : 0.12) * glow))
-            )
-            .background(
-                shape.fill(
-                    LinearGradient(
-                        colors: [
-                            .white.opacity(colorScheme == .dark ? 0.055 : 0.28),
-                            palette.primary.color.opacity((colorScheme == .dark ? 0.13 : 0.14) * glow),
-                            palette.accent.color.opacity((colorScheme == .dark ? 0.075 : 0.070) * glow)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+            .background {
+                switch surface {
+                case .liuli:
+                    // 与 AirPlayRoutePickerControl 同构：先保留完整系统材质，再叠专辑取色。
+                    shape.fill(.regularMaterial)
+                    shape.fill(
+                        LinearGradient(
+                            colors: [
+                                .white.opacity(colorScheme == .dark ? 0.15 : 0.58),
+                                palette.primary.color.opacity((colorScheme == .dark ? 0.20 : 0.24) * glow),
+                                palette.accent.color.opacity((colorScheme == .dark ? 0.08 : 0.12) * glow)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
-                )
-            )
-            .overlay(alignment: .topLeading) {
-                shape
-                    .strokeBorder(.white.opacity(colorScheme == .dark ? 0.10 : 0.46), lineWidth: 0.9)
-                    .blur(radius: 0.5)
-                    .blendMode(.screen)
+                case .mini:
+                    shape.fill(Color.white.opacity(colorScheme == .dark ? 0.14 : 0.46))
+                }
             }
             .overlay {
-                shape.strokeBorder(
-                    LinearGradient(
-                        colors: [
-                            AppColors.refCardBorder.opacity(colorScheme == .dark ? 0.95 : 0.78),
-                            palette.primary.color.opacity((colorScheme == .dark ? 0.18 : 0.26) * glow),
-                            palette.accent.color.opacity((colorScheme == .dark ? 0.16 : 0.18) * glow)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
+                switch surface {
+                case .liuli:
+                    shape.strokeBorder(
+                        LinearGradient(
+                            colors: [
+                                .white.opacity(colorScheme == .dark ? 0.30 : 0.78),
+                                palette.primary.color.opacity((colorScheme == .dark ? 0.30 : 0.38) * glow),
+                                .white.opacity(colorScheme == .dark ? 0.10 : 0.34)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+                case .mini:
+                    shape.strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.16 : 0.72), lineWidth: 0.8)
+                }
             }
-            .shadow(color: palette.primary.color.opacity((colorScheme == .dark ? 0.10 : 0.075) * glow), radius: 8 + 5 * glow, y: 5)
-            .shadow(color: .black.opacity(colorScheme == .dark ? 0.16 : 0.052), radius: 10, y: 5)
-            .pointerLiquidEdge(cornerRadius: cornerRadius, tint: palette.primary.color, intensity: 1.10 * glow)
+            .shadow(
+                color: .black.opacity(colorScheme == .dark ? 0.16 : (surface == .mini ? 0.05 : 0.052)),
+                radius: surface == .mini ? 4 : 10,
+                y: surface == .mini ? 2 : 5
+            )
+            .pointerLiquidEdge(cornerRadius: cornerRadius, tint: palette.primary.color, intensity: surface == .mini ? 0 : 1.10 * glow)
             // 按下反馈用玻璃高光（短暂提亮）+ 轻微缩放，而非简单降低不透明度。
             .brightness(configuration.isPressed ? (colorScheme == .dark ? 0.06 : 0.05) : 0)
             .scaleEffect(configuration.isPressed && !reduceMotion ? 0.93 : 1)
@@ -6728,52 +6696,17 @@ struct MusicGlassPressStyle: ButtonStyle {
 }
 
 private struct MusicModeIcon: View {
-    @Environment(\.colorScheme) private var colorScheme
     let systemImage: String
     let isActive: Bool
     var size: CGFloat = 30
     var palette: AlbumColorPalette?
 
     var body: some View {
-        let tint = palette?.primary.color ?? AppColors.pointerLightTint
         let accent = palette?.accent.color ?? AppColors.selectedGlassTint
         Image(systemName: systemImage)
             .font(.system(size: 14, weight: .semibold))
             .foregroundStyle(isActive ? accent : AppColors.refSecondaryText)
             .frame(width: size, height: size)
-            // 循环/随机图标在底栏也会出现，使用实色磨砂底避免重复创建实时 material。
-            .background(Circle().fill(AppColors.refSearchFill.opacity(colorScheme == .dark ? 0.82 : 0.96)))
-            .background(
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                .white.opacity(colorScheme == .dark ? 0.055 : 0.34),
-                                tint.opacity(colorScheme == .dark ? 0.12 : 0.12),
-                                .white.opacity(colorScheme == .dark ? 0.025 : 0.18)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            )
-            .overlay {
-                Circle().stroke(
-                    LinearGradient(
-                            colors: [
-                                AppColors.refCardBorder.opacity(colorScheme == .dark ? 0.95 : 0.80),
-                                tint.opacity(colorScheme == .dark ? 0.12 : 0.22),
-                                AppColors.refOutlineBorder.opacity(colorScheme == .dark ? 0.72 : 1.0)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                    lineWidth: 1
-                )
-            }
-            .shadow(color: tint.opacity(colorScheme == .dark ? 0.050 : 0.045), radius: 9, y: 4)
-            .shadow(color: .black.opacity(colorScheme == .dark ? 0.13 : 0.045), radius: 8, y: 4)
-            .pointerLiquidEdge(cornerRadius: size / 2, tint: tint, intensity: 0.96)
     }
 }
 
@@ -9052,6 +8985,7 @@ struct WujieArtwork: View {
     let palette: AlbumColorPalette
     let posterSize: CGFloat
     let coverGlowEnabled: Bool
+    let transitionNamespace: Namespace.ID?
     @StateObject private var playback: MusicMiniTransportStateObserver
     @State private var coverVisualProgress: Double = 1
     @State private var glowVisualProgress: Double = 1
@@ -9059,12 +8993,13 @@ struct WujieArtwork: View {
 
     private var cornerRadius: CGFloat { min(posterSize * 0.075, 28) }
 
-    init(item: MediaItem, controller: MpvPlayerController, palette: AlbumColorPalette, posterSize: CGFloat, coverGlowEnabled: Bool) {
+    init(item: MediaItem, controller: MpvPlayerController, palette: AlbumColorPalette, posterSize: CGFloat, coverGlowEnabled: Bool, transitionNamespace: Namespace.ID? = nil) {
         self.item = item
         self.controller = controller
         self.palette = palette
         self.posterSize = posterSize
         self.coverGlowEnabled = coverGlowEnabled
+        self.transitionNamespace = transitionNamespace
         _playback = StateObject(wrappedValue: MusicMiniTransportStateObserver(controller: controller))
     }
 
@@ -9109,6 +9044,8 @@ struct WujieArtwork: View {
             PosterImage(path: item.posterPath, title: item.title, mediaType: item.type)
                 .aspectRatio(1, contentMode: .fill)
                 .frame(width: posterSize, height: posterSize)
+                // 与琉璃同源的 mini→展开 封面 shared geometry：封面是展开动画的唯一几何锚点。
+                .modifier(MusicCoverGeometryModifier(namespace: transitionNamespace))
                 .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
                 .overlay {
                     // hero 受光印面边：顶部受光更亮、底部暗边收敛 → 像被环境光打亮的相纸而非卡片描边（专辑取色不变）。
@@ -9211,6 +9148,9 @@ struct WujieIdentityColumn: View {
     let palette: AlbumColorPalette
     let posterSize: CGFloat
     let coverGlowEnabled: Bool
+    /// 封面是展开/收起的几何锚点全程可见；标题与控制栈按此渐显/渐隐（见 MusicExpandedStage）。
+    var contentVisible: Bool = true
+    var transitionNamespace: Namespace.ID? = nil
 
     var body: some View {
         VStack(spacing: WujieDesignSystem.Space.xl) {
@@ -9221,7 +9161,8 @@ struct WujieIdentityColumn: View {
                 controller: controller,
                 palette: palette,
                 posterSize: posterSize,
-                coverGlowEnabled: coverGlowEnabled
+                coverGlowEnabled: coverGlowEnabled,
+                transitionNamespace: transitionNamespace
             )
             .frame(width: posterSize, height: posterSize)
 
@@ -9240,6 +9181,8 @@ struct WujieIdentityColumn: View {
                     .minimumScaleFactor(0.78)
             }
             .frame(maxWidth: .infinity)
+            .opacity(contentVisible ? 1 : 0)
+            .offset(y: contentVisible ? 0 : 14)
 
             VStack(spacing: WujieDesignSystem.Space.lg) {
                 WujieProgressBar(controller: controller, palette: palette)
@@ -9250,6 +9193,8 @@ struct WujieIdentityColumn: View {
             .frame(maxWidth: 460)
             .frame(maxWidth: .infinity)
             .layoutPriority(1)
+            .opacity(contentVisible ? 1 : 0)
+            .offset(y: contentVisible ? 0 : 18)
 
             Spacer(minLength: 0)
         }

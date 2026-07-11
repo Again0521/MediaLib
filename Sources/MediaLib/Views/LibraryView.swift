@@ -246,11 +246,6 @@ struct LibraryView: View {
 
     var body: some View {
         let displayedItems = currentItems
-        // 载入骨架 / 空态 / 海报墙三态标识：只驱动三者之间的柔和交叉过渡，
-        // 网格内部的数据更新不会触发整页动画。
-        let contentPhase: String = (isPreparingVisibleItems || visibleItemsAreOutOfDate) && displayedItems.isEmpty
-            ? "loading"
-            : (displayedItems.isEmpty ? "empty" : "content")
 
         Group {
             if (isPreparingVisibleItems || visibleItemsAreOutOfDate) && displayedItems.isEmpty {
@@ -311,11 +306,14 @@ struct LibraryView: View {
                 // 进入/退出多选模式的状态可能来自右键菜单等非 withAnimation 路径，
                 // 在容器上补显式动画绑定，保证浮栏始终以滑入/滑出过渡而不是硬切。
                 .animation(AppMotion.panel, value: appState.isSelectionModeActive)
-                .transition(.opacity)
             }
         }
-        // 骨架→内容→空态之间交叉淡入淡出，替代刷新完成瞬间的硬切。
-        .animation(reduceMotion ? nil : AppMotion.standard, value: contentPhase)
+        // 注意：不要给「骨架 / 内容 / 空态」这三个分支之间的切换加 value 动画。
+        // 三者容器结构不同（骨架/空态是居中的 ScrollView，内容是左对齐的 PosterGridList），
+        // 切观看筛选时会短暂经过 loading 分支再回到 content，spring 动画会对两个不同容器的
+        // 页头做位置插值，产生「向左滑入」的进场——这正是用户反馈的、只在切已看/未看时出现、
+        // 与其它筛选不一致的动画。分支切换保持瞬时；柔和感由下面的 contentBreathOpacity
+        // 呼吸（纯透明度、不位移）与 EmptyStateView 自带入场承担。
         // 统一的内容呼吸：任何筛选/排序/分区/搜索变化都走同一节奏的轻渐入，
         // 保证“进页、切筛选、换排序”观感一致，而不是只有观看筛选有入场动画。
         .onChange(of: contentRevisionKey) { _ in

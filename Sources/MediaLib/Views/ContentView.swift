@@ -297,6 +297,7 @@ struct ContentView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     /// 侧边栏底部状态卡片轮换间隔：曾从 18s 缩短到 6s、又调到 30s，
     /// 反馈仍嫌切换偏快。降到 60s，让每条状态有足够的停留时间。
     static let sidebarStatusRotationInterval: TimeInterval = 60
@@ -305,6 +306,8 @@ struct ContentView: View {
     static let sidebarInterruptWatchInterval: TimeInterval = 12
     /// 打断层单条内容展示时长：够读完一行标题+副标题，又不会喧宾夺主。
     static let sidebarInterruptDisplayDuration: TimeInterval = 6
+    /// 封面 shared geometry 的目标动画时长；背景树仅在这段连续过渡完成后才卸载。
+    static let musicPlayerTransitionDuration: UInt64 = 420_000_000
     @State private var selection: SidebarDestination? = .home
     @State private var isVideoExpanded = true
     @State private var isAlbumExpanded = true
@@ -313,15 +316,11 @@ struct ContentView: View {
     @State private var collapsedEmbySourceIDs: Set<String> = []
     @State private var embyRenameRequest: EmbyRenameRequest?
     @State private var musicPlayerExpanded = true
-    // 沉浸式 chrome（隐藏标题/侧栏按钮、透明标题栏、内容延伸到标题栏下）只在全屏播放器
-    // 已完全覆盖窗口时开启/关闭，使 chrome 切换引起的 navigationRoot 重排被覆盖层遮挡。
-    @State private var musicImmersive = false
     @State private var musicController = MpvPlayerController()
     @StateObject private var systemPhotoLibrary = SystemPhotoLibraryStore()
     @State private var columnVisibility: NavigationSplitViewVisibility = .automatic
     @State private var musicTransitionTask: Task<Void, Never>?
     @State private var musicTransitionSuppressesBackground = false
-    @State private var musicTransitionShieldActive = false
     @State private var musicBackgroundRootSuspended = false
     @State private var hadActiveMusic = false
     @State private var musicMiniPlayerCollapsed = false
@@ -450,7 +449,7 @@ struct ContentView: View {
     private func bodyWithLayers<V: View>(_ content: V) -> some View {
         content
         .background {
-            AppPageBackground(includeDirectionalLight: false)
+            rootWindowBackground
         }
         .background {
             MainLayoutActivityMonitor { active in
@@ -474,13 +473,6 @@ struct ContentView: View {
         // 因此 chrome 切换不会让它跳动，也始终盖住标题栏区域（展开过程顶部不再露白、不再抽搐）。
         .overlay {
             ZStack {
-                if musicTransitionShieldActive {
-                    Color(nsColor: musicWindowPalette.backdropBaseNSColor(for: musicPlayerEffectiveColorScheme))
-                        .ignoresSafeArea()
-                        .transition(.identity)
-                        .zIndex(18)
-                }
-
                 if let musicItem = musicPlayerBinding.wrappedValue, musicPlayerExpanded {
                     MusicPlayerView(
                         item: musicItem,
@@ -685,9 +677,7 @@ struct ContentView: View {
         }
         .background {
             MainWindowToolbarVisibilityGuard(
-                // R5-3：标题栏 chrome 在播放器一展开就隐藏（覆盖层此刻已盖住整窗），
-                // 不再等到 musicImmersive 延迟置位——否则展开后到沉浸前的这段时间，
-                // 顶部 AppKit 标题栏会露出一条白色横条。
+                // 标题栏 chrome 与播放器过渡同一帧切换；不另设延迟状态，避免中段重排。
                 hiddenForMusicOverlay: musicChromeShouldBeHidden,
                 hideSidebarToggleForMusicOverlay: musicChromeShouldBeHidden,
                 shouldApplyInitialPlacement: !appState.settings.hasCompletedOnboarding
@@ -789,6 +779,17 @@ struct ContentView: View {
     private func markMainLayoutTransition(after nanoseconds: UInt64 = 520_000_000) {
         beginMainLayoutTransition()
         finishMainLayoutTransition(after: nanoseconds)
+    }
+
+    private func setSidebarSelection(_ destination: SidebarDestination) {
+        guard selection != destination else { return }
+        // 先同步清理详情栈，再发布侧栏目的地；避免新页面已开始建树后再由 onChange
+        // 触发第二次 ObservableObject 刷新，形成“点击后停半拍”的观感。
+        appState.clearDetailNavigation()
+        let transaction = Transaction(animation: AppMotion.sidebarSelection)
+        withTransaction(transaction) {
+            selection = destination
+        }
     }
 
     private func beginMainLayoutTransition() {
@@ -1192,6 +1193,14 @@ struct ContentView: View {
         }
     }
 
+    private var rootWindowBackground: some View {
+        // 根窗口只负责透明合成，不能再按“估算的侧边栏宽度”铺一张页面底色。
+        // 那种方式会在用户拖拽分栏、系统重排或窗口缩放后落到侧边栏背后，让原生材质采样到
+        // 应用自己的浅灰层而不是窗口后的桌面。详情列和侧栏各自拥有明确、互不重叠的底板。
+        Color.clear
+        .ignoresSafeArea()
+    }
+
     private var navigationRoot: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             // 不再使用 List 的 selection 绑定：`.sidebar` 样式下系统会用强调色画选中框（蓝框），
@@ -1348,7 +1357,11 @@ struct ContentView: View {
                     onSecondaryAction: handleSidebarStatusSecondaryAction
                 )
             }
-            .background(SidebarReferenceBackground())
+            // 侧栏唯一底板：材质连同标题栏安全区一起铺满，整列一致（不再在顶部留出一块不同材质）。
+            .background {
+                NativeSidebarMaterialBackground(reduceTransparency: reduceTransparency)
+                    .ignoresSafeArea()
+            }
             // 选中态已完全由自绘 SidebarSelectionPill 接管（List 无 selection 绑定，不会有系统蓝框）；
             // tint 仅供 Disclosure 箭头等附属控件跟随主题。
             .tint(SidebarReferenceTokens.blue)
@@ -1360,7 +1373,14 @@ struct ContentView: View {
                 await sidebarInterruptWatchLoop()
             }
             .onAppear {
-                selection = SidebarDestination(storedID: storedSelectionID) ?? .home
+                if selection != .home {
+                    var transaction = Transaction(animation: nil)
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        selection = .home
+                    }
+                }
+                storedSelectionID = SidebarDestination.home.id
             }
             .onChange(of: selection) { _ in
                 if appState.settings.debugLoggingEnabled {
@@ -1392,6 +1412,8 @@ struct ContentView: View {
                         .transition(AppMotion.pageInsertion)
                 }
             }
+            // 页面底色只属于详情列；将其从主窗口根层移出，避免污染侧栏 `.behindWindow` 的采样。
+            .background(AppPageBackground(includeDirectionalLight: false))
             // 主内容区唯一的转场闸：侧栏切页淡入 + 轻缩放，详情/人物页下钻浮入、返回淡出，
             // 全部替代旧硬切。key 只随“显示哪一层内容”变化，页面内部状态更新不会触发整页重入场。
             .animation(reduceMotion ? nil : AppMotion.page, value: detailTransitionKey)
@@ -1439,7 +1461,7 @@ struct ContentView: View {
 
     private var musicWindowChromeHidden: Bool {
         appState.activePlayerItem?.type == .music &&
-        (musicTransitionShieldActive || musicPlayerExpanded || musicImmersive || musicTransitionSuppressesBackground)
+        (musicPlayerExpanded || musicTransitionSuppressesBackground)
     }
 
     private var musicChromeShouldBeHidden: Bool {
@@ -1448,7 +1470,7 @@ struct ContentView: View {
 
     private var musicWindowBackdropShouldBeActive: Bool {
         appState.activePlayerItem?.type == .music &&
-        (musicTransitionShieldActive || musicPlayerExpanded || musicImmersive || musicTransitionSuppressesBackground)
+        (musicPlayerExpanded || musicTransitionSuppressesBackground)
     }
 
     private var backgroundGlassPerformanceMode: GlassPerformanceMode {
@@ -1513,7 +1535,6 @@ struct ContentView: View {
         immediate.disablesAnimations = true
         withTransaction(immediate) {
             musicBackgroundRootSuspended = false
-            musicTransitionShieldActive = true
             musicTransitionSuppressesBackground = true
             musicMiniPlayerCollapsed = false
         }
@@ -1521,31 +1542,17 @@ struct ContentView: View {
             musicPlayerExpanded = true
         }
         musicTransitionTask = Task { @MainActor in
-            await Task.yield()
+            // 不在中途切换 chrome 或盖一层不透明盾：那会遮住 mini 与展开封面之间的
+            // matched geometry，视觉上变成“先停住、再铺满”。只在过渡完成后卸载背景树。
+            do { try await Task.sleep(nanoseconds: Self.musicPlayerTransitionDuration) } catch { return }
             guard appState.activePlayerItem?.type == .music, musicPlayerExpanded else {
-                finishInterruptedMusicTransition(expanded: false)
+                finishInterruptedMusicTransition(expanded: appState.activePlayerItem?.type == .music && musicPlayerExpanded)
                 return
             }
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
-                musicImmersive = true
-            }
-            // 等展开动画完全稳定后，再卸载背后的 NavigationSplitView。
-            // 过早卸载会改变 SwiftUI/NSWindow 内容树的 safe-area 与 titlebar 组合，正是展开末段白条的高风险点。
-            // 性能：musicPlayer 弹簧（response 0.40 / damping 0.90）约 0.55–0.7s 即视觉稳定，沉浸 chrome 已在
-            // 上方 Task.yield 后立即置位；原 1.15s 让背后整库（含海报墙 NSImage 显存）与全屏播放器的
-            // 两套离屏合成缓冲在 M 系列无风扇 GPU 上多并存约 0.35s，正是展开瞬间 WindowServer 内存冲高、
-            // 系统掉帧的高峰窗口。收紧到 0.80s（仍在稳定点之后留 ~0.1–0.25s 安全余量，不触发白条），
-            // 把双挂载峰值时长压掉约 30%，更早释放背后海报显存。
-            do { try await Task.sleep(nanoseconds: 800_000_000) } catch { return }
-            guard appState.activePlayerItem?.type == .music, musicPlayerExpanded, musicImmersive else {
-                finishInterruptedMusicTransition(expanded: appState.activePlayerItem?.type == .music && musicPlayerExpanded)
-                return
-            }
-            withTransaction(transaction) {
                 musicBackgroundRootSuspended = true
-                musicTransitionShieldActive = false
             }
             musicTransitionSuppressesBackground = false
         }
@@ -1570,9 +1577,7 @@ struct ContentView: View {
         withTransaction(transaction) {
             musicBackgroundRootSuspended = false
             musicPlayerExpanded = false
-            musicImmersive = false
             musicMiniPlayerCollapsed = false
-            musicTransitionShieldActive = false
         }
         musicTransitionSuppressesBackground = false
     }
@@ -1582,29 +1587,17 @@ struct ContentView: View {
         var immediate = Transaction()
         immediate.disablesAnimations = true
         withTransaction(immediate) {
-            musicTransitionShieldActive = true
             musicTransitionSuppressesBackground = true
             musicMiniPlayerCollapsed = false
+            if musicBackgroundRootSuspended {
+                musicBackgroundRootSuspended = false
+            }
+        }
+        withAnimation(AppMotion.musicPlayer) {
+            musicPlayerExpanded = false
         }
         musicTransitionTask = Task { @MainActor in
-            if musicBackgroundRootSuspended {
-                var restoreTransaction = Transaction()
-                restoreTransaction.disablesAnimations = true
-                withTransaction(restoreTransaction) {
-                    musicBackgroundRootSuspended = false
-                }
-                // 先给背后的列表/海报墙一小段预热时间，再让全屏播放器退场。
-                do { try await Task.sleep(nanoseconds: 70_000_000) } catch { return }
-            }
-            guard appState.activePlayerItem?.type == .music, musicPlayerExpanded else {
-                finishInterruptedMusicTransition(expanded: false)
-                return
-            }
-            withAnimation(AppMotion.musicPlayer) {
-                musicPlayerExpanded = false
-            }
-            // 配合更紧凑的 musicPlayer 弹簧，缩短收起时 overlay 与 chrome 恢复的重合窗口。
-            do { try await Task.sleep(nanoseconds: 400_000_000) } catch { return }
+            do { try await Task.sleep(nanoseconds: Self.musicPlayerTransitionDuration) } catch { return }
             guard appState.activePlayerItem?.type == .music, !musicPlayerExpanded else {
                 finishInterruptedMusicTransition(expanded: appState.activePlayerItem?.type == .music && musicPlayerExpanded)
                 return
@@ -1612,8 +1605,7 @@ struct ContentView: View {
             var transaction = Transaction()
             transaction.disablesAnimations = true
             withTransaction(transaction) {
-                musicImmersive = false
-                musicTransitionShieldActive = false
+                musicBackgroundRootSuspended = false
             }
             musicTransitionSuppressesBackground = false
         }
@@ -1625,8 +1617,6 @@ struct ContentView: View {
         withTransaction(transaction) {
             musicBackgroundRootSuspended = expanded
             musicPlayerExpanded = expanded
-            musicImmersive = expanded
-            musicTransitionShieldActive = false
             musicMiniPlayerCollapsed = false
         }
         musicTransitionSuppressesBackground = false
@@ -1639,9 +1629,7 @@ struct ContentView: View {
         withTransaction(transaction) {
             musicBackgroundRootSuspended = false
             musicPlayerExpanded = false
-            musicImmersive = false
             musicMiniPlayerCollapsed = false
-            musicTransitionShieldActive = false
         }
         musicTransitionSuppressesBackground = false
     }
@@ -1657,8 +1645,6 @@ struct ContentView: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             musicBackgroundRootSuspended = false
-            musicImmersive = false
-            musicTransitionShieldActive = false
         }
         musicTransitionSuppressesBackground = false
     }
@@ -1737,7 +1723,7 @@ struct ContentView: View {
 
     private func sidebarRow(_ destination: SidebarDestination, indented: Bool = false, showsDot: Bool) -> some View {
         let selected = selection == destination
-        return SidebarSelectableRow(selected: selected, indent: indented, showsDot: showsDot, action: { selection = destination }) {
+        return SidebarSelectableRow(selected: selected, indent: indented, showsDot: showsDot, action: { setSidebarSelection(destination) }) {
             if indented {
                 if usesCustomRecordingSidebarGlyph(destination) {
                     SidebarRecordingNavIcon(selected: selected)
@@ -1796,7 +1782,7 @@ struct ContentView: View {
 
     private func smartCollectionSidebarRow(_ collection: VideoSmartCollection) -> some View {
         let selected = selection == .smartCollection(collection.id)
-        return SidebarSelectableRow(selected: selected, indent: true, action: { selection = .smartCollection(collection.id) }) {
+        return SidebarSelectableRow(selected: selected, indent: true, action: { setSidebarSelection(.smartCollection(collection.id)) }) {
             PlayfulSymbolIcon(systemImage: "sparkles.rectangle.stack", size: 22)
             Text(collection.name)
                 .foregroundStyle(selected ? SidebarReferenceTokens.selectedText : SidebarReferenceTokens.itemText)
@@ -1829,7 +1815,7 @@ struct ContentView: View {
 
     private func manualCollectionSidebarRow(_ collection: VideoManualCollection, previewItems: [MediaItem]) -> some View {
         let selected = selection == .manualCollection(collection.id)
-        return SidebarSelectableRow(selected: selected, indent: true, action: { selection = .manualCollection(collection.id) }) {
+        return SidebarSelectableRow(selected: selected, indent: true, action: { setSidebarSelection(.manualCollection(collection.id)) }) {
             VideoManualCollectionCoverView(
                 items: previewItems,
                 title: collection.name,
@@ -1870,7 +1856,10 @@ struct ContentView: View {
     @ViewBuilder
     private func embySourceGroup(for source: MediaSource) -> some View {
         let libraries = appState.embyLibraries.filter { $0.sourceID == source.id }
-        let sectionsWithItems = EmbyLibrarySection.allCases.filter {
+        let visibleLibraries = libraries.filter { !isRemoteMusicLibrary($0) }
+        // 「最近播放」是远程音乐页控制栏内的子页，不再和「音乐」并列成侧边栏入口。
+        // 否则同一批远程音乐会被拆成两个无上下文的入口。
+        let sectionsWithItems = EmbyLibrarySection.allCases.filter { $0 != .recent &&
             appState.hasEmbyItems(for: $0, sourceID: source.id)
         }
         let expansion = embyExpansionBinding(source.id)
@@ -1878,7 +1867,7 @@ struct ContentView: View {
             systemImage: "server.rack",
             title: source.name,
             isExpanded: expansion,
-            collapsedCount: sectionsWithItems.count + libraries.count
+            collapsedCount: sectionsWithItems.count + visibleLibraries.count
         )
         .contextMenu {
             Button {
@@ -1892,10 +1881,14 @@ struct ContentView: View {
                 sidebarRow(.embySection(source.id, section), indented: true)
             }
             // 同一来源内：视频/收藏与各媒体库目录之间不再插入分隔线与额外间距，保持紧凑一致。
-            ForEach(libraries) { library in
+            ForEach(visibleLibraries) { library in
                 sidebarRow(.embyLibrary(library.id), indented: true)
             }
         }
+    }
+
+    private func isRemoteMusicLibrary(_ library: EmbyLibrarySummary) -> Bool {
+        library.collectionType?.lowercased() == "music"
     }
 
     private func embyExpansionBinding(_ sourceID: String) -> Binding<Bool> {
@@ -1913,7 +1906,7 @@ struct ContentView: View {
 
     private func musicSmartPlaylistSidebarRow(_ playlist: MusicSmartPlaylist) -> some View {
         let selected = selection == .musicSmartPlaylist(playlist.id)
-        return SidebarSelectableRow(selected: selected, indent: true, action: { selection = .musicSmartPlaylist(playlist.id) }) {
+        return SidebarSelectableRow(selected: selected, indent: true, action: { setSidebarSelection(.musicSmartPlaylist(playlist.id)) }) {
             PlayfulSymbolIcon(systemImage: "music.note.list", size: 22)
             Text(playlist.name)
                 .foregroundStyle(selected ? SidebarReferenceTokens.selectedText : SidebarReferenceTokens.itemText)
@@ -2137,92 +2130,6 @@ private enum SidebarReferenceTokens {
 
     static func color(_ hex: String) -> Color {
         Color(nsColor: NSColor(appThemeHex: hex) ?? .labelColor)
-    }
-}
-
-private struct SidebarReferenceBackground: View {
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
-    var body: some View {
-        ZStack(alignment: .trailing) {
-            SidebarNativeMaterialBackground()
-            if reduceTransparency {
-                LinearGradient(
-                    colors: [
-                        SidebarReferenceTokens.backgroundTop,
-                        SidebarReferenceTokens.backgroundBottom
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            }
-            // 参照原生 App（Finder/Notes/Mail）侧边栏：`.sidebar` 材质本身就是磨砂 + 透出桌面壁纸。
-            // 任何叠加纱罩（哪怕每层只有 5%~7%）累计起来都会把壁纸透过感洗成近实底白，
-            // 因此非「降低透明度」模式下不再叠任何着色层，让材质以原生形态直接呈现。
-            if !reduceTransparency {
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(colorScheme == .dark ? 0.015 : 0.035),
-                        Color.white.opacity(colorScheme == .dark ? 0.006 : 0.012)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-                .blendMode(.plusLighter)
-                .allowsHitTesting(false)
-            }
-            SidebarReferenceTokens.divider
-                .opacity(colorScheme == .dark ? 0.44 : 0.46)
-                .frame(width: 1)
-        }
-        .ignoresSafeArea()
-    }
-}
-
-private struct SidebarNativeMaterialBackground: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .sidebar
-        view.blendingMode = .behindWindow
-        view.state = .active
-        view.isEmphasized = true
-        return view
-    }
-
-    func updateNSView(_ nsView: NSVisualEffectView, context: Context) {
-        nsView.material = .sidebar
-        nsView.blendingMode = .behindWindow
-        nsView.state = .active
-        nsView.isEmphasized = true
-        // ★根因：SwiftUI 把这个 NSVisualEffectView 塞进了 NSHostingView 自己的 layer 树很深的位置。
-        // `.behindWindow` 混合模式要求从这个 view 一路到 window 的 contentView，中间每一层 CALayer
-        // 都不能是不透明的——只要有一层 `isOpaque`/纯色背景挡着，取样的就是那层 layer 的颜色，
-        // 而不是真正窗口后面的桌面，效果上就是"整片糊成一个纯色磨砂"而不是"透出桌面"。
-        // SwiftUI 的宿主 layer 默认按不透明优化（层展平/离屏合成），所以之前不管怎么调这个视图
-        // 自己的参数、纱罩透明度都没用——问题根本不在这个 view 上，而在它上面的祖先层。
-        // 这里显式把从本视图到 window.contentView 之间的每一层都掰成非不透明、透明背景色。
-        DispatchQueue.main.async {
-            var view: NSView? = nsView
-            while let current = view {
-                current.layer?.isOpaque = false
-                current.layer?.backgroundColor = NSColor.clear.cgColor
-                if let scrollView = current as? NSScrollView {
-                    scrollView.drawsBackground = false
-                }
-                if current === nsView.window?.contentView {
-                    break
-                }
-                view = current.superview
-            }
-            if let contentView = nsView.window?.contentView {
-                contentView.layer?.isOpaque = false
-                contentView.layer?.backgroundColor = NSColor.clear.cgColor
-                contentView.superview?.wantsLayer = true
-                contentView.superview?.layer?.isOpaque = false
-                contentView.superview?.layer?.backgroundColor = NSColor.clear.cgColor
-            }
-        }
     }
 }
 
@@ -2779,7 +2686,7 @@ private struct SidebarSelectableRow<Label: View>: View {
         .animation(reduceMotion ? nil : AppMotion.listHover, value: hovering)
         // 选中 wash（蓝粉渐变 + hairline）随选择切换柔和过渡，替代旧硬切；
         // 字重不可动画属性照常瞬时切换，不受影响。
-        .animation(reduceMotion ? nil : AppMotion.listHover, value: selected)
+        .animation(reduceMotion ? nil : AppMotion.sidebarSelection, value: selected)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 }
@@ -3496,6 +3403,10 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
         }
 
         private func clearTitlebarBackground(in view: NSView, window: NSWindow) {
+            // 绝不进入应用内容子树：contentView 内部的 NSVisualEffectView（如侧栏底板）
+            // 会被 "visualeffect" 类名匹配误伤——wantsLayer/清 layer 背景会让 behindWindow
+            // backdrop 完全失效。这里只负责标题栏 chrome 残留。
+            if view === window.contentView { return }
             if shouldClearTitlebarBackgroundView(view, window: window) {
                 let id = ObjectIdentifier(view)
                 if titlebarBackgroundOriginalState[id] == nil {
@@ -3567,10 +3478,11 @@ private struct MainWindowToolbarVisibilityGuard: NSViewRepresentable {
             if view is NSButton { return false }
             let className = NSStringFromClass(type(of: view)).lowercased()
             if containsTrafficLight(in: view, window: window) {
+                // ★不再匹配 themeframe：给 NSThemeFrame 强制 wantsLayer/清 layer 背景
+                // 会破坏窗口内所有 behindWindow 材质的 backdrop（实机 B3 harness 证实）。
                 return className.contains("titlebar") ||
                     className.contains("toolbar") ||
-                    className.contains("visualeffect") ||
-                    className.contains("themeframe")
+                    className.contains("visualeffect")
             }
             return className.contains("titlebar") ||
                 className.contains("toolbar") ||

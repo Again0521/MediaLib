@@ -57,6 +57,7 @@ final class MediaLibAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         LiveTitleIconDebugTool.scheduleWindowCaptureIfRequested()
+        WindowMaterialDiagnostics.scheduleIfRequested()
         VividIconGridDebugTool.runAndExitIfRequested()
     }
 
@@ -80,12 +81,10 @@ final class MediaLibAppDelegate: NSObject, NSApplicationDelegate {
         if window.backgroundColor != .clear {
             window.backgroundColor = .clear
         }
-        if window.contentView?.wantsLayer != true {
-            window.contentView?.wantsLayer = true
-        }
-        if window.contentView?.layer?.backgroundColor != NSColor.clear.cgColor {
-            window.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
-        }
+        // ★不要再给 contentView / frameView(NSThemeFrame) 强制 wantsLayer 或清 layer 背景：
+        // 实机分级对照（B1/B2/B3 harness）证实这些 layer 改动会让 NSVisualEffectView 的
+        // .behindWindow backdrop 完全失效（侧栏只剩平灰、无桌面透光模糊）。
+        // 窗口级 isOpaque=false + backgroundColor=.clear 已足够消除启动白条。
         if #available(macOS 11.0, *) {
             if window.titlebarSeparatorStyle != .none {
                 window.titlebarSeparatorStyle = .none

@@ -239,11 +239,7 @@ struct PosterGridList<Leading: View>: View {
                     .help("返回顶部")
                 }
             }
-            .overlay(alignment: .top) {
-                PosterGridTopFade()
-                    .offset(y: -proxy.safeAreaInsets.top)
-                    .ignoresSafeArea(edges: .top)
-            }
+            // 页面顶部不再叠加滚动遮罩（原 PosterGridTopFade 已按用户要求移除）。
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
         }
         .suppressHoverEffectsDuringScroll()
@@ -675,31 +671,6 @@ struct PosterCardView: View {
                             .strokeBorder(.white.opacity(0.24), lineWidth: 0.5)
                     }
             }
-    }
-}
-
-private struct PosterGridTopFade: View {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
-    var body: some View {
-        Group {
-            if reduceTransparency {
-                Color(nsColor: .windowBackgroundColor)
-            } else {
-                Rectangle()
-                    .fill(.ultraThinMaterial)
-            }
-        }
-        .mask {
-            LinearGradient(
-                colors: [.black.opacity(0.72), .black.opacity(0.22), .clear],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-        .frame(height: 28)
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
     }
 }
 

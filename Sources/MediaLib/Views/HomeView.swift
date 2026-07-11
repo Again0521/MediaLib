@@ -1,6 +1,7 @@
 import AppKit
 import MediaLibCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 private struct HomeContentSnapshotInput: Sendable {
     let items: [MediaItem]
@@ -807,6 +808,9 @@ private enum HomeModuleKind: String, CaseIterable, Identifiable {
     case dashboard
     case seriesRecommendations
     case continueWatching
+    case recentlyPlayed
+    case watchlist
+    case favorites
     case musicRecommendations
     case continueListening
     case recentSeries
@@ -820,6 +824,9 @@ private enum HomeModuleKind: String, CaseIterable, Identifiable {
         .stats,
         .seriesRecommendations,
         .continueWatching,
+        .recentlyPlayed,
+        .watchlist,
+        .favorites,
         .musicRecommendations,
         .continueListening,
         .recentSeries,
@@ -829,14 +836,226 @@ private enum HomeModuleKind: String, CaseIterable, Identifiable {
     ]
 
     static let vividVisibleOrder: [HomeModuleKind] = defaultOrder
+
+    var editingTitle: String {
+        switch self {
+        case .hero: return "每日推荐"
+        case .stats: return "媒体总览"
+        case .dashboard: return "运行状态"
+        case .seriesRecommendations: return "剧集推荐"
+        case .continueWatching: return "继续观看"
+        case .recentlyPlayed: return "最近播放"
+        case .watchlist: return "想看"
+        case .favorites: return "收藏"
+        case .musicRecommendations: return "音乐推荐"
+        case .continueListening: return "继续听"
+        case .recentSeries: return "最近添加"
+        case .highRated: return "高分精选"
+        case .photoWall: return "照片墙"
+        }
+    }
+
+    var editingSystemImage: String {
+        switch self {
+        case .hero: return "sparkles"
+        case .stats: return "chart.bar"
+        case .dashboard: return "gauge.with.dots.needle.67percent"
+        case .seriesRecommendations: return "sparkles.tv"
+        case .continueWatching: return "play.circle"
+        case .recentlyPlayed: return "clock.arrow.circlepath"
+        case .watchlist: return "bookmark"
+        case .favorites: return "heart"
+        case .musicRecommendations: return "music.note"
+        case .continueListening: return "headphones"
+        case .recentSeries: return "clock.badge.plus"
+        case .highRated: return "star"
+        case .photoWall: return "photo.stack"
+        }
+    }
 }
 
 private enum HomeVividFocusedCollection: String {
     case seriesRecommendations
     case recentSeries
     case highRated
+    case recentlyPlayed
+    case watchlist
+    case favorites
 
     var id: String { rawValue }
+}
+
+/// 首页编排只重排模块枚举，不搬动视图实例；这样拖动不会触发媒体数据重算或打断横向列表滚动。
+private struct HomeModuleDropDelegate: DropDelegate {
+    let target: HomeModuleKind
+    @Binding var dragged: HomeModuleKind?
+    let onMove: (HomeModuleKind, HomeModuleKind) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let dragged, dragged != target else { return }
+        onMove(dragged, target)
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        dragged = nil
+        return true
+    }
+}
+
+private struct HomeLayoutFooter: View {
+    let onEdit: () -> Void
+
+    var body: some View {
+        Button(action: onEdit) {
+            Label("编辑首页", systemImage: "pencil")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(HomeVividTokens.textTertiary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("调整首页组件的顺序和显示内容")
+    }
+}
+
+private struct HomeLayoutEditorDock: View {
+    let canReset: Bool
+    let addableModules: [HomeModuleKind]
+    @Binding var isShowingAddPanel: Bool
+    let onDone: () -> Void
+    let onReset: () -> Void
+    let onAdd: (HomeModuleKind) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button {
+                isShowingAddPanel = true
+            } label: {
+                Label("添加", systemImage: "plus")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(HomeVividTokens.textPrimary)
+                    .padding(.horizontal, 13)
+                    .frame(height: 36)
+                    .background(AppColors.refCardBg, in: Capsule())
+                    .overlay {
+                        Capsule().strokeBorder(HomeVividTokens.controlBorder, lineWidth: 1)
+                    }
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $isShowingAddPanel, arrowEdge: .bottom) {
+                HomeModuleAddPanel(modules: addableModules) { module in
+                    onAdd(module)
+                    isShowingAddPanel = false
+                }
+            }
+
+            if canReset {
+                Button(action: onReset) {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 13, weight: .bold))
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .help("恢复默认布局")
+            }
+
+            Button(action: onDone) {
+                Label("完成", systemImage: "checkmark")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .frame(height: 36)
+                    .background(HomeVividTokens.gradient([HomeVividTokens.blue, HomeVividTokens.cyan]), in: Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(5)
+        .background(AppColors.refCardBg.opacity(0.96), in: Capsule())
+        .overlay {
+            Capsule().strokeBorder(HomeVividTokens.border.opacity(0.9), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 18, y: 7)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct HomeModuleDragPreview<Content: View>: View {
+    let module: HomeModuleKind
+    let content: Content
+
+    init(module: HomeModuleKind, @ViewBuilder content: () -> Content) {
+        self.module = module
+        self.content = content()
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            content
+                .frame(width: 280, height: 176, alignment: .topLeading)
+                .allowsHitTesting(false)
+                .clipped()
+
+            Label(module.editingTitle, systemImage: module.editingSystemImage)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 11)
+                .frame(height: 32)
+                .background(.black.opacity(0.46), in: Capsule())
+                .padding(12)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(.white.opacity(0.7), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.2), radius: 18, y: 9)
+    }
+}
+
+private struct HomeModuleAddPanel: View {
+    let modules: [HomeModuleKind]
+    let onAdd: (HomeModuleKind) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if modules.isEmpty {
+                Text("所有组件均已添加")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(HomeVividTokens.textSecondary)
+                    .padding(.vertical, 10)
+            } else {
+                ForEach(modules) { module in
+                    HStack(spacing: 10) {
+                        Image(systemName: module.editingSystemImage)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(HomeVividTokens.blue)
+                            .frame(width: 24, height: 24)
+                            .background(HomeVividTokens.color("EEF5FF"), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+
+                        Text(module.editingTitle)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(HomeVividTokens.textPrimary)
+
+                        Spacer(minLength: 10)
+
+                        Button("添加") {
+                            onAdd(module)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    .padding(.vertical, 3)
+                }
+            }
+        }
+        .padding(16)
+        .frame(width: 280)
+    }
 }
 
 struct HomeView: View {
@@ -868,6 +1087,9 @@ struct HomeView: View {
     @State private var homeTimeRefreshToken = 0
     @State private var photoWallViewerIndex: Int?
     @State private var focusedVividCollection: HomeVividFocusedCollection?
+    @State private var isHomeEditing = false
+    @State private var draggedHomeModule: HomeModuleKind?
+    @State private var isShowingHomeModuleAddPanel = false
     @AppStorage("MediaLib.home.selectedTab") private var selectedTabRaw = HomeTab.overview.rawValue
     @AppStorage("MediaLib.home.moduleOrder") private var homeModuleOrderRaw = ""
     @AppStorage("MediaLib.home.hiddenModules") private var hiddenHomeModulesRaw = ""
@@ -1015,6 +1237,20 @@ struct HomeView: View {
             photoWallViewerOverlay
         }
         .navigationTitle("首页")
+        .overlay(alignment: .bottom) {
+            if isHomeEditing, !isSearching, tab == .overview, focusedVividCollection == nil, !appState.sources.isEmpty {
+                HomeLayoutEditorDock(
+                    canReset: !hiddenHomeModules.isEmpty || homeModuleOrderRaw.isEmpty == false,
+                    addableModules: availableHomeModulesToAdd,
+                    isShowingAddPanel: $isShowingHomeModuleAddPanel,
+                    onDone: toggleHomeEditing,
+                    onReset: resetHomeLayout,
+                    onAdd: addHomeModule
+                )
+                .padding(.bottom, appState.activePlayerItem?.type == .music ? 82 : 14)
+                .zIndex(60)
+            }
+        }
         .transaction { transaction in
             if layoutTransitionActive {
                 transaction.disablesAnimations = true
@@ -1197,19 +1433,29 @@ struct HomeView: View {
         switch tab {
         case .overview:
             if focusedVividCollection == nil {
-                let modules = orderedHomeModules
+                // 普通首页只渲染有实际内容的模块；编辑态保留已添加模块，
+                // 这样用户仍可将暂时为空的模块移除或调整位置。
+                let modules = isHomeEditing ? orderedHomeModules : visibleHomeModules
                 VStack(alignment: .leading, spacing: HomeVividTokens.moduleSpacing) {
-                    ForEach(Array(modules.enumerated()), id: \.element) { moduleIndex, module in
-                        vividOverviewModuleContent(module)
-                            .id("home-module-\(module.rawValue)")
-                            // 首次进入首页时模块逐块浮入（blockStagger + 逐项 delay）；
-                            // 从详情返回（有锚点恢复）或 Reduce Motion 时直接呈现终态。
-                            .modifier(HomeModuleEntranceModifier(
-                                index: moduleIndex,
-                                staggerEnabled: activeReturnContext == nil
-                            ))
+                    ForEach(modules) { module in
+                        editableOverviewModule(module) {
+                            vividOverviewModuleContent(module)
+                                .id("home-module-\(module.rawValue)")
+                                // 首次进入首页时模块逐块浮入（blockStagger + 逐项 delay）；
+                                // 从详情返回（有锚点恢复）或 Reduce Motion 时直接呈现终态。
+                                .modifier(HomeModuleEntranceModifier(
+                                    index: modules.firstIndex(of: module) ?? 0,
+                                    staggerEnabled: activeReturnContext == nil && !isHomeEditing
+                                ))
+                        }
+                    }
+
+                    if !isHomeEditing {
+                        HomeLayoutFooter(onEdit: toggleHomeEditing)
+                            .padding(.top, 8)
                     }
                 }
+                .padding(.bottom, isHomeEditing ? 82 : 0)
             } else {
                 EmptyView()
             }
@@ -1306,6 +1552,51 @@ struct HomeView: View {
                     onDidRestoreAnchor: completeOverviewHorizontalRestoration
                 )
             }
+        case .recentlyPlayed:
+            HomeVividPosterRow(
+                title: appState.localized("最近播放"),
+                barColors: [HomeVividTokens.cyan, HomeVividTokens.indigo],
+                actionTitle: "查看全部 ›",
+                actionTint: HomeVividTokens.indigo,
+                items: homeRecentlyPlayedItems,
+                variant: .poster,
+                emptyMessage: appState.localized("开始播放后，这里会汇总本地与远程媒体的最近记录。"),
+                metadata: overviewMetadata(for:),
+                onSelect: openHomeItem,
+                action: { focusedVividCollection = .recentlyPlayed },
+                restoreAnchorID: activeReturnContext?.anchorID,
+                onDidRestoreAnchor: completeOverviewHorizontalRestoration
+            )
+        case .watchlist:
+            HomeVividPosterRow(
+                title: appState.localized("想看"),
+                barColors: [HomeVividTokens.orange, HomeVividTokens.pink],
+                actionTitle: "查看全部 ›",
+                actionTint: HomeVividTokens.pink,
+                items: homeWatchlistItems,
+                variant: .poster,
+                emptyMessage: appState.localized("把感兴趣的影片加入想看，它们会在这里跨来源汇总。"),
+                metadata: overviewMetadata(for:),
+                onSelect: openHomeItem,
+                action: { focusedVividCollection = .watchlist },
+                restoreAnchorID: activeReturnContext?.anchorID,
+                onDidRestoreAnchor: completeOverviewHorizontalRestoration
+            )
+        case .favorites:
+            HomeVividPosterRow(
+                title: appState.localized("收藏"),
+                barColors: [HomeVividTokens.pink, HomeVividTokens.violet],
+                actionTitle: "查看全部 ›",
+                actionTint: HomeVividTokens.violet,
+                items: homeFavoriteItems,
+                variant: .poster,
+                emptyMessage: appState.localized("收藏影片或喜欢歌曲后，这里会从整个公开媒体库为你汇总。"),
+                metadata: overviewMetadata(for:),
+                onSelect: openHomeItem,
+                action: { focusedVividCollection = .favorites },
+                restoreAnchorID: activeReturnContext?.anchorID,
+                onDidRestoreAnchor: completeOverviewHorizontalRestoration
+            )
         case .musicRecommendations:
             let tracks = musicRecommendationItems
             if !tracks.isEmpty {
@@ -1397,6 +1688,27 @@ struct HomeView: View {
                 subtitle: appState.localized("从高评分和偏好信号中挑选。"),
                 barColors: [HomeVividTokens.orange, HomeVividTokens.violet],
                 items: highRatedFeaturedItems
+            )
+        case .recentlyPlayed:
+            focusedCollectionPosterGrid(
+                title: appState.localized("最近播放"),
+                subtitle: appState.localized("从全部公开媒体源汇总最近播放记录。"),
+                barColors: [HomeVividTokens.cyan, HomeVividTokens.indigo],
+                items: homeRecentlyPlayedItems
+            )
+        case .watchlist:
+            focusedCollectionPosterGrid(
+                title: appState.localized("想看"),
+                subtitle: appState.localized("从全部公开媒体源汇总你的想看项目。"),
+                barColors: [HomeVividTokens.orange, HomeVividTokens.pink],
+                items: homeWatchlistItems
+            )
+        case .favorites:
+            focusedCollectionPosterGrid(
+                title: appState.localized("收藏"),
+                subtitle: appState.localized("从全部公开媒体源汇总你喜欢的影片和歌曲。"),
+                barColors: [HomeVividTokens.pink, HomeVividTokens.violet],
+                items: homeFavoriteItems
             )
         }
     }
@@ -1533,6 +1845,42 @@ struct HomeView: View {
                     onDidRestoreAnchor: completeOverviewHorizontalRestoration
                 )
             }
+        case .recentlyPlayed:
+            HomeOverviewBoard(
+                title: appState.localized("最近播放"),
+                subtitle: appState.localized("从全部公开媒体源汇总最近播放记录。"),
+                systemImage: "clock.arrow.circlepath",
+                items: homeRecentlyPlayedItems,
+                emptyMessage: appState.localized("开始播放后，这里会汇总本地与远程媒体的最近记录。"),
+                metadata: overviewMetadata(for:),
+                onSelect: openHomeItem,
+                restoreAnchorID: activeReturnContext?.anchorID,
+                onDidRestoreAnchor: completeOverviewHorizontalRestoration
+            )
+        case .watchlist:
+            HomeOverviewBoard(
+                title: appState.localized("想看"),
+                subtitle: appState.localized("从全部公开媒体源汇总你的想看项目。"),
+                systemImage: "bookmark",
+                items: homeWatchlistItems,
+                emptyMessage: appState.localized("把感兴趣的影片加入想看，它们会在这里跨来源汇总。"),
+                metadata: overviewMetadata(for:),
+                onSelect: openHomeItem,
+                restoreAnchorID: activeReturnContext?.anchorID,
+                onDidRestoreAnchor: completeOverviewHorizontalRestoration
+            )
+        case .favorites:
+            HomeOverviewBoard(
+                title: appState.localized("收藏"),
+                subtitle: appState.localized("从全部公开媒体源汇总你喜欢的内容。"),
+                systemImage: "heart",
+                items: homeFavoriteItems,
+                emptyMessage: appState.localized("收藏影片或喜欢歌曲后，这里会从整个公开媒体库为你汇总。"),
+                metadata: overviewMetadata(for:),
+                onSelect: openHomeItem,
+                restoreAnchorID: activeReturnContext?.anchorID,
+                onDidRestoreAnchor: completeOverviewHorizontalRestoration
+            )
         case .musicRecommendations:
             let tracks = musicRecommendationItems
             if !tracks.isEmpty {
@@ -1608,26 +1956,232 @@ struct HomeView: View {
     }
 
     private var orderedHomeModules: [HomeModuleKind] {
-        let stored = homeModuleOrderRaw
-            .split(separator: ",")
-            .compactMap { HomeModuleKind(rawValue: String($0)) }
-        let allowed = HomeModuleKind.vividVisibleOrder
-        let base = stored.filter { allowed.contains($0) }
-        let ordered = base.isEmpty ? allowed : base + allowed.filter { !base.contains($0) }
         let hidden = hiddenHomeModules
-        let visible = ordered.filter { !hidden.contains($0) }
+        let visible = allOrderedHomeModules.filter { !hidden.contains($0) }
         return visible.isEmpty ? [.hero] : visible
     }
 
+    private var visibleHomeModules: [HomeModuleKind] {
+        orderedHomeModules.filter(isHomeModuleVisible)
+    }
+
+    private func isHomeModuleVisible(_ module: HomeModuleKind) -> Bool {
+        switch module {
+        case .hero:
+            return !overviewFeaturedItems.isEmpty
+        case .stats, .dashboard:
+            // 这两项是全局状态而非媒体项目；媒体库存在时始终保留总览入口。
+            return true
+        case .seriesRecommendations:
+            return !seriesRecommendationItems.isEmpty
+        case .continueWatching:
+            return !continueWatchingSeriesItems.isEmpty
+        case .recentlyPlayed:
+            return !homeRecentlyPlayedItems.isEmpty
+        case .watchlist:
+            return !homeWatchlistItems.isEmpty
+        case .favorites:
+            return !homeFavoriteItems.isEmpty
+        case .musicRecommendations:
+            return !musicRecommendationItems.isEmpty
+        case .continueListening:
+            return !continueListeningItems.isEmpty
+        case .recentSeries:
+            return !recentSeriesItems.isEmpty
+        case .highRated:
+            return !highRatedFeaturedItems.isEmpty
+        case .photoWall:
+            return !photoWallTheme.items.isEmpty
+        }
+    }
+
     private var hiddenHomeModules: Set<HomeModuleKind> {
-        Set(hiddenHomeModulesRaw
+        let allowedIDs = HomeModuleKind.vividVisibleOrder.map(\.rawValue)
+        let storedIDs = homeModuleOrderRaw
             .split(separator: ",")
-            .compactMap { HomeModuleKind(rawValue: String($0)) })
+            .map(String.init)
+        let hiddenIDs = HomeModuleLayoutPolicy.normalizedHiddenIDs(
+            storedIDs: hiddenHomeModulesRaw.split(separator: ",").map(String.init),
+            allowedIDs: allowedIDs
+        )
+        // 在当前有效顺序外的 id 无意义，顺带从读取结果中剔除。
+        let effectiveIDs = Set(HomeModuleLayoutPolicy.normalizedOrder(storedIDs: storedIDs, allowedIDs: allowedIDs))
+        return Set(hiddenIDs.intersection(effectiveIDs).compactMap(HomeModuleKind.init(rawValue:)))
+    }
+
+    /// 首页的公开集合边界：本地、远程视频与远程音乐都允许进入；保险库条目在
+    /// AppState 的首页投影阶段已经剔除，这里再做一次防御性过滤以保证 UI 不泄漏。
+    private var homePublicMediaItems: [MediaItem] {
+        var seen = Set<String>()
+        return (appState.homeVideoItems + appState.homeMusicTracks + appState.albumItems)
+            .filter { item in
+                item.type != .privateCollection &&
+                !appState.isPrivateItem(item) &&
+                seen.insert(item.id).inserted
+            }
+    }
+
+    private var homeRecentlyPlayedItems: [MediaItem] {
+        // 相册源的录像仍可能是 .homeVideo；必须经 isAlbumItem 按来源路径过滤，
+        // 不能只依赖 MediaType，否则“最近播放”会重新混入相册内容。
+        MediaPlaybackRecencyPolicy.recentNonMusicItems(
+            homePublicMediaItems.filter { !appState.isAlbumItem($0) },
+            limit: 36
+        )
+    }
+
+    private var homeWatchlistItems: [MediaItem] {
+        homePublicMediaItems
+            .filter(\.watchlist)
+            .sorted { lhs, rhs in
+                let leftScore = max(lhs.rating ?? 0, (lhs.userRating ?? 0) * 2)
+                let rightScore = max(rhs.rating ?? 0, (rhs.userRating ?? 0) * 2)
+                if leftScore != rightScore { return leftScore > rightScore }
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+            .prefix(36)
+            .map { $0 }
+    }
+
+    private var homeFavoriteItems: [MediaItem] {
+        homePublicMediaItems
+            .filter(\.favorite)
+            .sorted { lhs, rhs in
+                let left = lhs.lastPlayedAt ?? lhs.updatedAt
+                let right = rhs.lastPlayedAt ?? rhs.updatedAt
+                if left != right { return left > right }
+                let leftScore = max(lhs.rating ?? 0, (lhs.userRating ?? 0) * 2)
+                let rightScore = max(rhs.rating ?? 0, (rhs.userRating ?? 0) * 2)
+                if leftScore != rightScore { return leftScore > rightScore }
+                return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+            }
+            .prefix(36)
+            .map { $0 }
+    }
+
+    @ViewBuilder
+    private func editableOverviewModule<Content: View>(
+        _ module: HomeModuleKind,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        if isHomeEditing {
+            let isDragged = draggedHomeModule == module
+            content()
+                .allowsHitTesting(false)
+                .opacity(isDragged ? 0.42 : 1)
+                .scaleEffect(isDragged ? 0.985 : 1, anchor: .center)
+                .zIndex(isDragged ? 2 : 0)
+                .animation(.easeOut(duration: 0.16), value: isDragged)
+                .overlay {
+                    // 编辑时内容区被禁用以避免误播放；透明层只提供拖放与右键移除。
+                    // 顺序在拖入目标模块时即时重排，因此无需额外的插入线提示。
+                    Color.clear
+                        .contentShape(RoundedRectangle(cornerRadius: HomeVividTokens.largeCardRadius, style: .continuous))
+                        .onDrag {
+                            draggedHomeModule = module
+                            return NSItemProvider(object: module.rawValue as NSString)
+                        } preview: {
+                            HomeModuleDragPreview(module: module) {
+                                content()
+                            }
+                        }
+                        .onDrop(
+                            of: [UTType.text],
+                            delegate: HomeModuleDropDelegate(
+                                target: module,
+                                dragged: $draggedHomeModule,
+                                onMove: moveHomeModule
+                            )
+                        )
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                hideHomeModule(module)
+                            } label: {
+                                Label("移除\(module.editingTitle)", systemImage: "minus.circle")
+                            }
+                        }
+                        .accessibilityLabel("拖动\(module.editingTitle)以调整顺序")
+                }
+                .contentShape(RoundedRectangle(cornerRadius: HomeVividTokens.largeCardRadius, style: .continuous))
+        } else {
+            content()
+        }
+    }
+
+    private func toggleHomeEditing() {
+        withAnimation(AppMotion.standard) {
+            isHomeEditing.toggle()
+        }
+        if !isHomeEditing {
+            draggedHomeModule = nil
+            isShowingHomeModuleAddPanel = false
+        }
+    }
+
+    private func moveHomeModule(_ module: HomeModuleKind, before destination: HomeModuleKind) {
+        let movedIDs = HomeModuleLayoutPolicy.moving(
+            module.rawValue,
+            before: destination.rawValue,
+            in: allOrderedHomeModules.map(\.rawValue)
+        )
+        persistHomeModuleOrder(movedIDs.compactMap(HomeModuleKind.init(rawValue:)))
+    }
+
+    private func hideHomeModule(_ module: HomeModuleKind) {
+        // 至少保留一个可见模块，避免用户因误触进入空白首页且没有恢复入口。
+        guard orderedHomeModules.count > 1 else { return }
+        var hidden = hiddenHomeModules
+        hidden.insert(module)
+        hiddenHomeModulesRaw = HomeModuleKind.vividVisibleOrder
+            .filter { hidden.contains($0) }
+            .map(\.rawValue)
+            .joined(separator: ",")
+    }
+
+    private var availableHomeModulesToAdd: [HomeModuleKind] {
+        HomeModuleKind.vividVisibleOrder.filter { hiddenHomeModules.contains($0) }
+    }
+
+    private func addHomeModule(_ module: HomeModuleKind) {
+        let reorderedIDs = HomeModuleLayoutPolicy.appending(
+            module.rawValue,
+            to: allOrderedHomeModules.map(\.rawValue)
+        )
+        persistHomeModuleOrder(reorderedIDs.compactMap(HomeModuleKind.init(rawValue:)))
+
+        var hidden = hiddenHomeModules
+        hidden.remove(module)
+        hiddenHomeModulesRaw = HomeModuleKind.vividVisibleOrder
+            .filter { hidden.contains($0) }
+            .map(\.rawValue)
+            .joined(separator: ",")
+    }
+
+    private func resetHomeLayout() {
+        homeModuleOrderRaw = ""
+        hiddenHomeModulesRaw = ""
+    }
+
+    private var allOrderedHomeModules: [HomeModuleKind] {
+        let storedIDs = homeModuleOrderRaw
+            .split(separator: ",")
+            .map(String.init)
+        let allowedIDs = HomeModuleKind.vividVisibleOrder.map(\.rawValue)
+        return HomeModuleLayoutPolicy.normalizedOrder(storedIDs: storedIDs, allowedIDs: allowedIDs)
+            .compactMap(HomeModuleKind.init(rawValue:))
+    }
+
+    private func persistHomeModuleOrder(_ modules: [HomeModuleKind]) {
+        homeModuleOrderRaw = modules.map(\.rawValue).joined(separator: ",")
     }
 
     private func openHomeItem(_ item: MediaItem) {
         if item.type == .music {
             appState.play(item)
+        } else if appState.isAlbumItem(item) {
+            // 首页的全库收藏可包含相册来源；相册项没有影视详情页语义，进入相册总览。
+            onOpenAlbumSection(.all)
         } else {
             appState.presentDetail(item, from: SidebarDestination.home.id, anchorID: item.id)
         }
