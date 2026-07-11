@@ -307,7 +307,11 @@ struct ContentView: View {
     /// 打断层单条内容展示时长：够读完一行标题+副标题，又不会喧宾夺主。
     static let sidebarInterruptDisplayDuration: TimeInterval = 6
     /// 封面 shared geometry 的目标动画时长；背景树仅在这段连续过渡完成后才卸载。
-    static let musicPlayerTransitionDuration: UInt64 = 420_000_000
+    // 背景树卸载/恢复的延迟：必须错开展开页入场序列的全部结构变化点
+    // （封面落位 0.32s → phase1 0.30s → phase2 0.44s → panel spring 尾巴 ~0.9s）。
+    // 曾设 420ms：与 phase2 的 withAnimation 结构插入同帧，偶发触发
+    // NSHostingView updateAnimatedWindowSize 布局循环崩溃（Layout Window pass 爆炸）。
+    static let musicPlayerTransitionDuration: UInt64 = 1_200_000_000
     @State private var selection: SidebarDestination? = .home
     @State private var isVideoExpanded = true
     @State private var isAlbumExpanded = true

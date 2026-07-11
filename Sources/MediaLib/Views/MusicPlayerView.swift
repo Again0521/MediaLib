@@ -617,7 +617,6 @@ struct MusicPlayerView: View {
     @State private var paletteLoadTask: Task<Void, Never>?
     @State private var backdropAnimationTask: Task<Void, Never>?
     @State private var entranceAnimationTask: Task<Void, Never>?
-    @State private var minimizeSequenceTask: Task<Void, Never>?
     @State private var isMinimizing = false
     @State private var backdropAnimationReady = false
     @State private var glassLayerReady = false  // 重型封面纹理延迟出现；轻量玻璃底从首帧常驻，避免断层
@@ -715,7 +714,6 @@ struct MusicPlayerView: View {
             paletteLoadTask?.cancel()
             backdropAnimationTask?.cancel()
             entranceAnimationTask?.cancel()
-            minimizeSequenceTask?.cancel()
             resumeAutoScrollTask?.cancel()
             glassLayerReady = false
             backdropAnimationReady = false
@@ -852,7 +850,6 @@ struct MusicPlayerView: View {
 
     private func startEntranceAnimation() {
         entranceAnimationTask?.cancel()
-        minimizeSequenceTask?.cancel()
         isMinimizing = false
         guard !reduceMotion else {
             entrancePhase = 2
@@ -860,9 +857,7 @@ struct MusicPlayerView: View {
         }
         entrancePhase = 0
         entranceAnimationTask = Task { @MainActor in
-            // 以封面为视觉锚点：mini→展开的封面 shared geometry 弹簧（AppMotion.musicPlayer，
-            // response 0.32）先飞至落位，其余组件等封面基本落定后才开始渐显——
-            // phase 1（发光/标题/控制栏/收起按钮）在 0.30s 跟上，phase 2（歌词/频谱）再错开一拍。
+            // 以封面为视觉锚点：等封面 shared geometry 弹簧基本落位后其余组件才渐显。
             do { try await Task.sleep(nanoseconds: 300_000_000) } catch { return }
             withAnimation(AppMotion.panel) {
                 entrancePhase = 1
@@ -874,8 +869,11 @@ struct MusicPlayerView: View {
         }
     }
 
-    /// 收起与展开互为镜像：先把封面以外的组件渐隐（entrancePhase 归 0），
-    /// 短暂停后再触发真正的收起——此时画面上只剩封面，由 matched geometry 飞回底栏。
+    /// 收起与展开互为镜像：封面回程与其余组件渐隐在同一瞬间触发，没有任何等待——
+    /// 封面是用户点击后第一眼盯着的焦点，哪怕几十毫秒的延迟触发也会读成“点了没反应、卡了一下”。
+    /// 两者各自用自己的动画时长独立完成（封面走 shared geometry 弹簧，其余组件走短渐隐），
+    /// 靠同时起步而非时间错峰来保证连贯，之前试过的“渐隐先行几十/几百毫秒再触发飞行”
+    /// 两种写法都被用户看出停顿，问题不在具体延迟数值，而在“延迟”这个结构本身。
     private func beginMinimizeSequence() {
         guard !isMinimizing else { return }
         guard !reduceMotion else {
@@ -887,11 +885,7 @@ struct MusicPlayerView: View {
         withAnimation(.easeOut(duration: 0.20)) {
             entrancePhase = 0
         }
-        minimizeSequenceTask = Task { @MainActor in
-            do { try await Task.sleep(nanoseconds: 230_000_000) } catch { return }
-            guard !Task.isCancelled else { return }
-            onRequestMinimize()
-        }
+        onRequestMinimize()
     }
 
     private func scheduleBackdropAnimation() {
@@ -9044,8 +9038,6 @@ struct WujieArtwork: View {
             PosterImage(path: item.posterPath, title: item.title, mediaType: item.type)
                 .aspectRatio(1, contentMode: .fill)
                 .frame(width: posterSize, height: posterSize)
-                // 与琉璃同源的 mini→展开 封面 shared geometry：封面是展开动画的唯一几何锚点。
-                .modifier(MusicCoverGeometryModifier(namespace: transitionNamespace))
                 .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
                 .overlay {
                     // hero 受光印面边：顶部受光更亮、底部暗边收敛 → 像被环境光打亮的相纸而非卡片描边（专辑取色不变）。
@@ -9165,6 +9157,9 @@ struct WujieIdentityColumn: View {
                 transitionNamespace: transitionNamespace
             )
             .frame(width: posterSize, height: posterSize)
+            // 与琉璃同源的 mini→展开 封面 shared geometry：挂在定尺寸容器上，
+            // 避免 .fill 内容模式的图片理想尺寸参与 matched 插值（会引发窗口级布局循环崩溃）。
+            .modifier(MusicCoverGeometryModifier(namespace: transitionNamespace))
 
             VStack(spacing: WujieDesignSystem.Space.xs) {
                 VStack(spacing: 5) {
