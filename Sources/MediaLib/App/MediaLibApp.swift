@@ -118,6 +118,7 @@ struct MediaLibApp: App {
                 // 改为在 MainWindowToolbarVisibilityGuard 里用 AppKit 的 contentMinSize 固定最小尺寸。
                 .onAppear { [appState] in
                     appState.applyAppearance()
+                    appState.restoreServerModeIfNeeded()
                     LiveTitleIconDebugTool.scheduleWindowCaptureIfRequested()
                     SystemMediaCommandCenter.shared.configure(appState: appState)
                     appDelegate.onOpenFiles = { [weak appState] urls in

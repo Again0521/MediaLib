@@ -4,7 +4,7 @@ import SQLite3
 // 内部所有可变状态（db 句柄）只通过私有串行 queue 访问，线程安全由队列约束保证，
 // 编译器无法静态验证这一点，因此显式标注 @unchecked Sendable（而非让调用处到处 @Sendable 警告）。
 public final class DatabaseManager: @unchecked Sendable {
-    public static let currentSchemaVersion = 20
+    public static let currentSchemaVersion = 24
 
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
@@ -393,6 +393,34 @@ public final class DatabaseManager: @unchecked Sendable {
                 try execute("PRAGMA user_version = 20")
             }
             version = 20
+        }
+        if version < 21 {
+            try transaction {
+                try migrateToVersion21()
+                try execute("PRAGMA user_version = 21")
+            }
+            version = 21
+        }
+        if version < 22 {
+            try transaction {
+                try migrateToVersion22()
+                try execute("PRAGMA user_version = 22")
+            }
+            version = 22
+        }
+        if version < 23 {
+            try transaction {
+                try migrateToVersion23()
+                try execute("PRAGMA user_version = 23")
+            }
+            version = 23
+        }
+        if version < 24 {
+            try transaction {
+                try migrateToVersion24()
+                try execute("PRAGMA user_version = 24")
+            }
+            version = 24
         }
         guard version == Self.currentSchemaVersion else {
             throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
@@ -1063,6 +1091,223 @@ public final class DatabaseManager: @unchecked Sendable {
           rebuilt_at TEXT NOT NULL
         )
         """)
+    }
+
+    private func migrateToVersion21() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_users (
+          id TEXT PRIMARY KEY,
+          username TEXT NOT NULL,
+          normalized_username TEXT NOT NULL UNIQUE,
+          display_name TEXT NOT NULL,
+          is_disabled INTEGER NOT NULL DEFAULT 0 CHECK (is_disabled IN (0, 1)),
+          requires_initial_password INTEGER NOT NULL DEFAULT 1 CHECK (requires_initial_password IN (0, 1)),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_server_users_updated ON server_users(updated_at)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_roles (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          normalized_name TEXT NOT NULL UNIQUE,
+          is_system INTEGER NOT NULL DEFAULT 0 CHECK (is_system IN (0, 1)),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """)
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_role_permissions (
+          role_id TEXT NOT NULL,
+          permission TEXT NOT NULL,
+          PRIMARY KEY(role_id, permission),
+          FOREIGN KEY(role_id) REFERENCES server_roles(id) ON DELETE CASCADE
+        )
+        """)
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_user_roles (
+          user_id TEXT NOT NULL,
+          role_id TEXT NOT NULL,
+          assigned_at TEXT NOT NULL,
+          PRIMARY KEY(user_id, role_id),
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE,
+          FOREIGN KEY(role_id) REFERENCES server_roles(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_server_user_roles_role ON server_user_roles(role_id)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_credentials (
+          user_id TEXT PRIMARY KEY,
+          password_hash TEXT NOT NULL,
+          password_algorithm TEXT NOT NULL CHECK (password_algorithm = 'argon2id'),
+          password_changed_at TEXT NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE
+        )
+        """)
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_library_grants (
+          user_id TEXT NOT NULL,
+          library_id TEXT NOT NULL,
+          can_view INTEGER NOT NULL DEFAULT 0 CHECK (can_view IN (0, 1)),
+          can_play INTEGER NOT NULL DEFAULT 0 CHECK (can_play IN (0, 1)),
+          can_download INTEGER NOT NULL DEFAULT 0 CHECK (can_download IN (0, 1)),
+          can_edit_metadata INTEGER NOT NULL DEFAULT 0 CHECK (can_edit_metadata IN (0, 1)),
+          can_delete_items INTEGER NOT NULL DEFAULT 0 CHECK (can_delete_items IN (0, 1)),
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(user_id, library_id),
+          CHECK (can_play <= can_view),
+          CHECK (can_download <= can_play),
+          CHECK (can_edit_metadata <= can_view),
+          CHECK (can_delete_items <= can_view),
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_server_library_grants_library ON server_library_grants(library_id)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_devices (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          platform TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          revoked_at TEXT,
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_server_devices_user ON server_devices(user_id, revoked_at)")
+
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_auth_sessions (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          access_token_digest TEXT NOT NULL UNIQUE CHECK (length(access_token_digest) = 64),
+          refresh_token_digest TEXT NOT NULL UNIQUE CHECK (length(refresh_token_digest) = 64),
+          access_expires_at TEXT NOT NULL,
+          refresh_expires_at TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT NOT NULL,
+          revoked_at TEXT,
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE,
+          FOREIGN KEY(device_id) REFERENCES server_devices(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_server_sessions_user ON server_auth_sessions(user_id, revoked_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_server_sessions_device ON server_auth_sessions(device_id, revoked_at)")
+        try execute("CREATE INDEX IF NOT EXISTS index_server_sessions_refresh_expiry ON server_auth_sessions(refresh_expires_at)")
+
+        let now = DateCoding.string(from: Date()) ?? ""
+        try execute(
+            """
+            INSERT OR IGNORE INTO server_roles (id, name, normalized_name, is_system, created_at, updated_at)
+            VALUES (?, ?, ?, 1, ?, ?), (?, ?, ?, 1, ?, ?)
+            """,
+            bindings: [
+                .text("server-role-admin"), .text("管理员"), .text("administrator"), .text(now), .text(now),
+                .text("server-role-member"), .text("成员"), .text("member"), .text(now), .text(now)
+            ]
+        )
+        let adminPermissions = [
+            "server.manage", "users.manage", "libraries.manage", "sessions.manage",
+            "media.view", "media.play", "media.download", "metadata.edit", "items.delete", "playback.transcode"
+        ]
+        for permission in adminPermissions {
+            try execute(
+                "INSERT OR IGNORE INTO server_role_permissions (role_id, permission) VALUES (?, ?)",
+                bindings: [.text("server-role-admin"), .text(permission)]
+            )
+        }
+        for permission in ["media.view", "media.play", "playback.transcode"] {
+            try execute(
+                "INSERT OR IGNORE INTO server_role_permissions (role_id, permission) VALUES (?, ?)",
+                bindings: [.text("server-role-member"), .text(permission)]
+            )
+        }
+        try execute(
+            """
+            INSERT INTO server_users (
+              id, username, normalized_username, display_name, is_disabled,
+              requires_initial_password, created_at, updated_at
+            )
+            SELECT ?, ?, ?, COALESCE(
+              (SELECT name FROM local_user_profiles WHERE is_default = 1 LIMIT 1), ?
+            ), 0, 1, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM server_users)
+            """,
+            bindings: [
+                .text("server-user-local-admin"), .text("admin"), .text("admin"),
+                .text("本地管理员"), .text(now), .text(now)
+            ]
+        )
+        try execute(
+            """
+            INSERT OR IGNORE INTO server_user_roles (user_id, role_id, assigned_at)
+            SELECT id, ?, ? FROM server_users WHERE id = ?
+            """,
+            bindings: [.text("server-role-admin"), .text(now), .text("server-user-local-admin")]
+        )
+    }
+
+    private func migrateToVersion22() throws {
+        try addColumnIfMissing(
+            table: "server_credentials",
+            column: "failed_attempt_count",
+            definition: "failed_attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (failed_attempt_count >= 0)"
+        )
+        try addColumnIfMissing(table: "server_credentials", column: "locked_until", definition: "locked_until TEXT")
+        try addColumnIfMissing(table: "server_credentials", column: "last_failed_at", definition: "last_failed_at TEXT")
+        try addColumnIfMissing(table: "server_credentials", column: "last_login_at", definition: "last_login_at TEXT")
+        try execute("CREATE INDEX IF NOT EXISTS index_server_credentials_locked ON server_credentials(locked_until)")
+    }
+
+    private func migrateToVersion23() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_security_events (
+          id TEXT PRIMARY KEY,
+          occurred_at TEXT NOT NULL,
+          category TEXT NOT NULL CHECK (category IN ('authentication', 'identity', 'authorization', 'session')),
+          action TEXT NOT NULL CHECK (length(action) BETWEEN 1 AND 64),
+          outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure', 'denied')),
+          actor_user_id TEXT,
+          target_user_id TEXT,
+          session_id TEXT,
+          device_id TEXT,
+          detail_code TEXT CHECK (detail_code IS NULL OR length(detail_code) BETWEEN 1 AND 64),
+          FOREIGN KEY(actor_user_id) REFERENCES server_users(id) ON DELETE SET NULL,
+          FOREIGN KEY(target_user_id) REFERENCES server_users(id) ON DELETE SET NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_server_security_events_time ON server_security_events(occurred_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS index_server_security_events_actor ON server_security_events(actor_user_id, occurred_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS index_server_security_events_target ON server_security_events(target_user_id, occurred_at DESC)")
+    }
+
+    private func migrateToVersion24() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_user_media_state (
+          user_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          play_position REAL NOT NULL DEFAULT 0 CHECK (play_position >= 0),
+          play_progress REAL NOT NULL DEFAULT 0 CHECK (play_progress >= 0 AND play_progress <= 1),
+          is_watched INTEGER NOT NULL DEFAULT 0 CHECK (is_watched IN (0, 1)),
+          play_count INTEGER NOT NULL DEFAULT 0 CHECK (play_count >= 0),
+          last_played_at TEXT,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(user_id, media_id),
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_server_user_media_state_recent ON server_user_media_state(user_id, last_played_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS index_server_user_media_state_media ON server_user_media_state(media_id)")
     }
 
     private func validateBackup(at backupURL: URL) throws {

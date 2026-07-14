@@ -45,7 +45,14 @@ struct SettingsView: View {
     @State private var showingAboutSoftware = false
     @State private var showingSyncConflictQueue = false
     @State private var showingMetadataHistory = false
+    @State private var showingServerPasswordSetup = false
+    @State private var showingServerPasswordChange = false
+    @State private var showingServerPasswordRecovery = false
+    @State private var showingServerSessionManagement = false
+    @State private var showingServerUserManagement = false
     @State private var autoStartMusicMetadataConsole = false
+    @State private var serverModeNameDraft = ""
+    @State private var serverModePortDraft = ""
     var body: some View {
         ZStack(alignment: .topLeading) {
             // 设置分组继续使用原生 List 虚拟化；标题区移出 List，避免 List 行内边距和
@@ -65,6 +72,7 @@ struct SettingsView: View {
                 settingsRow { subtitleSettings }
                 settingsRow { thumbnailSettings }
                 settingsRow { connectorStateSettings }
+                settingsRow { serverModeSettings }
                 settingsRow { traktSettings }
                 settingsRow { privacySettings }
                 settingsRow { advancedSettings }
@@ -127,6 +135,73 @@ struct SettingsView: View {
         .sheet(isPresented: $showingMetadataHistory) {
             MetadataCorrectionHistorySheet()
                 .environmentObject(appState)
+        }
+        .sheet(isPresented: $showingServerPasswordSetup) {
+            ServerInitialPasswordSetupSheet(
+                store: appState.serverAdministrationStore,
+                onComplete: {
+                    showingServerPasswordSetup = false
+                    appState.showFloatingNotice(
+                        title: "管理员密码已设置",
+                        message: "现在可以使用 admin 登录本机 Web 服务。",
+                        kind: .success
+                    )
+                },
+                onCancel: { showingServerPasswordSetup = false }
+            )
+        }
+        .sheet(isPresented: $showingServerPasswordChange) {
+            ServerAdministratorPasswordChangeSheet(
+                store: appState.serverAdministrationStore,
+                onComplete: {
+                    showingServerPasswordChange = false
+                    appState.showFloatingNotice(
+                        title: "管理员密码已修改",
+                        message: "全部 Web 与 Mlink 会话已退出，请使用新密码重新登录。",
+                        kind: .success
+                    )
+                },
+                onCancel: { showingServerPasswordChange = false }
+            )
+        }
+        .sheet(isPresented: $showingServerPasswordRecovery) {
+            ServerAdministratorPasswordRecoverySheet(
+                store: appState.serverAdministrationStore,
+                prepareForRecovery: { await appState.prepareServerForCredentialRecovery() },
+                onComplete: {
+                    showingServerPasswordRecovery = false
+                    appState.showFloatingNotice(
+                        title: "管理员密码已恢复",
+                        message: "旧设备和会话已全部撤销；服务保持关闭，请确认新密码后手动重新开启。",
+                        kind: .success
+                    )
+                },
+                onCancel: { showingServerPasswordRecovery = false }
+            )
+        }
+        .sheet(isPresented: $showingServerSessionManagement) {
+            ServerSessionManagementSheet(
+                store: appState.serverAdministrationStore,
+                onClose: { showingServerSessionManagement = false }
+            )
+        }
+        .sheet(isPresented: $showingServerUserManagement) {
+            ServerUserManagementSheet(
+                store: appState.serverAdministrationStore,
+                libraries: serverLibraryOptions,
+                onClose: { showingServerUserManagement = false }
+            )
+        }
+        .onAppear {
+            if serverModeNameDraft.isEmpty {
+                serverModeNameDraft = appState.serverModeConfiguration.serverName
+            }
+            if serverModePortDraft.isEmpty {
+                serverModePortDraft = String(appState.serverModeConfiguration.port)
+            }
+        }
+        .task {
+            await appState.serverAdministrationStore.refresh()
         }
     }
 
@@ -1017,6 +1092,147 @@ struct SettingsView: View {
                 }
                 SettingsDescription(text: "清理不再使用的缓存和过旧的任务记录，给磁盘腾点空间；你的媒体文件不会被删除、移动或改名。")
             }
+        }
+    }
+
+    private var serverModeSettings: some View {
+        SettingsSection(title: "服务端（预览）", subtitle: "在本机启动 MediaLIB 服务进程，为网页与 Mlink 客户端协议做准备。", systemImage: "server.rack") {
+            SettingsRow(title: "服务模式", systemImage: "power") {
+                Toggle("服务模式", isOn: Binding(get: {
+                    appState.serverModeConfiguration.isEnabled
+                }, set: { enabled in
+                    appState.setServerModeEnabled(enabled)
+                }))
+                .labelsHidden()
+                .toggleStyle(.switch)
+            }
+
+            SettingsRow(title: "当前状态", systemImage: "circle.fill") {
+                Text(appState.serverModeStatus.title)
+                    .foregroundStyle(serverModeStatusColor)
+            }
+
+            SettingsRow(title: "管理员账号", systemImage: "person.badge.key") {
+                Text(serverAdministratorStatusText)
+                    .font(.callout)
+                    .foregroundStyle(
+                        appState.serverAdministrationStore.requiresInitialPassword
+                            ? AppColors.warning
+                            : AppColors.success
+                    )
+                if appState.serverAdministrationStore.requiresInitialPassword {
+                    Button("设置密码…") {
+                        appState.serverAdministrationStore.clearError()
+                        showingServerPasswordSetup = true
+                    }
+                    .settingsActionButton(prominent: true)
+                    .disabled(!appState.serverAdministrationStore.isAvailable)
+                } else {
+                    Button("修改密码…") {
+                        appState.serverAdministrationStore.clearError()
+                        showingServerPasswordChange = true
+                    }
+                    .settingsActionButton()
+                    .disabled(!appState.serverAdministrationStore.isAvailable)
+                    Button("忘记密码…") {
+                        appState.serverAdministrationStore.clearError()
+                        showingServerPasswordRecovery = true
+                    }
+                    .settingsActionButton()
+                    .disabled(!appState.serverAdministrationStore.isAvailable)
+                }
+            }
+
+            if !appState.serverAdministrationStore.requiresInitialPassword {
+                SettingsRow(title: "用户与权限", systemImage: "person.2.badge.gearshape") {
+                    Text("\(appState.serverAdministrationStore.userCount) 个用户 · 按媒体库最小授权")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button("管理…") {
+                        showingServerUserManagement = true
+                    }
+                    .settingsActionButton()
+                }
+
+                SettingsRow(title: "设备与会话", systemImage: "laptopcomputer.and.iphone") {
+                    Text("\(appState.serverAdministrationStore.activeDeviceCount) 台设备 · \(appState.serverAdministrationStore.activeSessionCount) 个会话")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button("管理…") {
+                        showingServerSessionManagement = true
+                    }
+                    .settingsActionButton()
+                }
+            }
+
+            SettingsRow(title: "服务器名称", systemImage: "pencil.line") {
+                TextField("MediaLIB Server", text: $serverModeNameDraft)
+                .onSubmit {
+                    appState.updateServerModeServerName(serverModeNameDraft)
+                    serverModeNameDraft = appState.serverModeConfiguration.serverName
+                }
+                .settingsTextInput(
+                    text: serverModeNameDraft,
+                    maxWidth: SettingsControlMetrics.compactControlWidth
+                )
+            }
+
+            SettingsRow(title: "本机端口", systemImage: "number") {
+                TextField("8098", text: $serverModePortDraft)
+                    .onSubmit {
+                        let port = Int(serverModePortDraft) ?? ServerModeConfiguration.defaultPort
+                        appState.updateServerModePort(port)
+                        serverModePortDraft = String(appState.serverModeConfiguration.port)
+                    }
+                    .settingsTextInput(
+                        text: serverModePortDraft,
+                        maxWidth: SettingsControlMetrics.compactControlWidth
+                    )
+            }
+
+            SettingsRow(title: "本机地址", systemImage: "link") {
+                Text(appState.serverModeEndpointDisplayText)
+                    .font(.callout.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Button("打开 Web") {
+                    NSWorkspace.shared.open(appState.serverModeConfiguration.loopbackBaseURL)
+                }
+                .settingsActionButton()
+                .disabled(
+                    appState.serverModeStatus != .running ||
+                        appState.serverAdministrationStore.requiresInitialPassword
+                )
+            }
+
+            SettingsDescription(text: "名称或端口在按 Return 后生效；服务运行时会自动重启。当前仅监听 127.0.0.1，登录后可在本机 Web 查看资料库并通过 Range/HLS 播放；尚不接受局域网或公网连接。服务器身份会持久化保存。")
+        }
+    }
+
+    private var serverAdministratorStatusText: String {
+        let store = appState.serverAdministrationStore
+        if !store.isAvailable { return "身份数据库不可用" }
+        if store.isLoading && store.snapshot == nil { return "正在检查…" }
+        return store.requiresInitialPassword ? "需要首次设置" : "admin 已保护"
+    }
+
+    private var serverLibraryOptions: [ServerLibraryOption] {
+        appState.sources
+            .filter { $0.mediaType != .privateCollection }
+            .map { ServerLibraryOption(id: $0.id, name: $0.name, mediaType: $0.mediaType) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private var serverModeStatusColor: Color {
+        switch appState.serverModeStatus {
+        case .running:
+            return .green
+        case .starting:
+            return .orange
+        case .failed:
+            return .red
+        case .stopped:
+            return .secondary
         }
     }
 

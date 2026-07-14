@@ -1,4 +1,5 @@
 import Foundation
+import MediaLibCore
 import MediaLibServerProtocol
 
 @main
@@ -20,14 +21,42 @@ struct MediaLibServer {
                 MlinkServerDescriptor(
                     serverID: configuration.serverID,
                     serverName: configuration.serverName,
-                    capabilities: [
-                        "health",
-                        "server-discovery"
-                    ]
+                    capabilities: ServerCommandOutput.capabilities
                 )
             )
         case "--serve":
-            let server = try LocalLoopbackHTTPServer(configuration: configuration)
+            let directories = try FileAccessService.appDirectories()
+            let database = try DatabaseManager(
+                url: directories.database,
+                backupDirectory: directories.databaseBackups
+            )
+            let catalog = ServerLibraryCatalog(database: database)
+            let administrationCatalog = ServerAdministrationCatalog(database: database)
+            let authentication = try ServerAuthenticationService(database: database)
+            let inspector = FFprobeMediaInspector()
+            let hlsSessionManager = FFmpegHLSSessionManager()
+            let server = try LocalLoopbackHTTPServer(
+                configuration: configuration,
+                librarySnapshotProvider: { try catalog.snapshot(for: $0) },
+                libraryBrowseProvider: { try catalog.browse($0, for: $1) },
+                libraryCategoriesProvider: { try catalog.categories(for: $0) },
+                mediaDetailProvider: { try catalog.publicDetail(id: $0, for: $1) },
+                mediaPlaybackStateUpdater: { try catalog.updatePlaybackState(id: $0, request: $1, for: $2) },
+                mediaAssetProvider: { try catalog.publicAsset(id: $0, for: $1, requiring: $2) },
+                artworkAssetProvider: { try catalog.publicArtwork(id: $0, kind: $1, for: $2) },
+                playbackInfoProvider: { itemID, principal in
+                    guard let asset = try catalog.publicAsset(
+                        id: itemID,
+                        for: principal,
+                        requiring: .playMedia
+                    ) else { return nil }
+                    return try inspector.inspect(asset: asset)
+                },
+                hlsSessionManager: hlsSessionManager,
+                administrationCatalog: administrationCatalog,
+                authenticationService: authentication,
+                authenticationProvider: { try authentication.principal(forRequestHead: $0) }
+            )
             print("MediaLibServer 正在监听 http://\(configuration.host):\(configuration.port)")
             try server.run()
         case "--help", "-h":
@@ -42,14 +71,30 @@ struct MediaLibServer {
 }
 
 enum ServerCommandOutput {
+    static let capabilities = [
+        "administration-read",
+        "authenticated-library",
+        "categorized-library-browse",
+        "protected-artwork",
+        "health",
+        "loopback-hls-transcode",
+        "loopback-range-streaming",
+        "media-detail",
+        "media-probe",
+        "per-user-playback-state",
+        "server-discovery",
+        "web-playback"
+    ]
+
     static let usage = """
-    MediaLibServer Phase 0
+    MediaLibServer 回环预览服务
       --health   输出不含敏感信息的服务器健康 JSON
       --describe 输出 Mlink 服务描述 JSON
-      --serve    仅在 127.0.0.1 上启动 Phase 0 探测 HTTP 服务
+      --serve    仅在 127.0.0.1 上启动认证 Web/媒体预览服务
 
-    当前 HTTP 服务仅提供 GET/HEAD /health 与 /.well-known/mlink，
-    不提供用户、媒体、资料库或远程网络访问。完整 HTTP runtime 将在 Hummingbird 依赖可用后接入。
+    当前具备登录/刷新/注销、桌面多用户与逐资料库授权、安全审计、
+    Web 列表/详情/播放、逐用户续播/已看、只读管理、播放探测、HTTP Range、HLS 与分级限速。限速参数压测、
+    告警聚合、可信代理、TLS 与远程部署尚未完成，因此不会接受局域网或公网监听地址。
     """
 
     static func write<T: Encodable>(_ value: T) throws {
@@ -94,7 +139,7 @@ struct ServerLaunchConfiguration: Sendable {
         return Self(
             host: normalizedHost,
             port: port,
-            // Phase 0 的默认标识仅用于本地健康探测；进入配对流程前会迁移为数据库持久化 ID。
+            // App/容器必须注入持久化 ID；默认值只用于开发命令和本机健康探测。
             serverID: serverID?.isEmpty == false ? serverID! : "medialib-development",
             serverName: serverName?.isEmpty == false ? serverName! : "MediaLIB Server"
         )
@@ -111,9 +156,9 @@ enum ServerConfigurationError: LocalizedError {
         case let .invalidPort(value):
             return "MEDIALIB_SERVER_PORT 无效：\(value)。端口必须在 1 到 65535 之间。"
         case let .nonLoopbackHost(host):
-            return "Phase 0 服务端只允许监听本机回环地址，不能使用：\(host)。"
+            return "当前安全门槛下服务端只允许监听本机回环地址，不能使用：\(host)。"
         case let .runtimeNotInstalled(host, port):
-            return "MediaLibServer 当前仅提供 Phase 0 协议验证命令，尚未监听 \(host):\(port)。使用 --health、--describe、--serve 或 --help。"
+            return "MediaLibServer 未选择运行命令，尚未监听 \(host):\(port)。使用 --health、--describe、--serve 或 --help。"
         }
     }
 }

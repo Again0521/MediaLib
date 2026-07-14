@@ -61,6 +61,14 @@ final class PackageDMGScriptPathTests: XCTestCase {
         XCTAssertFalse(script.contains("\"$ROOT_DIR/.build/release/$APP_NAME\""))
     }
 
+    func testPackageScriptBundlesBothFFmpegAndFFprobeForServerPlayback() throws {
+        let script = try String(contentsOf: repositoryPackageScriptURL(), encoding: .utf8)
+
+        XCTAssertTrue(script.contains("Contents/MacOS/ffmpeg"))
+        XCTAssertTrue(script.contains("Contents/MacOS/ffprobe"))
+        XCTAssertTrue(script.contains("ffprobe was not found"))
+    }
+
     private func makeTemporaryPackageRoot(name: String) throws -> URL {
         let root = try makeTemporaryDirectory(name: name)
         let scriptsDirectory = root.appendingPathComponent("scripts", isDirectory: true)

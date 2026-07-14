@@ -378,6 +378,13 @@ final class AppState: ObservableObject {
         set { libraryDomain.replaceItems(newValue) }
     }
     @Published var settings: AppSettings
+    /// 服务端设置独立于播放器偏好：它将同时服务于桌面端和未来的纯服务端镜像。
+    let serverModeSettingsStore = ServerModeSettingsStore()
+    let serverModeController = ServerModeProcessController()
+    private var serverModeForwarding: AnyCancellable?
+    let serverAdministrationStore = ServerAdministrationStore()
+    private var serverAdministrationForwarding: AnyCancellable?
+    @Published var serverModeConfiguration: ServerModeConfiguration
     let detailNavigation = DetailNavigationStore()
     private var detailNavigationForwarding: AnyCancellable?
     var selectedItem: MediaItem? {
@@ -873,6 +880,7 @@ final class AppState: ObservableObject {
             loadedSettings.hasCompletedOnboarding = false
         }
         self.settings = loadedSettings
+        self.serverModeConfiguration = serverModeSettingsStore.load()
         self.configuredWatchedThreshold = loadedSettings.watchedThreshold
         self.privacyLockState.setPINConfigured(loadedSettings.privacyPINEnabled && privacyLockService.hasPIN())
         // 首帧前就把用户配色写入全局色板，避免启动闪一帧默认配色。
@@ -944,6 +952,7 @@ final class AppState: ObservableObject {
             self.videoOfflineCacheStore = nil
             self.startupError = error.localizedDescription
         }
+        serverAdministrationStore.configure(database: database)
         // 选择态变化转发到 AppState 自身的 objectWillChange，使既有 @EnvironmentObject 视图照常刷新
         // （等价于此前 isSelectionModeActive/selectedItemIDs 作为 AppState @Published 的行为）。
         selectionForwarding = selection.objectWillChange.sink { [weak self] _ in
@@ -1018,6 +1027,12 @@ final class AppState: ObservableObject {
             self?.objectWillChange.send()
         }
         detailNavigationForwarding = detailNavigation.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        serverModeForwarding = serverModeController.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        serverAdministrationForwarding = serverAdministrationStore.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
         musicMetadataActivityForwarding = musicMetadataActivity.objectWillChange.sink { [weak self] _ in

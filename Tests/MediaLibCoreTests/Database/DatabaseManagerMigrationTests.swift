@@ -38,6 +38,67 @@ final class DatabaseManagerMigrationTests: XCTestCase {
         XCTAssertNoThrow(try db.validateCurrentDatabase())
     }
 
+    func testVersion24CreatesServerIdentityAuditPlaybackStateAndPendingLocalAdministrator() throws {
+        let db = try DatabaseManager(url: dbURL)
+        let expectedTables = Set([
+            "server_users", "server_roles", "server_role_permissions", "server_user_roles",
+            "server_credentials", "server_library_grants", "server_devices", "server_auth_sessions",
+            "server_security_events", "server_user_media_state"
+        ])
+        let actualTables = Set(try db.query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'server_%'"
+        ) { $0.string(0) ?? "" })
+
+        XCTAssertTrue(expectedTables.isSubset(of: actualTables))
+        let administrator = try db.query(
+            """
+            SELECT username, requires_initial_password
+            FROM server_users WHERE id = 'server-user-local-admin'
+            """
+        ) { ($0.string(0) ?? "", $0.bool(1)) }.first
+        XCTAssertEqual(administrator?.0, "admin")
+        XCTAssertEqual(administrator?.1, true)
+        XCTAssertEqual(
+            try db.query("SELECT COUNT(*) FROM server_credentials") { $0.int(0) ?? -1 }.first,
+            0,
+            "迁移不得生成默认密码或伪造密码摘要"
+        )
+        let credentialColumns = Set(try db.query("PRAGMA table_info(server_credentials)") {
+            $0.string(1) ?? ""
+        })
+        XCTAssertTrue(Set([
+            "failed_attempt_count", "locked_until", "last_failed_at", "last_login_at"
+        ]).isSubset(of: credentialColumns))
+        XCTAssertEqual(
+            try db.query(
+                """
+                SELECT COUNT(*) FROM server_user_roles
+                WHERE user_id = 'server-user-local-admin' AND role_id = 'server-role-admin'
+                """
+            ) { $0.int(0) ?? 0 }.first,
+            1
+        )
+        let auditColumns = Set(try db.query("PRAGMA table_info(server_security_events)") {
+            $0.string(1) ?? ""
+        })
+        XCTAssertTrue(Set([
+            "id", "occurred_at", "category", "action", "outcome", "actor_user_id",
+            "target_user_id", "session_id", "device_id", "detail_code"
+        ]).isSubset(of: auditColumns))
+        XCTAssertFalse(auditColumns.contains("password"))
+        XCTAssertFalse(auditColumns.contains("token"))
+        XCTAssertFalse(auditColumns.contains("path"))
+        let playbackColumns = Set(try db.query("PRAGMA table_info(server_user_media_state)") {
+            $0.string(1) ?? ""
+        })
+        XCTAssertEqual(playbackColumns, Set([
+            "user_id", "media_id", "play_position", "play_progress", "is_watched",
+            "play_count", "last_played_at", "updated_at"
+        ]))
+        XCTAssertFalse(playbackColumns.contains("session_id"))
+        XCTAssertFalse(playbackColumns.contains("file_path"))
+    }
+
     func testDatabaseNewerThanAppThrowsRecognizableError() throws {
         // 先正常建库迁到当前版本，再把 user_version 人为顶到未来版本，模拟「旧应用打开新库」。
         do {
