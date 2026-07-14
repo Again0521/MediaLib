@@ -1,0 +1,5 @@
+module CArgon2 {
+    header "argon2.h"
+    header "medialib_crypto.h"
+    export *
+}
