@@ -14,7 +14,9 @@ private func streamSocketType() -> Int32 { SOCK_STREAM }
 /// 但仍不承担 TLS、可信代理或公网访问；开放远程前会由生产 HTTP 框架替换。
 final class LocalLoopbackHTTPServer: @unchecked Sendable {
     private static let maximumConcurrentConnections = 32
+    private static let maximumRequestsPerConnection = 64
     private static let requestDeadline: TimeInterval = 10
+    private static let connectionLifetime: TimeInterval = 60
 
     private let configuration: ServerLaunchConfiguration
     private let router: LocalHTTPRouter
@@ -41,11 +43,16 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             ServerLibraryCategoriesResponse(categories: [])
         },
         mediaDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerMediaItemDetail? = { _, _ in nil },
+        seriesDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerSeriesDetail? = { _, _ in nil },
+        seriesEpisodesProvider: @escaping (String, ServerSeriesSeasonSelector, Int, Int, ServerRequestPrincipal) throws -> ServerSeriesEpisodesPage? = { _, _, _, _, _ in nil },
         mediaPlaybackStateUpdater: @escaping (String, ServerPlaybackStateUpdateRequest, ServerRequestPrincipal) throws -> ServerMediaUserState? = { _, _, _ in nil },
+        mediaPreferenceUpdater: @escaping (String, ServerUserMediaPreferenceUpdate, ServerRequestPrincipal) throws -> ServerMediaUserPreference? = { _, _, _ in nil },
         mediaAssetProvider: @escaping (String, ServerRequestPrincipal, ServerPermission) throws -> ServerMediaAsset? = { _, _, _ in nil },
+        webVTTSubtitleTracksProvider: @escaping (String, ServerRequestPrincipal) throws -> [ServerWebVTTSubtitleTrack]? = { _, _ in nil },
+        webVTTSubtitleAssetProvider: @escaping (String, Int, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
         artworkAssetProvider: @escaping (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
         playbackInfoProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerMediaPlaybackInfo? = { _, _ in nil },
-        hlsSessionManager: FFmpegHLSSessionManager? = nil,
+        currentUserProfileProvider: @escaping (ServerRequestPrincipal) throws -> ServerCurrentUserProfile? = { _ in nil },
         administrationCatalog: ServerAdministrationCatalog? = nil,
         authenticationService: ServerAuthenticationService? = nil,
         authenticationProvider: @escaping (String) throws -> ServerRequestPrincipal? = { _ in nil },
@@ -68,11 +75,16 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             libraryBrowseProvider: libraryBrowseProvider,
             libraryCategoriesProvider: libraryCategoriesProvider,
             mediaDetailProvider: mediaDetailProvider,
+            seriesDetailProvider: seriesDetailProvider,
+            seriesEpisodesProvider: seriesEpisodesProvider,
             mediaPlaybackStateUpdater: mediaPlaybackStateUpdater,
+            mediaPreferenceUpdater: mediaPreferenceUpdater,
             mediaAssetProvider: mediaAssetProvider,
+            webVTTSubtitleTracksProvider: webVTTSubtitleTracksProvider,
+            webVTTSubtitleAssetProvider: webVTTSubtitleAssetProvider,
             artworkAssetProvider: artworkAssetProvider,
             playbackInfoProvider: playbackInfoProvider,
-            hlsSessionManager: hlsSessionManager,
+            currentUserProfileProvider: currentUserProfileProvider,
             administrationCatalog: administrationCatalog,
             authenticationService: authenticationService,
             authenticationProvider: authenticationProvider,
@@ -164,32 +176,42 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
 
     private func handle(client: Int32, clientAddressKey: String) {
         defer { _ = close(client) }
-        guard let received = receiveRequest(from: client) else { return }
-        let request: LocalHTTPRequest
-        switch received {
-        case let .request(value): request = value
-        case let .rejected(rejection):
-            write(response: response(for: rejection), to: client)
-            return
-        }
-        if let rejection = requestSecurityPolicy.validate(request.head, bodyLength: request.body.count) {
-            let response: LocalHTTPResponse
-            switch rejection {
-            case .badRequest: response = .badRequest()
-            case .forbidden: response = .forbidden()
-            case .payloadTooLarge: response = .payloadTooLarge()
+        let connectionDeadline = ProcessInfo.processInfo.systemUptime + Self.connectionLifetime
+        for requestIndex in 0..<Self.maximumRequestsPerConnection {
+            guard ProcessInfo.processInfo.systemUptime <= connectionDeadline,
+                  let received = receiveRequest(from: client)
+            else { return }
+            let request: LocalHTTPRequest
+            switch received {
+            case let .request(value): request = value
+            case let .rejected(rejection):
+                write(response: response(for: rejection), to: client)
+                return
             }
-            write(response: response, to: client)
-            return
+            if let rejection = requestSecurityPolicy.validate(request.head, bodyLength: request.body.count) {
+                let response: LocalHTTPResponse
+                switch rejection {
+                case .badRequest: response = .badRequest()
+                case .forbidden: response = .forbidden()
+                case .payloadTooLarge: response = .payloadTooLarge()
+                }
+                write(response: response, to: client)
+                return
+            }
+            let keepAlive = requestIndex + 1 < Self.maximumRequestsPerConnection &&
+                ProcessInfo.processInfo.systemUptime <= connectionDeadline &&
+                Self.supportsPersistentConnection(request.head)
+            write(
+                response: router.response(
+                    for: request.head,
+                    body: request.body,
+                    clientAddressKey: clientAddressKey
+                ),
+                to: client,
+                keepAlive: keepAlive
+            )
+            if !keepAlive { return }
         }
-        write(
-            response: router.response(
-                for: request.head,
-                body: request.body,
-                clientAddressKey: clientAddressKey
-            ),
-            to: client
-        )
     }
 
     private func response(for rejection: HTTPRequestSecurityPolicy.Rejection) -> LocalHTTPResponse {
@@ -262,6 +284,28 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         return length
     }
 
+    /// HTTP/1.1 reuses a connection unless the client explicitly closes it. HTTP/1.0
+    /// remains close-by-default and must explicitly opt in. Request validation handles
+    /// duplicate/ambiguous headers before this policy is used for a response.
+    static func supportsPersistentConnection(_ head: String) -> Bool {
+        let lines = head.components(separatedBy: "\r\n")
+        guard let requestLine = lines.first else { return false }
+        let requestParts = requestLine.split(separator: " ", omittingEmptySubsequences: true)
+        guard requestParts.count == 3 else { return false }
+        let version = requestParts[2].uppercased()
+        let connectionTokens = lines.dropFirst().compactMap { line -> [String]? in
+            guard let colon = line.firstIndex(of: ":"),
+                  line[..<colon].trimmingCharacters(in: .whitespaces).lowercased() == "connection"
+            else { return nil }
+            return line[line.index(after: colon)...]
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+        }.flatMap { $0 }
+        if connectionTokens.contains("close") { return false }
+        if version == "HTTP/1.1" { return true }
+        return version == "HTTP/1.0" && connectionTokens.contains("keep-alive")
+    }
+
     private static func clientAddressKey(_ address: sockaddr_in) -> String {
         var address = address
         var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
@@ -272,8 +316,8 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         return String(cString: buffer)
     }
 
-    private func write(response: LocalHTTPResponse, to client: Int32) {
-        write(data: response.serializedHeaders(), to: client)
+    private func write(response: LocalHTTPResponse, to client: Int32, keepAlive: Bool = false) {
+        write(data: response.serializedHeaders(keepAlive: keepAlive), to: client)
         switch response.payload {
         case let .data(body):
             write(data: body, to: client)
@@ -307,6 +351,72 @@ private struct LocalHTTPRequest {
     let body: Data
 }
 
+/// Web 管理成员创建的严格正文。未知字段、缺字段、重复权限表达或异常值一律拒绝，
+/// 避免由宽松 JSON 解码把未来字段静默扩展成权限接口。
+private struct ServerAdministrationMemberCreateRequest: Decodable {
+    let username: String
+    let displayName: String
+    let password: String
+    let libraryIDs: [String]
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case username, displayName, password, libraryIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
+        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.rawValue)) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unexpected fields"))
+        }
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        username = try values.decode(String.self, forKey: .username)
+        displayName = try values.decode(String.self, forKey: .displayName)
+        password = try values.decode(String.self, forKey: .password)
+        libraryIDs = try values.decode([String].self, forKey: .libraryIDs)
+    }
+}
+
+/// 仅允许当前会话主体提交自己的当前密码和新密码。正文不含 userID、设备、会话或
+/// 恢复票据，字段不精确匹配即拒绝。
+private struct ServerPasswordChangeRequest: Decodable {
+    let currentPassword: String
+    let newPassword: String
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case currentPassword, newPassword
+    }
+
+    init(from decoder: Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
+        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.rawValue)) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unexpected fields"))
+        }
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        currentPassword = try values.decode(String.self, forKey: .currentPassword)
+        newPassword = try values.decode(String.self, forKey: .newPassword)
+        guard (1...1_024).contains(currentPassword.utf8.count),
+              (12...1_024).contains(newPassword.utf8.count)
+        else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "invalid password lengths"))
+        }
+    }
+}
+
+private struct DynamicCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
 private enum LocalHTTPRequestReceiveResult {
     case request(LocalHTTPRequest)
     case rejected(HTTPRequestSecurityPolicy.Rejection)
@@ -319,11 +429,16 @@ struct LocalHTTPRouter {
     private let libraryBrowseProvider: (ServerLibraryQuery, ServerRequestPrincipal) throws -> ServerLibraryItemsPage
     private let libraryCategoriesProvider: (ServerRequestPrincipal) throws -> ServerLibraryCategoriesResponse
     private let mediaDetailProvider: (String, ServerRequestPrincipal) throws -> ServerMediaItemDetail?
+    private let seriesDetailProvider: (String, ServerRequestPrincipal) throws -> ServerSeriesDetail?
+    private let seriesEpisodesProvider: (String, ServerSeriesSeasonSelector, Int, Int, ServerRequestPrincipal) throws -> ServerSeriesEpisodesPage?
     private let mediaPlaybackStateUpdater: (String, ServerPlaybackStateUpdateRequest, ServerRequestPrincipal) throws -> ServerMediaUserState?
+    private let mediaPreferenceUpdater: (String, ServerUserMediaPreferenceUpdate, ServerRequestPrincipal) throws -> ServerMediaUserPreference?
     private let mediaAssetProvider: (String, ServerRequestPrincipal, ServerPermission) throws -> ServerMediaAsset?
+    private let webVTTSubtitleTracksProvider: (String, ServerRequestPrincipal) throws -> [ServerWebVTTSubtitleTrack]?
+    private let webVTTSubtitleAssetProvider: (String, Int, ServerRequestPrincipal) throws -> ServerMediaAsset?
     private let artworkAssetProvider: (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset?
     private let playbackInfoProvider: (String, ServerRequestPrincipal) throws -> ServerMediaPlaybackInfo?
-    private let hlsSessionManager: FFmpegHLSSessionManager?
+    private let currentUserProfileProvider: (ServerRequestPrincipal) throws -> ServerCurrentUserProfile?
     private let administrationCatalog: ServerAdministrationCatalog?
     private let authenticationService: ServerAuthenticationService?
     private let authenticationProvider: (String) throws -> ServerRequestPrincipal?
@@ -346,11 +461,16 @@ struct LocalHTTPRouter {
             ServerLibraryCategoriesResponse(categories: [])
         },
         mediaDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerMediaItemDetail? = { _, _ in nil },
+        seriesDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerSeriesDetail? = { _, _ in nil },
+        seriesEpisodesProvider: @escaping (String, ServerSeriesSeasonSelector, Int, Int, ServerRequestPrincipal) throws -> ServerSeriesEpisodesPage? = { _, _, _, _, _ in nil },
         mediaPlaybackStateUpdater: @escaping (String, ServerPlaybackStateUpdateRequest, ServerRequestPrincipal) throws -> ServerMediaUserState? = { _, _, _ in nil },
+        mediaPreferenceUpdater: @escaping (String, ServerUserMediaPreferenceUpdate, ServerRequestPrincipal) throws -> ServerMediaUserPreference? = { _, _, _ in nil },
         mediaAssetProvider: @escaping (String, ServerRequestPrincipal, ServerPermission) throws -> ServerMediaAsset? = { _, _, _ in nil },
+        webVTTSubtitleTracksProvider: @escaping (String, ServerRequestPrincipal) throws -> [ServerWebVTTSubtitleTrack]? = { _, _ in nil },
+        webVTTSubtitleAssetProvider: @escaping (String, Int, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
         artworkAssetProvider: @escaping (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
         playbackInfoProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerMediaPlaybackInfo? = { _, _ in nil },
-        hlsSessionManager: FFmpegHLSSessionManager? = nil,
+        currentUserProfileProvider: @escaping (ServerRequestPrincipal) throws -> ServerCurrentUserProfile? = { _ in nil },
         administrationCatalog: ServerAdministrationCatalog? = nil,
         authenticationService: ServerAuthenticationService? = nil,
         authenticationProvider: @escaping (String) throws -> ServerRequestPrincipal? = { _ in nil },
@@ -363,11 +483,16 @@ struct LocalHTTPRouter {
         self.libraryBrowseProvider = libraryBrowseProvider
         self.libraryCategoriesProvider = libraryCategoriesProvider
         self.mediaDetailProvider = mediaDetailProvider
+        self.seriesDetailProvider = seriesDetailProvider
+        self.seriesEpisodesProvider = seriesEpisodesProvider
         self.mediaPlaybackStateUpdater = mediaPlaybackStateUpdater
+        self.mediaPreferenceUpdater = mediaPreferenceUpdater
         self.mediaAssetProvider = mediaAssetProvider
+        self.webVTTSubtitleTracksProvider = webVTTSubtitleTracksProvider
+        self.webVTTSubtitleAssetProvider = webVTTSubtitleAssetProvider
         self.artworkAssetProvider = artworkAssetProvider
         self.playbackInfoProvider = playbackInfoProvider
-        self.hlsSessionManager = hlsSessionManager
+        self.currentUserProfileProvider = currentUserProfileProvider
         self.administrationCatalog = administrationCatalog
         self.authenticationService = authenticationService
         self.authenticationProvider = authenticationProvider
@@ -411,17 +536,101 @@ struct LocalHTTPRouter {
             ) { return limited }
             return .javascript(body: Data(ServerWebLoginPage.script.utf8), omitBody: isHeadRequest)
         }
+        if (method == "GET" || isHeadRequest), path == "/assets/login.css" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .stylesheet(body: Data(ServerWebLoginPage.style.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/app-shell.css" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .stylesheet(body: Data(ServerWebShellStyle.css.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/library.css" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .stylesheet(body: Data(ServerWebLibraryPage.style.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/home.css" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .stylesheet(body: Data(ServerWebHomePage.style.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/account.css" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .stylesheet(body: Data(ServerWebAccountPage.style.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/status.css" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .stylesheet(body: Data(ServerWebStatusPage.style.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/sources.css" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .stylesheet(body: Data(ServerWebSourcesPage.style.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/admin.css" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .stylesheet(body: Data(ServerWebAdministrationPage.style.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/player.css" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .stylesheet(body: Data(ServerWebMediaDetailPage.style.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/series.css" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .stylesheet(body: Data(ServerWebSeriesPage.style.utf8), omitBody: isHeadRequest)
+        }
         if (method == "GET" || isHeadRequest), path == "/assets/admin.js" {
             if let limited = limitedResponse(
                 scope: .publicProbe, identityComponents: [clientAddressKey]
             ) { return limited }
             return .javascript(body: Data(ServerWebAdministrationPage.script.utf8), omitBody: isHeadRequest)
         }
+        if (method == "GET" || isHeadRequest), path == "/assets/sources.js" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .javascript(body: Data(ServerWebSourcesPage.script.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/status.js" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .javascript(body: Data(ServerWebStatusPage.script.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/account.js" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .javascript(body: Data(ServerWebAccountPage.script.utf8), omitBody: isHeadRequest)
+        }
         if (method == "GET" || isHeadRequest), path == "/assets/player.js" {
             if let limited = limitedResponse(
                 scope: .publicProbe, identityComponents: [clientAddressKey]
             ) { return limited }
             return .javascript(body: Data(ServerWebMediaDetailPage.script.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/series.js" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .javascript(body: Data(ServerWebSeriesPage.script.utf8), omitBody: isHeadRequest)
         }
         if (method == "GET" || isHeadRequest), path == "/assets/library.js" {
             if let limited = limitedResponse(
@@ -445,15 +654,15 @@ struct LocalHTTPRouter {
             }
             return .unauthorized()
         }
-        if method == "DELETE" {
-            if let limited = limitedResponse(
-                scope: .authenticatedMutation,
-                principal: principal,
-                clientAddressKey: clientAddressKey
-            ) { return limited }
-            return cancelHLSResponse(path: path, principal: principal)
-        }
         if method == "POST" {
+            if path == "/api/v1/auth/password" {
+                if let limited = limitedResponse(
+                    scope: .authenticatedMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                ) { return limited }
+                return passwordChangeResponse(body: body, principal: principal)
+            }
             if path == "/api/v1/auth/logout" {
                 if let limited = limitedResponse(
                     scope: .authenticatedMutation,
@@ -474,21 +683,42 @@ struct LocalHTTPRouter {
                     principal: principal
                 )
             }
-            guard path.hasPrefix("/api/v1/playback/hls/") else { return .methodNotAllowed() }
-            let encodedID = String(path.dropFirst("/api/v1/playback/hls/".count))
-            guard !encodedID.isEmpty,
-                  let itemID = encodedID.removingPercentEncoding,
-                  !itemID.contains("/")
-            else {
-                return .notFound()
+            if path.hasPrefix("/api/v1/user-media/preferences/") {
+                if let limited = limitedResponse(
+                    scope: .authenticatedMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                ) { return limited }
+                return updateMediaPreferenceResponse(path: path, body: body, principal: principal)
             }
-            if let limited = limitedResponse(
-                scope: .transcodeMutation,
-                principal: principal,
-                clientAddressKey: clientAddressKey,
-                cost: 2
-            ) { return limited }
-            return startHLSResponse(itemID: itemID, principal: principal, omitBody: false)
+            if path == "/api/v1/admin/users" {
+                if let limited = limitedResponse(
+                    scope: .authenticatedMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                ) { return limited }
+                guard principal.permissions.contains(.manageUsers) else { return .forbidden() }
+                return createAdministrationMemberResponse(body: body, principal: principal)
+            }
+            if path.hasPrefix("/api/v1/admin/sessions/") {
+                if let limited = limitedResponse(
+                    scope: .authenticatedMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                ) { return limited }
+                guard principal.permissions.contains(.manageSessions) else { return .forbidden() }
+                return revokeAdministrationSessionResponse(path: path, principal: principal)
+            }
+            if path.hasPrefix("/api/v1/admin/users/") {
+                if let limited = limitedResponse(
+                    scope: .authenticatedMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                ) { return limited }
+                guard principal.permissions.contains(.manageUsers) else { return .forbidden() }
+                return updateAdministrationUserAvailabilityResponse(path: path, principal: principal)
+            }
+            return .methodNotAllowed()
         }
         guard method == "GET" || isHeadRequest else {
             return .methodNotAllowed()
@@ -529,17 +759,229 @@ struct LocalHTTPRouter {
                 ),
                 omitBody: isHeadRequest
             )
-        case "/library":
+        case "/sources":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+            return .html(
+                body: Data(
+                    ServerWebSourcesPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case "/status":
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
             return .html(
                 body: Data(
-                    ServerWebLibraryPage.render(
+                    ServerWebStatusPage.render(
                         serverName: serverName,
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case "/account":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            return .html(
+                body: Data(
+                    ServerWebAccountPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case "/library":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let categories = try? libraryCategoriesProvider(principal) else {
+                return .serviceUnavailable()
+            }
+            let selectedCategoryID = selectedLibraryCategoryID(
+                from: target,
+                allowedCategories: categories.categories
+            )
+            return .html(
+                body: Data(
+                    ServerWebLibraryPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer,
+                        categories: categories.categories,
+                        selectedCategoryID: selectedCategoryID
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case "/search":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let categories = try? libraryCategoriesProvider(principal) else {
+                return .serviceUnavailable()
+            }
+            return .html(
+                body: Data(
+                    ServerWebLibraryPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer,
+                        page: .search,
+                        categories: categories.categories
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case "/watching":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let categories = try? libraryCategoriesProvider(principal) else {
+                return .serviceUnavailable()
+            }
+            return .html(
+                body: Data(
+                    ServerWebLibraryPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer,
+                        page: .continuing,
+                        categories: categories.categories
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case "/history":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let categories = try? libraryCategoriesProvider(principal) else {
+                return .serviceUnavailable()
+            }
+            return .html(
+                body: Data(
+                    ServerWebLibraryPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer,
+                        page: .history,
+                        categories: categories.categories
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case "/favorites":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let categories = try? libraryCategoriesProvider(principal) else {
+                return .serviceUnavailable()
+            }
+            return .html(
+                body: Data(
+                    ServerWebLibraryPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer,
+                        page: .favorites,
+                        categories: categories.categories
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case "/watchlist":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let categories = try? libraryCategoriesProvider(principal) else {
+                return .serviceUnavailable()
+            }
+            return .html(
+                body: Data(
+                    ServerWebLibraryPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer,
+                        page: .watchlist,
+                        categories: categories.categories
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case "/watched":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let categories = try? libraryCategoriesProvider(principal) else {
+                return .serviceUnavailable()
+            }
+            return .html(
+                body: Data(
+                    ServerWebLibraryPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer,
+                        page: .watched,
+                        categories: categories.categories
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case "/ratings":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let categories = try? libraryCategoriesProvider(principal) else {
+                return .serviceUnavailable()
+            }
+            return .html(
+                body: Data(
+                    ServerWebLibraryPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer,
+                        page: .ratings,
+                        categories: categories.categories
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case "/unwatched":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let categories = try? libraryCategoriesProvider(principal) else {
+                return .serviceUnavailable()
+            }
+            return .html(
+                body: Data(
+                    ServerWebLibraryPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer,
+                        page: .unwatched,
+                        categories: categories.categories
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -556,6 +998,29 @@ struct LocalHTTPRouter {
                 return .html(
                     body: Data(
                         ServerWebMediaDetailPage.render(
+                            serverName: serverName,
+                            detail: detail,
+                            csrfToken: csrfToken,
+                            showAdministration: principal.canManageServer
+                        ).utf8
+                    ),
+                    omitBody: isHeadRequest
+                )
+            } catch {
+                return .serviceUnavailable()
+            }
+        case let seriesPagePath where seriesPagePath.hasPrefix("/series/"):
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let seriesID = decodedPathIdentifier(seriesPagePath, prefix: "/series/") else {
+                return .notFound()
+            }
+            do {
+                guard let detail = try seriesDetailProvider(seriesID, principal) else { return .notFound() }
+                return .html(
+                    body: Data(
+                        ServerWebSeriesPage.render(
                             serverName: serverName,
                             detail: detail,
                             csrfToken: csrfToken,
@@ -626,6 +1091,20 @@ struct LocalHTTPRouter {
             } catch {
                 return .serviceUnavailable()
             }
+        case let seriesEpisodesPath where seriesEpisodesPath.hasPrefix("/api/v1/series/"):
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let request = seriesEpisodeQuery(from: target) else { return .badRequest() }
+            do {
+                guard let page = try seriesEpisodesProvider(
+                    request.id, request.season, request.offset, request.limit, principal
+                ) else { return .notFound() }
+                guard let encoded = ServerCommandOutput.jsonData(page) else { return .serviceUnavailable() }
+                body = encoded
+            } catch {
+                return .serviceUnavailable()
+            }
         case let imagePath where imagePath.hasPrefix("/api/v1/images/"):
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
@@ -650,6 +1129,18 @@ struct LocalHTTPRouter {
                 return .serviceUnavailable()
             }
             body = data
+        case "/api/v1/auth/me":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            do {
+                guard let profile = try currentUserProfileProvider(principal),
+                      let data = ServerCommandOutput.jsonData(profile)
+                else { return .unauthorized() }
+                body = data
+            } catch {
+                return .serviceUnavailable()
+            }
         case "/api/v1/admin/sessions":
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
@@ -674,6 +1165,30 @@ struct LocalHTTPRouter {
                 return .serviceUnavailable()
             }
             body = data
+        case "/api/v1/admin/sources":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+            guard let administrationCatalog,
+                  let sources = try? administrationCatalog.sources(),
+                  let data = ServerCommandOutput.jsonData(sources)
+            else {
+                return .serviceUnavailable()
+            }
+            body = data
+        case "/api/v1/admin/libraries":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.manageLibraries) else { return .forbidden() }
+            guard let administrationCatalog,
+                  let libraries = try? administrationCatalog.libraries(),
+                  let data = ServerCommandOutput.jsonData(libraries)
+            else {
+                return .serviceUnavailable()
+            }
+            body = data
         case let infoPath where infoPath.hasPrefix("/api/v1/playback/info/"):
             if let limited = limitedResponse(
                 scope: .mediaProbe, principal: principal, clientAddressKey: clientAddressKey
@@ -686,11 +1201,19 @@ struct LocalHTTPRouter {
                 return .notFound()
             }
             return playbackInfoResponse(itemID: itemID, principal: principal, omitBody: isHeadRequest)
-        case let hlsOutputPath where hlsOutputPath.hasPrefix("/api/v1/hls/"):
+        case let subtitleListPath where subtitleListPath.hasPrefix("/api/v1/playback/subtitles/"):
+            if let limited = limitedResponse(
+                scope: .mediaProbe, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let itemID = decodedPathIdentifier(subtitleListPath, prefix: "/api/v1/playback/subtitles/") else {
+                return .notFound()
+            }
+            return webVTTSubtitleTracksResponse(itemID: itemID, principal: principal, omitBody: isHeadRequest)
+        case let subtitlePath where subtitlePath.hasPrefix("/api/v1/subtitles/"):
             if let limited = limitedResponse(
                 scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
-            return hlsOutputResponse(path: hlsOutputPath, principal: principal, omitBody: isHeadRequest)
+            return webVTTSubtitleResponse(path: subtitlePath, principal: principal, omitBody: isHeadRequest)
         case let streamPath where streamPath.hasPrefix("/api/v1/stream/"):
             if let limited = limitedResponse(
                 scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
@@ -749,7 +1272,7 @@ struct LocalHTTPRouter {
                 guard keyValue.count == 2,
                       let key = decodeQueryComponent(String(keyValue[0])),
                       let value = decodeQueryComponent(String(keyValue[1])),
-                      ["q", "type", "offset", "limit", "sort"].contains(key),
+                      ["q", "type", "offset", "limit", "sort", "state", "preference"].contains(key),
                       values[key] == nil
                 else { return nil }
                 values[key] = value
@@ -769,15 +1292,102 @@ struct LocalHTTPRouter {
                 return nil
             }
         }
+        let playbackFilter: ServerLibraryPlaybackFilter?
+        if let rawState = values["state"], !rawState.isEmpty {
+            guard let parsed = ServerLibraryPlaybackFilter(rawValue: rawState) else { return nil }
+            playbackFilter = parsed
+        } else {
+            playbackFilter = nil
+        }
+        let preferenceFilter: ServerLibraryPreferenceFilter?
+        if let rawPreference = values["preference"], !rawPreference.isEmpty {
+            guard let parsed = ServerLibraryPreferenceFilter(rawValue: rawPreference) else { return nil }
+            preferenceFilter = parsed
+        } else {
+            preferenceFilter = nil
+        }
         guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
               let limit = strictNonnegativeInteger(values["limit"] ?? "48"), (1...100).contains(limit),
               let sort = ServerLibrarySort(rawValue: values["sort"] ?? ServerLibrarySort.updatedDescending.rawValue)
         else { return nil }
-        return ServerLibraryQuery(searchText: searchText, type: type, offset: offset, limit: limit, sort: sort)
+        return ServerLibraryQuery(
+            searchText: searchText, type: type, offset: offset, limit: limit,
+            sort: sort, playbackFilter: playbackFilter, preferenceFilter: preferenceFilter
+        )
     }
 
     private func decodeQueryComponent(_ value: String) -> String? {
         value.replacingOccurrences(of: "+", with: " ").removingPercentEncoding
+    }
+
+    private func seriesEpisodeQuery(
+        from target: String
+    ) -> (id: String, season: ServerSeriesSeasonSelector, offset: Int, limit: Int)? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.count == 2 else { return nil }
+        let path = String(pieces[0])
+        let prefix = "/api/v1/series/"
+        let suffix = "/episodes"
+        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
+        let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
+        guard !encodedID.isEmpty,
+              let id = decodedPathIdentifier("/series/\(encodedID)", prefix: "/series/")
+        else { return nil }
+        var values: [String: String] = [:]
+        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
+            guard !pair.isEmpty else { return nil }
+            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard keyValue.count == 2,
+                  let key = decodeQueryComponent(String(keyValue[0])),
+                  let value = decodeQueryComponent(String(keyValue[1])),
+                  ["season", "offset", "limit"].contains(key),
+                  values[key] == nil,
+                  value.utf8.count <= 64,
+                  !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
+            else { return nil }
+            values[key] = value
+        }
+        let season: ServerSeriesSeasonSelector
+        if values["season"] == "unspecified" {
+            season = .unspecified
+        } else {
+            guard let rawSeason = values["season"],
+                  let number = strictNonnegativeInteger(rawSeason), number <= 10_000
+            else { return nil }
+            season = .numbered(number)
+        }
+        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
+              let limit = strictNonnegativeInteger(values["limit"] ?? "50"), (1...100).contains(limit)
+        else { return nil }
+        return (id, season, offset, limit)
+    }
+
+    /// Returns an active category only when the page query contains one unique,
+    /// well-formed value that is present in the current principal's authorized list.
+    private func selectedLibraryCategoryID(
+        from target: String,
+        allowedCategories: [ServerLibraryCategory]
+    ) -> String? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.first == "/library", pieces.count == 2 else { return nil }
+        var selected: String?
+        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
+            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard keyValue.count == 2,
+                  let key = decodeQueryComponent(String(keyValue[0])),
+                  let value = decodeQueryComponent(String(keyValue[1]))
+            else { return nil }
+            guard key == "type" else { continue }
+            guard selected == nil,
+                  value.utf8.count <= 512,
+                  !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
+            else { return nil }
+            selected = value
+        }
+        guard let selected,
+              allowedCategories.prefix(32).contains(where: { $0.id == selected })
+        else { return nil }
+        return selected
     }
 
     private func strictNonnegativeInteger(_ value: String) -> Int? {
@@ -806,6 +1416,45 @@ struct LocalHTTPRouter {
             return .partialFile(asset: asset, range: range, omitBody: omitBody)
         }
         return .fullFile(asset: asset, omitBody: omitBody)
+    }
+
+    private func webVTTSubtitleTracksResponse(
+        itemID: String,
+        principal: ServerRequestPrincipal,
+        omitBody: Bool
+    ) -> LocalHTTPResponse {
+        do {
+            guard let tracks = try webVTTSubtitleTracksProvider(itemID, principal),
+                  let body = ServerCommandOutput.jsonData(tracks)
+            else { return .notFound() }
+            return .ok(body: body, omitBody: omitBody)
+        } catch {
+            return .notFound()
+        }
+    }
+
+    private func webVTTSubtitleResponse(
+        path: String,
+        principal: ServerRequestPrincipal,
+        omitBody: Bool
+    ) -> LocalHTTPResponse {
+        let prefix = "/api/v1/subtitles/"
+        let remainder = path.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: false)
+        guard remainder.count == 2,
+              let itemID = String(remainder[0]).removingPercentEncoding,
+              !itemID.isEmpty,
+              !itemID.contains("/"),
+              !itemID.contains("\\"),
+              let trackID = strictNonnegativeInteger(String(remainder[1])),
+              trackID < ServerWebVTTSubtitleTrack.maximumTrackCount,
+              let asset = try? webVTTSubtitleAssetProvider(itemID, trackID, principal)
+        else { return .notFound() }
+        return .file(
+            url: asset.fileURL,
+            byteLength: asset.byteLength,
+            contentType: "text/vtt; charset=utf-8",
+            omitBody: omitBody
+        )
     }
 
     private func updatePlaybackStateResponse(
@@ -837,6 +1486,132 @@ struct LocalHTTPRouter {
         }
     }
 
+    /// 偏好请求只允许一次更新一个字段，避免浏览器可借构造型正文意外覆盖其他字段。
+    /// 用户身份始终取 principal；评分 0 表示清除，1–5 表示星级。
+    private func updateMediaPreferenceResponse(
+        path: String,
+        body: Data,
+        principal: ServerRequestPrincipal
+    ) -> LocalHTTPResponse {
+        guard let itemID = decodedPathIdentifier(path, prefix: "/api/v1/user-media/preferences/"),
+              let object = try? JSONSerialization.jsonObject(with: body),
+              let dictionary = object as? [String: Any],
+              dictionary.count == 1
+        else { return .badRequest() }
+
+        let preference: ServerUserMediaPreferenceUpdate
+        if let value = dictionary["favorite"] as? Bool, Set(dictionary.keys) == Set(["favorite"]) {
+            preference = .favorite(value)
+        } else if let value = dictionary["watchlist"] as? Bool, Set(dictionary.keys) == Set(["watchlist"]) {
+            preference = .watchlist(value)
+        } else if let value = dictionary["rating"] as? NSNumber,
+                  CFGetTypeID(value) != CFBooleanGetTypeID(),
+                  value.doubleValue.isFinite,
+                  (0...5).contains(value.doubleValue),
+                  Set(dictionary.keys) == Set(["rating"]) {
+            preference = .rating(value.doubleValue == 0 ? nil : value.doubleValue)
+        } else {
+            return .badRequest()
+        }
+        do {
+            guard let updated = try mediaPreferenceUpdater(itemID, preference, principal),
+                  let encoded = ServerCommandOutput.jsonData(updated)
+            else { return .notFound() }
+            return .json(body: encoded)
+        } catch {
+            // 未知/无权媒体和内部仓储细节均不能通过偏好写接口区分。
+            return .notFound()
+        }
+    }
+
+    private func revokeAdministrationSessionResponse(
+        path: String,
+        principal: ServerRequestPrincipal
+    ) -> LocalHTTPResponse {
+        let prefix = "/api/v1/admin/sessions/"
+        let suffix = "/revoke"
+        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return .notFound() }
+        let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
+        guard !encodedID.isEmpty,
+              let sessionID = encodedID.removingPercentEncoding,
+              !sessionID.isEmpty,
+              !sessionID.contains("/"),
+              !sessionID.contains("\\"),
+              !sessionID.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }),
+              sessionID.utf8.count <= 512,
+              let administrationCatalog
+        else { return .notFound() }
+        do {
+            try administrationCatalog.revokeSession(id: sessionID, actorUserID: principal.userID)
+            return .noContent()
+        } catch {
+            return .notFound()
+        }
+    }
+
+    private func updateAdministrationUserAvailabilityResponse(
+        path: String,
+        principal: ServerRequestPrincipal
+    ) -> LocalHTTPResponse {
+        let prefix = "/api/v1/admin/users/"
+        let action: (suffix: String, disabled: Bool)
+        if path.hasSuffix("/disable") {
+            action = ("/disable", true)
+        } else if path.hasSuffix("/enable") {
+            action = ("/enable", false)
+        } else {
+            return .notFound()
+        }
+        let encodedID = String(path.dropFirst(prefix.count).dropLast(action.suffix.count))
+        guard !encodedID.isEmpty,
+              let userID = encodedID.removingPercentEncoding,
+              !userID.isEmpty,
+              !userID.contains("/"),
+              !userID.contains("\\"),
+              !userID.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }),
+              userID.utf8.count <= 512,
+              let administrationCatalog
+        else { return .notFound() }
+        do {
+            try administrationCatalog.setUserDisabled(
+                id: userID,
+                disabled: action.disabled,
+                actorUserID: principal.userID
+            )
+            return .noContent()
+        } catch {
+            return .notFound()
+        }
+    }
+
+    private func createAdministrationMemberResponse(
+        body: Data,
+        principal: ServerRequestPrincipal
+    ) -> LocalHTTPResponse {
+        guard let request = try? JSONDecoder().decode(ServerAdministrationMemberCreateRequest.self, from: body),
+              let administrationCatalog
+        else { return .badRequest() }
+        guard request.libraryIDs.isEmpty || principal.permissions.contains(.manageLibraries) else {
+            return .forbidden()
+        }
+        do {
+            try administrationCatalog.createMember(
+                username: request.username,
+                displayName: request.displayName,
+                password: request.password,
+                libraryIDs: request.libraryIDs,
+                actorUserID: principal.userID
+            )
+            return .noContent()
+        } catch ServerAdministrationCatalogError.unavailable {
+            return .serviceUnavailable()
+        } catch {
+            // 此处不把重复用户名、来源存在性或口令细节回显给浏览器，避免成员枚举与
+            // 内部资料库信息泄漏；前端只给出通用的输入/创建失败提示。
+            return .badRequest()
+        }
+    }
+
     private func playbackInfoResponse(
         itemID: String,
         principal: ServerRequestPrincipal,
@@ -850,68 +1625,6 @@ struct LocalHTTPRouter {
             // ffprobe 的原始错误可能包含路径或损坏文件的内容摘要，不可作为 HTTP 响应返回。
             return .serviceUnavailable()
         }
-    }
-
-    private func startHLSResponse(
-        itemID: String,
-        principal: ServerRequestPrincipal,
-        omitBody: Bool
-    ) -> LocalHTTPResponse {
-        guard let hlsSessionManager,
-              let asset = try? mediaAssetProvider(itemID, principal, .transcodePlayback)
-        else {
-            return .notFound()
-        }
-        do {
-            let session = try hlsSessionManager.start(asset: asset, ownerSessionID: principal.sessionID)
-            guard let body = ServerCommandOutput.jsonData(session) else { return .serviceUnavailable() }
-            return .ok(body: body, omitBody: omitBody)
-        } catch {
-            return .serviceUnavailable()
-        }
-    }
-
-    private func hlsOutputResponse(
-        path: String,
-        principal: ServerRequestPrincipal,
-        omitBody: Bool
-    ) -> LocalHTTPResponse {
-        let components = path.split(separator: "/", omittingEmptySubsequences: true)
-        guard components.count == 5,
-              components[0] == "api", components[1] == "v1", components[2] == "hls",
-              let outputURL = hlsSessionManager?.outputURL(
-                sessionID: String(components[3]),
-                fileName: String(components[4]),
-                ownerSessionID: principal.sessionID
-              ),
-              let attributes = try? FileManager.default.attributesOfItem(atPath: outputURL.path),
-              let byteLength = attributes[.size] as? NSNumber
-        else {
-            return .notFound()
-        }
-        return .file(
-            url: outputURL,
-            byteLength: byteLength.int64Value,
-            contentType: outputURL.pathExtension == "m3u8" ? "application/vnd.apple.mpegurl" : "video/mp2t",
-            omitBody: omitBody
-        )
-    }
-
-    private func cancelHLSResponse(path: String, principal: ServerRequestPrincipal) -> LocalHTTPResponse {
-        let components = path.split(separator: "/", omittingEmptySubsequences: true)
-        guard components.count == 4,
-              components[0] == "api", components[1] == "v1", components[2] == "hls",
-              let hlsSessionManager
-        else {
-            return .notFound()
-        }
-        guard hlsSessionManager.cancel(
-            sessionID: String(components[3]),
-            ownerSessionID: principal.sessionID
-        ) else {
-            return .notFound()
-        }
-        return .noContent()
     }
 
     private func publicProbeResponse(path: String, omitBody: Bool) -> LocalHTTPResponse {
@@ -1024,6 +1737,28 @@ struct LocalHTTPRouter {
             return .noContent(clearingAuthenticationCookies: true)
         } catch {
             return .serviceUnavailable()
+        }
+    }
+
+    private func passwordChangeResponse(
+        body: Data,
+        principal: ServerRequestPrincipal
+    ) -> LocalHTTPResponse {
+        guard let request = try? JSONDecoder().decode(ServerPasswordChangeRequest.self, from: body),
+              let authenticationService
+        else { return .badRequest() }
+        do {
+            try authenticationService.changePassword(
+                for: principal,
+                currentPassword: request.currentPassword,
+                newPassword: request.newPassword
+            )
+            // 轮换服务已撤销所有会话；清除当前浏览器的双 Cookie，强制使用新口令重新登录。
+            return .noContent(clearingAuthenticationCookies: true)
+        } catch {
+            // 不区分当前密码错误、重用、并发修改、禁用或 Argon2 参数错误，避免通过 HTTP
+            // 形成凭据/账户状态预言机。服务已在需要时记录脱敏拒绝审计。
+            return .badRequest()
         }
     }
 
@@ -1190,7 +1925,18 @@ struct LocalHTTPResponse {
             contentType: "text/javascript; charset=utf-8",
             payload: .data(omitBody ? Data() : body),
             declaredContentLength: body.count,
-            additionalHeaders: []
+            additionalHeaders: ["Cache-Control: private, max-age=300"]
+        )
+    }
+
+    static func stylesheet(body: Data, omitBody: Bool) -> Self {
+        Self(
+            statusCode: 200,
+            reason: "OK",
+            contentType: "text/css; charset=utf-8",
+            payload: .data(omitBody ? Data() : body),
+            declaredContentLength: body.count,
+            additionalHeaders: ["Cache-Control: private, max-age=300"]
         )
     }
 
@@ -1310,9 +2056,11 @@ struct LocalHTTPResponse {
             "HTTP/1.1 \(statusCode) \(reason)",
             "Content-Type: \(contentType)",
             "Content-Length: \(declaredContentLength)",
-            "Cache-Control: no-store",
             "Connection: close"
         ]
+        if !additionalHeaders.contains(where: { $0.hasPrefix("Cache-Control:") }) {
+            headers.append("Cache-Control: no-store")
+        }
         if statusCode == 405 {
             headers.append("Allow: GET, HEAD")
         }
@@ -1322,14 +2070,21 @@ struct LocalHTTPResponse {
         return data
     }
 
-    func serializedHeaders() -> Data {
+    func serializedHeaders(keepAlive: Bool = false) -> Data {
         var headers = [
             "HTTP/1.1 \(statusCode) \(reason)",
             "Content-Type: \(contentType)",
             "Content-Length: \(declaredContentLength)",
-            "Cache-Control: no-store",
-            "Connection: close"
+            keepAlive ? "Connection: keep-alive" : "Connection: close"
         ]
+        if keepAlive {
+            headers.append("Keep-Alive: timeout=10, max=64")
+        }
+        // API/HTML/媒体响应默认 no-store；只有代码明确标注的无身份静态资源
+        // 才能以 private 缓存复用，防止重复加载与用户数据缓存混淆。
+        if !additionalHeaders.contains(where: { $0.hasPrefix("Cache-Control:") }) {
+            headers.append("Cache-Control: no-store")
+        }
         if statusCode == 405 {
             headers.append("Allow: GET, HEAD")
         }

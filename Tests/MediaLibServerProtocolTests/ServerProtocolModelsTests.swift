@@ -41,6 +41,20 @@ final class ServerProtocolModelsTests: XCTestCase {
         XCTAssertFalse(String(data: data, encoding: .utf8)?.contains("path") ?? true)
     }
 
+    func testOlderServerPayloadsDecodeWithEmptyUserPreferences() throws {
+        let cardJSON = #"{"id":"movie-1","type":"movie","title":"影片","year":2026,"artworkAvailable":true}"#
+        let detailJSON = #"{"id":"movie-1","type":"movie","title":"影片","genres":[],"artworkAvailable":true,"backdropAvailable":false,"canDirectPlay":true,"canTranscode":false}"#
+
+        XCTAssertEqual(
+            try JSONDecoder().decode(ServerLibraryItem.self, from: Data(cardJSON.utf8)).userPreference,
+            .empty
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(ServerMediaItemDetail.self, from: Data(detailJSON.utf8)).userPreference,
+            .empty
+        )
+    }
+
     func testPaginatedLibraryAndCategoriesRoundTripWithoutIdentityOrPaths() throws {
         let state = ServerMediaUserState(
             itemID: "movie-1", positionSeconds: 50, progress: 0.5, isWatched: false,
@@ -122,10 +136,18 @@ final class ServerProtocolModelsTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(ServerMediaItemDetail.self, from: data), detail)
         for forbiddenField in [
             "filepath", "sourcepath", "posterpath", "backdroppath", "externalid",
-            "playposition", "playprogress", "watched", "favorite", "watchlist", "token", "digest"
+            "playposition", "playprogress", "userid", "deviceid", "sessionid", "token", "digest"
         ] {
             XCTAssertFalse(text.contains(forbiddenField), "unexpected detail field: \(forbiddenField)")
         }
+    }
+
+    func testOlderDetailPayloadsDecodeWithoutEpisodeNavigation() throws {
+        let legacy = #"{"id":"episode-1","type":"episode","title":"第一集","genres":[],"artworkAvailable":false,"backdropAvailable":false,"canDirectPlay":true,"canTranscode":false}"#
+        let detail = try JSONDecoder().decode(ServerMediaItemDetail.self, from: Data(legacy.utf8))
+
+        XCTAssertNil(detail.previousEpisode)
+        XCTAssertNil(detail.nextEpisode)
     }
 
     func testPerUserPlaybackStateRoundTripsWithoutIdentityOrPathAndRejectsInvalidUpdates() throws {
@@ -151,20 +173,6 @@ final class ServerProtocolModelsTests: XCTestCase {
         XCTAssertFalse(ServerPlaybackStateUpdateRequest(
             event: .progress, positionSeconds: 900, durationSeconds: 100
         ).isValid)
-    }
-
-    func testHLSSessionUsesOnlyAnAPIPath() throws {
-        let session = ServerHLSPlaybackSession(
-            id: "session-001",
-            itemID: "movie-1",
-            manifestPath: "/api/v1/hls/session-001/index.m3u8"
-        )
-        let data = try JSONEncoder().encode(session)
-        let text = String(data: data, encoding: .utf8) ?? ""
-
-        XCTAssertEqual(try JSONDecoder().decode(ServerHLSPlaybackSession.self, from: data), session)
-        XCTAssertFalse(text.contains("file:"))
-        XCTAssertFalse(text.contains("/private/"))
     }
 
     func testAdministrationDTOsRoundTripWithoutCredentialOrNetworkFields() throws {

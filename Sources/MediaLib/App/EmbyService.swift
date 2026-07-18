@@ -397,7 +397,7 @@ struct EmbyService {
     static func isMediaServerSourcePath(_ value: String?) -> Bool {
         guard let value else { return false }
         let lowercased = value.lowercased()
-        return lowercased.hasPrefix("emby://") || lowercased.hasPrefix("jellyfin://") || lowercased.hasPrefix("plex://")
+        return lowercased.hasPrefix("emby://") || lowercased.hasPrefix("jellyfin://") || lowercased.hasPrefix("plex://") || lowercased.hasPrefix("mlink://")
     }
 
     /// 是否为「Emby 兼容」远程源（Emby 或 Jellyfin）——两者播放上报、转码取流走完全相同的 Emby API，

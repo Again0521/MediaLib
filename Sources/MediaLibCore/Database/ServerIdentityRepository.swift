@@ -797,7 +797,12 @@ public final class ServerIdentityRepository: @unchecked Sendable {
         }
     }
 
-    public func setUserDisabled(id: String, disabled: Bool, at date: Date = Date()) throws {
+    public func setUserDisabled(
+        id: String,
+        disabled: Bool,
+        actorUserID: String? = nil,
+        at date: Date = Date()
+    ) throws {
         let id = try validatedIdentifier(id)
         if id == Self.initialAdministratorUserID {
             throw ServerIdentityRepositoryError.cannotModifyInitialAdministrator
@@ -813,6 +818,17 @@ public final class ServerIdentityRepository: @unchecked Sendable {
                     "UPDATE server_auth_sessions SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?",
                     bindings: [.optionalDate(date), .text(id)]
                 )
+            }
+            if let actorUserID {
+                try appendSecurityEvent(ServerSecurityEvent(
+                    occurredAt: date,
+                    category: .identity,
+                    action: disabled ? "user.disabled" : "user.enabled",
+                    outcome: .success,
+                    actorUserID: actorUserID,
+                    targetUserID: id,
+                    detailCode: disabled ? "sessions.revoked" : nil
+                ))
             }
         }
     }

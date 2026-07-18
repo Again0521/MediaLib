@@ -4,7 +4,7 @@ import SQLite3
 // 内部所有可变状态（db 句柄）只通过私有串行 queue 访问，线程安全由队列约束保证，
 // 编译器无法静态验证这一点，因此显式标注 @unchecked Sendable（而非让调用处到处 @Sendable 警告）。
 public final class DatabaseManager: @unchecked Sendable {
-    public static let currentSchemaVersion = 24
+    public static let currentSchemaVersion = 26
 
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
@@ -421,6 +421,20 @@ public final class DatabaseManager: @unchecked Sendable {
                 try execute("PRAGMA user_version = 24")
             }
             version = 24
+        }
+        if version < 25 {
+            try transaction {
+                try migrateToVersion25()
+                try execute("PRAGMA user_version = 25")
+            }
+            version = 25
+        }
+        if version < 26 {
+            try transaction {
+                try migrateToVersion26()
+                try execute("PRAGMA user_version = 26")
+            }
+            version = 26
         }
         guard version == Self.currentSchemaVersion else {
             throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
@@ -1308,6 +1322,72 @@ public final class DatabaseManager: @unchecked Sendable {
         """)
         try execute("CREATE INDEX IF NOT EXISTS index_server_user_media_state_recent ON server_user_media_state(user_id, last_played_at DESC)")
         try execute("CREATE INDEX IF NOT EXISTS index_server_user_media_state_media ON server_user_media_state(media_id)")
+    }
+
+    /// 服务端资料库搜索索引。采用 external-content FTS5 表，原始媒体数据仍只存于
+    /// `media_items`；触发器保证扫描、远端同步、编辑和删除的索引同步在同一事务内完成。
+    /// 索引不包含文件路径、外部地址、凭据或桌面端播放痕迹。
+    private func migrateToVersion25() throws {
+        try execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS media_items_fts USING fts5(
+          title,
+          original_title,
+          artist,
+          album,
+          genre,
+          year,
+          content='media_items',
+          content_rowid='rowid',
+          tokenize='unicode61 remove_diacritics 2'
+        )
+        """)
+        try execute("""
+        CREATE TRIGGER IF NOT EXISTS media_items_fts_insert
+        AFTER INSERT ON media_items BEGIN
+          INSERT INTO media_items_fts(rowid, title, original_title, artist, album, genre, year)
+          VALUES (new.rowid, new.title, new.original_title, new.artist, new.album, new.genre, new.year);
+        END
+        """)
+        try execute("""
+        CREATE TRIGGER IF NOT EXISTS media_items_fts_delete
+        AFTER DELETE ON media_items BEGIN
+          INSERT INTO media_items_fts(media_items_fts, rowid, title, original_title, artist, album, genre, year)
+          VALUES ('delete', old.rowid, old.title, old.original_title, old.artist, old.album, old.genre, old.year);
+        END
+        """)
+        try execute("""
+        CREATE TRIGGER IF NOT EXISTS media_items_fts_update
+        AFTER UPDATE OF title, original_title, artist, album, genre, year ON media_items BEGIN
+          INSERT INTO media_items_fts(media_items_fts, rowid, title, original_title, artist, album, genre, year)
+          VALUES ('delete', old.rowid, old.title, old.original_title, old.artist, old.album, old.genre, old.year);
+          INSERT INTO media_items_fts(rowid, title, original_title, artist, album, genre, year)
+          VALUES (new.rowid, new.title, new.original_title, new.artist, new.album, new.genre, new.year);
+        END
+        """)
+        try execute("INSERT INTO media_items_fts(media_items_fts) VALUES ('rebuild')")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_server_top_level_updated ON media_items(source_path, type, parent_id, updated_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_server_top_level_title ON media_items(source_path, type, parent_id, title COLLATE NOCASE)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_server_top_level_year ON media_items(source_path, type, parent_id, year DESC)")
+    }
+
+    /// 服务端用户自己的收藏、想看与评分，不复用桌面端 `media_items` 全局字段。
+    /// 这保证 Web/Mlink 多用户互不覆盖，也避免扫描或远端同步写入改变服务端偏好。
+    private func migrateToVersion26() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_user_media_preferences (
+          user_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          is_favorite INTEGER NOT NULL DEFAULT 0 CHECK (is_favorite IN (0, 1)),
+          is_watchlist INTEGER NOT NULL DEFAULT 0 CHECK (is_watchlist IN (0, 1)),
+          user_rating REAL CHECK (user_rating IS NULL OR (user_rating > 0 AND user_rating <= 5)),
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(user_id, media_id),
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_server_user_media_preferences_favorite ON server_user_media_preferences(user_id, is_favorite, updated_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS index_server_user_media_preferences_watchlist ON server_user_media_preferences(user_id, is_watchlist, updated_at DESC)")
     }
 
     private func validateBackup(at backupURL: URL) throws {

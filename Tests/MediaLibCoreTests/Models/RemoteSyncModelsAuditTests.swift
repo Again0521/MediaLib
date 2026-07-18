@@ -54,6 +54,7 @@ final class RemoteSyncModelsAuditTests: XCTestCase {
         XCTAssertEqual(RemoteConnectorProvider.emby.displayName, "Emby")
         XCTAssertEqual(RemoteConnectorProvider.jellyfin.displayName, "Jellyfin")
         XCTAssertEqual(RemoteConnectorProvider.plex.displayName, "Plex")
+        XCTAssertEqual(RemoteConnectorProvider.mlink.displayName, "MediaLIB Server")
         XCTAssertEqual(RemoteConnectorProvider.trakt.displayName, "Trakt")
         XCTAssertEqual(RemoteConnectorProvider.iCloud.displayName, "iCloud")
     }

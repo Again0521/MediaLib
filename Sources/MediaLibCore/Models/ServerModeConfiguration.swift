@@ -12,17 +12,22 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
     public var serverID: String
     public var serverName: String
     public var port: Int
+    /// 仅在服务模式运行时生效：桌面端停止非必要视觉预热，服务子进程采用 utility QoS。
+    /// 索引、认证、扫描和媒体分发仍保持可用，不能把轻量模式实现成停掉服务功能。
+    public var isLightweightMode: Bool
 
     public init(
         isEnabled: Bool = false,
         serverID: String = UUID().uuidString.lowercased(),
         serverName: String = ServerModeConfiguration.defaultServerName,
-        port: Int = ServerModeConfiguration.defaultPort
+        port: Int = ServerModeConfiguration.defaultPort,
+        isLightweightMode: Bool = false
     ) {
         self.isEnabled = isEnabled
         self.serverID = Self.normalizedServerID(serverID)
         self.serverName = Self.normalizedServerName(serverName)
         self.port = Self.normalizedPort(port)
+        self.isLightweightMode = isLightweightMode
     }
 
     public var loopbackBaseURL: URL {
@@ -42,6 +47,7 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         case serverID
         case serverName
         case port
+        case isLightweightMode
     }
 
     public init(from decoder: Decoder) throws {
@@ -50,7 +56,8 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
             isEnabled: try container.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? false,
             serverID: try container.decodeIfPresent(String.self, forKey: .serverID) ?? UUID().uuidString.lowercased(),
             serverName: try container.decodeIfPresent(String.self, forKey: .serverName) ?? Self.defaultServerName,
-            port: try container.decodeIfPresent(Int.self, forKey: .port) ?? Self.defaultPort
+            port: try container.decodeIfPresent(Int.self, forKey: .port) ?? Self.defaultPort,
+            isLightweightMode: try container.decodeIfPresent(Bool.self, forKey: .isLightweightMode) ?? false
         )
     }
 

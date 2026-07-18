@@ -165,6 +165,9 @@ public struct MediaSource: Identifiable, Codable, Hashable, Sendable {
         if normalizedPath.hasPrefix("plex://") {
             return .plex
         }
+        if normalizedPath.hasPrefix("mlink://") {
+            return .mlink
+        }
         if normalizedPath.hasPrefix("smb://") {
             return .smb
         }
@@ -184,7 +187,7 @@ public struct MediaSource: Identifiable, Codable, Hashable, Sendable {
     public var displayPath: String {
         guard let components = URLComponents(string: path),
               let scheme = components.scheme,
-              ["emby", "jellyfin", "plex", "smb", "ftp", "ftps"].contains(scheme.lowercased()) else {
+              ["emby", "jellyfin", "plex", "mlink", "smb", "ftp", "ftps"].contains(scheme.lowercased()) else {
             return path
         }
         var sanitized = components
@@ -199,13 +202,15 @@ public enum MediaSourceKind: String, Codable, Hashable {
     case emby
     case jellyfin
     case plex
+    /// MediaLIB Mlink 服务端来源；认证、分类和播放 URL 均使用 Mlink 契约，不复用第三方协议。
+    case mlink
     case smb
     case ftp
     /// 用户添加的网络视频地址（http/rtsp 等）聚合成的虚拟来源，不对应磁盘目录。
     case url
 
     public var isRemoteMediaServer: Bool {
-        self == .emby || self == .jellyfin || self == .plex
+        self == .emby || self == .jellyfin || self == .plex || self == .mlink
     }
 
     public var displayName: String {
@@ -214,6 +219,7 @@ public enum MediaSourceKind: String, Codable, Hashable {
         case .emby: return "EMBY"
         case .jellyfin: return "Jellyfin"
         case .plex: return "Plex"
+        case .mlink: return "MediaLIB Server"
         case .smb: return "SMB"
         case .ftp: return "FTP"
         case .url: return "URL"

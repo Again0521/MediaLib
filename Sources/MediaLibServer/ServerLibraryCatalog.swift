@@ -8,88 +8,103 @@ final class ServerLibraryCatalog {
     private let mediaRepository: MediaRepository
     private let sourceRepository: SourceRepository
     private let userMediaStateRepository: ServerUserMediaStateRepository
+    private let userMediaPreferenceRepository: ServerUserMediaPreferenceRepository
 
     init(database: DatabaseManager) {
         self.mediaRepository = MediaRepository(database: database)
         self.sourceRepository = SourceRepository(database: database)
         self.userMediaStateRepository = ServerUserMediaStateRepository(database: database)
+        self.userMediaPreferenceRepository = ServerUserMediaPreferenceRepository(database: database)
     }
 
     func snapshot(for principal: ServerRequestPrincipal) throws -> ServerLibrarySnapshot {
-        let visibleItems = try publicItems(for: principal, requiring: .viewMedia)
-        let countsByType = visibleItems.reduce(into: [String: Int]()) { counts, item in
-            counts[item.type.rawValue, default: 0] += 1
+        guard principal.permissions.contains(.viewMedia) else {
+            return ServerLibrarySnapshot(
+                summary: ServerLibrarySummary(totalItemCount: 0, countsByType: [:]),
+                items: ServerLibraryItemsResponse(totalItemCount: 0, items: [])
+            )
         }
-        let cards = visibleItems
-            .filter { $0.parentID == nil && $0.type != .episode }
-            .sorted {
-                if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
-                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
-            }
-            .prefix(60)
-            .map {
+        let home = try mediaRepository.fetchServerLibraryHome(
+            allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia)
+        )
+        let states = try userMediaStateRepository.fetch(userID: principal.userID, mediaIDs: home.items.map(\.id))
+        let preferences = try userMediaPreferenceRepository.fetch(userID: principal.userID, mediaIDs: home.items.map(\.id))
+        let cards = home.items.map {
                 ServerLibraryItem(
                     id: $0.id,
                     type: $0.type.rawValue,
                     title: $0.cardTitle,
                     year: $0.year,
-                    artworkAvailable: $0.posterPath?.isEmpty == false
+                    artworkAvailable: $0.posterPath?.isEmpty == false,
+                    isSeries: Self.isSeriesContainer($0),
+                    userState: states[$0.id].map(Self.protocolState),
+                    userPreference: preferences[$0.id].map(Self.protocolPreference) ?? .empty
                 )
             }
         return ServerLibrarySnapshot(
             summary: ServerLibrarySummary(
-                totalItemCount: visibleItems.count,
-                countsByType: countsByType
+                totalItemCount: home.totalItemCount,
+                countsByType: home.countsByType
             ),
             items: ServerLibraryItemsResponse(totalItemCount: cards.count, items: cards)
         )
     }
 
     func categories(for principal: ServerRequestPrincipal) throws -> ServerLibraryCategoriesResponse {
-        let counts = try publicItems(for: principal, requiring: .viewMedia).reduce(into: [MediaType: Int]()) {
-            $0[$1.type, default: 0] += 1
-        }
+        guard principal.permissions.contains(.viewMedia) else { return ServerLibraryCategoriesResponse(categories: []) }
+        let summary = try mediaRepository.fetchServerLibraryHome(
+            allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
+            cardLimit: 1
+        )
         let categories = MediaType.allCases.compactMap { type -> ServerLibraryCategory? in
-            guard type != .privateCollection, type != .auto, let count = counts[type], count > 0 else { return nil }
+            guard type != .privateCollection,
+                  type != .auto,
+                  let count = summary.countsByType[type.rawValue],
+                  count > 0
+            else { return nil }
             return ServerLibraryCategory(id: type.rawValue, title: type.displayName, itemCount: count)
         }
         return ServerLibraryCategoriesResponse(categories: categories)
     }
 
     func browse(_ query: ServerLibraryQuery, for principal: ServerRequestPrincipal) throws -> ServerLibraryItemsPage {
-        var items = try publicItems(for: principal, requiring: .viewMedia)
-        if let type = query.type, let mediaType = MediaType(rawValue: type) {
-            items = items.filter { $0.type == mediaType }
-        } else {
-            items = items.filter { $0.parentID == nil && $0.type != .episode }
+        guard principal.permissions.contains(.viewMedia) else {
+            return ServerLibraryItemsPage(totalItemCount: 0, offset: query.offset, limit: query.limit, items: [])
         }
-        if let searchText = query.searchText?.trimmingCharacters(in: .whitespacesAndNewlines), !searchText.isEmpty {
-            let needle = searchText.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            items = items.filter { item in
-                [item.cardTitle, item.originalTitle, item.artist, item.album, item.genre, item.year.map(String.init)]
-                    .compactMap { $0 }
-                    .contains { $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current).contains(needle) }
-            }
+        let type = query.type.flatMap(MediaType.init(rawValue:))
+        let playbackFilter: ServerLibraryUserStateFilter? = switch query.playbackFilter {
+        case .inProgress: .inProgress
+        case .watched: .watched
+        case .unwatched: .unwatched
+        case .history: .history
+        case nil: nil
         }
-        switch query.sort {
-        case .updatedDescending:
-            items.sort {
-                if $0.updatedAt != $1.updatedAt { return $0.updatedAt > $1.updatedAt }
-                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
-            }
-        case .titleAscending:
-            items.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-        case .yearDescending:
-            items.sort {
-                if $0.year != $1.year { return ($0.year ?? Int.min) > ($1.year ?? Int.min) }
-                return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
-            }
+        let preferenceFilter: ServerLibraryUserPreferenceFilter? = switch query.preferenceFilter {
+        case .favorite: .favorite
+        case .watchlist: .watchlist
+        case .rated: .rated
+        case nil: nil
         }
-        let total = items.count
-        let pageItems = query.offset < total
-            ? Array(items.dropFirst(query.offset).prefix(query.limit))
-            : []
+        // 只有 history 查询连接当前用户状态表，才允许按该表的最近播放时间排序；
+        // 其他受限请求即使携带该安全枚举也降级为资料更新时间，避免引用不存在的 SQL 别名。
+        let sort: ServerLibraryDatabaseSort = query.playbackFilter == .history && query.sort == .lastPlayedDescending
+            ? .lastPlayedDescending
+            : databaseSort(query.sort)
+        let databasePage = try mediaRepository.fetchServerLibraryPage(
+            allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
+            type: type,
+            topLevelOnly: type == nil && playbackFilter == nil && preferenceFilter == nil,
+            searchText: query.searchText,
+            offset: query.offset,
+            limit: query.limit,
+            sort: sort,
+            userID: principal.userID,
+            playbackFilter: playbackFilter,
+            preferenceFilter: preferenceFilter
+        )
+        let pageItems = databasePage.items
         let states = try userMediaStateRepository.fetch(userID: principal.userID, mediaIDs: pageItems.map(\.id))
+        let preferences = try userMediaPreferenceRepository.fetch(userID: principal.userID, mediaIDs: pageItems.map(\.id))
         let cards = pageItems.map { item in
             ServerLibraryItem(
                 id: item.id,
@@ -97,11 +112,13 @@ final class ServerLibraryCatalog {
                 title: Self.boundedText(item.cardTitle, maximumLength: 512) ?? "未命名媒体",
                 year: item.year,
                 artworkAvailable: item.posterPath?.isEmpty == false,
-                userState: states[item.id].map(Self.protocolState)
+                isSeries: Self.isSeriesContainer(item),
+                userState: states[item.id].map(Self.protocolState),
+                userPreference: preferences[item.id].map(Self.protocolPreference) ?? .empty
             )
         }
         return ServerLibraryItemsPage(
-            totalItemCount: total,
+            totalItemCount: databasePage.totalItemCount,
             offset: query.offset,
             limit: query.limit,
             items: cards
@@ -115,11 +132,10 @@ final class ServerLibraryCatalog {
         let hasReadableAsset = item.filePath.flatMap(Self.localReadableFileURL(from:)) != nil
         let isPlayable = try publicItems(for: principal, requiring: .playMedia)
             .contains(where: { $0.id == id })
-        let isTranscodable = try publicItems(for: principal, requiring: .transcodePlayback)
-            .contains(where: { $0.id == id })
         let canDirectPlay = hasReadableAsset && isPlayable
-        let canTranscode = hasReadableAsset && isTranscodable
+        let episodeNavigation = try authorizedEpisodeNavigation(for: item, principal: principal)
         let userState = try userMediaStateRepository.fetch(userID: principal.userID, mediaID: item.id)
+        let userPreference = try userMediaPreferenceRepository.fetch(userID: principal.userID, mediaID: item.id)
         let runtimeSeconds: Double? = {
             if let duration = item.duration, duration.isFinite, duration >= 0 { return duration }
             if let runtime = item.runtime, runtime >= 0 { return Double(runtime) * 60 }
@@ -141,8 +157,105 @@ final class ServerLibraryCatalog {
             artworkAvailable: item.posterPath?.isEmpty == false,
             backdropAvailable: item.backdropPath?.isEmpty == false,
             canDirectPlay: canDirectPlay,
-            canTranscode: canTranscode,
-            userState: userState.map(Self.protocolState)
+            canTranscode: false,
+            previousEpisode: episodeNavigation.previous,
+            nextEpisode: episodeNavigation.next,
+            userState: userState.map(Self.protocolState),
+            userPreference: userPreference.map(Self.protocolPreference) ?? .empty
+        )
+    }
+
+    func seriesDetail(id: String, for principal: ServerRequestPrincipal) throws -> ServerSeriesDetail? {
+        guard principal.permissions.contains(.viewMedia),
+              let overview = try mediaRepository.fetchServerSeriesOverview(
+                allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
+                seriesID: id,
+                userID: principal.userID
+              )
+        else { return nil }
+        let item = overview.series
+        let preference = try userMediaPreferenceRepository.fetch(userID: principal.userID, mediaID: item.id)
+        let seasons = overview.seasons.map { season in
+            let title: String
+            let seasonID: String
+            if let number = season.seasonNumber {
+                title = number == 0 ? "特别篇" : "第 \(number) 季"
+                seasonID = "season-\(number)"
+            } else {
+                title = "未分季"
+                seasonID = "unspecified"
+            }
+            return ServerSeriesSeason(
+                id: seasonID,
+                seasonNumber: season.seasonNumber,
+                title: title,
+                episodeCount: season.episodeCount,
+                watchedCount: season.watchedCount,
+                inProgressCount: season.inProgressCount
+            )
+        }
+        return ServerSeriesDetail(
+            id: item.id,
+            type: item.type.rawValue,
+            title: Self.boundedText(item.cardTitle, maximumLength: 512) ?? "未命名系列",
+            originalTitle: Self.boundedText(item.originalTitle, maximumLength: 512),
+            year: item.year,
+            overview: Self.boundedText(item.overview, maximumLength: 8_000),
+            genres: Self.genres(item.genre),
+            communityRating: item.rating,
+            artworkAvailable: item.posterPath?.isEmpty == false,
+            backdropAvailable: item.backdropPath?.isEmpty == false,
+            totalEpisodeCount: overview.totalEpisodeCount,
+            seasons: seasons,
+            userPreference: preference.map(Self.protocolPreference) ?? .empty
+        )
+    }
+
+    func seriesEpisodes(
+        id: String,
+        season: ServerSeriesSeasonSelector,
+        offset: Int,
+        limit: Int,
+        for principal: ServerRequestPrincipal
+    ) throws -> ServerSeriesEpisodesPage? {
+        guard principal.permissions.contains(.viewMedia) else { return nil }
+        let allowedSourcePaths = try allowedPublicSourcePaths(for: principal, requiring: .viewMedia)
+        guard
+              try mediaRepository.fetchServerSeriesOverview(
+                allowedSourcePaths: allowedSourcePaths,
+                seriesID: id,
+                userID: principal.userID
+              ) != nil
+        else { return nil }
+        let page = try mediaRepository.fetchServerSeriesEpisodePage(
+            allowedSourcePaths: allowedSourcePaths,
+            seriesID: id,
+            season: season,
+            offset: offset,
+            limit: limit
+        )
+        let states = try userMediaStateRepository.fetch(userID: principal.userID, mediaIDs: page.items.map(\.id))
+        let items = page.items.map { item in
+            let runtimeSeconds: Double? = {
+                if let duration = item.duration, duration.isFinite, duration >= 0 { return duration }
+                if let runtime = item.runtime, runtime >= 0 { return Double(runtime) * 60 }
+                return nil
+            }()
+            return ServerSeriesEpisode(
+                id: item.id,
+                title: Self.boundedText(item.cardTitle, maximumLength: 512) ?? "未命名剧集",
+                seasonNumber: item.seasonNumber,
+                episodeNumber: item.episodeNumber,
+                runtimeSeconds: runtimeSeconds,
+                artworkAvailable: item.posterPath?.isEmpty == false,
+                userState: states[item.id].map(Self.protocolState)
+            )
+        }
+        return ServerSeriesEpisodesPage(
+            totalItemCount: page.totalItemCount,
+            offset: offset,
+            limit: min(max(limit, 1), 100),
+            items: items
         )
     }
 
@@ -174,6 +287,22 @@ final class ServerLibraryCatalog {
         return Self.protocolState(state)
     }
 
+    func updatePreference(
+        id: String,
+        preference: ServerUserMediaPreferenceUpdate,
+        for principal: ServerRequestPrincipal
+    ) throws -> ServerMediaUserPreference? {
+        guard try publicItems(for: principal, requiring: .viewMedia).contains(where: { $0.id == id }) else {
+            return nil
+        }
+        let record = try userMediaPreferenceRepository.update(
+            userID: principal.userID,
+            mediaID: id,
+            preference: preference
+        )
+        return Self.protocolPreference(record)
+    }
+
     /// 将媒体 ID 映射为可读取的本地文件，但绝不将这个路径交给 DTO 或路由以外的调用者。
     /// 调用前已经通过用户、资料库、能力和会话授权；未知与无权 ID 统一返回 nil。
     func publicAsset(
@@ -195,6 +324,35 @@ final class ServerLibraryCatalog {
             return nil
         }
         return ServerMediaAsset(id: item.id, fileURL: url, byteLength: size)
+    }
+
+    /// 浏览器原生字幕只交付同目录、同基名的外挂 WebVTT。这里不转换 SRT/ASS，
+    /// 也不让调用方提供文件名或路径，避免字幕入口退化为任意文件读取。
+    func webVTTSubtitleTracks(
+        id: String,
+        for principal: ServerRequestPrincipal
+    ) throws -> [ServerWebVTTSubtitleTrack]? {
+        guard let asset = try publicAsset(id: id, for: principal, requiring: .playMedia) else {
+            return nil
+        }
+        return try Self.webVTTSubtitleAssets(for: asset).enumerated().map {
+            ServerWebVTTSubtitleTrack(id: $0.offset, label: "字幕 \($0.offset + 1)")
+        }
+    }
+
+    func publicWebVTTSubtitleAsset(
+        id: String,
+        trackID: Int,
+        for principal: ServerRequestPrincipal
+    ) throws -> ServerMediaAsset? {
+        guard (0..<ServerWebVTTSubtitleTrack.maximumTrackCount).contains(trackID),
+              let asset = try publicAsset(id: id, for: principal, requiring: .playMedia)
+        else {
+            return nil
+        }
+        let tracks = try Self.webVTTSubtitleAssets(for: asset)
+        guard tracks.indices.contains(trackID) else { return nil }
+        return tracks[trackID]
     }
 
     /// 海报/背景图使用与详情相同的逐条目授权，不接受客户端路径。SVG 等可执行图片格式
@@ -230,25 +388,87 @@ final class ServerLibraryCatalog {
         requiring permission: ServerPermission
     ) throws -> [MediaItem] {
         guard principal.permissions.contains(permission) else { return [] }
-        let sources = try sourceRepository.fetchAll()
-        let publicSources = sources.filter { $0.mediaType != .privateCollection }
-        let publicSourcePaths = Set(publicSources.map(\.path))
-        let allowedSourcePaths: Set<String>
-        if principal.canManageServer {
-            allowedSourcePaths = publicSourcePaths
-        } else {
-            allowedSourcePaths = Set(publicSources.compactMap { source in
-                principal.allows(permission, libraryID: source.id) ? source.path : nil
-            })
-        }
+        let allowedSourcePaths = try allowedPublicSourcePaths(for: principal, requiring: permission)
         return try mediaRepository.fetchAll().filter { item in
             guard item.type != .privateCollection,
                   let sourcePath = item.sourcePath,
-                  publicSourcePaths.contains(sourcePath)
+                  !sourcePath.isEmpty
             else {
                 return false
             }
             return allowedSourcePaths.contains(sourcePath)
+        }
+    }
+
+    private func allowedPublicSourcePaths(
+        for principal: ServerRequestPrincipal,
+        requiring permission: ServerPermission
+    ) throws -> Set<String> {
+        guard principal.permissions.contains(permission) else { return [] }
+        let publicSources = try sourceRepository.fetchAll().filter { $0.mediaType != .privateCollection }
+        if principal.canManageServer {
+            return Set(publicSources.map(\.path).filter { !$0.isEmpty })
+        }
+        return Set(publicSources.compactMap { source in
+            principal.allows(permission, libraryID: source.id) && !source.path.isEmpty ? source.path : nil
+        })
+    }
+
+    private func authorizedEpisodeNavigation(
+        for item: MediaItem,
+        principal: ServerRequestPrincipal
+    ) throws -> (previous: ServerEpisodeNavigation?, next: ServerEpisodeNavigation?) {
+        guard item.type == .episode, let parentID = item.parentID, !parentID.isEmpty else {
+            return (nil, nil)
+        }
+        let episodes = try publicItems(for: principal, requiring: .playMedia)
+            .filter {
+                $0.type == .episode &&
+                    $0.parentID == parentID &&
+                    $0.filePath.flatMap(Self.localReadableFileURL(from:)) != nil
+            }
+            .sorted {
+                let leftSeason = $0.seasonNumber ?? Int.min
+                let rightSeason = $1.seasonNumber ?? Int.min
+                if leftSeason != rightSeason { return leftSeason < rightSeason }
+                let leftEpisode = $0.episodeNumber ?? Int.min
+                let rightEpisode = $1.episodeNumber ?? Int.min
+                if leftEpisode != rightEpisode { return leftEpisode < rightEpisode }
+                let titleOrder = $0.title.localizedCaseInsensitiveCompare($1.title)
+                if titleOrder != .orderedSame { return titleOrder == .orderedAscending }
+                return $0.id < $1.id
+            }
+        guard let index = episodes.firstIndex(where: { $0.id == item.id }) else { return (nil, nil) }
+        func navigation(_ episode: MediaItem?) -> ServerEpisodeNavigation? {
+            guard let episode else { return nil }
+            return ServerEpisodeNavigation(
+                id: episode.id,
+                title: Self.boundedText(episode.cardTitle, maximumLength: 512) ?? "未命名剧集"
+            )
+        }
+        return (
+            navigation(index > episodes.startIndex ? episodes[index - 1] : nil),
+            navigation(index + 1 < episodes.endIndex ? episodes[index + 1] : nil)
+        )
+    }
+
+    private func databaseSort(_ sort: ServerLibrarySort) -> ServerLibraryDatabaseSort {
+        switch sort {
+        case .updatedDescending: return .updatedDescending
+        case .titleAscending: return .titleAscending
+        case .yearDescending: return .yearDescending
+        case .lastPlayedDescending: return .updatedDescending
+        }
+    }
+
+    private static func isSeriesContainer(_ item: MediaItem) -> Bool {
+        switch item.type {
+        case .tvShow, .anime, .variety:
+            return true
+        case .documentary:
+            return item.filePath?.isEmpty != false
+        default:
+            return false
         }
     }
 
@@ -262,6 +482,36 @@ final class ServerLibraryCatalog {
         }
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return url
+    }
+
+    private static func webVTTSubtitleAssets(for asset: ServerMediaAsset) throws -> [ServerMediaAsset] {
+        let fileManager = FileManager.default
+        let resolvedMediaURL = asset.fileURL.resolvingSymlinksInPath().standardizedFileURL
+        let directory = resolvedMediaURL.deletingLastPathComponent()
+        let stem = resolvedMediaURL.deletingPathExtension().lastPathComponent
+        guard !stem.isEmpty else { return [] }
+        let candidates = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        )
+        return try candidates.compactMap { candidate -> ServerMediaAsset? in
+            guard candidate.pathExtension.lowercased() == "vtt" else { return nil }
+            let resolvedCandidate = candidate.resolvingSymlinksInPath().standardizedFileURL
+            guard resolvedCandidate.deletingLastPathComponent() == directory else { return nil }
+            let candidateStem = resolvedCandidate.deletingPathExtension().lastPathComponent
+            guard candidateStem == stem || candidateStem.hasPrefix(stem + ".") else { return nil }
+            let values = try resolvedCandidate.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard values.isRegularFile == true,
+                  let size = values.fileSize,
+                  size > 0,
+                  size <= ServerWebVTTSubtitleTrack.maximumByteLength
+            else { return nil }
+            return ServerMediaAsset(id: asset.id, fileURL: resolvedCandidate, byteLength: Int64(size))
+        }
+        .sorted { $0.fileURL.lastPathComponent.localizedStandardCompare($1.fileURL.lastPathComponent) == .orderedAscending }
+        .prefix(ServerWebVTTSubtitleTrack.maximumTrackCount)
+        .map { $0 }
     }
 
     private static func boundedText(_ value: String?, maximumLength: Int) -> String? {
@@ -292,11 +542,28 @@ final class ServerLibraryCatalog {
             updatedAt: state.updatedAt
         )
     }
+
+    private static func protocolPreference(_ preference: ServerUserMediaPreferenceRecord) -> ServerMediaUserPreference {
+        ServerMediaUserPreference(
+            isFavorite: preference.isFavorite,
+            isWatchlist: preference.isWatchlist,
+            rating: preference.userRating
+        )
+    }
 }
 
 struct ServerLibrarySnapshot {
     let summary: ServerLibrarySummary
     let items: ServerLibraryItemsResponse
+}
+
+/// Web 专用的外挂字幕引用。ID 只是稳定排序后的有界序号，绝不携带文件名或路径。
+struct ServerWebVTTSubtitleTrack: Codable, Equatable {
+    static let maximumTrackCount = 16
+    static let maximumByteLength = 8 * 1024 * 1024
+
+    let id: Int
+    let label: String
 }
 
 /// 保持在 Server target 内部的已授权媒体文件引用。任何协议响应都只携带媒体 ID，
@@ -318,6 +585,7 @@ struct ServerMediaAsset {
         case "aac": return "audio/aac"
         case "flac": return "audio/flac"
         case "wav": return "audio/wav"
+        case "vtt": return "text/vtt; charset=utf-8"
         case "jpg", "jpeg", "jfif": return "image/jpeg"
         case "png": return "image/png"
         case "webp": return "image/webp"

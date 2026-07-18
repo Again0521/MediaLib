@@ -1,5 +1,67 @@
 import Foundation
 
+/// 服务端资料库的固定排序集合。调用方不能把 SQL 片段带入这个边界。
+public enum ServerLibraryDatabaseSort: Sendable {
+    case updatedDescending
+    case titleAscending
+    case yearDescending
+    case lastPlayedDescending
+}
+
+/// 服务器已认证用户自己的播放状态筛选。此枚举不接受数据库列或任意 SQL，
+/// 并只在授权来源筛选之后与 `server_user_media_state` 做绑定用户的连接。
+public enum ServerLibraryUserStateFilter: Equatable, Sendable {
+    case inProgress
+    case watched
+    case unwatched
+    case history
+}
+
+/// 服务器已认证用户自己的偏好筛选。和播放状态一样，用户身份由服务端传入，
+/// 客户端不能表达任意列名或查询其他用户。
+public enum ServerLibraryUserPreferenceFilter: Sendable {
+    case favorite
+    case watchlist
+    case rated
+}
+
+/// 已在 SQLite 内完成授权来源过滤、全文检索、排序和分页的结果。
+public struct ServerLibraryDatabasePage: Sendable {
+    public let totalItemCount: Int
+    public let items: [MediaItem]
+}
+
+/// 资料库首页所需的受权摘要与有限卡片。计数和卡片都在 SQLite 内完成，
+/// 避免首页为展示 60 张海报而把整个授权媒体库物化到服务进程内存。
+public struct ServerLibraryDatabaseHome: Sendable {
+    public let totalItemCount: Int
+    public let countsByType: [String: Int]
+    public let items: [MediaItem]
+}
+
+public enum ServerSeriesSeasonSelector: Equatable, Sendable {
+    case numbered(Int)
+    case unspecified
+}
+
+public struct ServerSeriesDatabaseSeason: Equatable, Sendable {
+    public let seasonNumber: Int?
+    public let episodeCount: Int
+    public let watchedCount: Int
+    public let inProgressCount: Int
+}
+
+public struct ServerSeriesDatabaseOverview: Sendable {
+    public let series: MediaItem
+    public let totalEpisodeCount: Int
+    public let seasons: [ServerSeriesDatabaseSeason]
+}
+
+public struct ServerSeriesDatabaseEpisodePage: Sendable {
+    public let totalItemCount: Int
+    public let items: [MediaItem]
+}
+
 public final class MediaRepository {
     private let database: DatabaseManager
 
@@ -144,6 +206,242 @@ public final class MediaRepository {
             bindings: [.text(id)],
             map: map(row:)
         ).first
+    }
+
+    /// 供 HTTP/Mlink 服务端调用的有界资料库查询。授权来源在同一 SQLite 连接的临时表中
+    /// 表达，避免把完整媒体库拉入内存后再筛选；FTS 参数始终由受限文本构造，绝不拼入 SQL。
+    public func fetchServerLibraryPage(
+        allowedSourcePaths: Set<String>,
+        type: MediaType?,
+        topLevelOnly: Bool,
+        searchText: String?,
+        offset: Int,
+        limit: Int,
+        sort: ServerLibraryDatabaseSort,
+        userID: String,
+        playbackFilter: ServerLibraryUserStateFilter?,
+        preferenceFilter: ServerLibraryUserPreferenceFilter? = nil
+    ) throws -> ServerLibraryDatabasePage {
+        guard !allowedSourcePaths.isEmpty else { return ServerLibraryDatabasePage(totalItemCount: 0, items: []) }
+        let safeOffset = max(offset, 0)
+        let safeLimit = min(max(limit, 1), 100)
+        let ftsQuery = searchText.flatMap(Self.serverFTSQuery)
+
+        return try database.transaction {
+            try database.execute("CREATE TEMP TABLE IF NOT EXISTS server_library_allowed_source_paths (path TEXT PRIMARY KEY) WITHOUT ROWID")
+            try database.execute("DELETE FROM server_library_allowed_source_paths")
+            for path in allowedSourcePaths where !path.isEmpty {
+                try database.execute(
+                    "INSERT OR IGNORE INTO server_library_allowed_source_paths(path) VALUES (?)",
+                    bindings: [.text(path)]
+                )
+            }
+
+            var from = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            var bindings: [SQLiteValue] = []
+            if let playbackFilter {
+                let join = playbackFilter == .unwatched ? " LEFT JOIN " : " INNER JOIN "
+                from += join + "server_user_media_state AS user_state ON user_state.media_id = item.id AND user_state.user_id = ?"
+                bindings.append(.text(userID))
+            }
+            if preferenceFilter != nil {
+                from += " INNER JOIN server_user_media_preferences AS user_preference ON user_preference.media_id = item.id AND user_preference.user_id = ?"
+                bindings.append(.text(userID))
+            }
+            var predicates = ["item.type != ?"]
+            bindings.append(.text(MediaType.privateCollection.rawValue))
+            if let type {
+                predicates.append("item.type = ?")
+                bindings.append(.text(type.rawValue))
+            } else if topLevelOnly {
+                predicates.append("item.parent_id IS NULL")
+                predicates.append("item.type != ?")
+                bindings.append(.text(MediaType.episode.rawValue))
+            }
+            if let ftsQuery {
+                predicates.append("item.rowid IN (SELECT rowid FROM media_items_fts WHERE media_items_fts MATCH ?)")
+                bindings.append(.text(ftsQuery))
+            }
+            if let playbackFilter {
+                switch playbackFilter {
+                case .inProgress:
+                    predicates.append("user_state.is_watched = 0")
+                    predicates.append("user_state.play_progress > 0")
+                case .watched:
+                    predicates.append("user_state.is_watched = 1")
+                case .unwatched:
+                    predicates.append("(user_state.media_id IS NULL OR user_state.is_watched = 0)")
+                case .history:
+                    predicates.append("user_state.play_count > 0")
+                }
+            }
+            if let preferenceFilter {
+                switch preferenceFilter {
+                case .favorite:
+                    predicates.append("user_preference.is_favorite = 1")
+                case .watchlist:
+                    predicates.append("user_preference.is_watchlist = 1")
+                case .rated:
+                    predicates.append("user_preference.user_rating IS NOT NULL")
+                    predicates.append("user_preference.user_rating > 0")
+                }
+            }
+            let whereClause = " WHERE " + predicates.joined(separator: " AND ")
+            let total = try database.query("SELECT COUNT(*) " + from + whereClause, bindings: bindings) { $0.int(0) ?? 0 }.first ?? 0
+            var pageBindings = bindings
+            pageBindings.append(.int(Int64(safeLimit)))
+            pageBindings.append(.int(Int64(safeOffset)))
+            let pageSQL = serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: from)
+                + whereClause + " ORDER BY " + Self.serverOrderBy(sort) + " LIMIT ? OFFSET ?"
+            let items = try database.query(pageSQL, bindings: pageBindings, map: map(row:))
+            try database.execute("DELETE FROM server_library_allowed_source_paths")
+            return ServerLibraryDatabasePage(totalItemCount: total, items: items)
+        }
+    }
+
+    /// 供认证首页读取的有界摘要。授权来源仍写入同一连接的临时表，和分页 API
+    /// 使用完全相同的资料库边界；不同之处仅是 SQL 聚合分类并限制最近卡片数量。
+    public func fetchServerLibraryHome(
+        allowedSourcePaths: Set<String>,
+        cardLimit: Int = 60
+    ) throws -> ServerLibraryDatabaseHome {
+        guard !allowedSourcePaths.isEmpty else {
+            return ServerLibraryDatabaseHome(totalItemCount: 0, countsByType: [:], items: [])
+        }
+        let safeLimit = min(max(cardLimit, 1), 100)
+        return try database.transaction {
+            try database.execute("CREATE TEMP TABLE IF NOT EXISTS server_library_allowed_source_paths (path TEXT PRIMARY KEY) WITHOUT ROWID")
+            try database.execute("DELETE FROM server_library_allowed_source_paths")
+            for path in allowedSourcePaths where !path.isEmpty {
+                try database.execute(
+                    "INSERT OR IGNORE INTO server_library_allowed_source_paths(path) VALUES (?)",
+                    bindings: [.text(path)]
+                )
+            }
+
+            let from = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let visiblePredicate = " WHERE item.type != ?"
+            let visibleBindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
+            let countRows = try database.query(
+                "SELECT item.type, COUNT(*) " + from + visiblePredicate + " GROUP BY item.type",
+                bindings: visibleBindings
+            ) { row in
+                (row.string(0) ?? "", row.int(1) ?? 0)
+            }
+            let countsByType = countRows.reduce(into: [String: Int]()) { counts, row in
+                guard !row.0.isEmpty, row.1 > 0 else { return }
+                counts[row.0] = row.1
+            }
+            let items = try database.query(
+                serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: from)
+                    + visiblePredicate
+                    + " AND item.parent_id IS NULL AND item.type != ? ORDER BY item.updated_at DESC, item.title COLLATE NOCASE ASC LIMIT ?",
+                bindings: visibleBindings + [
+                    .text(MediaType.episode.rawValue),
+                    .int(Int64(safeLimit))
+                ],
+                map: map(row:)
+            )
+            try database.execute("DELETE FROM server_library_allowed_source_paths")
+            return ServerLibraryDatabaseHome(
+                totalItemCount: countsByType.values.reduce(0, +),
+                countsByType: countsByType,
+                items: items
+            )
+        }
+    }
+
+    /// 已授权系列首屏。父项和所有季统计都在授权来源临时表内读取，观看数量只连接
+    /// 当前用户状态；没有可见剧集的普通媒体不能伪装成系列容器。
+    public func fetchServerSeriesOverview(
+        allowedSourcePaths: Set<String>,
+        seriesID: String,
+        userID: String
+    ) throws -> ServerSeriesDatabaseOverview? {
+        guard !allowedSourcePaths.isEmpty, !seriesID.isEmpty else { return nil }
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            guard let series = try database.query(
+                serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: authorizedJoin)
+                    + " WHERE item.id = ? AND item.type != ? AND item.type != ? LIMIT 1",
+                bindings: [
+                    .text(seriesID),
+                    .text(MediaType.privateCollection.rawValue),
+                    .text(MediaType.episode.rawValue)
+                ],
+                map: map(row:)
+            ).first else { return nil }
+
+            let rows = try database.query(
+                """
+                SELECT item.season_number,
+                       COUNT(*),
+                       SUM(CASE WHEN user_state.is_watched = 1 THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN user_state.is_watched = 0 AND user_state.play_progress > 0 THEN 1 ELSE 0 END)
+                \(authorizedJoin)
+                LEFT JOIN server_user_media_state AS user_state
+                  ON user_state.media_id = item.id AND user_state.user_id = ?
+                WHERE item.parent_id = ? AND item.type = ?
+                GROUP BY item.season_number
+                ORDER BY item.season_number IS NULL ASC, item.season_number ASC
+                """,
+                bindings: [.text(userID), .text(seriesID), .text(MediaType.episode.rawValue)]
+            ) { row in
+                ServerSeriesDatabaseSeason(
+                    seasonNumber: row.int(0),
+                    episodeCount: row.int(1) ?? 0,
+                    watchedCount: row.int(2) ?? 0,
+                    inProgressCount: row.int(3) ?? 0
+                )
+            }
+            let total = rows.reduce(0) { $0 + max($1.episodeCount, 0) }
+            guard total > 0 else { return nil }
+            return ServerSeriesDatabaseOverview(series: series, totalEpisodeCount: total, seasons: rows)
+        }
+    }
+
+    /// 单季剧集分页。season 只能由固定 selector 表达，不能携带 SQL 或父级查询；
+    /// 单页最多 100 集，避免超长系列一次占满服务进程与浏览器内存。
+    public func fetchServerSeriesEpisodePage(
+        allowedSourcePaths: Set<String>,
+        seriesID: String,
+        season: ServerSeriesSeasonSelector,
+        offset: Int,
+        limit: Int
+    ) throws -> ServerSeriesDatabaseEpisodePage {
+        guard !allowedSourcePaths.isEmpty, !seriesID.isEmpty else {
+            return ServerSeriesDatabaseEpisodePage(totalItemCount: 0, items: [])
+        }
+        let safeOffset = min(max(offset, 0), 1_000_000)
+        let safeLimit = min(max(limit, 1), 100)
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            var predicate = " WHERE item.parent_id = ? AND item.type = ?"
+            var bindings: [SQLiteValue] = [.text(seriesID), .text(MediaType.episode.rawValue)]
+            switch season {
+            case let .numbered(number):
+                predicate += " AND item.season_number = ?"
+                bindings.append(.int(Int64(number)))
+            case .unspecified:
+                predicate += " AND item.season_number IS NULL"
+            }
+            let total = try database.query(
+                "SELECT COUNT(*) " + authorizedJoin + predicate,
+                bindings: bindings
+            ) { $0.int(0) ?? 0 }.first ?? 0
+            let items = try database.query(
+                serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: authorizedJoin)
+                    + predicate
+                    + " ORDER BY item.episode_number IS NULL ASC, item.episode_number ASC, item.title COLLATE NOCASE ASC, item.id ASC LIMIT ? OFFSET ?",
+                bindings: bindings + [.int(Int64(safeLimit)), .int(Int64(safeOffset))],
+                map: map(row:)
+            )
+            return ServerSeriesDatabaseEpisodePage(totalItemCount: total, items: items)
+        }
     }
 
     public func fetchTopLevel(type: MediaType? = nil) throws -> [MediaItem] {
@@ -511,6 +809,47 @@ public final class MediaRepository {
         """
     }
 
+    /// 服务端分页可能连接逐用户播放状态表；所有媒体列显式限定为 `item`，
+    /// 避免同名 `play_count` / `play_progress` 被 SQLite 解释为歧义列。
+    private var serverSelectSQL: String {
+        """
+        SELECT item.id, item.type, item.title, item.original_title, item.artist, item.album, item.track_number, item.year, item.overview, item.poster_path, item.backdrop_path,
+               item.rating, item.user_rating, item.runtime, item.source_path, item.parent_id, item.season_number, item.episode_number,
+               item.file_path, item.file_size, item.video_codec, item.audio_codec, item.resolution, item.video_bitrate, item.duration,
+               item.loudness_track_gain_db, item.loudness_album_gain_db, item.loudness_track_peak, item.loudness_album_peak,
+               item.play_count, item.play_position, item.play_progress, item.watched, item.favorite, item.watchlist, item.external_id, item.metadata_provider, item.collection_title, item.created_at, item.updated_at, item.last_played_at, item.genre
+        FROM media_items
+        """
+    }
+
+    private static func serverOrderBy(_ sort: ServerLibraryDatabaseSort) -> String {
+        switch sort {
+        case .updatedDescending:
+            return "item.updated_at DESC, item.title COLLATE NOCASE ASC, item.id ASC"
+        case .titleAscending:
+            return "item.title COLLATE NOCASE ASC, item.id ASC"
+        case .yearDescending:
+            return "CASE WHEN item.year IS NULL THEN 1 ELSE 0 END ASC, item.year DESC, item.title COLLATE NOCASE ASC, item.id ASC"
+        case .lastPlayedDescending:
+            return "user_state.last_played_at DESC, item.id ASC"
+        }
+    }
+
+    private static func serverFTSQuery(_ rawValue: String) -> String? {
+        let tokens = rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        guard !tokens.isEmpty else { return nil }
+        // 每个 token 始终是被双引号包围的词组，内嵌引号加倍；末尾唯一的 `*`
+        // 由服务端添加以支持前缀检索，客户端无法注入 MATCH 运算符或字段名。
+        return tokens.map { token in
+            let escaped = token.replacingOccurrences(of: "\"", with: "\"\"")
+            return "\"\(escaped)\"*"
+        }.joined(separator: " AND ")
+    }
+
     private func bindings(for item: MediaItem) -> [SQLiteValue] {
         [
             .text(item.id),
@@ -712,6 +1051,17 @@ public final class MediaRepository {
 
     private static func escapedLikeContainsPattern(for value: String) -> String {
         "%\(escapedLikeLiteral(value))%"
+    }
+
+    private func prepareServerAllowedSourcePaths(_ allowedSourcePaths: Set<String>) throws {
+        try database.execute("CREATE TEMP TABLE IF NOT EXISTS server_library_allowed_source_paths (path TEXT PRIMARY KEY) WITHOUT ROWID")
+        try database.execute("DELETE FROM server_library_allowed_source_paths")
+        for path in allowedSourcePaths where !path.isEmpty {
+            try database.execute(
+                "INSERT OR IGNORE INTO server_library_allowed_source_paths(path) VALUES (?)",
+                bindings: [.text(path)]
+            )
+        }
     }
 
     private static func escapedLikeLiteral(_ value: String) -> String {

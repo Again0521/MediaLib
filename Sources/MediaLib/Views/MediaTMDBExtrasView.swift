@@ -141,7 +141,7 @@ struct MediaTMDBExtrasView: View {
                     .foregroundStyle(.secondary)
             }
             .padding(14)
-            .staticSurfaceBackground(cornerRadius: 14)
+            .staticSurfaceBackground(cornerRadius: AppRadius.card)
         }
     }
 
@@ -523,7 +523,7 @@ struct MediaTMDBExtrasView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .staticSurfaceBackground(cornerRadius: 18)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card)
     }
 
     private func horizontalStrip<Content: View>(

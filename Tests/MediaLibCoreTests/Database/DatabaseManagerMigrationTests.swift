@@ -99,6 +99,59 @@ final class DatabaseManagerMigrationTests: XCTestCase {
         XCTAssertFalse(playbackColumns.contains("file_path"))
     }
 
+    func testVersion25MaintainsPathFreeFullTextIndexAcrossWrites() throws {
+        let db = try DatabaseManager(url: dbURL)
+        let repository = MediaRepository(database: db)
+        let indexNames = try db.query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'media_items_fts'"
+        ) { $0.string(0) ?? "" }
+        XCTAssertEqual(indexNames, ["media_items_fts"])
+
+        try repository.upsert(MediaItem(
+            id: "fts-item", type: .movie, title: "Amélie", artist: "Yann",
+            sourcePath: "/library", filePath: "/private/never-exposed/movie.mkv", genre: "Romance"
+        ))
+        XCTAssertEqual(
+            try db.query(
+                "SELECT id FROM media_items WHERE rowid IN (SELECT rowid FROM media_items_fts WHERE media_items_fts MATCH ?)",
+                bindings: [.text("amelie*")]
+            ) { $0.string(0) ?? "" },
+            ["fts-item"]
+        )
+
+        try repository.upsert(MediaItem(
+            id: "fts-item", type: .movie, title: "Moonlit Garden", artist: "Yann",
+            sourcePath: "/library", filePath: "/private/never-exposed/movie.mkv", genre: "Drama"
+        ))
+        XCTAssertEqual(
+            try db.query(
+                "SELECT COUNT(*) FROM media_items_fts WHERE media_items_fts MATCH ?",
+                bindings: [.text("amelie*")]
+            ) { $0.int(0) ?? -1 }.first,
+            0
+        )
+        XCTAssertEqual(
+            try db.query(
+                "SELECT COUNT(*) FROM media_items_fts WHERE media_items_fts MATCH ?",
+                bindings: [.text("moonlit*")]
+            ) { $0.int(0) ?? -1 }.first,
+            1
+        )
+        try db.execute("DELETE FROM media_items WHERE id = ?", bindings: [.text("fts-item")])
+        XCTAssertEqual(
+            try db.query("SELECT COUNT(*) FROM media_items_fts") { $0.int(0) ?? -1 }.first,
+            0
+        )
+    }
+
+    func testVersion26CreatesPathFreePerUserMediaPreferences() throws {
+        let db = try DatabaseManager(url: dbURL)
+        let columns = Set(try db.query("PRAGMA table_info(server_user_media_preferences)") { $0.string(1) ?? "" })
+        XCTAssertEqual(columns, Set(["user_id", "media_id", "is_favorite", "is_watchlist", "user_rating", "updated_at"]))
+        XCTAssertFalse(columns.contains("file_path"))
+        XCTAssertFalse(columns.contains("session_id"))
+    }
+
     func testDatabaseNewerThanAppThrowsRecognizableError() throws {
         // 先正常建库迁到当前版本，再把 user_version 人为顶到未来版本，模拟「旧应用打开新库」。
         do {

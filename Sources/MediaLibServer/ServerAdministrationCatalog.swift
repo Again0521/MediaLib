@@ -9,15 +9,27 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
     static let maximumDeviceCount = 500
     static let maximumSessionCount = 500
     static let maximumSecurityEventCount = 100
+    static let maximumSourceCount = 500
 
     private let repository: ServerIdentityRepository
+    private let sourceRepository: SourceRepository?
+    private let passwordHasher: ServerPasswordHasher?
 
-    init(repository: ServerIdentityRepository) {
+    init(
+        repository: ServerIdentityRepository,
+        sourceRepository: SourceRepository? = nil,
+        passwordHasher: ServerPasswordHasher? = try? ServerPasswordHasher()
+    ) {
         self.repository = repository
+        self.sourceRepository = sourceRepository
+        self.passwordHasher = passwordHasher
     }
 
     convenience init(database: DatabaseManager) {
-        self.init(repository: ServerIdentityRepository(database: database))
+        self.init(
+            repository: ServerIdentityRepository(database: database),
+            sourceRepository: SourceRepository(database: database)
+        )
     }
 
     func users() throws -> ServerManagedUsersResponse {
@@ -28,6 +40,7 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
                 id: user.id,
                 username: user.username,
                 displayName: user.displayName,
+                isBuiltInAdministrator: user.id == ServerIdentityRepository.initialAdministratorUserID,
                 isDisabled: user.isDisabled,
                 requiresInitialPassword: user.requiresInitialPassword,
                 roleIDs: try repository.roleIDs(userID: user.id),
@@ -108,4 +121,117 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
             }
         )
     }
+
+    func sources() throws -> ServerManagedSourcesResponse? {
+        guard let sourceRepository else { return nil }
+        let allSources = try sourceRepository.fetchAll()
+        let selected = allSources.prefix(Self.maximumSourceCount)
+        let summaries = selected.map { source in
+            ServerManagedSourceSummary(
+                id: source.id,
+                name: source.name,
+                mediaType: source.mediaType.rawValue,
+                sourceKind: source.sourceKind.rawValue,
+                autoScan: source.autoScan,
+                includeInMetadataFetch: source.includeInMetadataFetch,
+                includeInHealthCheck: source.includeInHealthCheck,
+                updatedAt: source.updatedAt
+            )
+        }
+        return ServerManagedSourcesResponse(
+            totalCount: allSources.count,
+            isTruncated: allSources.count > summaries.count,
+            sources: summaries
+        )
+    }
+
+    func libraries() throws -> ServerManagedLibrariesResponse? {
+        guard let sourceRepository else { return nil }
+        let allLibraries = try sourceRepository.fetchAll()
+            .filter { $0.mediaType != .privateCollection }
+            .sorted {
+                let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
+                return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
+            }
+        let selected = allLibraries.prefix(Self.maximumSourceCount)
+        return ServerManagedLibrariesResponse(
+            totalCount: allLibraries.count,
+            isTruncated: allLibraries.count > selected.count,
+            libraries: selected.map {
+                ServerManagedLibrarySummary(id: $0.id, name: $0.name, mediaType: $0.mediaType.rawValue)
+            }
+        )
+    }
+
+    /// 创建只能得到普通成员角色；提升至管理员或修改角色仍需专门的权限管理流程。
+    /// 所选资料库被限制为非保险库来源，并统一授予 view/play、拒绝下载与编辑权限。
+    func createMember(
+        username: String,
+        displayName: String,
+        password: String,
+        libraryIDs: [String],
+        actorUserID: String
+    ) throws {
+        let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1...128).contains(trimmedUsername.utf8.count),
+              (1...256).contains(trimmedDisplayName.utf8.count),
+              (12...1_024).contains(password.utf8.count),
+              libraryIDs.count <= 100,
+              Set(libraryIDs).count == libraryIDs.count,
+              libraryIDs.allSatisfy(Self.isSafeIdentifier)
+        else { throw ServerIdentityRepositoryError.invalidIdentifier }
+        guard let sourceRepository, let passwordHasher else {
+            throw ServerAdministrationCatalogError.unavailable
+        }
+        let permittedLibraryIDs = Set(
+            try sourceRepository.fetchAll()
+                .filter { $0.mediaType != .privateCollection }
+                .map(\.id)
+        )
+        guard Set(libraryIDs).isSubset(of: permittedLibraryIDs) else {
+            throw ServerIdentityRepositoryError.invalidIdentifier
+        }
+
+        // Argon2 成本计算始终发生在数据库事务外，明文也不保存在本 Catalog 的状态中。
+        let hash = try passwordHasher.hash(password: password)
+        let userID = UUID().uuidString
+        let grants = libraryIDs.map {
+            ServerLibraryGrant(
+                userID: userID,
+                libraryID: $0,
+                canView: true,
+                canPlay: true,
+                canDownload: false
+            )
+        }
+        _ = try repository.createConfiguredUser(
+            id: userID,
+            username: trimmedUsername,
+            displayName: trimmedDisplayName,
+            roleID: ServerIdentityRepository.memberRoleID,
+            argon2idEncodedHash: hash,
+            libraryGrants: grants,
+            actorUserID: actorUserID
+        )
+    }
+
+    func revokeSession(id: String, actorUserID: String) throws {
+        try repository.revokeSession(id: id, actorUserID: actorUserID)
+    }
+
+    func setUserDisabled(id: String, disabled: Bool, actorUserID: String) throws {
+        try repository.setUserDisabled(id: id, disabled: disabled, actorUserID: actorUserID)
+    }
+
+    private static func isSafeIdentifier(_ value: String) -> Bool {
+        guard !value.isEmpty, value.utf8.count <= 512,
+              !value.contains("/"), !value.contains("\\")
+        else { return false }
+        return !value.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7f }
+    }
+}
+
+enum ServerAdministrationCatalogError: Error {
+    case unavailable
 }

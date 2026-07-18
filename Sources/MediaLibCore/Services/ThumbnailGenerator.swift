@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import AVFoundation
 import Foundation
@@ -423,3 +424,4 @@ public final class ThumbnailGenerator {
         return Double(darkSamples) / Double(sampleCount) > 0.88
     }
 }
+#endif

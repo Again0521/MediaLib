@@ -53,6 +53,35 @@ final class ServerLibraryCatalogTests: XCTestCase {
         XCTAssertTrue(snapshot.items.items.first?.artworkAvailable == true)
     }
 
+    func testHomeSnapshotCountsAuthorizedEpisodesButLimitsCardsToRecentTopLevelItems() throws {
+        let sourceRepository = SourceRepository(database: database)
+        let mediaRepository = MediaRepository(database: database)
+        try sourceRepository.save(MediaSource(id: "public", name: "客厅电影", path: "/Volumes/Movies", mediaType: .movie))
+        let older = Date(timeIntervalSince1970: 100)
+        let newer = Date(timeIntervalSince1970: 200)
+        try mediaRepository.upsert(MediaItem(
+            id: "movie-a", type: .movie, title: "A 电影", sourcePath: "/Volumes/Movies",
+            filePath: "/Volumes/Movies/a.mp4", updatedAt: older
+        ))
+        try mediaRepository.upsert(MediaItem(
+            id: "movie-b", type: .movie, title: "B 电影", sourcePath: "/Volumes/Movies",
+            filePath: "/Volumes/Movies/b.mp4", updatedAt: newer
+        ))
+        try mediaRepository.upsert(MediaItem(
+            id: "episode", type: .episode, title: "第一集", sourcePath: "/Volumes/Movies",
+            parentID: "series", filePath: "/Volumes/Movies/e1.mp4", updatedAt: newer
+        ))
+
+        let snapshot = try ServerLibraryCatalog(database: database).snapshot(for: .testAdministrator())
+        let categories = try ServerLibraryCatalog(database: database).categories(for: .testAdministrator())
+
+        XCTAssertEqual(snapshot.summary.totalItemCount, 3)
+        XCTAssertEqual(snapshot.summary.countsByType, ["movie": 2, "episode": 1])
+        XCTAssertEqual(snapshot.items.items.map(\.id), ["movie-b", "movie-a"])
+        XCTAssertEqual(categories.categories.first(where: { $0.id == "movie" })?.itemCount, 2)
+        XCTAssertEqual(categories.categories.first(where: { $0.id == "episode" })?.itemCount, 1)
+    }
+
     func testMemberSeesOnlyGrantedSourceAndCannotResolveOtherSourceAsset() throws {
         let sourceRepository = SourceRepository(database: database)
         let mediaRepository = MediaRepository(database: database)
@@ -96,6 +125,95 @@ final class ServerLibraryCatalogTests: XCTestCase {
         XCTAssertEqual(snapshot.items.items.map(\.id), ["allowed-item"])
         XCTAssertNotNil(try catalog.publicAsset(id: "allowed-item", for: principal))
         XCTAssertNil(try catalog.publicAsset(id: "denied-item", for: principal))
+    }
+
+    func testWebVTTSidecarsStayAuthorizedBoundedAndPathFree() throws {
+        let sourceRepository = SourceRepository(database: database)
+        let mediaRepository = MediaRepository(database: database)
+        let directory = temporaryDirectory.appendingPathComponent("subtitles", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let media = directory.appendingPathComponent("movie.mkv")
+        try Data("media".utf8).write(to: media)
+        let expectedVTT = Data("WEBVTT\n\n00:00.000 --> 00:01.000\nHello\n".utf8)
+        try expectedVTT.write(to: directory.appendingPathComponent("movie.en.vtt"))
+        try Data("WEBVTT\n\n00:00.000 --> 00:01.000\nHidden\n".utf8)
+            .write(to: directory.appendingPathComponent("other.vtt"))
+        let outside = temporaryDirectory.appendingPathComponent("outside.vtt")
+        try Data("WEBVTT\n\n00:00.000 --> 00:01.000\nOutside\n".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            atPath: directory.appendingPathComponent("movie.escape.vtt").path,
+            withDestinationPath: outside.path
+        )
+        try sourceRepository.save(MediaSource(id: "subtitle-library", name: "字幕库", path: directory.path, mediaType: .movie))
+        try mediaRepository.upsert(MediaItem(
+            id: "subtitle-item", type: .movie, title: "字幕影片", sourcePath: directory.path, filePath: media.path
+        ))
+        let grant = ServerLibraryGrant(userID: "member", libraryID: "subtitle-library", canView: true, canPlay: true, canDownload: false)
+        let principal = ServerRequestPrincipal(
+            userID: "member", deviceID: "device", sessionID: "session",
+            permissions: [.viewMedia, .playMedia], libraryGrants: [grant.libraryID: grant]
+        )
+        let denied = ServerRequestPrincipal(
+            userID: "denied", deviceID: "other", sessionID: "other-session",
+            permissions: [.viewMedia, .playMedia], libraryGrants: [:]
+        )
+        let catalog = ServerLibraryCatalog(database: database)
+
+        let tracks = try XCTUnwrap(catalog.webVTTSubtitleTracks(id: "subtitle-item", for: principal))
+        let asset = try XCTUnwrap(catalog.publicWebVTTSubtitleAsset(id: "subtitle-item", trackID: 0, for: principal))
+        let encoded = try JSONEncoder().encode(tracks)
+
+        XCTAssertEqual(tracks, [ServerWebVTTSubtitleTrack(id: 0, label: "字幕 1")])
+        XCTAssertEqual(asset.contentType, "text/vtt; charset=utf-8")
+        XCTAssertEqual(try Data(contentsOf: asset.fileURL), expectedVTT)
+        XCTAssertFalse((String(data: encoded, encoding: .utf8) ?? "").contains(directory.path))
+        XCTAssertNil(try catalog.webVTTSubtitleTracks(id: "subtitle-item", for: denied))
+        XCTAssertNil(try catalog.publicWebVTTSubtitleAsset(id: "subtitle-item", trackID: 0, for: denied))
+        XCTAssertNil(try catalog.publicWebVTTSubtitleAsset(id: "subtitle-item", trackID: 16, for: principal))
+    }
+
+    func testEpisodeNavigationUsesOnlyAuthorizedPlayableSiblings() throws {
+        let sourceRepository = SourceRepository(database: database)
+        let mediaRepository = MediaRepository(database: database)
+        let allowedDirectory = temporaryDirectory.appendingPathComponent("episodes-allowed", isDirectory: true)
+        let deniedDirectory = temporaryDirectory.appendingPathComponent("episodes-denied", isDirectory: true)
+        try FileManager.default.createDirectory(at: allowedDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: deniedDirectory, withIntermediateDirectories: true)
+        let first = allowedDirectory.appendingPathComponent("episode-1.mp4")
+        let second = allowedDirectory.appendingPathComponent("episode-2.mp4")
+        let denied = deniedDirectory.appendingPathComponent("episode-3.mp4")
+        try Data("one".utf8).write(to: first)
+        try Data("two".utf8).write(to: second)
+        try Data("three".utf8).write(to: denied)
+        try sourceRepository.save(MediaSource(id: "allowed-series", name: "允许剧集", path: allowedDirectory.path, mediaType: .tvShow))
+        try sourceRepository.save(MediaSource(id: "denied-series", name: "拒绝剧集", path: deniedDirectory.path, mediaType: .tvShow))
+        for (id, title, number, source, file) in [
+            ("episode-1", "第一集", 1, allowedDirectory.path, first.path),
+            ("episode-2", "第二集", 2, allowedDirectory.path, second.path),
+            ("episode-3", "不应出现", 3, deniedDirectory.path, denied.path)
+        ] {
+            try mediaRepository.upsert(MediaItem(
+                id: id, type: .episode, title: title, sourcePath: source, parentID: "show-1",
+                seasonNumber: 1, episodeNumber: number, filePath: file
+            ))
+        }
+        let grant = ServerLibraryGrant(userID: "member", libraryID: "allowed-series", canView: true, canPlay: true, canDownload: false)
+        let principal = ServerRequestPrincipal(
+            userID: "member", deviceID: "device", sessionID: "session",
+            permissions: [.viewMedia, .playMedia], libraryGrants: [grant.libraryID: grant]
+        )
+        let catalog = ServerLibraryCatalog(database: database)
+
+        let firstDetail = try XCTUnwrap(catalog.publicDetail(id: "episode-1", for: principal))
+        let secondDetail = try XCTUnwrap(catalog.publicDetail(id: "episode-2", for: principal))
+        let text = String(data: try JSONEncoder().encode(secondDetail), encoding: .utf8) ?? ""
+
+        XCTAssertNil(firstDetail.previousEpisode)
+        XCTAssertEqual(firstDetail.nextEpisode, ServerEpisodeNavigation(id: "episode-2", title: "S01E02  第二集"))
+        XCTAssertEqual(secondDetail.previousEpisode, ServerEpisodeNavigation(id: "episode-1", title: "S01E01  第一集"))
+        XCTAssertNil(secondDetail.nextEpisode, "未授权资料库的同组剧集不能成为网页下一集")
+        XCTAssertFalse(text.contains("show-1"))
+        XCTAssertFalse(text.contains(deniedDirectory.path))
     }
 
     func testDetailIsBoundedAuthorizedAndExcludesDesktopPlaybackTrace() throws {
@@ -155,7 +273,7 @@ final class ServerLibraryCatalogTests: XCTestCase {
         XCTAssertEqual(detail.runtimeSeconds, 7_200)
         XCTAssertEqual(detail.communityRating, 8.6)
         XCTAssertTrue(detail.canDirectPlay)
-        XCTAssertTrue(detail.canTranscode)
+        XCTAssertFalse(detail.canTranscode)
         XCTAssertNil(try catalog.publicDetail(id: "detail-item", for: deniedPrincipal))
         let encoded = try JSONEncoder().encode(detail)
         let text = String(data: encoded, encoding: .utf8)?.lowercased() ?? ""
@@ -206,9 +324,101 @@ final class ServerLibraryCatalogTests: XCTestCase {
         let stateA = try XCTUnwrap(catalog.updatePlaybackState(id: "state-item", request: request, for: principalA))
         XCTAssertEqual(stateA.progress, 0.5, accuracy: 0.0001)
         XCTAssertEqual(try catalog.publicDetail(id: "state-item", for: principalA)?.userState, stateA)
+        XCTAssertEqual(try catalog.snapshot(for: principalA).items.items.first?.userState, stateA)
         XCTAssertNil(try catalog.publicDetail(id: "state-item", for: principalB)?.userState)
+        XCTAssertEqual(
+            try catalog.browse(ServerLibraryQuery(limit: 10, playbackFilter: .inProgress), for: principalA).items.map(\.id),
+            ["state-item"]
+        )
+        XCTAssertTrue(
+            try catalog.browse(ServerLibraryQuery(limit: 10, playbackFilter: .inProgress), for: principalB).items.isEmpty
+        )
         XCTAssertNil(try catalog.updatePlaybackState(id: "state-item", request: request, for: denied))
         XCTAssertNil(try catalog.publicDetail(id: "missing", for: principalA))
+    }
+
+    func testSeriesHierarchyUsesAuthorizedSourcesAndCurrentUserSeasonState() throws {
+        let sources = SourceRepository(database: database)
+        let media = MediaRepository(database: database)
+        let identities = ServerIdentityRepository(database: database)
+        let states = ServerUserMediaStateRepository(database: database)
+        let preferences = ServerUserMediaPreferenceRepository(database: database)
+        try sources.save(MediaSource(id: "series-allowed", name: "剧集库", path: "/Volumes/Series", mediaType: .tvShow))
+        try sources.save(MediaSource(id: "series-denied", name: "隐藏剧集库", path: "/Volumes/HiddenSeries", mediaType: .tvShow))
+        try media.upsert(MediaItem(
+            id: "series-1", type: .tvShow, title: "测试系列", year: 2026,
+            overview: "系列简介", sourcePath: "/Volumes/Series"
+        ))
+        try media.upsert(MediaItem(
+            id: "episode-1", type: .episode, title: "第一集", sourcePath: "/Volumes/Series",
+            parentID: "series-1", seasonNumber: 1, episodeNumber: 1, duration: 1_200
+        ))
+        try media.upsert(MediaItem(
+            id: "episode-2", type: .episode, title: "第二集", sourcePath: "/Volumes/Series",
+            parentID: "series-1", seasonNumber: 1, episodeNumber: 2, duration: 1_500
+        ))
+        try media.upsert(MediaItem(
+            id: "episode-special", type: .episode, title: "幕后", sourcePath: "/Volumes/Series",
+            parentID: "series-1", episodeNumber: 1
+        ))
+        try media.upsert(MediaItem(
+            id: "denied-episode", type: .episode, title: "不应出现", sourcePath: "/Volumes/HiddenSeries",
+            parentID: "series-1", seasonNumber: 1, episodeNumber: 3
+        ))
+        _ = try identities.createUser(id: "series-member", username: "series-member", displayName: "成员")
+        _ = try identities.createUser(id: "series-other", username: "series-other", displayName: "另一成员")
+        _ = try states.update(userID: "series-member", mediaID: "episode-1", event: .completed, position: 1_200, duration: 1_200)
+        _ = try states.update(userID: "series-member", mediaID: "episode-2", event: .progress, position: 300, duration: 1_500)
+        _ = try states.update(userID: "series-other", mediaID: "episode-2", event: .completed, position: 1_500, duration: 1_500)
+        _ = try preferences.update(userID: "series-member", mediaID: "series-1", preference: .favorite(true))
+        let grant = ServerLibraryGrant(
+            userID: "series-member", libraryID: "series-allowed", canView: true, canPlay: true, canDownload: false
+        )
+        let principal = ServerRequestPrincipal(
+            userID: "series-member", deviceID: "device", sessionID: "session",
+            permissions: [.viewMedia, .playMedia], libraryGrants: [grant.libraryID: grant]
+        )
+        let denied = ServerRequestPrincipal(
+            userID: "series-other", deviceID: "other-device", sessionID: "other-session",
+            permissions: [.viewMedia, .playMedia], libraryGrants: [:]
+        )
+        let catalog = ServerLibraryCatalog(database: database)
+
+        let detail = try XCTUnwrap(catalog.seriesDetail(id: "series-1", for: principal))
+        XCTAssertEqual(detail.totalEpisodeCount, 3)
+        XCTAssertEqual(detail.seasons.map(\.title), ["第 1 季", "未分季"])
+        XCTAssertEqual(detail.seasons.first?.episodeCount, 2)
+        XCTAssertEqual(detail.seasons.first?.watchedCount, 1)
+        XCTAssertEqual(detail.seasons.first?.inProgressCount, 1)
+        XCTAssertTrue(detail.userPreference.isFavorite)
+        XCTAssertNil(try catalog.seriesDetail(id: "series-1", for: denied))
+        XCTAssertNil(try catalog.seriesDetail(id: "episode-1", for: principal))
+
+        let firstPage = try XCTUnwrap(catalog.seriesEpisodes(
+            id: "series-1", season: .numbered(1), offset: 0, limit: 1, for: principal
+        ))
+        XCTAssertEqual(firstPage.totalItemCount, 2)
+        XCTAssertEqual(firstPage.items.map(\.id), ["episode-1"])
+        XCTAssertTrue(firstPage.hasMore)
+        XCTAssertEqual(firstPage.items.first?.userState?.isWatched, true)
+        let secondPage = try XCTUnwrap(catalog.seriesEpisodes(
+            id: "series-1", season: .numbered(1), offset: 1, limit: 10, for: principal
+        ))
+        XCTAssertEqual(secondPage.items.map(\.id), ["episode-2"])
+        XCTAssertEqual(secondPage.items.first?.userState?.progress ?? 0, 0.2, accuracy: 0.0001)
+        let unspecified = try XCTUnwrap(catalog.seriesEpisodes(
+            id: "series-1", season: .unspecified, offset: 0, limit: 10, for: principal
+        ))
+        XCTAssertEqual(unspecified.items.map(\.id), ["episode-special"])
+        XCTAssertNil(try catalog.seriesEpisodes(
+            id: "series-1", season: .numbered(1), offset: 0, limit: 10, for: denied
+        ))
+        let encoded = try JSONEncoder().encode(detail)
+        let text = String(data: encoded, encoding: .utf8) ?? ""
+        XCTAssertFalse(text.contains("/Volumes/"))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("sourcePath"))
+        XCTAssertFalse(text.localizedCaseInsensitiveContains("parentID"))
+        XCTAssertFalse(text.contains("series-other"))
     }
 
     func testBrowseUsesServerCategoriesPaginationSearchAndCurrentUserState() throws {
@@ -226,9 +436,45 @@ final class ServerLibraryCatalogTests: XCTestCase {
         try mediaRepository.upsert(MediaItem(
             id: "episode-1", type: .episode, title: "银河 第一集", sourcePath: "/Volumes/Browse"
         ))
-        _ = try ServerUserMediaStateRepository(database: database).update(
+        let userStateRepository = ServerUserMediaStateRepository(database: database)
+        _ = try userStateRepository.update(
             userID: ServerIdentityRepository.initialAdministratorUserID,
-            mediaID: "movie-3", event: .progress, position: 30, duration: 100
+            mediaID: "movie-3", event: .started, position: 0, duration: 100,
+            at: Date(timeIntervalSince1970: 100)
+        )
+        _ = try userStateRepository.update(
+            userID: ServerIdentityRepository.initialAdministratorUserID,
+            mediaID: "movie-3", event: .progress, position: 30, duration: 100,
+            at: Date(timeIntervalSince1970: 110)
+        )
+        _ = try userStateRepository.update(
+            userID: ServerIdentityRepository.initialAdministratorUserID,
+            mediaID: "movie-0", event: .started, position: 0, duration: 100,
+            at: Date(timeIntervalSince1970: 200)
+        )
+        _ = try userStateRepository.update(
+            userID: ServerIdentityRepository.initialAdministratorUserID,
+            mediaID: "movie-0", event: .completed, position: 100, duration: 100,
+            at: Date(timeIntervalSince1970: 201)
+        )
+        let preferenceRepository = ServerUserMediaPreferenceRepository(database: database)
+        _ = try ServerIdentityRepository(database: database).createUser(
+            id: "another-user", username: "another", displayName: "另一用户"
+        )
+        _ = try preferenceRepository.update(
+            userID: ServerIdentityRepository.initialAdministratorUserID,
+            mediaID: "movie-2", preference: .favorite(true)
+        )
+        _ = try preferenceRepository.update(
+            userID: ServerIdentityRepository.initialAdministratorUserID,
+            mediaID: "movie-4", preference: .watchlist(true)
+        )
+        _ = try preferenceRepository.update(
+            userID: ServerIdentityRepository.initialAdministratorUserID,
+            mediaID: "movie-1", preference: .rating(4.5)
+        )
+        _ = try preferenceRepository.update(
+            userID: "another-user", mediaID: "movie-1", preference: .favorite(true)
         )
         let catalog = ServerLibraryCatalog(database: database)
         let principal = ServerRequestPrincipal(
@@ -250,6 +496,29 @@ final class ServerLibraryCatalogTests: XCTestCase {
             ServerLibraryQuery(type: "episode", limit: 10),
             for: principal
         )
+        let continuing = try catalog.browse(
+            ServerLibraryQuery(limit: 10, playbackFilter: .inProgress),
+            for: principal
+        )
+        let history = try catalog.browse(
+            ServerLibraryQuery(limit: 10, sort: .lastPlayedDescending, playbackFilter: .history),
+            for: principal
+        )
+        let favorites = try catalog.browse(
+            ServerLibraryQuery(limit: 10, preferenceFilter: .favorite), for: principal
+        )
+        let watchlist = try catalog.browse(
+            ServerLibraryQuery(limit: 10, preferenceFilter: .watchlist), for: principal
+        )
+        let ratings = try catalog.browse(
+            ServerLibraryQuery(limit: 10, preferenceFilter: .rated), for: principal
+        )
+        let watched = try catalog.browse(
+            ServerLibraryQuery(limit: 10, playbackFilter: .watched), for: principal
+        )
+        let unwatched = try catalog.browse(
+            ServerLibraryQuery(limit: 10, playbackFilter: .unwatched), for: principal
+        )
 
         XCTAssertEqual(categories.categories.first(where: { $0.id == "movie" })?.itemCount, 5)
         XCTAssertEqual(categories.categories.first(where: { $0.id == "episode" })?.itemCount, 1)
@@ -259,6 +528,17 @@ final class ServerLibraryCatalogTests: XCTestCase {
         XCTAssertEqual(search.items.map(\.id), ["movie-3"])
         XCTAssertEqual(search.items.first?.userState?.progress ?? -1, 0.3, accuracy: 0.0001)
         XCTAssertEqual(episodes.items.map(\.id), ["episode-1"])
+        XCTAssertEqual(continuing.items.map(\.id), ["movie-3"])
+        XCTAssertEqual(history.items.map(\.id), ["movie-0", "movie-3"])
+        XCTAssertEqual(favorites.items.map(\.id), ["movie-2"])
+        XCTAssertTrue(favorites.items.first?.userPreference.isFavorite == true)
+        XCTAssertEqual(watchlist.items.map(\.id), ["movie-4"])
+        XCTAssertTrue(watchlist.items.first?.userPreference.isWatchlist == true)
+        XCTAssertEqual(ratings.items.map(\.id), ["movie-1"])
+        XCTAssertEqual(ratings.items.first?.userPreference.rating, 4.5)
+        XCTAssertEqual(watched.items.map(\.id), ["movie-0"])
+        XCTAssertFalse(unwatched.items.map(\.id).contains("movie-0"))
+        XCTAssertTrue(unwatched.items.map(\.id).contains("episode-1"))
     }
 
     func testArtworkRequiresItemAuthorizationAndRejectsUnsafeOrOversizedFiles() throws {

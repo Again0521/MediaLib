@@ -1,3 +1,4 @@
+#if os(macOS)
 import AVFoundation
 import Foundation
 
@@ -417,3 +418,4 @@ public final class AudioMetadataReader {
         return "jpg"
     }
 }
+#endif

@@ -11,7 +11,6 @@ enum ServerRateLimitScope: String, CaseIterable, Sendable {
     case apiRead
     case mediaProbe
     case mediaStream
-    case transcodeMutation
     case authenticatedMutation
 }
 
@@ -49,7 +48,6 @@ final class ServerRequestRateLimiter: @unchecked Sendable {
         .apiRead: .init(capacity: 180, refillPerSecond: 3),
         .mediaProbe: .init(capacity: 12, refillPerSecond: 0.1),
         .mediaStream: .init(capacity: 240, refillPerSecond: 4),
-        .transcodeMutation: .init(capacity: 4, refillPerSecond: 1.0 / 30.0),
         .authenticatedMutation: .init(capacity: 30, refillPerSecond: 0.5)
     ]
 

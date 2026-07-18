@@ -27,7 +27,7 @@ struct AppUpdateAssetCandidate: Equatable {
 enum AppVersion {
     /// 打包版从 Info.plist 读取；swift run 裸二进制兜底用当前发布版本。
     static var current: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.5.1"
+        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.5.5"
     }
 
     /// 从任意文本里提取版本号：抓出第一段「点分数字」，如 v1.1.1 / MediaLIB_V1.1.8 / 标题里的 1.1.11。

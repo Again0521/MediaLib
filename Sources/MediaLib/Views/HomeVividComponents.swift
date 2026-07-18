@@ -1024,6 +1024,12 @@ private struct HomeVividPosterCard: View {
                         .padding(9)
                 }
             }
+            .overlay(alignment: .topLeading) {
+                if isMlinkItem {
+                    MlinkPosterBadge()
+                        .padding(9)
+                }
+            }
         }
         .buttonStyle(.plain)
         .offset(y: active && !reduceMotion ? -5 : 0)
@@ -1051,6 +1057,11 @@ private struct HomeVividPosterCard: View {
                 contentMode: .fill
             )
         }
+    }
+
+    private var isMlinkItem: Bool {
+        item.metadataProvider?.caseInsensitiveCompare("Mlink") == .orderedSame ||
+            item.sourcePath?.lowercased().hasPrefix("mlink://") == true
     }
 
     private var glyphPlaceholder: some View {

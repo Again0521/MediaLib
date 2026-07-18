@@ -205,7 +205,7 @@ struct PersonDetailView: View {
             .verticalScrollPassthroughFromNestedHorizontal()
         }
         .padding(16)
-        .staticSurfaceBackground(cornerRadius: 18)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card)
     }
 
     private func hero(_ person: MediaPerson) -> some View {
@@ -406,7 +406,7 @@ struct PersonDetailView: View {
             }
         }
         .padding(16)
-        .staticSurfaceBackground(cornerRadius: 18)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card)
     }
 
     private func open(_ row: PersonWorkRow) {

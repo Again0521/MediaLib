@@ -472,6 +472,12 @@ struct PosterCardView: View {
                     .padding(9)
             }
         }
+        .overlay(alignment: .topLeading) {
+            if isMlinkItem {
+                MlinkPosterBadge()
+                    .padding(9)
+            }
+        }
         .overlay {
             if isSelectionActive && isSelected {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -582,6 +588,11 @@ struct PosterCardView: View {
         item.type != .music
     }
 
+    private var isMlinkItem: Bool {
+        item.metadataProvider?.caseInsensitiveCompare("Mlink") == .orderedSame ||
+            item.sourcePath?.lowercased().hasPrefix("mlink://") == true
+    }
+
     /// 由父视图（观察 AppState）计算后按值传入卡片，避免卡片自身订阅 AppState。
     /// 含响应式来源（缓存状态/子项）与 item 自身属性。
     static func badgeTexts(for item: MediaItem, appState: AppState) -> [String] {
@@ -671,6 +682,22 @@ struct PosterCardView: View {
                             .strokeBorder(.white.opacity(0.24), lineWidth: 0.5)
                     }
             }
+    }
+}
+
+/// Mlink 来源的固定视觉标识。独立于海报图、分辨率和评分，便于用户识别该卡片的分类由服务端镜像。
+struct MlinkPosterBadge: View {
+    var body: some View {
+        Text("Mlink")
+            .font(.system(size: 10, weight: .black, design: .rounded))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(AppColors.referenceBlue.opacity(0.92), in: Capsule())
+            .overlay {
+                Capsule().strokeBorder(.white.opacity(0.36), lineWidth: 0.6)
+            }
+            .accessibilityLabel("Mlink 服务端来源")
     }
 }
 

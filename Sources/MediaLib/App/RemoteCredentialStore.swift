@@ -8,6 +8,8 @@ struct RemoteSourceCredential: Codable {
     var username: String?
     var password: String?
     var accessToken: String?
+    /// 仅用于 Mlink 等支持短期 access token 轮换的服务端；与其他凭据一样以 0600 文件保存。
+    var refreshToken: String?
     var userID: String?
 }
 

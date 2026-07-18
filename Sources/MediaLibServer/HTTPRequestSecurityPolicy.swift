@@ -29,6 +29,7 @@ struct HTTPRequestSecurityPolicy {
         }
         let method = String(requestParts[0])
         let target = String(requestParts[1])
+        let path = target.split(separator: "?", maxSplits: 1).first.map(String.init) ?? target
         guard Self.allowedMethods.contains(method),
               target.utf8.count <= 2_048,
               target.first == "/",
@@ -90,7 +91,6 @@ struct HTTPRequestSecurityPolicy {
         guard declaredBodyLength == bodyLength else { return .badRequest }
         if declaredBodyLength > 0 {
             guard declaredBodyLength <= 4_096 else { return .payloadTooLarge }
-            let path = target.split(separator: "?", maxSplits: 1).first.map(String.init) ?? target
             guard method == "POST",
                   Self.isJSONBodyPath(path),
                   let contentType = headers["content-type"]?.first?.lowercased(),
@@ -104,11 +104,18 @@ struct HTTPRequestSecurityPolicy {
             return .forbidden
         }
         if Self.mutatingMethods.contains(method) {
-            guard let token = headers["x-medialib-csrf"]?.first,
-                  Self.constantTimeEqual(token, csrfToken),
-                  originIsAllowed(headers["origin"]?.first)
-            else {
-                return .forbidden
+            if isVerifiedNativeMlinkRequest(headers, path: path) {
+                // 原生 Mlink 请求没有浏览器 Cookie，也不能携带 Origin；它通过 Bearer
+                // 令牌在路由层认证。例外仅限两条客户端状态同步端点，绝不能成为
+                // 账户、登录或管理类网页写操作的 CSRF 旁路。
+                guard headers["cookie"] == nil, headers["origin"] == nil else { return .forbidden }
+            } else {
+                guard let token = headers["x-medialib-csrf"]?.first,
+                      Self.constantTimeEqual(token, csrfToken),
+                      originIsAllowed(headers["origin"]?.first)
+                else {
+                    return .forbidden
+                }
             }
         }
         return nil
@@ -154,15 +161,41 @@ struct HTTPRequestSecurityPolicy {
         return components.port == nil || components.port == allowedPort
     }
 
-    private static let allowedMethods: Set<String> = ["GET", "HEAD", "POST", "DELETE"]
-    private static let mutatingMethods: Set<String> = ["POST", "DELETE"]
+    private func isVerifiedNativeMlinkRequest(_ headers: [String: [String]], path: String) -> Bool {
+        // 自定义请求头不能由跨站脚本在未获 CORS 授权时发送；同时拒绝任何浏览器
+        // Cookie/Origin 组合，使它不成为浏览器 CSRF 规则的旁路。
+        headers["x-medialib-client"] == ["mlink-native/1"] &&
+            Self.isNativeMlinkMutationPath(path)
+    }
+
+    // 当前 Web 写入只有登录、刷新、注销、播放状态和逐用户偏好 POST；不接受未使用的方法，
+    // 避免历史转码清理等 DELETE 请求绕过入口策略进入路由层。
+    private static let allowedMethods: Set<String> = ["GET", "HEAD", "POST"]
+    private static let mutatingMethods: Set<String> = ["POST"]
     private static let jsonBodyPaths: Set<String> = [
         "/api/v1/auth/login",
         "/api/v1/auth/refresh"
     ]
 
     private static func isJSONBodyPath(_ path: String) -> Bool {
-        jsonBodyPaths.contains(path) || path.hasPrefix("/api/v1/playback/state/")
+        jsonBodyPaths.contains(path) ||
+            path == "/api/v1/auth/password" ||
+            path == "/api/v1/admin/users" ||
+            path.hasPrefix("/api/v1/playback/state/") ||
+            path.hasPrefix("/api/v1/user-media/preferences/")
+    }
+
+    private static func isNativeMlinkMutationPath(_ path: String) -> Bool {
+        isSingleOpaqueIdentifierPath(path, prefix: "/api/v1/playback/state/") ||
+            isSingleOpaqueIdentifierPath(path, prefix: "/api/v1/user-media/preferences/")
+    }
+
+    /// 不要用前缀作为长期授权边界：未来在同一资源树增加子路由时，原生 CSRF
+    /// 例外不应自动扩散。真正的路由还会做 percent decoding 与字符集验证。
+    private static func isSingleOpaqueIdentifierPath(_ path: String, prefix: String) -> Bool {
+        guard path.hasPrefix(prefix) else { return false }
+        let identifier = path.dropFirst(prefix.count)
+        return !identifier.isEmpty && !identifier.contains("/") && !identifier.contains("\\")
     }
     private static let headerNameCharacters = Set("!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 

@@ -11,6 +11,8 @@ private extension RemoteConnectorProvider {
             return "Jellyfin"
         case .plex:
             return "Plex"
+        case .mlink:
+            return "MediaLIB Server"
         default:
             return displayName
         }
@@ -35,7 +37,7 @@ struct SourcesView: View {
             VStack(alignment: .leading, spacing: 22) {
                 PageHeader(
                     title: "媒体源",
-                    subtitle: "管理本地文件夹、移动硬盘、网络挂载、Emby、Jellyfin 和 Plex 媒体库。",
+                    subtitle: "管理本地文件夹、移动硬盘、网络挂载、MediaLIB Server、Emby、Jellyfin 和 Plex 媒体库。",
                     systemImage: "externaldrive"
                 ) {
                     sourceActionsRow
@@ -50,7 +52,7 @@ struct SourcesView: View {
                     EmptyStateView(
                         title: "媒体源待添加",
                         systemImage: "externaldrive.badge.plus",
-                        message: "接入本地文件夹、移动硬盘、网络挂载、Emby、Jellyfin 或 Plex 媒体库后，MediaLIB 会整理索引。"
+                        message: "接入本地文件夹、移动硬盘、网络挂载、MediaLIB Server、Emby、Jellyfin 或 Plex 媒体库后，MediaLIB 会整理索引。"
                     )
                     .frame(minHeight: 320)
                 } else {
@@ -70,7 +72,7 @@ struct SourcesView: View {
                             title: "已断开媒体源",
                             subtitle: "这些来源暂时不可访问，可重新挂载、检查设置或稍后再扫描。",
                             systemImage: "externaldrive.badge.exclamationmark",
-                            tint: Color(red: 1.0, green: 0.62, blue: 0.27),
+                            tint: AppColors.semanticWarning,
                             count: disconnectedSources.count
                         )
                         sourcesList(disconnectedSources)
@@ -316,7 +318,7 @@ private struct AddMediaSourceWizardSheet: View {
                 urlConfiguration
             case .network:
                 networkConfiguration
-            case .emby, .jellyfin, .plex:
+            case .emby, .jellyfin, .plex, .mlink:
                 remoteConfiguration
             }
         case .settings:
@@ -401,7 +403,7 @@ private struct AddMediaSourceWizardSheet: View {
                         }
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .staticSurfaceBackground(cornerRadius: 14, shadowed: false)
+                        .staticSurfaceBackground(cornerRadius: AppRadius.card, shadowed: false)
                     }
                 }
             }
@@ -529,12 +531,22 @@ private struct AddMediaSourceWizardSheet: View {
     }
 
     private var serverPlaceholder: String {
-        selectedKind == .plex ? "服务器地址，例如 http://192.168.1.20:32400" : "服务器地址，例如 http://192.168.1.20:8096"
+        switch selectedKind {
+        case .plex:
+            return "服务器地址，例如 http://192.168.1.20:32400"
+        case .mlink:
+            return "服务器地址，例如 https://media.example.com（局域网非回环地址需 HTTPS）"
+        default:
+            return "服务器地址，例如 http://192.168.1.20:8096"
+        }
     }
 
     private var credentialNote: String {
         if selectedKind == .plex {
             return "Plex Token 只保存在本机，用于后续自动同步。MediaLIB 不会使用系统钥匙串。"
+        }
+        if selectedKind == .mlink {
+            return "登录密码只用于本次换取 Mlink 会话；access / refresh token 以受限本机文件保存，绝不会加入播放链接。非回环服务器必须使用 HTTPS。"
         }
         return "登录信息只保存在本机，用于后续自动同步。MediaLIB 不会使用系统钥匙串。"
     }
@@ -555,6 +567,8 @@ private struct AddMediaSourceWizardSheet: View {
                 return "连接并选择目录"
             case .plex:
                 return appState.isConnectingPlex ? "Plex 连接中" : "连接并同步"
+            case .mlink:
+                return appState.isConnectingMlink ? "MediaLIB Server 连接中" : "登录并同步"
             case .emby:
                 return appState.isConnectingEmby ? "Emby 连接中" : "登录并同步"
             case .jellyfin:
@@ -577,7 +591,7 @@ private struct AddMediaSourceWizardSheet: View {
                 return "plus"
             case .network:
                 return "network"
-            case .emby, .jellyfin, .plex:
+            case .emby, .jellyfin, .plex, .mlink:
                 return "arrow.triangle.2.circlepath"
             }
         }
@@ -607,6 +621,10 @@ private struct AddMediaSourceWizardSheet: View {
                 return appState.isConnectingJellyfin
                     || server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     || username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .mlink:
+                return appState.isConnectingMlink
+                    || server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
         case .settings:
             switch selectedKind {
@@ -622,6 +640,8 @@ private struct AddMediaSourceWizardSheet: View {
                 return appState.isConnectingEmby
             case .jellyfin:
                 return appState.isConnectingJellyfin
+            case .mlink:
+                return appState.isConnectingMlink
             }
         }
     }
@@ -688,6 +708,8 @@ private struct AddMediaSourceWizardSheet: View {
             connectRemoteMediaServer(provider: .jellyfin)
         case .plex:
             connectRemoteMediaServer(provider: .plex)
+        case .mlink:
+            connectRemoteMediaServer(provider: .mlink)
         }
     }
 
@@ -715,6 +737,15 @@ private struct AddMediaSourceWizardSheet: View {
                 )
             case .jellyfin:
                 await appState.connectJellyfinServer(
+                    server: request.server,
+                    username: request.username,
+                    password: request.password,
+                    includeInMetadataFetch: request.includeMetadata,
+                    includeInHealthCheck: request.includeHealth,
+                    remoteTraceSyncMode: request.traceMode
+                )
+            case .mlink:
+                await appState.connectMlinkServer(
                     server: request.server,
                     username: request.username,
                     password: request.password,
@@ -808,12 +839,13 @@ private enum AddMediaSourceKind: String, CaseIterable, Identifiable {
     case emby
     case jellyfin
     case plex
+    case mlink
 
     var id: String { rawValue }
 
     var isRemoteMediaServer: Bool {
         switch self {
-        case .emby, .jellyfin, .plex:
+        case .emby, .jellyfin, .plex, .mlink:
             return true
         case .local, .url, .network:
             return false
@@ -834,6 +866,8 @@ private enum AddMediaSourceKind: String, CaseIterable, Identifiable {
             return "Jellyfin"
         case .plex:
             return "Plex"
+        case .mlink:
+            return "MediaLIB Server"
         }
     }
 
@@ -851,6 +885,8 @@ private enum AddMediaSourceKind: String, CaseIterable, Identifiable {
             return "登录服务器并同步媒体库"
         case .plex:
             return "服务器地址与 Token 直连"
+        case .mlink:
+            return "安全登录并镜像服务端分类"
         }
     }
 
@@ -868,6 +904,8 @@ private enum AddMediaSourceKind: String, CaseIterable, Identifiable {
             return "登录后同步到独立的 Jellyfin 目录。"
         case .plex:
             return "连接后同步到独立的 Plex 目录。"
+        case .mlink:
+            return "登录后镜像服务端分类到独立的 Mlink 目录。"
         }
     }
 
@@ -885,6 +923,8 @@ private enum AddMediaSourceKind: String, CaseIterable, Identifiable {
             return "externaldrive.connected.to.line.below"
         case .plex:
             return "play.rectangle.on.rectangle"
+        case .mlink:
+            return "server.rack"
         }
     }
 }
@@ -1066,7 +1106,7 @@ private struct SourceSettingsSheet: View {
         if isLoadingLibraries {
             ProgressView("正在读取服务器媒体库…")
                 .frame(maxWidth: .infinity, minHeight: 130)
-                .staticSurfaceBackground(cornerRadius: 14, shadowed: false)
+                .staticSurfaceBackground(cornerRadius: AppRadius.card, shadowed: false)
         } else if let errorMessage {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
@@ -1087,7 +1127,7 @@ private struct SourceSettingsSheet: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .staticSurfaceBackground(cornerRadius: 14, shadowed: false)
+            .staticSurfaceBackground(cornerRadius: AppRadius.card, shadowed: false)
         } else if libraries.isEmpty {
             EmptyStateView(
                 title: "服务器未返回媒体库",
@@ -1388,13 +1428,13 @@ struct SourceRowView: View {
                         AppStatusBadge(
                             title: unhealthy == 0 ? "链接正常" : "\(unhealthy) 个链接失效",
                             systemImage: unhealthy == 0 ? "checkmark.circle" : "exclamationmark.circle",
-                            tint: unhealthy == 0 ? Color(red: 0.13, green: 0.72, blue: 0.42) : Color(red: 1.0, green: 0.62, blue: 0.27)
+                            tint: unhealthy == 0 ? AppColors.semanticGood : AppColors.semanticWarning
                         )
                     } else {
                         AppStatusBadge(
                             title: isReachable ? "可访问" : "不可访问",
                             systemImage: isReachable ? "checkmark.circle" : "exclamationmark.circle",
-                            tint: isReachable ? Color(red: 0.13, green: 0.72, blue: 0.42) : Color(red: 1.0, green: 0.62, blue: 0.27)
+                            tint: isReachable ? AppColors.semanticGood : AppColors.semanticWarning
                         )
                     }
 
@@ -1537,7 +1577,7 @@ struct SourceRowView: View {
 
     private var sourceKindBadgeIcon: String {
         switch source.sourceKind {
-        case .emby, .jellyfin, .plex:
+        case .emby, .jellyfin, .plex, .mlink:
             return "server.rack"
         case .local:
             return "internaldrive"
@@ -1553,7 +1593,7 @@ struct SourceRowView: View {
             return "exclamationmark.triangle"
         }
         switch source.sourceKind {
-        case .emby, .jellyfin, .plex:
+        case .emby, .jellyfin, .plex, .mlink:
             return "server.rack"
         case .smb, .ftp:
             return "network"
@@ -1565,7 +1605,7 @@ struct SourceRowView: View {
     }
 
     private func sourceAccent(isReachable: Bool) -> Color {
-        guard isReachable else { return Color(red: 1.0, green: 0.62, blue: 0.27) }
+        guard isReachable else { return AppColors.semanticWarning }
         if source.mediaType == .privateCollection {
             return Color(red: 1.0, green: 0.36, blue: 0.54)
         }
@@ -1575,7 +1615,9 @@ struct SourceRowView: View {
         case .jellyfin:
             return Color(red: 0.85, green: 0.27, blue: 0.94)
         case .plex:
-            return Color(red: 1.0, green: 0.62, blue: 0.27)
+            return AppColors.semanticWarning
+        case .mlink:
+            return Color(red: 0.15, green: 0.54, blue: 0.95)
         case .smb, .ftp:
             return AppColors.referenceCyan
         case .url:
@@ -1583,7 +1625,7 @@ struct SourceRowView: View {
         case .local:
             switch source.mediaType {
             case .music:
-                return Color(red: 1.0, green: 0.62, blue: 0.27)
+                return AppColors.semanticWarning
             case .photo, .homeVideo:
                 return AppColors.referenceCyan
             default:
@@ -1674,9 +1716,9 @@ private struct URLSourceManagementSheet: View {
         let state = appState.urlItemHealthState(for: item)
         let tint: Color = {
             switch state {
-            case .ok: return .green
-            case .unreachable: return .orange
-            case .unparseable: return .yellow
+            case .ok: return AppColors.semanticGood
+            case .unreachable: return AppColors.semanticWarning
+            case .unparseable: return AppColors.semanticWarning
             case .checking, .unknown: return .secondary
             }
         }()
@@ -1843,7 +1885,7 @@ private struct URLSourceManagementSheet: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .staticSurfaceBackground(cornerRadius: 14)
+            .staticSurfaceBackground(cornerRadius: AppRadius.card)
         }
     }
 

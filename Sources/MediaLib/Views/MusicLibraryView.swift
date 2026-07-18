@@ -1810,7 +1810,7 @@ private struct MusicCollectionTrackList: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
-            .staticSurfaceBackground(cornerRadius: 18)
+            .staticSurfaceBackground(cornerRadius: AppRadius.card)
 
             if let playlist {
                 MusicPlaylistTrackListView(

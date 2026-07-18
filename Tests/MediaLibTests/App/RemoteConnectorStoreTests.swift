@@ -37,11 +37,13 @@ final class RemoteConnectorStoreTests: XCTestCase {
         store.setConnecting(.emby, true)
         store.setConnecting(.jellyfin, true)
         store.setConnecting(.plex, true)
+        store.setConnecting(.mlink, true)
         store.setConnecting(.trakt, true)
 
         XCTAssertTrue(store.isConnecting(.emby))
         XCTAssertTrue(store.isConnecting(.jellyfin))
         XCTAssertTrue(store.isConnecting(.plex))
+        XCTAssertTrue(store.isConnecting(.mlink))
         XCTAssertFalse(store.isConnecting(.trakt))
     }
 

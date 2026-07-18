@@ -50,7 +50,9 @@ final class ServerModeProcessController: ObservableObject {
             environment["MEDIALIB_SERVER_PORT"] = String(configuration.port)
             environment["MEDIALIB_SERVER_ID"] = configuration.serverID
             environment["MEDIALIB_SERVER_NAME"] = configuration.serverName
+            environment["MEDIALIB_SERVER_LIGHTWEIGHT"] = configuration.isLightweightMode ? "1" : "0"
             process.environment = environment
+            process.qualityOfService = configuration.isLightweightMode ? .utility : .userInitiated
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             process.terminationHandler = { [weak self, weak process] terminatedProcess in

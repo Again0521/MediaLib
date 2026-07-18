@@ -1,5 +1,6 @@
 import Foundation
 import MediaLibCore
+import MediaLibServerProtocol
 
 struct ServerRequestPrincipal: Equatable, Sendable {
     let userID: String
@@ -239,6 +240,35 @@ final class ServerAuthenticationService: @unchecked Sendable {
         let cookieToken = cookie.flatMap { Self.cookie(named: Self.accessCookieName, in: $0) }
         guard !(bearer != nil && cookieToken != nil), let token = bearer ?? cookieToken else { return nil }
         return try principal(forAccessToken: token, at: date)
+    }
+
+    /// 仅供当前认证用户读取自己的显示身份与已生效权限；不暴露会话、设备、token 或
+    /// 其它用户的身份资料。用户被删除或状态失配时一律作为不可用处理。
+    func currentUserProfile(for principal: ServerRequestPrincipal) throws -> ServerCurrentUserProfile? {
+        guard let user = try identityRepository.user(id: principal.userID), !user.isDisabled else {
+            return nil
+        }
+        return ServerCurrentUserProfile(
+            username: user.username,
+            displayName: user.displayName,
+            roleIDs: try identityRepository.roleIDs(userID: user.id),
+            permissionIDs: principal.permissions.map(\.rawValue)
+        )
+    }
+
+    /// 当前主体的自助改密入口。目标用户只能来自已验证 principal，且轮换服务会在成功
+    /// 后原子撤销该用户的所有旧会话；不提供代表其它用户或管理员恢复的远程变体。
+    func changePassword(
+        for principal: ServerRequestPrincipal,
+        currentPassword: String,
+        newPassword: String
+    ) throws {
+        try ServerCredentialRotationService(database: database, passwordHasher: passwordHasher)
+            .changePassword(
+                userID: principal.userID,
+                currentPassword: currentPassword,
+                newPassword: newPassword
+            )
     }
 
     func logout(accessToken: String, at date: Date = Date()) throws {

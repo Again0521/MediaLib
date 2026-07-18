@@ -1,5 +1,7 @@
 import Foundation
+#if os(macOS)
 import ImageIO
+#endif
 
 public struct ScanProgress: Equatable {
     public var sourceID: String
@@ -21,6 +23,8 @@ public struct ScanSummary: Equatable {
     public var skippedFiles: Int
     public var errors: [String]
 }
+
+#if os(macOS)
 
 enum MediaScannerPathKind: Sendable, Equatable {
     case missing
@@ -740,3 +744,4 @@ public final class MediaScanner {
         }
     }
 }
+#endif

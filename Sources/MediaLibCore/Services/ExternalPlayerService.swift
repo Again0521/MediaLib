@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import Foundation
 
@@ -272,3 +273,4 @@ public final class ExternalPlayerService {
         ]
     }
 }
+#endif

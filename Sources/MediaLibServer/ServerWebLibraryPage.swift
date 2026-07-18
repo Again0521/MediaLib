@@ -1,10 +1,135 @@
 import Foundation
+import MediaLibServerProtocol
 
 /// 认证资料库浏览页。页面只包含同源静态脚本，所有服务器返回文本均通过
 /// `textContent` 写入 DOM，避免把媒体元数据变成 HTML 注入面。
 enum ServerWebLibraryPage {
-    static func render(serverName: String, csrfToken: String, showAdministration: Bool) -> String {
-        let administrationLink = showAdministration ? "<a href=\"/admin\">服务管理</a>" : ""
+    enum Page {
+        case library
+        case search
+        case continuing
+        case history
+        case favorites
+        case watchlist
+        case ratings
+        case watched
+        case unwatched
+
+        var path: String {
+            switch self {
+            case .library: return "/library"
+            case .search: return "/search"
+            case .continuing: return "/watching"
+            case .history: return "/history"
+            case .favorites: return "/favorites"
+            case .watchlist: return "/watchlist"
+            case .ratings: return "/ratings"
+            case .watched: return "/watched"
+            case .unwatched: return "/unwatched"
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .library: return "浏览资料库"
+            case .search: return "全局搜索"
+            case .continuing: return "继续观看"
+            case .history: return "播放历史"
+            case .favorites: return "我的收藏"
+            case .watchlist: return "想看清单"
+            case .ratings: return "我的评分"
+            case .watched: return "已看内容"
+            case .unwatched: return "未看内容"
+            }
+        }
+
+        var eyebrow: String {
+            switch self {
+            case .library: return "Mlink Library"
+            case .search: return "MediaLIB Search"
+            case .continuing: return "Continue Watching"
+            case .history: return "Playback History"
+            case .favorites: return "My Favorites"
+            case .watchlist: return "My Watchlist"
+            case .ratings: return "My Ratings"
+            case .watched: return "Watched"
+            case .unwatched: return "Unwatched"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .library: return "按服务端分类查找内容。结果每页最多 100 项，降低浏览器与服务端的瞬时占用。"
+            case .search: return "跨当前账号获授权的服务端资料库搜索。结果按服务端分类返回，且不会暴露文件路径或其他用户痕迹。"
+            case .continuing: return "只显示你尚未看完的内容；筛选、计数和分页均在服务端针对当前账号执行。"
+            case .history: return "只显示当前账号已开始播放过的内容，并按最近播放时间由新到旧排列。"
+            case .favorites: return "只显示当前账号收藏的内容。收藏状态与其他用户隔离，并可在详情页随时修改。"
+            case .watchlist: return "只显示当前账号加入想看的内容，适合作为稍后播放清单。"
+            case .ratings: return "只显示当前账号已经评分的内容；评分仅属于你，不会覆盖其他用户或桌面全局评分。"
+            case .watched: return "只显示当前账号已经看完的内容；观看状态来自服务端，不读取桌面端全局痕迹。"
+            case .unwatched: return "只显示当前账号尚未标记看完的内容，包括从未开始和仍在观看的项目。"
+            }
+        }
+
+        var playbackFilter: String? {
+            switch self {
+            case .continuing: return ServerLibraryPlaybackFilter.inProgress.rawValue
+            case .history: return ServerLibraryPlaybackFilter.history.rawValue
+            case .watched: return ServerLibraryPlaybackFilter.watched.rawValue
+            case .unwatched: return ServerLibraryPlaybackFilter.unwatched.rawValue
+            case .library, .search, .favorites, .watchlist, .ratings: return nil
+            }
+        }
+
+        var preferenceFilter: String? {
+            switch self {
+            case .favorites: return ServerLibraryPreferenceFilter.favorite.rawValue
+            case .watchlist: return ServerLibraryPreferenceFilter.watchlist.rawValue
+            case .ratings: return ServerLibraryPreferenceFilter.rated.rawValue
+            default: return nil
+            }
+        }
+
+        var defaultSort: ServerLibrarySort {
+            self == .history ? .lastPlayedDescending : .updatedDescending
+        }
+    }
+
+    static func render(
+        serverName: String,
+        csrfToken: String,
+        showAdministration: Bool,
+        page: Page = .library,
+        categories: [ServerLibraryCategory] = [],
+        selectedCategoryID: String? = nil
+    ) -> String {
+        let activeNavigation: ServerWebNavigation.Active = {
+            switch page {
+            case .library: return .library
+            case .search: return .search
+            case .continuing: return .watching
+            case .history: return .history
+            case .favorites: return .favorites
+            case .watchlist: return .watchlist
+            case .ratings: return .ratings
+            case .watched: return .watched
+            case .unwatched: return .unwatched
+            }
+        }()
+        let sidebar = ServerWebNavigation.render(
+            active: activeNavigation,
+            showAdministration: showAdministration,
+            note: .library,
+            categories: categories,
+            activeCategoryID: page == .library ? selectedCategoryID : nil
+        )
+        let playbackFilter = page.playbackFilter ?? ""
+        let preferenceFilter = page.preferenceFilter ?? ""
+        let historySortOption = page == .history ? "<option value=\"lastPlayedDescending\">最近播放</option>" : ""
+        let categoryOptions = categories.prefix(32).compactMap { category -> String? in
+            guard ServerWebURL.queryValue(category.id) != nil else { return nil }
+            return "<option value=\"\(escape(category.id))\">\(escape(category.title))（\(max(category.itemCount, 0))）</option>"
+        }.joined(separator: "")
         return """
         <!doctype html>
         <html lang="zh-Hans">
@@ -13,50 +138,21 @@ enum ServerWebLibraryPage {
           <meta name="viewport" content="width=device-width, initial-scale=1">
           <meta name="color-scheme" content="light">
           <meta name="medialib-csrf-token" content="\(escape(csrfToken))">
-          <title>资料库 · \(escape(serverName))</title>
-          <style>
-            :root { --primary:#236fb5; --primary-strong:#174d82; --accent:#087f5b; --ink:#172033; --muted:#64748b; --line:#dfe7f1; --canvas:#f4f8fc; --surface:#fff; --focus:#1570ef; --danger:#b42318; }
-            * { box-sizing:border-box; } html { min-width:320px; } body { overflow-x:hidden; margin:0; color:var(--ink); background:var(--canvas); font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-            a,button,select,input { touch-action:manipulation; } :focus-visible { outline:3px solid var(--focus); outline-offset:3px; }
-            .skip { position:fixed; z-index:1000; top:8px; left:8px; padding:10px 14px; border-radius:9px; color:#fff; background:var(--primary-strong); transform:translateY(-160%); } .skip:focus { transform:none; }
-            .shell { display:grid; grid-template-columns:232px minmax(0,1fr); min-height:100dvh; }
-            aside { padding:28px 18px; color:#eef7ff; background:linear-gradient(165deg,#183b68,#1e79cf 56%,#36bffa); }
-            .brand { display:flex; gap:10px; align-items:center; font-size:19px; font-weight:800; letter-spacing:.3px; }
-            .brand-mark { display:grid; place-items:center; width:34px; height:34px; border-radius:11px; color:#1774ce; background:#fff; box-shadow:0 8px 18px #123c6a55; }
-            nav { display:grid; gap:6px; margin-top:42px; } nav a { display:flex; align-items:center; min-height:44px; padding:10px 12px; border-radius:10px; color:inherit; text-decoration:none; font-size:14px; } nav a:hover,nav a.active { background:#ffffff2c; } nav a.active { font-weight:700; }
-            .privacy { margin-top:28px; padding:13px; border:1px solid #ffffff35; border-radius:14px; background:#173d6d45; font-size:12px; }
-            main { min-width:0; padding:clamp(22px,4vw,48px); } .eyebrow { margin:0 0 6px; color:var(--primary); font-size:13px; font-weight:750; letter-spacing:.08em; text-transform:uppercase; }
-            h1 { margin:0; font-size:clamp(30px,5vw,52px); line-height:1.08; letter-spacing:-.045em; } .subtitle { max-width:68ch; margin:12px 0 0; color:var(--muted); }
-            .filters { display:grid; grid-template-columns:minmax(220px,2fr) repeat(2,minmax(150px,1fr)) auto; gap:12px; align-items:end; margin-top:28px; padding:16px; border:1px solid var(--line); border-radius:18px; background:var(--surface); box-shadow:0 10px 30px #20385b0c; }
-            .field { display:grid; gap:6px; min-width:0; } label { font-size:13px; font-weight:700; } input,select,button { min-height:44px; border:1px solid #bdcadb; border-radius:10px; font:inherit; } input,select { width:100%; padding:9px 11px; color:var(--ink); background:#fff; } button { padding:9px 18px; border-color:var(--primary); color:#fff; background:var(--primary); cursor:pointer; font-weight:750; transition:background-color .18s ease,border-color .18s ease; } button:hover { background:var(--primary-strong); } button:disabled { cursor:not-allowed; opacity:.48; }
-            .results-head { display:flex; gap:16px; align-items:center; justify-content:space-between; margin-top:30px; } h2 { margin:0; font-size:19px; } .count { color:var(--muted); font-variant-numeric:tabular-nums; }
-            .status { min-height:48px; margin:12px 0; padding:12px 14px; border:1px solid var(--line); border-radius:12px; color:var(--muted); background:#ffffffb8; } .status[hidden] { display:none; } .status.error { color:var(--danger); border-color:#f2b8b5; background:#fff4f2; }
-            .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(164px,1fr)); gap:16px; }
-            .card { position:relative; overflow:hidden; min-width:0; border:1px solid var(--line); border-radius:16px; background:var(--surface); box-shadow:0 10px 28px #243a6210; }
-            .card a { display:block; min-height:100%; color:inherit; text-decoration:none; transition:background-color .18s ease; } .card a:hover { background:#f4f9ff; }
-            .poster { display:grid; overflow:hidden; aspect-ratio:2/3; place-items:center; color:#fff; background:linear-gradient(145deg,#236dbb,#36bffa 56%,#9ae2ff); font-size:48px; font-weight:800; } .poster img { width:100%; height:100%; object-fit:cover; }
-            .mlink { position:absolute; z-index:10; top:9px; left:9px; padding:4px 7px; border-radius:7px; color:#fff; background:#123b68e8; box-shadow:0 3px 10px #0c274555; font-size:11px; font-weight:800; letter-spacing:.03em; }
-            .copy { padding:12px; } .title { overflow:hidden; margin:0; font-size:14px; line-height:1.4; text-overflow:ellipsis; white-space:nowrap; } .meta { margin:6px 0 0; color:var(--muted); font-size:12px; }
-            .progress-label { display:block; margin-top:9px; color:var(--primary-strong); font-size:12px; } progress { display:block; width:100%; height:7px; margin-top:4px; accent-color:var(--accent); }
-            .pager { display:flex; gap:12px; align-items:center; justify-content:center; margin-top:28px; } .pager button { min-width:96px; } .page-label { min-width:120px; text-align:center; color:var(--muted); font-variant-numeric:tabular-nums; }
-            footer { margin-top:42px; color:var(--muted); font-size:12px; }
-            @media (max-width:900px) { .filters { grid-template-columns:1fr 1fr; } .search-field { grid-column:1/-1; } }
-            @media (max-width:720px) { .shell { display:block; } aside { padding:16px 20px; } nav { display:flex; overflow:auto; gap:8px; margin-top:14px; } nav a { flex:none; } .privacy { display:none; } main { padding:24px 18px 36px; } .filters { grid-template-columns:1fr; } .search-field { grid-column:auto; } .filters button { width:100%; } .grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; } }
-            @media (max-width:374px) { .grid { grid-template-columns:1fr; } }
-            @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition-duration:.01ms!important; } }
-          </style>
+          <title>\(page.title) · \(escape(serverName))</title>
+          <link rel="stylesheet" href="/assets/library.css">
+          <link rel="stylesheet" href="/assets/app-shell.css">
           <script src="/assets/library.js" defer></script>
         </head>
-        <body>
+        <body data-page-route="\(page.path)" data-playback-filter="\(playbackFilter)" data-preference-filter="\(preferenceFilter)" data-default-sort="\(page.defaultSort.rawValue)">
           <a class="skip" href="#main">跳到主要内容</a>
           <div class="shell">
-            <aside><div class="brand"><span class="brand-mark">M</span><span>MediaLIB</span></div><nav aria-label="主导航"><a href="/">资料库首页</a><a class="active" aria-current="page" href="/library">浏览全部</a>\(administrationLink)<a href="/.well-known/mlink">Mlink 描述</a><a href="/health">服务健康</a></nav><p class="privacy">分类、搜索结果和续播进度均由当前服务端授权后返回，不包含本地文件路径或其他用户记录。</p></aside>
+            \(sidebar)
             <main id="main" tabindex="-1">
-              <p class="eyebrow">Mlink Library</p><h1>浏览资料库</h1><p class="subtitle">在 \(escape(serverName)) 中按服务端分类查找内容。结果每页最多 100 项，降低浏览器与服务端的瞬时占用。</p>
+              <p class="eyebrow">\(page.eyebrow)</p><h1>\(page.title)</h1><p class="subtitle">在 \(escape(serverName)) 中\(page.subtitle)</p>
               <form class="filters" id="filters" role="search">
                 <div class="field search-field"><label for="query">搜索标题、年份或类型</label><input id="query" name="q" type="search" maxlength="128" autocomplete="off" placeholder="输入关键词"></div>
-                <div class="field"><label for="type">服务端分类</label><select id="type" name="type"><option value="">全部分类</option></select></div>
-                <div class="field"><label for="sort">排序方式</label><select id="sort" name="sort"><option value="updatedDescending">最近更新</option><option value="titleAscending">标题 A–Z</option><option value="yearDescending">年份从新到旧</option></select></div>
+                <div class="field"><label for="type">服务端分类</label><select id="type" name="type"><option value="">全部分类</option>\(categoryOptions)</select></div>
+                <div class="field"><label for="sort">排序方式</label><select id="sort" name="sort">\(historySortOption)<option value="updatedDescending">最近更新</option><option value="titleAscending">标题 A–Z</option><option value="yearDescending">年份从新到旧</option></select></div>
                 <button id="submit" type="submit">应用筛选</button>
               </form>
               <div class="results-head"><h2>媒体项目</h2><span class="count" id="count">等待加载</span></div>
@@ -69,6 +165,41 @@ enum ServerWebLibraryPage {
         </body></html>
         """
     }
+
+    /// 四个资料库视图共用的页面样式。以同源静态资源交付，避免每次切换
+    /// 浏览/搜索/续播/历史页都重新传输和解析同一套布局规则。
+    static let style = """
+    :root { --primary:#236fb5; --primary-strong:#174d82; --accent:#087f5b; --ink:#172033; --muted:#64748b; --line:#dfe7f1; --canvas:#f4f8fc; --surface:#fff; --focus:#1570ef; --danger:#b42318; }
+    * { box-sizing:border-box; } html { min-width:320px; } body { overflow-x:hidden; margin:0; color:var(--ink); background:var(--canvas); font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    a,button,select,input { touch-action:manipulation; } :focus-visible { outline:3px solid var(--focus); outline-offset:3px; }
+    .skip { position:fixed; z-index:1000; top:8px; left:8px; padding:10px 14px; border-radius:9px; color:#fff; background:var(--primary-strong); transform:translateY(-160%); } .skip:focus { transform:none; }
+    .shell { display:grid; grid-template-columns:258px minmax(0,1fr); min-height:100dvh; }
+    aside { padding:26px 16px; color:var(--ink); background:#fbfcfe; border-right:1px solid #e9edf4; }
+    .brand { display:flex; gap:10px; align-items:center; font-size:19px; font-weight:850; letter-spacing:-.02em; }
+    .brand-mark { display:grid; place-items:center; width:34px; height:34px; border-radius:10px; color:#fff; background:linear-gradient(135deg,#2e90fa,#36bffa); box-shadow:0 7px 16px #2e90fa35; }
+    nav { display:grid; gap:5px; margin-top:34px; } nav a { display:flex; align-items:center; min-height:44px; padding:10px 12px; border:1px solid transparent; border-radius:10px; color:#516174; text-decoration:none; font-size:14px; font-weight:650; } nav a:hover { color:#0f172a; background:#f1f5fa; } nav a.active { border-color:#dbeafe; color:#0f3d71; background:linear-gradient(110deg,#eaf4ff,#f8fbff); font-weight:800; }
+    .privacy { margin-top:28px; padding:13px; border:1px solid var(--line); border-radius:14px; color:var(--muted); background:#fff; box-shadow:0 8px 20px #243a6208; font-size:12px; }
+    main { min-width:0; padding:clamp(22px,4vw,48px); background:radial-gradient(circle at 86% -15%,#dff3ff 0,transparent 31%),var(--canvas); } .eyebrow { margin:0 0 6px; color:var(--primary); font-size:13px; font-weight:750; letter-spacing:.08em; text-transform:uppercase; }
+    h1 { margin:0; font-size:clamp(30px,5vw,52px); line-height:1.08; letter-spacing:-.045em; } .subtitle { max-width:68ch; margin:12px 0 0; color:var(--muted); }
+    .filters { display:grid; grid-template-columns:minmax(220px,2fr) repeat(2,minmax(150px,1fr)) auto; gap:12px; align-items:end; margin-top:28px; padding:16px; border:1px solid var(--line); border-radius:18px; background:var(--surface); box-shadow:0 10px 30px #20385b0c; }
+    .field { display:grid; gap:6px; min-width:0; } label { font-size:13px; font-weight:700; } input,select,button { min-height:44px; border:1px solid #bdcadb; border-radius:10px; font:inherit; } input,select { width:100%; padding:9px 11px; color:var(--ink); background:#fff; } button { padding:9px 18px; border-color:var(--primary); color:#fff; background:var(--primary); cursor:pointer; font-weight:750; transition:background-color .18s ease,border-color .18s ease; } button:hover { background:var(--primary-strong); } button:disabled { cursor:not-allowed; opacity:.48; }
+    .results-head { display:flex; gap:16px; align-items:center; justify-content:space-between; margin-top:30px; } h2 { margin:0; font-size:19px; } .count { color:var(--muted); font-variant-numeric:tabular-nums; }
+    .status { min-height:48px; margin:12px 0; padding:12px 14px; border:1px solid var(--line); border-radius:12px; color:var(--muted); background:#ffffffb8; } .status[hidden] { display:none; } .status.error { color:var(--danger); border-color:#f2b8b5; background:#fff4f2; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(164px,1fr)); gap:16px; }
+    .card { position:relative; overflow:hidden; min-width:0; border:1px solid var(--line); border-radius:16px; background:var(--surface); box-shadow:0 10px 28px #243a6210; }
+    .card a { display:block; min-height:100%; color:inherit; text-decoration:none; transition:background-color .18s ease; } .card a:hover { background:#f4f9ff; }
+    .poster { display:grid; overflow:hidden; aspect-ratio:2/3; place-items:center; color:#fff; background:linear-gradient(145deg,#236dbb,#36bffa 56%,#9ae2ff); font-size:48px; font-weight:800; } .poster img { width:100%; height:100%; object-fit:cover; }
+    .mlink { position:absolute; z-index:10; top:9px; left:9px; padding:4px 7px; border-radius:7px; color:#fff; background:#123b68e8; box-shadow:0 3px 10px #0c274555; font-size:11px; font-weight:800; letter-spacing:.03em; }
+    .copy { padding:12px; } .title { overflow:hidden; margin:0; font-size:14px; line-height:1.4; text-overflow:ellipsis; white-space:nowrap; } .meta { margin:6px 0 0; color:var(--muted); font-size:12px; }
+    .user-rating { display:block; margin-top:7px; color:#8a5a00; font-size:12px; font-weight:750; }
+    .progress-label { display:block; margin-top:9px; color:var(--primary-strong); font-size:12px; } progress { display:block; width:100%; height:7px; margin-top:4px; accent-color:var(--accent); }
+    .pager { display:flex; gap:12px; align-items:center; justify-content:center; margin-top:28px; } .pager button { min-width:96px; } .page-label { min-width:120px; text-align:center; color:var(--muted); font-variant-numeric:tabular-nums; }
+    footer { margin-top:42px; color:var(--muted); font-size:12px; }
+    @media (max-width:900px) { .filters { grid-template-columns:1fr 1fr; } .search-field { grid-column:1/-1; } }
+    @media (max-width:720px) { .shell { display:block; } aside { padding:16px 20px; } nav { display:flex; overflow:auto; gap:8px; margin-top:14px; } nav a { flex:none; } .privacy { display:none; } main { padding:24px 18px 36px; } .filters { grid-template-columns:1fr; } .search-field { grid-column:auto; } .filters button { width:100%; } .grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; } }
+    @media (max-width:374px) { .grid { grid-template-columns:1fr; } }
+    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition-duration:.01ms!important; } }
+    """
 
     static let script = #"""
     (() => {
@@ -85,6 +216,10 @@ enum ServerWebLibraryPage {
       const previous = document.getElementById('previous');
       const next = document.getElementById('next');
       const pageLabel = document.getElementById('page-label');
+      const pageRoute = ['/library', '/search', '/watching', '/history', '/favorites', '/watchlist', '/ratings', '/watched', '/unwatched'].includes(document.body.dataset.pageRoute) ? document.body.dataset.pageRoute : '/library';
+      const playbackFilter = ['inProgress', 'history', 'watched', 'unwatched'].includes(document.body.dataset.playbackFilter) ? document.body.dataset.playbackFilter : '';
+      const preferenceFilter = ['favorite', 'watchlist', 'rated'].includes(document.body.dataset.preferenceFilter) ? document.body.dataset.preferenceFilter : '';
+      const defaultSort = document.body.dataset.defaultSort === 'lastPlayedDescending' ? 'lastPlayedDescending' : 'updatedDescending';
       let offset = 0;
       let total = 0;
       let controller = null;
@@ -101,13 +236,15 @@ enum ServerWebLibraryPage {
         const q = params.get('q') || '';
         query.value = q.slice(0, 128);
         const initialSort = params.get('sort');
-        if (['updatedDescending', 'titleAscending', 'yearDescending'].includes(initialSort)) sort.value = initialSort;
+        sort.value = defaultSort;
+        if (['updatedDescending', 'titleAscending', 'yearDescending', 'lastPlayedDescending'].includes(initialSort) && Array.from(sort.options).some(option => option.value === initialSort)) sort.value = initialSort;
         const parsedOffset = Number(params.get('offset') || '0');
         offset = Number.isSafeInteger(parsedOffset) && parsedOffset >= 0 && parsedOffset <= 1000000 ? parsedOffset : 0;
         return params.get('type') || '';
       };
 
       const requestedType = safeInitialState();
+      if (Array.from(type.options).some(option => option.value === requestedType)) type.value = requestedType;
 
       async function fetchJSON(path, signal) {
         const response = await fetch(path, { credentials: 'same-origin', headers: { Accept: 'application/json' }, signal });
@@ -115,29 +252,12 @@ enum ServerWebLibraryPage {
         return response.json();
       }
 
-      async function loadCategories() {
-        try {
-          const data = await fetchJSON('/api/v1/library/categories');
-          const fragment = document.createDocumentFragment();
-          for (const category of Array.isArray(data.categories) ? data.categories : []) {
-            if (typeof category.id !== 'string' || typeof category.title !== 'string') continue;
-            const option = document.createElement('option');
-            option.value = category.id;
-            option.textContent = `${category.title}（${Number(category.itemCount) || 0}）`;
-            fragment.append(option);
-          }
-          type.append(fragment);
-          if (Array.from(type.options).some(option => option.value === requestedType)) type.value = requestedType;
-        } catch (_) {
-          // 分类失败不阻塞“全部分类”浏览；主列表会显示自己的可恢复错误。
-        }
-      }
-
       function renderItem(item) {
         const article = element('article', 'card');
         const link = element('a');
-        link.href = `/item/${encodeURIComponent(String(item.id || ''))}`;
-        link.setAttribute('aria-label', `查看并播放 ${String(item.title || '未命名媒体')}`);
+        const isSeries = item.isSeries === true;
+        link.href = `${isSeries ? '/series/' : '/item/'}${encodeURIComponent(String(item.id || ''))}`;
+        link.setAttribute('aria-label', `${isSeries ? '查看系列' : '查看并播放'} ${String(item.title || '未命名媒体')}`);
         const badge = element('span', 'mlink', 'Mlink');
         const poster = element('div', 'poster', String(item.type || 'M').slice(0, 1).toUpperCase());
         poster.setAttribute('role', 'img');
@@ -155,10 +275,18 @@ enum ServerWebLibraryPage {
         titleNode.title = String(item.title || '未命名媒体');
         const meta = element('p', 'meta', `${String(item.type || 'other')} · ${item.year || '未标注年份'}`);
         copy.append(titleNode, meta);
+        const preference = item.userPreference;
+        if (preference && Number.isFinite(Number(preference.rating)) && Number(preference.rating) > 0) {
+          copy.append(element('span', 'user-rating', `我的评分 ${Number(preference.rating).toLocaleString('zh-Hans', { maximumFractionDigits: 1 })} / 5`));
+        }
         const state = item.userState;
         if (state && Number.isFinite(Number(state.progress))) {
           const percent = Math.max(0, Math.min(100, Math.round(Number(state.progress) * 100)));
-          const label = element('span', 'progress-label', state.isWatched ? '已看完' : `已播放 ${percent}%`);
+          const baseLabel = state.isWatched ? '已看完' : `已播放 ${percent}%`;
+          const playedAt = playbackFilter === 'history' && typeof state.lastPlayedAt === 'string' ? new Date(state.lastPlayedAt) : null;
+          const historyTime = playedAt && Number.isFinite(playedAt.getTime())
+            ? ` · 最近播放于 ${playedAt.toLocaleString('zh-Hans', { dateStyle: 'medium', timeStyle: 'short' })}` : '';
+          const label = element('span', 'progress-label', `${baseLabel}${historyTime}`);
           const progress = document.createElement('progress');
           progress.max = 100;
           progress.value = percent;
@@ -185,6 +313,8 @@ enum ServerWebLibraryPage {
         const normalizedQuery = query.value.trim();
         if (normalizedQuery) params.set('q', normalizedQuery);
         if (type.value) params.set('type', type.value);
+        if (playbackFilter) params.set('state', playbackFilter);
+        if (preferenceFilter) params.set('preference', preferenceFilter);
         try {
           const data = await fetchJSON(`/api/v1/library/browse?${params.toString()}`, controller.signal);
           total = Math.max(0, Number(data.totalItemCount) || 0);
@@ -199,11 +329,18 @@ enum ServerWebLibraryPage {
           previous.disabled = offset === 0;
           next.disabled = !Boolean(data.hasMore);
           if (items.length === 0) {
-            status.textContent = '没有符合条件的媒体。请尝试清除关键词或切换分类。';
+            status.textContent = playbackFilter === 'inProgress' ? '你目前没有未完成的内容。'
+              : (playbackFilter === 'history' ? '你目前还没有播放历史。'
+              : (playbackFilter === 'watched' ? '你目前还没有已看内容。'
+              : (playbackFilter === 'unwatched' ? '当前分类中没有未看内容。'
+              : (preferenceFilter === 'favorite' ? '你目前还没有收藏内容，可在媒体详情页添加。'
+              : (preferenceFilter === 'watchlist' ? '你的想看清单还是空的，可在媒体详情页添加。'
+              : (preferenceFilter === 'rated' ? '你目前还没有评分内容，可在媒体详情页评分。'
+              : '没有符合条件的媒体。请尝试清除关键词或切换分类。'))))));
           } else {
             status.hidden = true;
           }
-          if (updateHistory) history.replaceState(null, '', `/library?${params.toString()}`);
+          if (updateHistory) history.replaceState(null, '', `${pageRoute}?${params.toString()}`);
         } catch (error) {
           if (error && error.name === 'AbortError') status.textContent = '请求超时。请检查服务状态后重试。';
           else status.textContent = error instanceof Error ? error.message : '资料库载入失败，请重试。';
@@ -220,7 +357,7 @@ enum ServerWebLibraryPage {
       form.addEventListener('submit', event => { event.preventDefault(); offset = 0; loadPage(); });
       previous.addEventListener('click', () => { offset = Math.max(0, offset - pageSize); loadPage(); document.getElementById('main').focus(); });
       next.addEventListener('click', () => { if (offset + pageSize < total) offset += pageSize; loadPage(); document.getElementById('main').focus(); });
-      loadCategories().finally(() => loadPage());
+      void loadPage();
     })();
     """#
 

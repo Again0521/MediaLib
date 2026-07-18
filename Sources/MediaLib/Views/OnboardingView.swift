@@ -123,7 +123,7 @@ struct OnboardingView: View {
                 }
             }
             .padding(16)
-            .staticSurfaceBackground(cornerRadius: 18, thickness: 0.96)
+            .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 0.96)
             .frame(maxWidth: 440, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.top, 4)

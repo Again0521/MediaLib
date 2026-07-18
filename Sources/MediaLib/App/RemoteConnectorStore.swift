@@ -12,6 +12,7 @@ final class RemoteConnectorStore: ObservableObject {
     @Published private(set) var isConnectingEmby = false
     @Published private(set) var isConnectingJellyfin = false
     @Published private(set) var isConnectingPlex = false
+    @Published private(set) var isConnectingMlink = false
 
     func replaceAccounts(_ accounts: [RemoteConnectorAccount]) {
         self.accounts = accounts
@@ -37,6 +38,8 @@ final class RemoteConnectorStore: ObservableObject {
             return isConnectingJellyfin
         case .plex:
             return isConnectingPlex
+        case .mlink:
+            return isConnectingMlink
         default:
             return false
         }
@@ -50,6 +53,8 @@ final class RemoteConnectorStore: ObservableObject {
             isConnectingJellyfin = connecting
         case .plex:
             isConnectingPlex = connecting
+        case .mlink:
+            isConnectingMlink = connecting
         default:
             break
         }

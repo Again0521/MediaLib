@@ -49,7 +49,7 @@ struct QuickPreviewView: View {
                 .keyboardShortcut(.escape, modifiers: [])
             }
             .padding(14)
-            .staticSurfaceBackground(cornerRadius: 18)
+            .staticSurfaceBackground(cornerRadius: AppRadius.card)
             .padding(16)
         }
         .frame(minWidth: 760, minHeight: 460)

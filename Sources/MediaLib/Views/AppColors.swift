@@ -1935,11 +1935,13 @@ struct ReferenceCardSurface: View {
             )
         }
         .clipShape(shape)
+        // C 单档阴影：全 app 普通卡片统一为一档更紧致的柔影（原 radius15/y6 过浮，收敛为 radius10/y3），
+        // 消除「浮动卡片汤」的厚重感，让各页卡片投影观感一致。阴影是唯一档，勿在各页另设投影值。
         .shadow(
-            color: shadowed ? AppColors.refCardShadow.opacity(colorScheme == .dark ? 0.18 : 0.10) : .clear,
-            radius: shadowed ? 15 : 0,
+            color: shadowed ? AppColors.refCardShadow.opacity(colorScheme == .dark ? 0.16 : 0.08) : .clear,
+            radius: shadowed ? 10 : 0,
             x: 0,
-            y: shadowed ? 6 : 0
+            y: shadowed ? 3 : 0
         )
     }
 }
@@ -2061,15 +2063,11 @@ private struct GlassFocusRingModifier: ViewModifier {
 }
 
 /// 弹窗页脚「主操作」按钮：蓝色实心、统一 41 高、留足内距。作为主次层级中的**主**。
+/// 弹窗页脚「主操作」按钮：委托三件套 Primary（保持原有 12 圆角 / 20 内边距 / 41 高，观感不变）。
+/// 作为唯一入口后，切换形态风格时随三件套统一变化。
 struct AppSheetPrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        LiquidGlassButtonStyle(
-            cornerRadius: 12,
-            horizontalPadding: 20,
-            minHeight: AppControlMetrics.prominentButtonHeight,
-            prominent: true
-        )
-        .makeBody(configuration: configuration)
+        AppPrimaryButtonStyle().makeBody(configuration: configuration)
     }
 }
 
@@ -2077,8 +2075,7 @@ struct AppSheetPrimaryButtonStyle: ButtonStyle {
 /// 与蓝色实心主按钮形成清晰的上下级关系（系统原生 sheet 的 bordered + default 组合）。
 struct AppSheetSecondaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        LiquidGlassButtonStyle(
-            cornerRadius: 12,
+        AppStandardButtonStyle(
             horizontalPadding: 18,
             minHeight: AppControlMetrics.prominentButtonHeight,
             outlined: true
@@ -2403,6 +2400,7 @@ struct HeaderActionGlassButtonStyle: ButtonStyle {
 private struct HeaderActionGlassButtonStyleBody: View {
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.isFocused) private var isFocused
+    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let configuration: ButtonStyle.Configuration
     let cornerRadius: CGFloat
@@ -2424,14 +2422,16 @@ private struct HeaderActionGlassButtonStyleBody: View {
             .frame(minHeight: minHeight)
             .background {
                 ZStack {
-                    shape.fill(AppColors.refScanFill)
+                    // E 融入白：页头按钮与白色控件栏/卡片同一种白（原冷灰 refScanFill 是另一种材质→显生硬）；
+                    // hover/press 只做中性极淡加深，不上蓝、不加投影，让它读作 app 白卡的一部分。
+                    shape.fill(AppColors.refCardBg)
                     if active {
-                        shape.fill(AppColors.refProminentStart.opacity(pressed ? 0.12 : 0.06))
+                        shape.fill(Color.black.opacity(pressed ? 0.05 : 0.025))
                     }
                 }
             }
             .overlay {
-                shape.strokeBorder(active ? AppColors.refProminentStart.opacity(0.24) : AppColors.refCardBorder, lineWidth: 1)
+                shape.strokeBorder(AppColors.refCardBorder, lineWidth: 1)
             }
             .clipShape(shape)
             .modifier(GlassFocusRingModifier(active: isEnabled && isFocused, cornerRadius: cornerRadius))
@@ -2877,7 +2877,7 @@ struct PageHeader<Actions: View>: View {
                 .minimumScaleFactor(0.86)
             if let subtitle {
                 Text(subtitle)
-                    .font(.system(size: 13.5, weight: .medium))
+                    .font(.appBody(.medium))
                     .foregroundStyle(AppColors.refSubtle)
                     .lineLimit(2)
                     .lineSpacing(1)
@@ -3206,16 +3206,7 @@ struct AppSectionHeading<Trailing: View>: View {
             if let badgeText {
                 let bTint = badgeTint ?? AppColors.selectedGlassTint
                 Text(badgeText)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(bTint.opacity(0.95))
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(bTint.opacity(0.13), in: Capsule())
-                    .overlay {
-                        Capsule()
-                            .strokeBorder(bTint.opacity(0.28), lineWidth: 0.75)
-                    }
-                    .fixedSize()
+                    .appPillBadge(tint: bTint)
             }
 
             trailing
@@ -3249,37 +3240,17 @@ extension AppSectionHeading where Trailing == EmptyView {
 }
 
 struct AppStatusBadge: View {
-    @Environment(\.colorScheme) private var colorScheme
     let title: String
     let systemImage: String
     var tint: Color = AppColors.selectedGlassTint
 
     var body: some View {
+        // 统一到 .appPillBadge 单一规格（此前为渐变 + caption2，与区块徽章不一致）。
         HStack(spacing: 4) {
             AppGlyph(systemImage: systemImage, size: 11.5, lineWidth: 1.9)
             Text(title)
         }
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(tint.opacity(0.92))
-            .lineLimit(1)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-                LinearGradient(
-                    colors: [
-                        tint.opacity(colorScheme == .dark ? 0.22 : 0.13),
-                        tint.opacity(colorScheme == .dark ? 0.12 : 0.07)
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ),
-                in: Capsule()
-            )
-            .overlay {
-                Capsule()
-                    .strokeBorder(tint.opacity(colorScheme == .dark ? 0.34 : 0.26), lineWidth: 0.7)
-            }
-            .fixedSize()
+            .appPillBadge(tint: tint)
             .accessibilityElement(children: .combine)
     }
 }
@@ -4080,6 +4051,7 @@ private struct TransparentSearchTextField: NSViewRepresentable {
 
 struct GlassSearchField: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isFocused = false
     let placeholder: String
     @Binding var text: String
@@ -4114,12 +4086,15 @@ struct GlassSearchField: View {
         .frame(height: AppControlMetrics.searchFieldHeight)
         .frame(width: width)
         .background {
-            shape.fill(AppColors.refSearchFill)
+            // E 融入白：白底(refCardBg)取代冷灰 refSearchFill，与白卡/控件栏同材质。
+            shape.fill(AppColors.refCardBg)
         }
         .overlay {
-            if isFocused {
-                shape.strokeBorder(AppColors.refIconGlyph.opacity(0.55), lineWidth: 1.2)
-            }
+            // 常驻发丝边；聚焦时描边转强调色，无投影。
+            shape.strokeBorder(
+                isFocused ? AppColors.refIconGlyph.opacity(0.55) : AppColors.refCardBorder,
+                lineWidth: isFocused ? 1.2 : 1
+            )
         }
         .clipShape(shape)
         .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
@@ -4267,10 +4242,10 @@ struct GlassMenuButton<MenuItems: View>: View {
                 }
             }
             .overlay {
-                shape.strokeBorder(AppColors.refMenuBorder, lineWidth: 1)
+                // E 融入白：发丝边(refCardBorder)取代较重的板岩色 refMenuBorder，去投影，与白卡同材质。
+                shape.strokeBorder(AppColors.refCardBorder, lineWidth: 1)
             }
             .clipShape(shape)
-            .shadow(color: Color.black.opacity(0.04), radius: 2, x: 0, y: 1)
             .onHover { hovering in
                 isHovering = hovering
             }

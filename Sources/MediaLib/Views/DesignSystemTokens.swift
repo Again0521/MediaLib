@@ -27,6 +27,54 @@ enum AppSpacing {
     static let headerToControls: CGFloat = 16
 }
 
+/// 方向 C 统一文本刻度（对齐 macOS 文本样式，收敛此前散落的 17 档硬编码字号）。
+///
+/// 页头保留 30 的品牌体量；其余四档贴合系统 Title2 / Body / Callout / Caption。
+/// 数字列（时长、计数、评分、容量）一律取 `Font` 扩展里的 `*Mono` 变体避免跳动。
+/// 迁移原则：14 / 15 → title 或 body 就近；12.5 / 13.5 / 11.5 等碎片值一律并入最近档，禁止再新增小数字号。
+/// 音乐展开页不读本刻度（它有独立的 `MusicThemeConfig` 字号 token），本刻度改动不波及音乐皮肤。
+enum AppTypeScale {
+    /// 一级页面主标题（页头）。品牌体量，仅一级库页/设置页使用。
+    static let largeTitle: CGFloat = 30
+    /// 区块标题（剧集推荐 / 监测中心 / 设置节标题）。
+    static let title: CGFloat = 17
+    /// 正文、列表主文本。
+    static let body: CGFloat = 13
+    /// 次级说明、副标题、控件文案。
+    static let callout: CGFloat = 12
+    /// 徽章、时间码、脚注、计数。
+    static let caption: CGFloat = 11
+}
+
+extension Font {
+    static func appLargeTitle(_ weight: Font.Weight = .bold) -> Font {
+        .system(size: AppTypeScale.largeTitle, weight: weight)
+    }
+    static func appTitle(_ weight: Font.Weight = .semibold) -> Font {
+        .system(size: AppTypeScale.title, weight: weight)
+    }
+    static func appBody(_ weight: Font.Weight = .regular) -> Font {
+        .system(size: AppTypeScale.body, weight: weight)
+    }
+    static func appCallout(_ weight: Font.Weight = .regular) -> Font {
+        .system(size: AppTypeScale.callout, weight: weight)
+    }
+    static func appCaption(_ weight: Font.Weight = .regular) -> Font {
+        .system(size: AppTypeScale.caption, weight: weight)
+    }
+
+    // 数字列专用（等宽数字，防止滚动 / 计时时列宽跳动）。
+    static func appBodyMono(_ weight: Font.Weight = .regular) -> Font {
+        .system(size: AppTypeScale.body, weight: weight).monospacedDigit()
+    }
+    static func appCalloutMono(_ weight: Font.Weight = .regular) -> Font {
+        .system(size: AppTypeScale.callout, weight: weight).monospacedDigit()
+    }
+    static func appCaptionMono(_ weight: Font.Weight = .semibold) -> Font {
+        .system(size: AppTypeScale.caption, weight: weight).monospacedDigit()
+    }
+}
+
 enum AppRadius {
     // 控件/控制栏/卡片半径以 `MediaLIB 系统页面.html` 歌曲页实测为准：
     // 控制栏与筛选卡 16、通用卡片 16、控件 12，统一“卡边”几何语言。

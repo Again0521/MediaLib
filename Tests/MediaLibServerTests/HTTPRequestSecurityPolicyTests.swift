@@ -29,7 +29,7 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
 
     func testRejectsRequestSmugglingHeadersAndBodies() {
         XCTAssertEqual(
-            policy.validate("POST /api/v1/playback/hls/movie-1 HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"),
+            policy.validate("POST /api/v1/playback/state/movie-1 HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"),
             .badRequest
         )
         XCTAssertEqual(
@@ -37,7 +37,7 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
             .badRequest
         )
         XCTAssertEqual(
-            policy.validate("POST /api/v1/playback/hls/movie-1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 12\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"),
+            policy.validate("POST /api/v1/playback/state/movie-1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 12\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"),
             .badRequest
         )
         XCTAssertEqual(
@@ -47,16 +47,59 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
     }
 
     func testMutationsRequireCSRFAndSameOrigin() {
-        let accepted = "POST /api/v1/playback/hls/movie-1 HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Length: 0\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
+        let accepted = "POST /api/v1/playback/state/movie-1 HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Length: 0\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
         XCTAssertNil(policy.validate(accepted))
 
         XCTAssertEqual(
-            policy.validate("POST /api/v1/playback/hls/movie-1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"),
+            policy.validate("POST /api/v1/playback/state/movie-1 HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"),
             .forbidden
         )
         XCTAssertEqual(
-            policy.validate("DELETE /api/v1/hls/session-1 HTTP/1.1\r\nHost: localhost\r\nOrigin: https://attacker.example\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"),
+            policy.validate("DELETE /api/v1/playback/state/movie-1 HTTP/1.1\r\nHost: localhost\r\nOrigin: https://attacker.example\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"),
+            .badRequest
+        )
+    }
+
+    func testAdministrationSessionRevocationKeepsTheSameCSRFBoundary() {
+        let accepted = "POST /api/v1/admin/sessions/session-1/revoke HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Length: 0\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
+        XCTAssertNil(policy.validate(accepted))
+        XCTAssertEqual(
+            policy.validate(accepted.replacingOccurrences(of: "Origin: http://localhost:8098\r\n", with: "Origin: http://attacker.example\r\n")),
             .forbidden
+        )
+        XCTAssertEqual(
+            policy.validate(accepted.replacingOccurrences(of: "X-MediaLIB-CSRF: known-csrf-token\r\n", with: "")),
+            .forbidden
+        )
+    }
+
+    func testMemberCreationJSONKeepsTheSameCSRFAndContentTypeBoundary() {
+        let request = "POST /api/v1/admin/users HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Type: application/json\r\nContent-Length: 128\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
+        XCTAssertNil(policy.validate(request, bodyLength: 128))
+        XCTAssertEqual(
+            policy.validate(request.replacingOccurrences(of: "Content-Type: application/json\r\n", with: ""), bodyLength: 128),
+            .badRequest
+        )
+        XCTAssertEqual(
+            policy.validate(request.replacingOccurrences(of: "X-MediaLIB-CSRF: known-csrf-token\r\n", with: ""), bodyLength: 128),
+            .forbidden
+        )
+        XCTAssertEqual(
+            policy.validate(request.replacingOccurrences(of: "/api/v1/admin/users", with: "/api/v1/admin/users/unknown"), bodyLength: 128),
+            .badRequest
+        )
+    }
+
+    func testCurrentUserPasswordChangeJSONKeepsTheSameCSRFAndContentTypeBoundary() {
+        let request = "POST /api/v1/auth/password HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Type: application/json\r\nContent-Length: 128\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
+        XCTAssertNil(policy.validate(request, bodyLength: 128))
+        XCTAssertEqual(
+            policy.validate(request.replacingOccurrences(of: "Origin: http://localhost:8098\r\n", with: "Origin: http://attacker.example\r\n"), bodyLength: 128),
+            .forbidden
+        )
+        XCTAssertEqual(
+            policy.validate(request.replacingOccurrences(of: "Content-Type: application/json\r\n", with: ""), bodyLength: 128),
+            .badRequest
         )
     }
 
@@ -69,7 +112,7 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
             .badRequest
         )
         XCTAssertEqual(
-            policy.validate("POST /api/v1/playback/hls/movie HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n", bodyLength: 1),
+            policy.validate("POST /api/v1/playback/status/movie HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n", bodyLength: 1),
             .badRequest
         )
     }
@@ -85,6 +128,40 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
         XCTAssertEqual(policy.validate(unrelated, bodyLength: 64), .badRequest)
     }
 
+    func testAllowsOnlyCSRFProtectedPreferenceJSONAtTheDynamicItemRoute() {
+        let request = "POST /api/v1/user-media/preferences/movie-1 HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Type: application/json\r\nContent-Length: 17\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
+        XCTAssertNil(policy.validate(request, bodyLength: 17))
+        XCTAssertEqual(
+            policy.validate(request.replacingOccurrences(of: "Content-Type: application/json\r\n", with: ""), bodyLength: 17),
+            .badRequest
+        )
+        let unrelated = request.replacingOccurrences(of: "/api/v1/user-media/preferences/movie-1", with: "/api/v1/user-media/preference/movie-1")
+        XCTAssertEqual(policy.validate(unrelated, bodyLength: 17), .badRequest)
+    }
+
+    func testNativeMlinkMutationNeedsItsMarkerAndCannotCarryBrowserState() {
+        let request = "POST /api/v1/user-media/preferences/movie-1 HTTP/1.1\r\nHost: localhost:8098\r\nContent-Type: application/json\r\nContent-Length: 17\r\nAuthorization: Bearer native-token\r\nX-MediaLIB-Client: mlink-native/1\r\n\r\n"
+        XCTAssertNil(policy.validate(request, bodyLength: 17))
+        XCTAssertEqual(
+            policy.validate(request.replacingOccurrences(of: "X-MediaLIB-Client: mlink-native/1\r\n", with: ""), bodyLength: 17),
+            .forbidden
+        )
+        XCTAssertEqual(
+            policy.validate(request.replacingOccurrences(of: "\r\n\r\n", with: "\r\nCookie: sid=browser\r\n\r\n"), bodyLength: 17),
+            .forbidden
+        )
+        XCTAssertEqual(
+            policy.validate(request.replacingOccurrences(of: "\r\n\r\n", with: "\r\nOrigin: http://localhost:8098\r\n\r\n"), bodyLength: 17),
+            .forbidden
+        )
+        let passwordChange = request
+            .replacingOccurrences(of: "/api/v1/user-media/preferences/movie-1", with: "/api/v1/auth/password")
+        XCTAssertEqual(policy.validate(passwordChange, bodyLength: 17), .forbidden)
+        let nestedPath = request
+            .replacingOccurrences(of: "/api/v1/user-media/preferences/movie-1", with: "/api/v1/user-media/preferences/movie-1/future-action")
+        XCTAssertEqual(policy.validate(nestedPath, bodyLength: 17), .forbidden)
+    }
+
     func testRejectsAnyAttemptToSendPasswordRecoveryJSONOverHTTP() {
         let recovery = "POST /api/v1/auth/recover HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Type: application/json\r\nContent-Length: 32\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
         XCTAssertEqual(policy.validate(recovery, bodyLength: 32), .badRequest)
@@ -96,7 +173,7 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
             .forbidden
         )
         XCTAssertEqual(
-            policy.validate("GET /api/v1/hls/session/%2e%2e%2fsecret HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+            policy.validate("GET /api/v1/stream/%2e%2e%2fsecret HTTP/1.1\r\nHost: localhost\r\n\r\n"),
             .badRequest
         )
         XCTAssertEqual(

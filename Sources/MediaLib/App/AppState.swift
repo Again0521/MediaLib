@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import MediaLibCore
+import MediaLibServerProtocol
 import Network
 import OSLog
 import SwiftUI
@@ -331,6 +332,8 @@ private extension RemoteConnectorProvider {
             return "plex"
         case .jellyfin:
             return "jellyfin"
+        case .mlink:
+            return "mlink"
         default:
             return "emby"
         }
@@ -348,6 +351,8 @@ private extension RemoteConnectorProvider {
             return "Jellyfin"
         case .plex:
             return "Plex"
+        case .mlink:
+            return "MediaLIB Server"
         default:
             return displayName
         }
@@ -357,6 +362,11 @@ private extension RemoteConnectorProvider {
         if self == .plex {
             return """
             {"mediaSync":true,"librarySelection":true,"playbackReporting":true,"favoriteSync":false,"watchedSync":true,"tokenLogin":true,"transcodeQualitySelection":false}
+            """
+        }
+        if self == .mlink {
+            return """
+            {"mediaSync":true,"librarySelection":true,"playbackReporting":true,"favoriteSync":false,"watchedSync":true,"tokenLogin":true,"nativeDecode":false,"webDecode":true}
             """
         }
         return """
@@ -633,6 +643,10 @@ final class AppState: ObservableObject {
     private(set) var isConnectingPlex: Bool {
         get { remoteConnectorStore.isConnectingPlex }
         set { remoteConnectorStore.setConnecting(.plex, newValue) }
+    }
+    private(set) var isConnectingMlink: Bool {
+        get { remoteConnectorStore.isConnectingMlink }
+        set { remoteConnectorStore.setConnecting(.mlink, newValue) }
     }
     private var version122MaintenanceTask: Task<Void, Never>?
     var musicMetadataFetchProgress: String {
@@ -2846,6 +2860,8 @@ final class AppState: ObservableObject {
             return .jellyfin
         case .plex:
             return .plex
+        case .mlink:
+            return .mlink
         default:
             return nil
         }
@@ -4027,6 +4043,107 @@ final class AppState: ObservableObject {
         )
     }
 
+    /// 连接 MediaLIB Server。Mlink 先做公开描述协商，再用 token 登录并同步受权分类；
+    /// 不会把密码、token 或服务端媒体 URL 写入媒体源路径和索引。
+    func connectMlinkServer(
+        server: String,
+        username: String,
+        password: String,
+        includeInMetadataFetch: Bool = true,
+        includeInHealthCheck: Bool = true,
+        remoteTraceSyncMode: RemoteTraceSyncMode = .bidirectional
+    ) async {
+        let provider: RemoteConnectorProvider = .mlink
+        guard !isConnectingRemoteMediaServer(provider) else {
+            alert = AppAlert(title: "MediaLIB Server 正在连接", message: "当前连接完成后会自动显示结果。")
+            return
+        }
+        setConnectingRemoteMediaServer(provider, connecting: true)
+        defer { setConnectingRemoteMediaServer(provider, connecting: false) }
+
+        let serverText = server.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedServer = serverText.contains("://") ? serverText : "https://\(serverText)"
+        guard let serverURL = URL(string: normalizedServer), !serverText.isEmpty else {
+            alert = AppAlert(title: "MediaLIB Server 地址无效", message: "请输入服务器地址；局域网非回环服务必须使用 HTTPS。")
+            return
+        }
+        let sourceID = UUID().uuidString
+        let taskID = beginBackgroundTask(
+            kind: .embySync,
+            title: "MediaLIB Server 同步",
+            detail: "正在验证服务端并同步分类",
+            progress: nil,
+            isCancellable: false,
+            retrySourceID: sourceID
+        )
+        var sourceSaved = false
+        do {
+            let client = MlinkAPIClient()
+            let descriptor = try await client.discover(serverURL: serverURL)
+            let tokens = try await client.login(
+                serverURL: serverURL,
+                username: username,
+                password: password,
+                deviceName: ProcessInfo.processInfo.hostName
+            )
+            let categories = try await client.categories(serverURL: serverURL, accessToken: tokens.accessToken)
+            let source = MediaSource(
+                id: sourceID,
+                name: "MediaLIB Server · \(descriptor.serverName)",
+                path: "mlink://\(sourceID)",
+                mediaType: .auto,
+                autoScan: false,
+                minimumFileSize: 0,
+                preferLocalArtwork: false,
+                networkScrapingEnabled: false,
+                screenshotFallbackEnabled: false,
+                includeInMetadataFetch: includeInMetadataFetch,
+                includeInHealthCheck: includeInHealthCheck,
+                remoteTraceSyncMode: remoteTraceSyncMode
+            )
+            try sourceRepository?.save(source)
+            sourceSaved = true
+            try await remoteCredentialStore.saveAsync(
+                RemoteSourceCredential(
+                    kind: provider.credentialKind,
+                    serverURL: serverURL.absoluteString,
+                    username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+                    password: nil,
+                    accessToken: tokens.accessToken,
+                    refreshToken: tokens.refreshToken,
+                    userID: nil
+                ),
+                sourceID: sourceID
+            )
+            try remoteConnectorAccountRepository?.save(
+                RemoteConnectorAccount(
+                    provider: provider,
+                    accountLabel: "MediaLIB Server · \(descriptor.serverName)",
+                    serverURL: serverURL.absoluteString,
+                    username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+                    sourceID: sourceID,
+                    connectionMode: .library,
+                    syncEnabled: true,
+                    capabilitiesJSON: provider.mediaServerCapabilitiesJSON,
+                    privacyNote: "Mlink access / refresh token 仅保存在本机 0600 受限凭据文件中；桌面端不保存服务端媒体路径。",
+                    lastSyncedAt: Date()
+                )
+            )
+            try await importMlinkItems(source: source, serverURL: serverURL, accessToken: tokens.accessToken, categories: categories.categories)
+            reload()
+            finishBackgroundTask(id: taskID, errors: [])
+            alert = AppAlert(title: "MediaLIB Server 已连接", message: "\(descriptor.serverName) 的 \(categories.categories.count) 个分类已同步到 Mlink 目录。")
+        } catch {
+            if sourceSaved {
+                try? remoteConnectorAccountRepository?.delete(sourceID: sourceID)
+                await remoteCredentialStore.deleteAsync(sourceID: sourceID)
+                try? sourceRepository?.delete(id: sourceID)
+            }
+            finishBackgroundTask(id: taskID, errors: [error.localizedDescription])
+            showError("MediaLIB Server 连接失败", error)
+        }
+    }
+
     func connectPlexServer(
         server: String,
         token: String,
@@ -4262,6 +4379,8 @@ final class AppState: ObservableObject {
             return isConnectingJellyfin
         case .plex:
             return isConnectingPlex
+        case .mlink:
+            return isConnectingMlink
         default:
             return false
         }
@@ -4275,6 +4394,8 @@ final class AppState: ObservableObject {
             isConnectingJellyfin = connecting
         case .plex:
             isConnectingPlex = connecting
+        case .mlink:
+            isConnectingMlink = connecting
         default:
             break
         }
@@ -4357,6 +4478,10 @@ final class AppState: ObservableObject {
             await refreshPlexSource(source)
             return
         }
+        if provider == .mlink {
+            await refreshMlinkSource(source)
+            return
+        }
         let taskID = beginBackgroundTask(
             kind: .embySync,
             title: "\(provider.displayName) 同步 · \(source.name)",
@@ -4400,8 +4525,48 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func refreshMlinkSource(_ source: MediaSource) async {
+        let taskID = beginBackgroundTask(
+            kind: .embySync,
+            title: "MediaLIB Server 同步 · \(source.name)",
+            detail: "正在同步服务端分类",
+            progress: nil,
+            isCancellable: false,
+            retrySourceID: source.id
+        )
+        do {
+            try await withValidMlinkAccessToken(for: source) { serverURL, accessToken in
+                let client = MlinkAPIClient()
+                let categories = try await client.categories(serverURL: serverURL, accessToken: accessToken)
+                try await self.importMlinkItems(
+                    source: source, serverURL: serverURL, accessToken: accessToken, categories: categories.categories
+                )
+            }
+            finishBackgroundTask(id: taskID, errors: [])
+            reload()
+        } catch {
+            finishBackgroundTask(id: taskID, errors: [error.localizedDescription])
+            showError("MediaLIB Server 同步失败", error)
+        }
+    }
+
     func loadEmbyLibraries(for source: MediaSource) async throws -> [EmbyLibrarySummary] {
         guard source.sourceKind.isRemoteMediaServer else { return [] }
+        if source.sourceKind == .mlink {
+            return try await withValidMlinkAccessToken(for: source) { serverURL, accessToken in
+                let categories = try await MlinkAPIClient().categories(serverURL: serverURL, accessToken: accessToken)
+                return categories.categories.map { category in
+                    EmbyLibrarySummary(
+                        id: category.id,
+                        sourceID: source.id,
+                        viewID: category.id,
+                        name: "\(category.title)（\(category.itemCount)）",
+                        collectionType: category.id,
+                        sourceName: source.name
+                    )
+                }
+            }
+        }
         if source.sourceKind == .plex {
             return try await withValidPlexSession(for: source) { session in
                 try await plexService.fetchLibraries(
@@ -4488,6 +4653,28 @@ final class AppState: ObservableObject {
         await scheduleEmbyArtworkWarmup(source: source, items: plexItems)
     }
 
+    private func importMlinkItems(
+        source: MediaSource,
+        serverURL: URL,
+        accessToken: String,
+        categories: [ServerLibraryCategory]
+    ) async throws {
+        guard let mediaRepository else { return }
+        var mlinkItems = try await MlinkLibrarySynchronizer().fetchItems(
+            serverURL: serverURL,
+            accessToken: accessToken,
+            sourceID: source.id,
+            sourcePath: source.path,
+            categories: source.selectedEmbyLibraryIDs.isEmpty
+                ? categories
+                : categories.filter { source.selectedEmbyLibraryIDs.contains($0.id) }
+        )
+        if source.remoteTraceSyncMode == .disabled {
+            mlinkItems = mlinkItems.map(preservingLocalTraceForDisabledEmbySync)
+        }
+        try mediaRepository.replaceRemoteItems(sourcePathPrefix: source.path, with: mlinkItems)
+    }
+
     private func preservingLocalTraceForDisabledEmbySync(_ incoming: MediaItem) -> MediaItem {
         guard let existing = items.first(where: { $0.id == incoming.id }) else { return incoming }
         var copy = incoming
@@ -4506,6 +4693,7 @@ final class AppState: ObservableObject {
         items: [MediaItem],
         resumingTaskID: UUID? = nil
     ) async {
+        guard !isServerLightweightModeActive else { return }
         let urls = artworkWarmupURLs(for: items)
         guard !urls.isEmpty else { return }
 
@@ -4721,12 +4909,222 @@ final class AppState: ObservableObject {
         }
     }
 
+    private func withValidMlinkAccessToken<T>(
+        for source: MediaSource,
+        operation: (URL, String) async throws -> T
+    ) async throws -> T {
+        guard var credential = try await remoteCredentialStore.loadAsync(sourceID: source.id),
+              credential.kind == RemoteConnectorProvider.mlink.credentialKind,
+              let serverURL = URL(string: credential.serverURL),
+              let accessToken = credential.accessToken,
+              let refreshToken = credential.refreshToken else {
+            throw NSError(
+                domain: "MediaLib.Mlink",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "\(source.name) 的 Mlink 登录信息不存在，请重新连接。"]
+            )
+        }
+        do {
+            return try await operation(serverURL, accessToken)
+        } catch let error as MlinkAPIClient.Error {
+            guard error == .requestFailed(401) else { throw error }
+            let tokens = try await MlinkAPIClient().refresh(serverURL: serverURL, refreshToken: refreshToken)
+            credential.accessToken = tokens.accessToken
+            credential.refreshToken = tokens.refreshToken
+            try await remoteCredentialStore.saveAsync(credential, sourceID: source.id)
+            logger?.log("Mlink token 已轮换：\(source.name)")
+            return try await operation(serverURL, tokens.accessToken)
+        }
+    }
+
+    /// Mlink 的收藏、想看和评分以服务端当前用户为唯一真源。先乐观更新本地镜像，
+    /// 再由 Bearer 请求写回；失败时完整回滚，绝不改走桌面端全局偏好或 Trakt/Emby 写回。
+    private func updateMlinkPreference(
+        _ item: MediaItem,
+        source: MediaSource,
+        update: MlinkAPIClient.MediaPreferenceUpdate
+    ) {
+        guard let externalID = item.externalID, MlinkAPIClient.isSafeWebItemIdentifier(externalID) else {
+            showError("Mlink 偏好更新失败", MlinkAPIClient.Error.untrustedResponse)
+            return
+        }
+        let original = currentSnapshot(for: item)
+        applyMlinkPreferenceOptimistically(update, itemID: item.id)
+        showMediaStateNotice(
+            title: mlinkPreferenceNoticeTitle(update),
+            item: item,
+            suffix: mlinkPreferenceNoticeSuffix(update),
+            kind: .success
+        )
+
+        Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            do {
+                let preference = try await self.withValidMlinkAccessToken(for: source) { serverURL, accessToken in
+                    try await MlinkAPIClient().updatePreference(
+                        serverURL: serverURL, accessToken: accessToken, itemID: externalID, update: update
+                    )
+                }
+                guard let mediaRepository = self.mediaRepository else { return }
+                try mediaRepository.setFavorite(id: item.id, favorite: preference.isFavorite)
+                try mediaRepository.setWatchlist(id: item.id, watchlist: preference.isWatchlist)
+                try mediaRepository.updateRating(id: item.id, rating: preference.rating)
+                await MainActor.run {
+                    self.applyMlinkPreference(preference, itemID: item.id)
+                }
+            } catch {
+                await MainActor.run {
+                    self.applyMlinkPreference(
+                        ServerMediaUserPreference(
+                            isFavorite: original.favorite,
+                            isWatchlist: original.watchlist,
+                            rating: original.userRating
+                        ),
+                        itemID: item.id
+                    )
+                    let message = self.isPrivateItem(item) ? "状态已回滚，请解锁后重试。" : "\(item.cardTitle)：\(error.localizedDescription)"
+                    self.deliverTaskNotice(
+                        title: "Mlink 偏好同步失败",
+                        message: message,
+                        kind: .error,
+                        systemTitle: "Mlink 偏好同步失败",
+                        systemBody: message
+                    )
+                }
+            }
+        }
+    }
+
+    /// Mlink 项目由网页负责实际播放和进度上报；桌面目录的手动标记只转换为
+    /// `completed` 或 `reset`，不会构造媒体 URL、启动桌面解码或伪造续播时间。
+    private func updateMlinkWatched(_ item: MediaItem, source: MediaSource, watched: Bool) {
+        guard let externalID = item.externalID, MlinkAPIClient.isSafeWebItemIdentifier(externalID) else {
+            showError("Mlink 播放状态同步失败", MlinkAPIClient.Error.untrustedResponse)
+            return
+        }
+        let original = currentSnapshot(for: item)
+        applyMlinkPlaybackState(
+            ServerMediaUserState(
+                itemID: externalID,
+                positionSeconds: 0,
+                progress: watched ? 1 : 0,
+                isWatched: watched,
+                playCount: original.playCount ?? 0,
+                lastPlayedAt: watched ? Date() : nil,
+                updatedAt: Date()
+            ),
+            itemID: item.id
+        )
+        showMediaStateNotice(
+            title: watched ? "已标记为已观看" : "已标记为未观看",
+            item: item,
+            kind: .success
+        )
+        let event: MlinkAPIClient.PlaybackStateEvent = watched ? .completed : .reset
+        Task(priority: .utility) { [weak self] in
+            guard let self else { return }
+            do {
+                let state = try await self.withValidMlinkAccessToken(for: source) { serverURL, accessToken in
+                    try await MlinkAPIClient().updatePlaybackState(
+                        serverURL: serverURL, accessToken: accessToken, itemID: externalID,
+                        event: event, positionSeconds: 0, durationSeconds: nil
+                    )
+                }
+                guard let mediaRepository = self.mediaRepository else { return }
+                if state.isWatched {
+                    try mediaRepository.markWatched(id: item.id, watched: true)
+                } else {
+                    try mediaRepository.clearPlaybackHistory(id: item.id)
+                }
+                await MainActor.run { self.applyMlinkPlaybackState(state, itemID: item.id) }
+            } catch {
+                await MainActor.run {
+                    self.applyMlinkPlaybackState(
+                        ServerMediaUserState(
+                            itemID: externalID,
+                            positionSeconds: original.playPosition,
+                            progress: original.playProgress,
+                            isWatched: original.watched,
+                            playCount: original.playCount ?? 0,
+                            lastPlayedAt: original.lastPlayedAt,
+                            updatedAt: original.updatedAt
+                        ),
+                        itemID: item.id
+                    )
+                    self.deliverTaskNotice(
+                        title: "Mlink 播放状态同步失败",
+                        message: "\(item.cardTitle)：\(error.localizedDescription)",
+                        kind: .error,
+                        systemTitle: "Mlink 播放状态同步失败",
+                        systemBody: "\(item.cardTitle)：\(error.localizedDescription)"
+                    )
+                }
+            }
+        }
+    }
+
+    private func applyMlinkPlaybackState(_ state: ServerMediaUserState, itemID: String) {
+        func updated(_ value: MediaItem) -> MediaItem {
+            guard value.id == itemID else { return value }
+            var copy = value
+            copy.playPosition = state.positionSeconds
+            copy.playProgress = state.progress
+            copy.watched = state.isWatched
+            copy.playCount = state.playCount
+            copy.lastPlayedAt = state.lastPlayedAt
+            copy.updatedAt = state.updatedAt
+            return copy
+        }
+        items = items.map(updated)
+        musicQueue = musicQueue.map(updated)
+        if let activePlayerItem { self.activePlayerItem = updated(activePlayerItem) }
+        if let selectedItem { self.selectedItem = updated(selectedItem) }
+        if let quickPreviewItem { self.quickPreviewItem = updated(quickPreviewItem) }
+        rebuildDerivedItemCaches()
+        libraryRevision += 1
+    }
+
+    private func applyMlinkPreferenceOptimistically(
+        _ update: MlinkAPIClient.MediaPreferenceUpdate,
+        itemID: String
+    ) {
+        switch update {
+        case .favorite(let value): updateFavoriteInMemory(id: itemID, favorite: value)
+        case .watchlist(let value): updateWatchlistInMemory(id: itemID, watchlist: value)
+        case .rating(let value): updateRatingInMemory(id: itemID, rating: value)
+        }
+    }
+
+    private func applyMlinkPreference(_ preference: ServerMediaUserPreference, itemID: String) {
+        updateFavoriteInMemory(id: itemID, favorite: preference.isFavorite)
+        updateWatchlistInMemory(id: itemID, watchlist: preference.isWatchlist)
+        updateRatingInMemory(id: itemID, rating: preference.rating)
+    }
+
+    private func mlinkPreferenceNoticeTitle(_ update: MlinkAPIClient.MediaPreferenceUpdate) -> String {
+        switch update {
+        case .favorite(let value): return value ? "已加入喜欢" : "已取消喜欢"
+        case .watchlist(let value): return value ? "已加入想看" : "已从想看移除"
+        case .rating(let value): return value == nil ? "已清除评级" : "评级已更新"
+        }
+    }
+
+    private func mlinkPreferenceNoticeSuffix(_ update: MlinkAPIClient.MediaPreferenceUpdate) -> String? {
+        if case .rating(let value) = update { return userRatingNoticeSuffix(value) }
+        return nil
+    }
+
     private func embySource(for item: MediaItem) -> MediaSource? {
         guard Self.isEmbyItem(item) else { return nil }
         return sources.first { source in
             source.sourceKind.isRemoteMediaServer &&
             Self.isSourcePath(item.sourcePath, inside: source.path)
         }
+    }
+
+    private func mlinkSource(for item: MediaItem) -> MediaSource? {
+        guard let source = embySource(for: item), source.sourceKind == .mlink else { return nil }
+        return source
     }
 
     /// 该条目是否能展示详情页「详情」栏：已匹配 TMDB 的本地条目，或来自远程媒体服务器。
@@ -4776,6 +5174,7 @@ final class AppState: ObservableObject {
     /// TMDB/Emby 详情接口拉一张 backdrop 并回填缓存；期间 banner 先用竖版海报裁切显示，
     /// 拉到后随 backdropRevision 刷新自动换成横版图。每个条目每次启动只尝试一次。
     func warmHeroBackdrops(for items: [MediaItem]) {
+        guard !isServerLightweightModeActive else { return }
         let candidates = items.filter { item in
             item.type != .music &&
             cachedBackdropPath(for: item) == nil &&
@@ -4796,6 +5195,14 @@ final class AppState: ObservableObject {
                 self.registerBackdropPath(from: snapshot, mediaID: item.id)
             }
         }
+    }
+
+    /// 轻量服务模式仅回收桌面视觉预热；扫描、索引和服务端媒体分发不能在这里取消。
+    func cancelNonessentialVisualWarmupsForServerMode() {
+        heroBackdropWarmupTask?.cancel()
+        heroBackdropWarmupTask = nil
+        embyArtworkWarmupTasks.values.forEach { $0.cancel() }
+        embyArtworkWarmupTasks.removeAll()
     }
 
     func loadDetailSnapshot(for item: MediaItem, forceRefresh: Bool = false) async -> MediaDetailSnapshot? {
@@ -6721,6 +7128,9 @@ final class AppState: ObservableObject {
             play(firstEpisode, preserveSelection: preserveSelection)
             return
         }
+        if openMlinkWebPlayerIfNeeded(for: item) {
+            return
+        }
         guard item.filePath != nil else {
             alert = AppAlert(title: "无法播放", message: "此媒体没有可播放文件。")
             return
@@ -6745,6 +7155,62 @@ final class AppState: ObservableObject {
             return
         }
         playPreparedItem(item, preserveSelection: preserveSelection)
+    }
+
+    /// Mlink 条目没有本地文件路径。客户端只负责打开无令牌的网页详情地址；浏览器使用
+    /// 自己的受保护会话并以原生能力解码媒体，避免把服务端播放凭据交给本地播放器。
+    func isMlinkWebPlaybackItem(_ item: MediaItem) -> Bool {
+        guard embySource(for: item)?.sourceKind == .mlink,
+              let itemID = item.externalID else { return false }
+        return MlinkAPIClient.isSafeWebItemIdentifier(itemID)
+    }
+
+    func playbackActionTitle(for item: MediaItem) -> String {
+        isMlinkWebPlaybackItem(item) ? "在网页中播放" : "播放"
+    }
+
+    func canStartPlayback(for item: MediaItem) -> Bool {
+        isMlinkWebPlaybackItem(item) || item.filePath != nil || !children(for: item).isEmpty
+    }
+
+    @discardableResult
+    private func openMlinkWebPlayerIfNeeded(for item: MediaItem) -> Bool {
+        guard isMlinkWebPlaybackItem(item),
+              let source = embySource(for: item),
+              let itemID = item.externalID else { return false }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let credential = try await remoteCredentialStore.loadAsync(sourceID: source.id),
+                      credential.kind == RemoteConnectorProvider.mlink.credentialKind,
+                      let serverURL = URL(string: credential.serverURL) else {
+                    throw NSError(
+                        domain: "MediaLib.Mlink",
+                        code: -2,
+                        userInfo: [NSLocalizedDescriptionKey: "(source.name) 的服务器地址不可用，请重新连接。"]
+                    )
+                }
+                let isSeries = item.sourcePath?.hasPrefix(source.path + "/series/") == true
+                let webURL = try MlinkAPIClient().webItemURL(
+                    serverURL: serverURL, itemID: itemID, isSeries: isSeries
+                )
+                guard NSWorkspace.shared.open(webURL) else {
+                    throw NSError(
+                        domain: "MediaLib.Mlink",
+                        code: -3,
+                        userInfo: [NSLocalizedDescriptionKey: "无法在默认浏览器中打开服务端详情页。"]
+                    )
+                }
+                showFloatingNotice(
+                    title: "已在网页中打开",
+                    message: "请在浏览器中登录并播放；媒体由网页端解码。",
+                    kind: .success
+                )
+            } catch {
+                showError("无法打开 Mlink 网页播放", error)
+            }
+        }
+        return true
     }
 
     private func prepareEmbyItemForPlayback(_ item: MediaItem) async throws -> MediaItem {
@@ -8240,6 +8706,10 @@ final class AppState: ObservableObject {
             currentFavorite = selected.favorite
         }
         let nextFavorite = !currentFavorite
+        if let source = mlinkSource(for: item) {
+            updateMlinkPreference(item, source: source, update: .favorite(nextFavorite))
+            return
+        }
 
         updateFavoriteInMemory(id: item.id, favorite: nextFavorite)
         showMediaStateNotice(
@@ -8427,6 +8897,10 @@ final class AppState: ObservableObject {
             currentWatchlist = selected.watchlist
         }
         let nextWatchlist = !currentWatchlist
+        if let source = mlinkSource(for: item) {
+            updateMlinkPreference(item, source: source, update: .watchlist(nextWatchlist))
+            return
+        }
         updateWatchlistInMemory(id: item.id, watchlist: nextWatchlist)
         showMediaStateNotice(
             title: nextWatchlist ? "已加入想看" : "已从想看移除",
@@ -8522,6 +8996,10 @@ final class AppState: ObservableObject {
     }
 
     func markWatched(_ item: MediaItem, watched: Bool) {
+        if let source = mlinkSource(for: item) {
+            updateMlinkWatched(item, source: source, watched: watched)
+            return
+        }
         do {
             let currentItem = currentSnapshot(for: item)
             let shouldClearWatchlist = shouldClearWatchlistWhenMarkedWatched(currentItem, watched: watched)
@@ -8554,10 +9032,17 @@ final class AppState: ObservableObject {
 
     func markAllWatched(_ items: [MediaItem], watched: Bool) {
         guard !items.isEmpty else { return }
+        let mlinkItems = items.filter { mlinkSource(for: $0) != nil }
+        let localItems = items.filter { mlinkSource(for: $0) == nil }
+
+        // Mlink 条目只同步用户意图；实际播放与进度仍由网页播放器上报，桌面端不会取流或解码。
+        mlinkItems.forEach { markWatched($0, watched: watched) }
+
+        guard !localItems.isEmpty else { return }
         guard let mediaRepository else { return }
         var hadError = false
         var clearedWatchlistItems: [MediaItem] = []
-        for item in items {
+        for item in localItems {
             do {
                 let currentItem = currentSnapshot(for: item)
                 let shouldClearWatchlist = shouldClearWatchlistWhenMarkedWatched(currentItem, watched: watched)
@@ -8581,15 +9066,15 @@ final class AppState: ObservableObject {
             }
         }
         reload()
-        scheduleEmbyPlayedSync(items, played: watched)
-        syncTraktHistory(items, watched: watched)
+        scheduleEmbyPlayedSync(localItems, played: watched)
+        syncTraktHistory(localItems, watched: watched)
         clearedWatchlistItems.forEach { syncTraktWatchlist($0, add: false) }
         if hadError {
             alert = AppAlert(title: "部分更新失败", message: "有条目的观看状态未能更新，请检查数据库状态。")
         } else {
             showFloatingNotice(
                 title: watched ? "已标记为已观看" : "已标记为未观看",
-                message: "\(items.count) 个内容",
+                message: "\(localItems.count) 个本地内容",
                 kind: .success,
                 duration: 3.2
             )
@@ -8617,6 +9102,10 @@ final class AppState: ObservableObject {
         items.first(where: { $0.id == item.id })?.userRating ??
         selectedItem.flatMap { $0.id == item.id ? $0.userRating : nil } ??
         item.userRating
+        if let source = mlinkSource(for: item) {
+            updateMlinkPreference(item, source: source, update: .rating(rating))
+            return
+        }
         updateRatingInMemory(id: item.id, rating: rating)
         showMediaStateNotice(
             title: rating == nil ? "已清除评级" : "评级已更新",

@@ -31,6 +31,14 @@ enum AuroraPalette {
     /// 统计磁贴 / 区块标识用的鲜明多色家族（固定，不随主题）。
     static let family: [Color] = [blue, teal, orange, magenta, purple, cyan]
 
+    // MARK: 语义四值（固定，浅/深各取值，鲜明不发灰）
+    // 全 app 状态语义（成功 / 警告 / 错误 / 信息）唯一来源，供徽章 / 状态点 / 提示统一取用。
+    // 与 AppColors.success/warning/error（主题派生，后续废弃）分离——语义色不应随浅灰主题变灰。
+    static let semanticGood = dyn("1F9D57", "45D67F")
+    static let semanticWarning = dyn("D98A00", "FFB84D")
+    static let semanticDanger = dyn("D64545", "FF6B6B")
+    static let semanticInfo = blue
+
     /// Hero 影院级深面与其上的前景色。
     static let heroSurface = dyn("1B1733", "0E0B1A")
     static let heroOn = Color.white
@@ -2605,7 +2613,7 @@ struct HomeRecommendRow: View {
             }
         }
         .padding(16)
-        .staticSurfaceBackground(cornerRadius: 20, thickness: 1.02)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 1.02)
         .repeatedCardChrome(false, cornerRadius: 20)
     }
 }
@@ -2667,7 +2675,7 @@ struct HomeModuleContainer<Content: View>: View {
             content
         }
         .padding(16)
-        .staticSurfaceBackground(cornerRadius: 20, thickness: 1.02)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 1.02)
         .repeatedCardChrome(false, cornerRadius: 20)
     }
 }

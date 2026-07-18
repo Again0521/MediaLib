@@ -209,7 +209,7 @@ struct LibraryHealthCenterView: View {
                 value: "\(healthScore)%",
                 subtitle: healthIssueCount == 0 ? "未发现待处理项" : "\(healthIssueCount) 项需处理",
                 systemImage: "checkmark.seal",
-                tint: healthIssueCount == 0 ? AppColors.selectedGlassTint : .orange,
+                tint: healthIssueCount == 0 ? AppColors.selectedGlassTint : AppColors.semanticWarning,
                 progress: Double(healthScore) / 100
             )
             .frame(maxWidth: .infinity)
@@ -218,7 +218,7 @@ struct LibraryHealthCenterView: View {
                 value: "\(reachableSourceCount)/\(max(appState.sources.count, 1))",
                 subtitle: healthSnapshot.offlineSources.isEmpty ? "全部在线" : "\(healthSnapshot.offlineSources.count) 个离线",
                 systemImage: "externaldrive.badge.checkmark",
-                tint: healthSnapshot.offlineSources.isEmpty ? AppColors.referenceCyan : .orange,
+                tint: healthSnapshot.offlineSources.isEmpty ? AppColors.referenceCyan : AppColors.semanticWarning,
                 progress: sourceAvailabilityProgress
             )
             .frame(maxWidth: .infinity)
@@ -227,7 +227,7 @@ struct LibraryHealthCenterView: View {
                 value: "\(metadataScore)%",
                 subtitle: metadataGapCount == 0 ? "资料完整" : "\(metadataGapCount) 个缺口",
                 systemImage: "tag",
-                tint: metadataGapCount == 0 ? Color.green : Color.orange,
+                tint: metadataGapCount == 0 ? AppColors.semanticGood : AppColors.semanticWarning,
                 progress: Double(metadataScore) / 100
             )
             .frame(maxWidth: .infinity)
@@ -315,18 +315,18 @@ struct LibraryHealthCenterView: View {
         }()
         return dashboardCard(height: DashboardWidgetMetrics.summaryHeight) {
             HStack(spacing: 9) {
-                accentTick(over ? .orange : AppColors.referenceCyan)
+                accentTick(over ? AppColors.semanticWarning : AppColors.referenceCyan)
                 Text("离线缓存用量")
                     .font(.subheadline.weight(.heavy))
                     .foregroundStyle(AppColors.refTitleText)
                 Spacer(minLength: 8)
-                statusPill("\(summary.entryCount) 个缓存", tint: over ? .orange : AppColors.refSecondaryText)
+                statusPill("\(summary.entryCount) 个缓存", tint: over ? AppColors.semanticWarning : AppColors.refSecondaryText)
             }
             HStack(alignment: .firstTextBaseline, spacing: 5) {
                 Text(ByteCountFormatter.string(fromByteCount: summary.totalBytes, countStyle: .file))
                     .font(.title3.weight(.bold))
                     .monospacedDigit()
-                    .foregroundStyle(over ? Color.orange : AppColors.refTitleText)
+                    .foregroundStyle(over ? AppColors.semanticWarning : AppColors.refTitleText)
                 if let limit = summary.byteLimit, limit > 0 {
                     Text("/ \(ByteCountFormatter.string(fromByteCount: limit, countStyle: .file))")
                         .font(.caption)
@@ -343,7 +343,7 @@ struct LibraryHealthCenterView: View {
                     Capsule().fill(AppColors.refScanFill)
                     if fraction > 0 {
                         Capsule()
-                            .fill(over ? Color.orange : AppColors.referenceBlue)
+                            .fill(over ? AppColors.semanticWarning : AppColors.referenceBlue)
                             .frame(width: max(geo.size.width * CGFloat(fraction), 6))
                     }
                 }
@@ -351,7 +351,7 @@ struct LibraryHealthCenterView: View {
             .frame(height: 9)
             Text(over ? "已超出缓存上限，可在设置中清理或调大上限。" : "离线缓存供视频离线播放使用，上限可在设置中调整。")
                 .font(.caption)
-                .foregroundStyle(over ? Color.orange : Color.secondary)
+                .foregroundStyle(over ? AppColors.semanticWarning : Color.secondary)
         }
     }
 
@@ -389,7 +389,7 @@ struct LibraryHealthCenterView: View {
                 Spacer(minLength: 8)
                 statusPill(
                     offlineCount == 0 ? "全部在线" : "\(offlineCount) 个离线",
-                    tint: offlineCount == 0 ? .green : .orange
+                    tint: offlineCount == 0 ? AppColors.semanticGood : AppColors.semanticWarning
                 )
             }
             if appState.sources.isEmpty {
@@ -421,7 +421,7 @@ struct LibraryHealthCenterView: View {
     }
 
     private func sourceRow(_ source: MediaSource, online: Bool) -> some View {
-        let tint: Color = online ? AppColors.referenceBlue : .orange
+        let tint: Color = online ? AppColors.referenceBlue : AppColors.semanticWarning
         // 单行行高：左信息 + 右状态/图标动作，不再分两行把卡片撑高。
         return HStack(spacing: 9) {
             AppGlyph(systemImage: source.sourceKind == .local ? "externaldrive" : "network", size: 14)
@@ -440,13 +440,13 @@ struct LibraryHealthCenterView: View {
             Spacer(minLength: 6)
             if online {
                 HStack(spacing: 4) {
-                    Circle().fill(Color.green).frame(width: 6, height: 6)
+                    Circle().fill(AppColors.semanticGood).frame(width: 6, height: 6)
                     Text("在线").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
                 }
             } else {
                 // 离线：状态 + 图标按钮（重新挂载/扫描/忽略），原「离线媒体源」三动作原样保留。
                 HStack(spacing: 4) {
-                    Text("离线").font(.caption2.weight(.bold)).foregroundStyle(.orange)
+                    Text("离线").font(.caption2.weight(.bold)).foregroundStyle(AppColors.semanticWarning)
                     if appState.canRemountNetworkSource(source) {
                         iconAction("arrow.triangle.2.circlepath", "重新挂载") {
                             appState.remountNetworkSource(source)
@@ -500,7 +500,7 @@ struct LibraryHealthCenterView: View {
                 Spacer(minLength: 8)
                 statusPill(
                     items.isEmpty ? "完整" : "\(items.count) 项缺口",
-                    tint: items.isEmpty ? .green : accent
+                    tint: items.isEmpty ? AppColors.semanticGood : accent
                 )
             }
             Text(isMusic
@@ -510,7 +510,7 @@ struct LibraryHealthCenterView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if items.isEmpty {
-                compactNote(isMusic ? "歌曲元数据完整，无需补充。" : "影视元数据完整，无需补充。", glyph: "checkmark.circle", tint: .green)
+                compactNote(isMusic ? "歌曲元数据完整，无需补充。" : "影视元数据完整，无需补充。", glyph: "checkmark.circle", tint: AppColors.semanticGood)
             } else {
                 ScrollView {
                     LazyVStack(spacing: 7) {
@@ -551,7 +551,7 @@ struct LibraryHealthCenterView: View {
             Spacer(minLength: 6)
             Text(missingMetadataTag(item))
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(.orange)
+                .foregroundStyle(AppColors.semanticWarning)
                 .lineLimit(1)
             Button {
                 metadataItem = item
@@ -587,7 +587,7 @@ struct LibraryHealthCenterView: View {
             badgeText: maintenanceIssueCount == 0 ? "正常" : "\(maintenanceIssueCount) 项"
         )
         if maintenanceIssueCount == 0 {
-            compactNote("未发现失效文件、失效链接、重复条目或影视详情资料缺口。", glyph: "checkmark.seal", tint: .green)
+            compactNote("未发现失效文件、失效链接、重复条目或影视详情资料缺口。", glyph: "checkmark.seal", tint: AppColors.semanticGood)
         } else {
             ScrollView(showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 14) {
@@ -792,7 +792,7 @@ struct LibraryHealthCenterView: View {
             badgeText: activeTaskCount > 0 ? "\(activeTaskCount) 进行中" : "\(appState.backgroundTasks.count) 项"
         )
         if appState.backgroundTasks.isEmpty {
-            compactNote("暂无后台任务；扫描、同步和缓存任务会在运行时显示。", glyph: "checkmark.circle", tint: .green)
+            compactNote("暂无后台任务；扫描、同步和缓存任务会在运行时显示。", glyph: "checkmark.circle", tint: AppColors.semanticGood)
         } else {
             DashboardGroupedList(maxHeight: DashboardWidgetMetrics.taskListMaxHeight) {
                 ForEach(Array(appState.backgroundTasks.enumerated()), id: \.element.id) { index, task in
@@ -887,7 +887,7 @@ struct LibraryHealthCenterView: View {
     private func taskStateTint(_ state: BackgroundTaskState) -> Color {
         switch state {
         case .failed: return .red
-        case .cancelled, .paused, .pausing: return .orange
+        case .cancelled, .paused, .pausing: return AppColors.semanticWarning
         case .completed, .queued, .running: return AppColors.selectedGlassTint
         }
     }
@@ -1318,7 +1318,7 @@ private struct DashboardRingCard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(14)
-        .staticSurfaceBackground(cornerRadius: 20, thickness: 0.94)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 0.94)
         .hoverLiftEffect(cornerRadius: 20)
         .accessibilityElement(children: .combine)
     }

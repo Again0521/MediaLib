@@ -244,7 +244,7 @@ struct DetailView: View {
                       systemImage: allWatched ? "eye.slash" : "eye.fill")
                     .font(.caption.weight(.semibold))
             }
-            .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 10, horizontalPadding: 9, minHeight: 28))
+            .buttonStyle(AppStandardButtonStyle(cornerRadius: 10, horizontalPadding: 9, minHeight: 28))
         }
     }
 
@@ -415,7 +415,7 @@ struct DetailView: View {
                         Image(systemName: item.watchlist ? "bookmark.fill" : "bookmark")
                             .foregroundStyle(item.watchlist ? AppColors.selectedGlassTint : Color.primary)
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 14, horizontalPadding: 10, minHeight: 30))
+                    .buttonStyle(AppStandardButtonStyle(cornerRadius: 14, horizontalPadding: 10, minHeight: 30))
                     .help(item.watchlist ? "移出想看" : "加入想看")
                     .accessibilityLabel(item.watchlist ? "移出想看" : "加入想看")
                     Button {
@@ -424,7 +424,7 @@ struct DetailView: View {
                         Image(systemName: item.favorite ? "heart.fill" : "heart")
                             .foregroundStyle(item.favorite ? Color.red : Color.primary)
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 14, horizontalPadding: 10, minHeight: 30))
+                    .buttonStyle(AppStandardButtonStyle(cornerRadius: 14, horizontalPadding: 10, minHeight: 30))
                     .help(item.favorite ? "取消喜欢" : "喜欢")
                     .accessibilityLabel(item.favorite ? "取消喜欢" : "喜欢")
                 }
@@ -495,10 +495,18 @@ struct DetailView: View {
                         Button {
                             appState.play(item, preserveSelection: true)
                         } label: {
-                            Label("播放", systemImage: "play.fill")
+                            Label(
+                                appState.playbackActionTitle(for: item),
+                                systemImage: appState.isMlinkWebPlaybackItem(item) ? "safari" : "play.fill"
+                            )
                         }
-                        .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 14, minHeight: 34, prominent: true))
-                        .disabled(item.filePath == nil && appState.children(for: item).isEmpty)
+                        .buttonStyle(AppPrimaryButtonStyle(horizontalPadding: 14, minHeight: 34))
+                        .disabled(!appState.canStartPlayback(for: item))
+                        .accessibilityHint(
+                            appState.isMlinkWebPlaybackItem(item)
+                                ? "在默认浏览器中打开服务端详情页，由网页端解码播放。"
+                                : "开始播放此媒体。"
+                        )
 
                         Button {
                             appState.openExternally(item)
@@ -537,7 +545,7 @@ struct DetailView: View {
                             }
                         }
                     }
-                    .buttonStyle(LiquidGlassButtonStyle(cornerRadius: 12, horizontalPadding: 12, minHeight: 34))
+                    .buttonStyle(AppStandardButtonStyle(horizontalPadding: 12, minHeight: 34))
                     .fixedSize(horizontal: true, vertical: false)
                 }
                 // 横向操作条会吞掉落在按钮上的纵向触控板滚动，放行给外层详情列表。
@@ -642,7 +650,7 @@ struct DetailView: View {
             }
         }
         .padding(16)
-        .staticSurfaceBackground(cornerRadius: 14, thickness: 1.04)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 1.04)
     }
 
     private var remoteDisplayName: String {
@@ -701,16 +709,9 @@ private struct DetailMetadataChip: View {
     let systemImage: String
 
     var body: some View {
+        // 统一胶囊规格（C-R1 .appPillBadge）：中性元数据用中性色 tint，与类型标签的强调 tint 同源同形。
         Label(title, systemImage: systemImage)
-            .font(.caption.weight(.medium))
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(AppColors.cleanFieldFill.opacity(0.72), in: Capsule())
-            .overlay {
-                Capsule()
-                    .strokeBorder(AppColors.cleanPanelBorder.opacity(0.82), lineWidth: 0.75)
-            }
+            .appPillBadge(tint: AppColors.refSecondaryText)
     }
 }
 
@@ -720,15 +721,9 @@ private struct DetailGenreTagFlow: View {
     var body: some View {
         PosterBadgeFlowLayout(horizontalSpacing: 8, verticalSpacing: 7) {
             ForEach(genres, id: \.self) { genre in
+                // 与元数据胶囊同一规格（C-R1 .appPillBadge），类型标签用强调 tint 区分。
                 Text(genre)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(AppColors.selectedGlassTint.opacity(0.92))
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(AppColors.selectedGlassTint.opacity(0.10), in: Capsule())
-                    .overlay {
-                        Capsule().stroke(AppColors.cleanPanelBorder, lineWidth: 0.75)
-                    }
+                    .appPillBadge(tint: AppColors.selectedGlassTint)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

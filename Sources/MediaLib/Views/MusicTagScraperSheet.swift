@@ -260,7 +260,7 @@ struct MusicTagScraperSheet: View {
             }
         }
         .padding(14)
-        .staticSurfaceBackground(cornerRadius: 18, thickness: 1.06)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 1.06)
     }
 
     private var scopePicker: some View {
@@ -705,7 +705,7 @@ private struct MusicTagStatusPill: View {
             .foregroundStyle(status.tint)
             .padding(.horizontal, 10)
             .frame(height: 28)
-            .staticSurfaceBackground(cornerRadius: 14, thickness: 0.9)
+            .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 0.9)
     }
 }
 

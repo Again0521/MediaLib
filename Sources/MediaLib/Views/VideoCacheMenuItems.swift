@@ -301,7 +301,7 @@ struct VideoOfflineSubscriptionLimitSheet: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .staticSurfaceBackground(cornerRadius: 18)
+            .staticSurfaceBackground(cornerRadius: AppRadius.card)
 
             AppInfoNote(
                 text: "MediaLIB 会把未观看队列前 \(episodeLimit) 集保持为离线缓存；已缓存或正在缓存的剧集不会重复加入任务。",

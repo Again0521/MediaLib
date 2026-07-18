@@ -10,11 +10,16 @@ extension AppState {
         serverModeConfiguration.loopbackBaseURL.absoluteString
     }
 
+    var isServerLightweightModeActive: Bool {
+        serverModeConfiguration.isEnabled && serverModeConfiguration.isLightweightMode
+    }
+
     /// App 场景出现后恢复用户此前明确开启的本机服务模式。
     func restoreServerModeIfNeeded() {
         guard serverModeConfiguration.isEnabled else { return }
         do {
             try serverModeController.start(configuration: serverModeConfiguration)
+            applyServerLightweightPolicyIfNeeded()
         } catch {
             serverModeConfiguration.isEnabled = false
             serverModeSettingsStore.save(serverModeConfiguration)
@@ -32,6 +37,7 @@ extension AppState {
                 try serverModeController.start(configuration: serverModeConfiguration)
                 serverModeConfiguration.isEnabled = true
                 serverModeSettingsStore.save(serverModeConfiguration)
+                applyServerLightweightPolicyIfNeeded()
                 showFloatingNotice(
                     title: "服务模式已启动",
                     message: "当前仅允许本机通过 \(serverModeEndpointDisplayText) 登录并访问 Web 服务。",
@@ -69,6 +75,27 @@ extension AppState {
         applyServerModeConfiguration(configuration)
     }
 
+    func setServerLightweightModeEnabled(_ isEnabled: Bool) {
+        guard serverModeConfiguration.isEnabled else {
+            showFloatingNotice(
+                title: "请先启动服务模式",
+                message: "轻量模式只在服务运行时生效，避免误以为已降低本机负载。",
+                kind: .warning
+            )
+            return
+        }
+        var configuration = serverModeConfiguration
+        configuration.isLightweightMode = isEnabled
+        applyServerModeConfiguration(configuration)
+        if isEnabled {
+            showFloatingNotice(
+                title: "轻量服务模式已启用",
+                message: "已停止桌面视觉预热；索引、扫描、认证与媒体分发继续运行。",
+                kind: .success
+            )
+        }
+    }
+
     private func applyServerModeConfiguration(_ configuration: ServerModeConfiguration) {
         guard configuration != serverModeConfiguration else { return }
         let shouldRestart = serverModeConfiguration.isEnabled
@@ -80,5 +107,11 @@ extension AppState {
         if shouldRestart {
             restoreServerModeIfNeeded()
         }
+        applyServerLightweightPolicyIfNeeded()
+    }
+
+    private func applyServerLightweightPolicyIfNeeded() {
+        guard isServerLightweightModeActive else { return }
+        cancelNonessentialVisualWarmupsForServerMode()
     }
 }

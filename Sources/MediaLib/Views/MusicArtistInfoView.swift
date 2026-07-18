@@ -72,7 +72,7 @@ struct MusicArtistInfoView: View {
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .staticSurfaceBackground(cornerRadius: 18)
+                .staticSurfaceBackground(cornerRadius: AppRadius.card)
             } else if isLoading {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)

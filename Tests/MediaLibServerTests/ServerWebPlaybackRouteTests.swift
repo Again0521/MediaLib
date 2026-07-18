@@ -69,11 +69,47 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertFalse(html.contains("</style><script>bad()</script>"))
         XCTAssertTrue(html.contains("content=\"known-csrf\""))
         XCTAssertTrue(html.contains("src=\"/assets/player.js\""))
+        XCTAssertTrue(html.contains("href=\"/assets/player.css\""))
         XCTAssertTrue(html.contains("data-item-id=\"movie-1\""))
         XCTAssertTrue(html.contains("data-resume-position=\"300.0\""))
         XCTAssertTrue(html.contains("id=\"user-playback-state\""))
+        XCTAssertTrue(html.contains("id=\"technical-info\""))
+        XCTAssertTrue(html.contains("id=\"stream-list\""))
+        XCTAssertTrue(html.contains("id=\"reset-playback\""))
+        XCTAssertTrue(html.contains("id=\"playback-speed\""))
+        XCTAssertTrue(html.contains("id=\"fullscreen\""))
+        XCTAssertTrue(html.contains("id=\"picture-in-picture\""))
+        XCTAssertTrue(html.contains("id=\"toggle-favorite\""))
+        XCTAssertTrue(html.contains("id=\"toggle-watchlist\""))
+        XCTAssertTrue(html.contains("id=\"user-rating\""))
+        XCTAssertTrue(html.contains("data-is-favorite=\"false\""))
+        XCTAssertFalse(html.contains("id=\"automatic-next\""), "非剧集或没有已授权下一集时不能显示自动播放控件")
         XCTAssertFalse(html.localizedCaseInsensitiveContains("filePath"))
         XCTAssertFalse(html.contains("/private/"))
+    }
+
+    func testPlayerStylesheetIsPrivateCacheableAndContainsNoMediaData() throws {
+        let router = makeRouter()
+        let response = router.response(for: "GET /assets/player.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let headResponse = router.response(for: "HEAD /assets/player.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let headers = String(data: response.serializedHeaders(), encoding: .utf8) ?? ""
+        let headHeaders = String(data: headResponse.serializedHeaders(), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertTrue(headers.contains("Content-Type: text/css; charset=utf-8"))
+        XCTAssertTrue(headers.contains("Cache-Control: private, max-age=300"))
+        XCTAssertFalse(headers.contains("Cache-Control: no-store"))
+
+        let stylesheet = try XCTUnwrap(String(data: response.body, encoding: .utf8))
+        XCTAssertTrue(stylesheet.contains(".player-card"))
+        XCTAssertTrue(stylesheet.contains("video { display:block; inline-size:100%; max-inline-size:100%; min-inline-size:0; block-size:auto;"))
+        XCTAssertTrue(stylesheet.contains("@media (max-width:480px)"))
+        XCTAssertFalse(stylesheet.contains("movie-1"))
+        XCTAssertFalse(stylesheet.contains("token"))
+
+        XCTAssertEqual(headResponse.statusCode, 200)
+        XCTAssertTrue(headResponse.body.isEmpty)
+        XCTAssertEqual(headerValue(named: "Content-Length", in: headHeaders), headerValue(named: "Content-Length", in: headers))
     }
 
     func testPlayerScriptUsesAuthorizedLifecycleWithoutUnsafeHTMLOrTokenStorage() {
@@ -84,10 +120,13 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
 
         XCTAssertEqual(asset.statusCode, 200)
         XCTAssertTrue(script.contains("/api/v1/stream/"))
-        XCTAssertTrue(script.contains("/api/v1/playback/hls/"))
+        XCTAssertTrue(script.contains("/api/v1/playback/info/"))
         XCTAssertTrue(script.contains("/api/v1/playback/state/"))
+        XCTAssertTrue(script.contains("/api/v1/user-media/preferences/"))
+        XCTAssertTrue(script.contains("/api/v1/playback/subtitles/"))
+        XCTAssertTrue(script.contains("/api/v1/subtitles/"))
+        XCTAssertTrue(script.contains("document.createElement('track')"))
         XCTAssertTrue(script.contains("method: 'POST'"))
-        XCTAssertTrue(script.contains("method: 'DELETE'"))
         XCTAssertTrue(script.contains("X-MediaLIB-CSRF"))
         XCTAssertTrue(script.contains("credentials: 'same-origin'"))
         XCTAssertTrue(script.contains("encodeURIComponent(itemID)"))
@@ -95,14 +134,66 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertTrue(script.contains("timeupdate"))
         XCTAssertTrue(script.contains("loadedmetadata"))
         XCTAssertTrue(script.contains("JSON.stringify({ event, positionSeconds, durationSeconds })"))
-        XCTAssertTrue(script.contains("nativeHLS"))
+        XCTAssertTrue(script.contains("JSON.stringify({ [field]: value })"))
+        XCTAssertTrue(script.contains("event: 'reset'"))
+        XCTAssertTrue(script.contains("requestFullscreen"))
+        XCTAssertTrue(script.contains("requestPictureInPicture"))
+        XCTAssertTrue(script.contains("keydown"))
+        XCTAssertTrue(script.contains("scheduleAutomaticNext"))
+        XCTAssertTrue(script.contains("#autoplay"))
+        XCTAssertTrue(script.contains("window.location.assign"))
         XCTAssertTrue(script.contains("textContent"))
+        XCTAssertTrue(script.contains("replaceChildren"))
         XCTAssertFalse(script.contains("innerHTML"))
         XCTAssertFalse(script.contains("insertAdjacentHTML"))
         XCTAssertFalse(script.contains("document.cookie"))
         XCTAssertFalse(script.contains("localStorage"))
         XCTAssertFalse(script.contains("sessionStorage"))
         XCTAssertFalse(script.contains("eval("))
+        XCTAssertFalse(script.contains("/api/v1/playback/hls/"))
+        XCTAssertFalse(script.contains("/api/v1/hls/"))
+        XCTAssertFalse(script.contains("ffmpeg"))
+    }
+
+    func testEpisodeNavigationControlsUseSafeServerDerivedLinks() {
+        let detail = ServerMediaItemDetail(
+            id: "episode-2", type: "episode", title: "第二集", originalTitle: nil, year: nil,
+            overview: nil, genres: [], communityRating: nil, runtimeSeconds: nil,
+            videoCodec: nil, audioCodec: nil, resolution: nil, artworkAvailable: false,
+            backdropAvailable: false, canDirectPlay: true, canTranscode: false,
+            previousEpisode: ServerEpisodeNavigation(id: "episode-1", title: "<上一集>"),
+            nextEpisode: ServerEpisodeNavigation(id: "episode-3", title: "下一集")
+        )
+        let html = ServerWebMediaDetailPage.render(
+            serverName: "测试服务器", detail: detail, csrfToken: "csrf", showAdministration: false
+        )
+
+        XCTAssertTrue(html.contains("id=\"previous-episode\""))
+        XCTAssertTrue(html.contains("href=\"/item/episode-1\""))
+        XCTAssertTrue(html.contains("id=\"next-episode\""))
+        XCTAssertTrue(html.contains("href=\"/item/episode-3\""))
+        XCTAssertTrue(html.contains("id=\"automatic-next\""))
+        XCTAssertTrue(html.contains("id=\"cancel-automatic-next\""))
+        XCTAssertTrue(html.contains("&lt;上一集&gt;"))
+        XCTAssertFalse(html.contains("<上一集>"))
+    }
+
+    func testDetailPageUsesAuthorizedOpaquePosterWhenArtworkExists() {
+        let detail = ServerMediaItemDetail(
+            id: "movie id+1", type: "movie", title: "海报测试", originalTitle: nil,
+            year: nil, overview: nil, genres: [], communityRating: nil, runtimeSeconds: nil,
+            videoCodec: nil, audioCodec: nil, resolution: nil,
+            artworkAvailable: true, backdropAvailable: false,
+            canDirectPlay: true, canTranscode: false
+        )
+        let html = ServerWebMediaDetailPage.render(
+            serverName: "测试服务器", detail: detail, csrfToken: "csrf", showAdministration: false
+        )
+
+        XCTAssertTrue(html.contains("src=\"/api/v1/images/movie%20id%2B1/poster\""))
+        XCTAssertTrue(html.contains("loading=\"eager\""))
+        XCTAssertTrue(html.contains("decoding=\"async\""))
+        XCTAssertFalse(html.contains("role=\"img\""))
     }
 
     func testHomeCardsDeepLinkWithEncodedIdentifierAndEscapedTitle() {
@@ -189,6 +280,52 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         ).statusCode, 401)
     }
 
+    func testMediaPreferenceMutationUsesAuthenticatedPrincipalAndSingleFieldBody() throws {
+        var received: (itemID: String, preference: ServerUserMediaPreferenceUpdate, userID: String)?
+        let expected = ServerMediaUserPreference(isFavorite: true, isWatchlist: false, rating: nil)
+        let router = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            mediaPreferenceUpdater: { itemID, preference, principal in
+                received = (itemID, preference, principal.userID)
+                return expected
+            },
+            authenticationProvider: { requestHead in
+                requestHead.contains("Authorization: Bearer viewer")
+                    ? ServerRequestPrincipal(
+                        userID: "viewer", deviceID: "device", sessionID: "session",
+                        permissions: [.viewMedia], libraryGrants: [:]
+                    ) : nil
+            },
+            csrfToken: "known-csrf"
+        )
+        let body = Data(#"{"favorite":true}"#.utf8)
+        let response = router.response(
+            for: mutationRequest("/api/v1/user-media/preferences/movie-1", bodyLength: body.count),
+            body: body
+        )
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(received?.itemID, "movie-1")
+        XCTAssertEqual(received?.preference, .favorite(true))
+        XCTAssertEqual(received?.userID, "viewer")
+        XCTAssertEqual(try JSONDecoder().decode(ServerMediaUserPreference.self, from: response.body), expected)
+
+        let combined = Data(#"{"favorite":true,"watchlist":true}"#.utf8)
+        XCTAssertEqual(router.response(
+            for: mutationRequest("/api/v1/user-media/preferences/movie-1", bodyLength: combined.count),
+            body: combined
+        ).statusCode, 400)
+        let invalidRating = Data(#"{"rating":5.5}"#.utf8)
+        XCTAssertEqual(router.response(
+            for: mutationRequest("/api/v1/user-media/preferences/movie-1", bodyLength: invalidRating.count),
+            body: invalidRating
+        ).statusCode, 400)
+        XCTAssertEqual(router.response(
+            for: mutationRequest("/api/v1/user-media/preferences/movie-1", bodyLength: body.count, token: "missing"),
+            body: body
+        ).statusCode, 401)
+    }
+
     private func makeRouter(detail: ServerMediaItemDetail? = nil) -> LocalHTTPRouter {
         let item = detail ?? safeDetail
         let snapshot = ServerLibrarySnapshot(
@@ -223,5 +360,12 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
 
     private func mutationRequest(_ path: String, bodyLength: Int, token: String = "viewer") -> String {
         "POST \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nContent-Length: \(bodyLength)\r\nX-MediaLIB-CSRF: known-csrf\r\n\r\n"
+    }
+
+    private func headerValue(named name: String, in headers: String) -> String? {
+        headers
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .first { $0.hasPrefix("\(name): ") }
+            .map { String($0.dropFirst(name.count + 2)).trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 }

@@ -31,6 +31,136 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertGreaterThan(response.declaredContentLength, 0)
     }
 
+    func testPersistentConnectionPolicyIsHTTPVersionAwareAndBoundedByExplicitClose() {
+        XCTAssertTrue(LocalLoopbackHTTPServer.supportsPersistentConnection(
+            "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        ))
+        XCTAssertFalse(LocalLoopbackHTTPServer.supportsPersistentConnection(
+            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        ))
+        XCTAssertFalse(LocalLoopbackHTTPServer.supportsPersistentConnection(
+            "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n"
+        ))
+        XCTAssertTrue(LocalLoopbackHTTPServer.supportsPersistentConnection(
+            "GET / HTTP/1.0\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"
+        ))
+        XCTAssertFalse(LocalLoopbackHTTPServer.supportsPersistentConnection(
+            "GET / HTTP/2\r\nHost: localhost\r\n\r\n"
+        ))
+    }
+
+    func testResponseHeadersOnlyAdvertiseKeepAliveWhenTransportOptsIn() {
+        let response = LocalHTTPResponse.ok(body: Data("{}".utf8), omitBody: false)
+        let defaultHeaders = String(data: response.serializedHeaders(), encoding: .utf8) ?? ""
+        let persistentHeaders = String(
+            data: response.serializedHeaders(keepAlive: true), encoding: .utf8
+        ) ?? ""
+
+        XCTAssertTrue(defaultHeaders.contains("Connection: close"))
+        XCTAssertFalse(defaultHeaders.contains("Keep-Alive:"))
+        XCTAssertTrue(persistentHeaders.contains("Connection: keep-alive"))
+        XCTAssertTrue(persistentHeaders.contains("Keep-Alive: timeout=10, max=64"))
+        XCTAssertTrue(persistentHeaders.contains("Cache-Control: no-store"))
+        XCTAssertTrue(persistentHeaders.contains("Content-Security-Policy:"))
+    }
+
+    func testAuthenticatedStatusPageKeepsMachineHealthProbeSeparateAndUsesSafeScript() {
+        let page = router.response(for: "GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let head = router.response(for: "HEAD /status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let asset = router.response(for: "GET /assets/status.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let stylesheet = router.response(for: "GET /assets/status.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let html = String(data: page.body, encoding: .utf8) ?? ""
+        let script = String(data: asset.body, encoding: .utf8) ?? ""
+        let stylesheetHeaders = String(data: stylesheet.serializedHeaders(), encoding: .utf8) ?? ""
+        let style = String(data: stylesheet.body, encoding: .utf8) ?? ""
+
+        XCTAssertEqual(page.statusCode, 200)
+        XCTAssertEqual(head.statusCode, 200)
+        XCTAssertTrue(head.body.isEmpty)
+        XCTAssertGreaterThan(head.declaredContentLength, 0)
+        XCTAssertEqual(asset.statusCode, 200)
+        XCTAssertTrue(html.contains("src=\"/assets/status.js\""))
+        XCTAssertTrue(html.contains("href=\"/assets/status.css\""))
+        XCTAssertFalse(html.contains("<style>"))
+        XCTAssertTrue(html.contains("/health"))
+        XCTAssertTrue(script.contains("credentials:'same-origin'"))
+        XCTAssertTrue(script.contains("AbortController"))
+        XCTAssertTrue(script.contains("textContent"))
+        XCTAssertFalse(script.contains("innerHTML"))
+        XCTAssertFalse(script.contains("document.cookie"))
+        XCTAssertFalse(script.contains("localStorage"))
+        XCTAssertEqual(stylesheet.statusCode, 200)
+        XCTAssertTrue(stylesheetHeaders.contains("Cache-Control: private, max-age=300"))
+        XCTAssertFalse(stylesheetHeaders.contains("Cache-Control: no-store"))
+        XCTAssertTrue(style.contains(".state"))
+        XCTAssertFalse(style.contains("server-001"))
+    }
+
+    func testWebShellStyleIsSameOriginCacheableAndUsedByEveryPageFamily() {
+        let asset = router.response(for: "GET /assets/app-shell.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let head = router.response(for: "HEAD /assets/app-shell.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let headers = String(data: asset.serializedHeaders(), encoding: .utf8) ?? ""
+        let style = String(data: asset.body, encoding: .utf8) ?? ""
+        let pages = ["/", "/library", "/search", "/watching", "/history", "/favorites", "/watchlist", "/ratings", "/watched", "/unwatched", "/status", "/account", "/admin", "/sources"]
+
+        XCTAssertEqual(asset.statusCode, 200)
+        XCTAssertEqual(asset.contentType, "text/css; charset=utf-8")
+        XCTAssertTrue(headers.contains("Cache-Control: private, max-age=300"))
+        XCTAssertFalse(headers.contains("Cache-Control: no-store"))
+        XCTAssertTrue(style.contains(".shell > aside"))
+        XCTAssertTrue(style.contains("--ml-sidebar"))
+        XCTAssertTrue(style.contains(".app-nav .nav-group-title"))
+        XCTAssertTrue(style.contains(".app-mobile-nav"))
+        XCTAssertTrue(style.contains("position:sticky"))
+        XCTAssertEqual(head.statusCode, 200)
+        XCTAssertTrue(head.body.isEmpty)
+        XCTAssertEqual(head.declaredContentLength, asset.declaredContentLength)
+
+        for path in pages {
+            let response = router.response(for: "GET \(path) HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            let html = String(data: response.body, encoding: .utf8) ?? ""
+            XCTAssertEqual(response.statusCode, 200, path)
+            XCTAssertTrue(html.contains("href=\"/assets/app-shell.css\""), path)
+            XCTAssertTrue(html.contains("class=\"app-sidebar\""), path)
+            XCTAssertTrue(html.contains("aria-label=\"主导航\""), path)
+            XCTAssertTrue(html.contains("aria-label=\"移动端主导航\""), path)
+            XCTAssertTrue(html.contains("class=\"nav-icon\""), path)
+            XCTAssertTrue(html.contains(">媒体库</span>"), path)
+            XCTAssertTrue(html.contains(">管理</span>"), path)
+        }
+    }
+
+    func testSharedWebNavigationPreservesActiveStateAndHidesManagementDestinations() {
+        let member = ServerWebNavigation.render(
+            active: .watching, showAdministration: false, note: .library
+        )
+        let administrator = ServerWebNavigation.render(
+            active: .administration, showAdministration: true, note: .security
+        )
+
+        XCTAssertTrue(member.contains("href=\"/watching\""))
+        XCTAssertTrue(member.contains("class=\"nav-item active\" aria-current=\"page\" href=\"/watching\""))
+        XCTAssertFalse(member.contains("href=\"/admin\""))
+        XCTAssertFalse(member.contains("href=\"/sources\""))
+        XCTAssertTrue(member.contains("href=\"/status\""))
+        XCTAssertTrue(member.contains("href=\"/account\""))
+        XCTAssertTrue(administrator.contains("class=\"nav-item active\" aria-current=\"page\" href=\"/admin\""))
+        XCTAssertTrue(administrator.contains("href=\"/sources\""))
+        XCTAssertTrue(administrator.contains("路径、连接地址、凭据、Cookie 和令牌"))
+        XCTAssertFalse(administrator.contains("<script"))
+    }
+
+    func testDynamicAuthenticatedHTMLAndAPIsRemainNoStoreWhenStaticAssetsAreCacheable() {
+        let page = router.response(for: "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let api = router.response(for: "GET /api/v1/library/items HTTP/1.1\r\nHost: localhost\r\n\r\n")
+
+        for response in [page, api] {
+            let headers = String(data: response.serializedHeaders(), encoding: .utf8) ?? ""
+            XCTAssertTrue(headers.contains("Cache-Control: no-store"))
+            XCTAssertFalse(headers.contains("Cache-Control: private, max-age=300"))
+        }
+    }
+
     func testNonProbeRoutesDoNotExposeData() {
         let response = router.response(for: "GET /api/v1/libraries HTTP/1.1\r\nHost: localhost\r\n\r\n")
 
@@ -73,16 +203,27 @@ final class LocalHTTPRouterTests: XCTestCase {
 
         let page = unauthenticated.response(for: "GET /login HTTP/1.1\r\nHost: localhost\r\n\r\n")
         let script = unauthenticated.response(for: "GET /assets/login.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let stylesheet = unauthenticated.response(for: "GET /assets/login.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
         let html = String(data: page.body, encoding: .utf8) ?? ""
         let headers = String(data: page.serializedHeaders(), encoding: .utf8) ?? ""
+        let stylesheetHeaders = String(data: stylesheet.serializedHeaders(), encoding: .utf8) ?? ""
+        let style = String(data: stylesheet.body, encoding: .utf8) ?? ""
 
         XCTAssertEqual(page.statusCode, 200)
         XCTAssertTrue(html.contains("客厅 &lt;服务器&gt;"))
         XCTAssertTrue(html.contains("content=\"known-token\""))
         XCTAssertTrue(html.contains("src=\"/assets/login.js\""))
+        XCTAssertTrue(html.contains("href=\"/assets/login.css\""))
         XCTAssertFalse(html.contains("<script>"))
+        XCTAssertFalse(html.contains("<style>"))
         XCTAssertTrue(headers.contains("script-src 'self'"))
         XCTAssertEqual(script.contentType, "text/javascript; charset=utf-8")
+        XCTAssertEqual(stylesheet.statusCode, 200)
+        XCTAssertTrue(stylesheetHeaders.contains("Cache-Control: private, max-age=300"))
+        XCTAssertFalse(stylesheetHeaders.contains("Cache-Control: no-store"))
+        XCTAssertTrue(style.contains("#status"))
+        XCTAssertFalse(style.contains("known-token"))
+        XCTAssertFalse(style.contains("客厅"))
     }
 
     func testLibraryPreviewRoutesReturnOnlyProtocolDTOs() throws {
@@ -129,7 +270,12 @@ final class LocalHTTPRouterTests: XCTestCase {
                         type: "movie",
                         title: "<script>alert('x')</script>",
                         year: 2026,
-                        artworkAvailable: false
+                        artworkAvailable: false,
+                        userState: ServerMediaUserState(
+                            itemID: "movie-1", positionSeconds: 300, progress: 0.5,
+                            isWatched: false, playCount: 1, lastPlayedAt: nil,
+                            updatedAt: Date(timeIntervalSince1970: 1)
+                        )
                     )
                 ]
             )
@@ -149,8 +295,37 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertTrue(html.contains("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;"))
         XCTAssertTrue(html.contains("客厅 &lt;服务器&gt;"))
         XCTAssertTrue(html.contains("name=\"medialib-csrf-token\""))
+        XCTAssertTrue(html.contains("href=\"/assets/home.css\""))
+        XCTAssertFalse(html.contains("<style>"))
+        XCTAssertTrue(html.contains("继续观看 · 50%"))
+        XCTAssertTrue(html.contains("aria-label=\"已播放 50%\""))
+        XCTAssertTrue(html.contains("href=\"/library?type=movie\""))
+        XCTAssertTrue(html.contains(">电影</span>"))
+        XCTAssertTrue(html.contains("<span class=\"mlink\">Mlink</span>"))
         XCTAssertFalse(html.contains("filePath"))
         XCTAssertFalse(html.contains("sourcePath"))
+    }
+
+    func testHomeStyleIsPrivateCacheableAndContainsNoServerOrUserData() {
+        let response = router.response(for: "GET /assets/home.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let headResponse = router.response(for: "HEAD /assets/home.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let headers = String(data: response.serializedHeaders(), encoding: .utf8) ?? ""
+        let headHeaders = String(data: headResponse.serializedHeaders(), encoding: .utf8) ?? ""
+        let css = String(data: response.body, encoding: .utf8) ?? ""
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertTrue(headers.contains("Content-Type: text/css; charset=utf-8"))
+        XCTAssertTrue(headers.contains("Cache-Control: private, max-age=300"))
+        XCTAssertFalse(headers.contains("Cache-Control: no-store"))
+        XCTAssertTrue(css.contains(".summary-grid"))
+        XCTAssertTrue(css.contains(".media-grid"))
+        XCTAssertTrue(css.contains("@media (max-width:720px)"))
+        XCTAssertFalse(css.contains("server-001"))
+        XCTAssertFalse(css.contains("movie-1"))
+        XCTAssertFalse(css.contains("token"))
+        XCTAssertEqual(headResponse.statusCode, 200)
+        XCTAssertTrue(headResponse.body.isEmpty)
+        XCTAssertEqual(headerValue(named: "Content-Length", in: headHeaders), headerValue(named: "Content-Length", in: headers))
     }
 
     func testEveryResponseCarriesBrowserSecurityHeaders() {
@@ -178,16 +353,26 @@ final class LocalHTTPRouterTests: XCTestCase {
             authenticationProvider: { _ in .testAdministrator() }
         )
 
-        let valid = router.response(for: "GET /api/v1/library/browse?q=%E9%93%B6%E6%B2%B3+1&type=movie&offset=48&limit=48&sort=titleAscending HTTP/1.1\r\n\r\n")
+        let valid = router.response(for: "GET /api/v1/library/browse?q=%E9%93%B6%E6%B2%B3+1&type=movie&state=inProgress&offset=48&limit=48&sort=titleAscending HTTP/1.1\r\n\r\n")
         XCTAssertEqual(valid.statusCode, 200)
-        XCTAssertEqual(captured, ServerLibraryQuery(searchText: "银河 1", type: "movie", offset: 48, limit: 48, sort: .titleAscending))
+        XCTAssertEqual(captured, ServerLibraryQuery(searchText: "银河 1", type: "movie", offset: 48, limit: 48, sort: .titleAscending, playbackFilter: .inProgress))
         XCTAssertEqual(try JSONDecoder().decode(ServerLibraryItemsPage.self, from: valid.body).offset, 48)
+
+        let history = router.response(for: "GET /api/v1/library/browse?state=history&sort=lastPlayedDescending&limit=48 HTTP/1.1\r\n\r\n")
+        XCTAssertEqual(history.statusCode, 200)
+        XCTAssertEqual(captured, ServerLibraryQuery(limit: 48, sort: .lastPlayedDescending, playbackFilter: .history))
+
+        let favorites = router.response(for: "GET /api/v1/library/browse?preference=favorite&limit=48 HTTP/1.1\r\n\r\n")
+        XCTAssertEqual(favorites.statusCode, 200)
+        XCTAssertEqual(captured, ServerLibraryQuery(limit: 48, preferenceFilter: .favorite))
 
         for target in [
             "/api/v1/library/browse?limit=101",
             "/api/v1/library/browse?offset=-1",
             "/api/v1/library/browse?type=private",
             "/api/v1/library/browse?type=unknown",
+            "/api/v1/library/browse?state=anyoneElse",
+            "/api/v1/library/browse?preference=someoneElse",
             "/api/v1/library/browse?q=one&q=two",
             "/api/v1/library/browse?unknown=value",
             "/api/v1/library/browse?q=%ZZ"
@@ -203,18 +388,56 @@ final class LocalHTTPRouterTests: XCTestCase {
     func testLibraryPageUsesSameOriginScriptAndSafeDOMConstruction() {
         let router = LocalHTTPRouter(
             serverID: "server-001", serverName: "客厅 <服务器>",
+            libraryCategoriesProvider: { _ in
+                ServerLibraryCategoriesResponse(categories: [
+                    ServerLibraryCategory(id: "movie", title: "电影 <精选>", itemCount: 12)
+                ])
+            },
             authenticationProvider: { _ in .testAdministrator() }
         )
         let page = router.response(for: "GET /library HTTP/1.1\r\n\r\n")
+        let selectedPage = router.response(for: "GET /library?type=movie HTTP/1.1\r\n\r\n")
         let asset = router.response(for: "GET /assets/library.js HTTP/1.1\r\n\r\n")
+        let styleAsset = router.response(for: "GET /assets/library.css HTTP/1.1\r\n\r\n")
         let html = String(data: page.body, encoding: .utf8) ?? ""
+        let selectedHTML = String(data: selectedPage.body, encoding: .utf8) ?? ""
         let script = String(data: asset.body, encoding: .utf8) ?? ""
+        let style = String(data: styleAsset.body, encoding: .utf8) ?? ""
 
         XCTAssertEqual(page.statusCode, 200)
         XCTAssertEqual(asset.contentType, "text/javascript; charset=utf-8")
         XCTAssertTrue(html.contains("客厅 &lt;服务器&gt;"))
+        XCTAssertTrue(html.contains("href=\"/assets/library.css\""))
         XCTAssertTrue(html.contains("src=\"/assets/library.js\""))
-        XCTAssertTrue(html.contains("prefers-reduced-motion"))
+        XCTAssertTrue(html.contains("<option value=\"movie\">电影 &lt;精选&gt;（12）</option>"))
+        XCTAssertTrue(html.contains("href=\"/library?type=movie\""))
+        XCTAssertTrue(selectedHTML.contains("class=\"nav-item nav-category active\" aria-current=\"page\" href=\"/library?type=movie\""))
+        XCTAssertFalse(selectedHTML.contains("class=\"nav-item active\" aria-current=\"page\" href=\"/library\""))
+        let watching = router.response(for: "GET /watching HTTP/1.1\r\n\r\n")
+        let watchingHTML = String(data: watching.body, encoding: .utf8) ?? ""
+        XCTAssertEqual(watching.statusCode, 200)
+        XCTAssertTrue(watchingHTML.contains("data-playback-filter=\"inProgress\""))
+        let history = router.response(for: "GET /history HTTP/1.1\r\n\r\n")
+        let historyHTML = String(data: history.body, encoding: .utf8) ?? ""
+        XCTAssertEqual(history.statusCode, 200)
+        XCTAssertTrue(historyHTML.contains("data-page-route=\"/history\""))
+        XCTAssertTrue(historyHTML.contains("data-playback-filter=\"history\""))
+        XCTAssertTrue(historyHTML.contains("data-default-sort=\"lastPlayedDescending\""))
+        let favorites = router.response(for: "GET /favorites HTTP/1.1\r\n\r\n")
+        let favoritesHTML = String(data: favorites.body, encoding: .utf8) ?? ""
+        XCTAssertEqual(favorites.statusCode, 200)
+        XCTAssertTrue(favoritesHTML.contains("data-page-route=\"/favorites\""))
+        XCTAssertTrue(favoritesHTML.contains("data-preference-filter=\"favorite\""))
+        XCTAssertTrue(favoritesHTML.contains("class=\"nav-item active\" aria-current=\"page\" href=\"/favorites\""))
+        let watchlist = router.response(for: "GET /watchlist HTTP/1.1\r\n\r\n")
+        XCTAssertTrue((String(data: watchlist.body, encoding: .utf8) ?? "").contains("data-preference-filter=\"watchlist\""))
+        let watched = router.response(for: "GET /watched HTTP/1.1\r\n\r\n")
+        XCTAssertTrue((String(data: watched.body, encoding: .utf8) ?? "").contains("data-playback-filter=\"watched\""))
+        let ratings = router.response(for: "GET /ratings HTTP/1.1\r\n\r\n")
+        XCTAssertTrue((String(data: ratings.body, encoding: .utf8) ?? "").contains("data-preference-filter=\"rated\""))
+        let unwatched = router.response(for: "GET /unwatched HTTP/1.1\r\n\r\n")
+        XCTAssertTrue((String(data: unwatched.body, encoding: .utf8) ?? "").contains("data-playback-filter=\"unwatched\""))
+        XCTAssertTrue(style.contains("prefers-reduced-motion"))
         XCTAssertTrue(html.contains("Mlink"))
         XCTAssertTrue(script.contains("textContent"))
         XCTAssertTrue(script.contains("encodeURIComponent"))
@@ -223,10 +446,58 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertTrue(script.contains("/api/v1/images/"))
         XCTAssertTrue(script.contains("image.loading = 'lazy'"))
         XCTAssertTrue(script.contains("image.decoding = 'async'"))
+        XCTAssertTrue(script.contains("lastPlayedDescending"))
+        XCTAssertTrue(script.contains("'history'"))
+        XCTAssertTrue(script.contains("state.lastPlayedAt"))
+        XCTAssertTrue(script.contains("params.set('preference', preferenceFilter)"))
+        XCTAssertTrue(script.contains("void loadPage();"))
+        XCTAssertFalse(script.contains("/api/v1/library/categories"), "分类应随认证页面首屏交付，避免第二个导航请求")
         XCTAssertFalse(script.contains("innerHTML"))
         XCTAssertFalse(script.contains("localStorage"))
         XCTAssertFalse(script.contains("document.cookie"))
         XCTAssertFalse(script.contains("eval("))
+    }
+
+    func testLibraryStyleIsPrivateCacheableAndContainsNoServerOrUserData() {
+        let asset = router.response(for: "GET /assets/library.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let head = router.response(for: "HEAD /assets/library.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let headers = String(data: asset.serializedHeaders(), encoding: .utf8) ?? ""
+        let style = String(data: asset.body, encoding: .utf8) ?? ""
+
+        XCTAssertEqual(asset.statusCode, 200)
+        XCTAssertEqual(asset.contentType, "text/css; charset=utf-8")
+        XCTAssertTrue(headers.contains("Cache-Control: private, max-age=300"))
+        XCTAssertFalse(headers.contains("Cache-Control: no-store"))
+        XCTAssertTrue(style.contains(".filters"))
+        XCTAssertTrue(style.contains("@media (max-width:720px)"))
+        XCTAssertFalse(style.contains("server-001"))
+        XCTAssertFalse(style.contains("token"))
+        XCTAssertEqual(head.statusCode, 200)
+        XCTAssertTrue(head.body.isEmpty)
+        XCTAssertEqual(head.declaredContentLength, asset.declaredContentLength)
+    }
+
+    func testGlobalSearchPageReusesAuthorizedBoundedSearchWithoutLosingDeepLinkRoute() {
+        let router = LocalHTTPRouter(
+            serverID: "server-001", serverName: "客厅 <服务器>",
+            authenticationProvider: { _ in .testAdministrator() }
+        )
+
+        let page = router.response(for: "GET /search?q=%E6%B5%8B%E8%AF%95 HTTP/1.1\r\n\r\n")
+        let head = router.response(for: "HEAD /search HTTP/1.1\r\n\r\n")
+        let asset = router.response(for: "GET /assets/library.js HTTP/1.1\r\n\r\n")
+        let html = String(data: page.body, encoding: .utf8) ?? ""
+        let script = String(data: asset.body, encoding: .utf8) ?? ""
+
+        XCTAssertEqual(page.statusCode, 200)
+        XCTAssertEqual(head.statusCode, 200)
+        XCTAssertTrue(head.body.isEmpty)
+        XCTAssertTrue(html.contains("全局搜索"))
+        XCTAssertTrue(html.contains("data-page-route=\"/search\""))
+        XCTAssertTrue(html.contains("href=\"/search\""))
+        XCTAssertTrue(script.contains("pageRoute"))
+        XCTAssertTrue(script.contains("/api/v1/library/browse"))
+        XCTAssertFalse(script.contains("innerHTML"))
     }
 
     func testArtworkRouteUsesOpaqueAuthorizedIDBoundedKindAndPrivateCache() throws {
@@ -394,51 +665,39 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertFalse(String(data: failure.body, encoding: .utf8)?.contains("private") ?? true)
     }
 
-    func testHLSRoutesCreateServeAndCancelAnIsolatedSession() throws {
-        let sourceURL = try makeFixtureFile(contents: Data("source".utf8))
-        let cacheDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("LocalHTTPRouterTests-HLS-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: cacheDirectory) }
-        let process = RouterHLSProcessStub()
-        var capturedArguments: [String] = []
-        let manager = FFmpegHLSSessionManager(
-            cacheDirectory: cacheDirectory,
-            executableURLProvider: { URL(fileURLWithPath: "/usr/bin/ffmpeg-test-double") },
-            processFactory: { _, arguments, _ in
-                capturedArguments = arguments
-                return process
-            }
-        )
+    func testWebVTTSubtitleRoutesRequireAuthorizedOpaqueItemAndNeverExposePaths() throws {
+        let subtitle = try makeFixtureFile(contents: Data("WEBVTT\n\n".utf8))
         let router = LocalHTTPRouter(
             serverID: "server-001",
             serverName: "客厅服务器",
-            mediaAssetProvider: { id, _, _ in
-                id == "movie-1" ? ServerMediaAsset(id: id, fileURL: sourceURL, byteLength: 6) : nil
+            webVTTSubtitleTracksProvider: { itemID, _ in
+                itemID == "movie-1" ? [ServerWebVTTSubtitleTrack(id: 0, label: "字幕 1")] : nil
             },
-            hlsSessionManager: manager,
+            webVTTSubtitleAssetProvider: { itemID, trackID, _ in
+                guard itemID == "movie-1", trackID == 0 else { return nil }
+                return ServerMediaAsset(id: itemID, fileURL: subtitle, byteLength: 8)
+            },
             authenticationProvider: { _ in .testAdministrator() }
         )
 
-        let unsafeGet = router.response(for: "GET /api/v1/playback/hls/movie-1 HTTP/1.1\r\n\r\n")
-        let startResponse = router.response(for: "POST /api/v1/playback/hls/movie-1 HTTP/1.1\r\n\r\n")
-        let session = try JSONDecoder().decode(ServerHLSPlaybackSession.self, from: startResponse.body)
-        guard let manifestArgument = capturedArguments.last else { return XCTFail("Expected manifest argument") }
-        let manifestURL = URL(fileURLWithPath: manifestArgument)
-        try Data("#EXTM3U\n".utf8).write(to: manifestURL)
+        let list = router.response(for: "GET /api/v1/playback/subtitles/movie-1 HTTP/1.1\r\n\r\n")
+        let asset = router.response(for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n")
+        let malformed = router.response(for: "GET /api/v1/subtitles/movie-1/0/extra HTTP/1.1\r\n\r\n")
 
-        let outputResponse = router.response(for: "GET \(session.manifestPath) HTTP/1.1\r\n\r\n")
-        XCTAssertEqual(unsafeGet.statusCode, 404)
-        XCTAssertEqual(startResponse.statusCode, 200)
-        XCTAssertEqual(outputResponse.statusCode, 200)
-        XCTAssertEqual(outputResponse.contentType, "application/vnd.apple.mpegurl")
-        XCTAssertFalse(String(data: startResponse.body, encoding: .utf8)?.contains(cacheDirectory.path) ?? true)
+        XCTAssertEqual(list.statusCode, 200)
+        XCTAssertEqual(try JSONDecoder().decode([ServerWebVTTSubtitleTrack].self, from: list.body), [ServerWebVTTSubtitleTrack(id: 0, label: "字幕 1")])
+        XCTAssertFalse((String(data: list.body, encoding: .utf8) ?? "").contains(subtitle.path))
+        XCTAssertEqual(asset.statusCode, 200)
+        XCTAssertEqual(asset.contentType, "text/vtt; charset=utf-8")
+        XCTAssertEqual(asset.declaredContentLength, Data("WEBVTT\n\n".utf8).count)
+        XCTAssertTrue(asset.body.isEmpty, "文件内容会由 socket 流式写出，路由层不复制进内存 body")
+        XCTAssertEqual(malformed.statusCode, 404)
+    }
 
-        let cancelResponse = router.response(for: "DELETE /api/v1/hls/\(session.id) HTTP/1.1\r\n\r\n")
-        let afterCancel = router.response(for: "GET \(session.manifestPath) HTTP/1.1\r\n\r\n")
-        XCTAssertEqual(cancelResponse.statusCode, 204)
-        XCTAssertTrue(process.didTerminate)
-        XCTAssertEqual(afterCancel.statusCode, 404)
+    func testWebPlayerDoesNotExposeServerTranscodeRoutes() {
+        XCTAssertEqual(router.response(for: "POST /api/v1/playback/hls/movie-1 HTTP/1.1\r\n\r\n").statusCode, 405)
+        XCTAssertEqual(router.response(for: "GET /api/v1/hls/session/index.m3u8 HTTP/1.1\r\n\r\n").statusCode, 404)
+        XCTAssertEqual(router.response(for: "DELETE /api/v1/hls/session HTTP/1.1\r\n\r\n").statusCode, 405)
     }
 
     private func makeFixtureFile(contents: Data) throws -> URL {
@@ -447,18 +706,19 @@ final class LocalHTTPRouterTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: url) }
         return url
     }
+
+    private func headerValue(named name: String, in headers: String) -> String? {
+        headers
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .first { $0.hasPrefix("\(name): ") }
+            .map { String($0.dropFirst(name.count + 2)).trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
 }
 
 private enum ProbeFailure: LocalizedError {
     case pathInError
 
     var errorDescription: String? { "/private/secret/media.mkv" }
-}
-
-private final class RouterHLSProcessStub: HLSManagedProcess {
-    private(set) var didTerminate = false
-    var isRunning: Bool { !didTerminate }
-    func terminate() { didTerminate = true }
 }
 
 private enum CatalogFailure: Error {

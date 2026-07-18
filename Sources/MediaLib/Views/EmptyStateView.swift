@@ -137,7 +137,7 @@ struct AppLoadingView: View {
             Spacer()
         }
         .padding(10)
-        .staticSurfaceBackground(cornerRadius: 14, thickness: 0.86)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 0.86)
     }
 
     private func shimmerBlock(width: CGFloat, height: CGFloat, radius: CGFloat) -> some View {

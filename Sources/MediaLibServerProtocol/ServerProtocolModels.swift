@@ -29,6 +29,27 @@ public struct ServerHealth: Codable, Equatable, Sendable {
     }
 }
 
+/// 当前认证主体自己的最小账户视图。它不包含会话 ID、设备 ID、Cookie、token、
+/// 凭据、资料库路径或其他用户资料；权限仅用于网页安全地说明当前账号可见范围。
+public struct ServerCurrentUserProfile: Codable, Equatable, Sendable {
+    public let username: String
+    public let displayName: String
+    public let roleIDs: [String]
+    public let permissionIDs: [String]
+
+    public init(
+        username: String,
+        displayName: String,
+        roleIDs: [String],
+        permissionIDs: [String]
+    ) {
+        self.username = username
+        self.displayName = displayName
+        self.roleIDs = roleIDs.sorted()
+        self.permissionIDs = permissionIDs.sorted()
+    }
+}
+
 /// `/.well-known/mlink` 的公开描述。此阶段仅声明可安全探测的能力；认证、库列表
 /// 和任何媒体路径将在后续 API 中单独授权后返回。
 public struct MlinkServerDescriptor: Codable, Equatable, Sendable {
@@ -70,7 +91,11 @@ public struct ServerLibraryItem: Codable, Equatable, Sendable, Identifiable {
     public let title: String
     public let year: Int?
     public let artworkAvailable: Bool
+    /// 为 true 时该卡片是系列容器，应进入 `/series/{id}` 而不是播放器详情。
+    /// 它不包含父级 ID、路径或来源信息。
+    public let isSeries: Bool
     public let userState: ServerMediaUserState?
+    public let userPreference: ServerMediaUserPreference
 
     public init(
         id: String,
@@ -78,14 +103,156 @@ public struct ServerLibraryItem: Codable, Equatable, Sendable, Identifiable {
         title: String,
         year: Int?,
         artworkAvailable: Bool,
-        userState: ServerMediaUserState? = nil
+        isSeries: Bool = false,
+        userState: ServerMediaUserState? = nil,
+        userPreference: ServerMediaUserPreference = .empty
     ) {
         self.id = id
         self.type = type
         self.title = title
         self.year = year
         self.artworkAvailable = artworkAvailable
+        self.isSeries = isSeries
         self.userState = userState
+        self.userPreference = userPreference
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, type, title, year, artworkAvailable, isSeries, userState, userPreference
+    }
+
+    /// 允许新版客户端连接仍未发送偏好字段的服务端；缺失字段绝不能放大为
+    /// 桌面端全局状态，而是收敛为当前用户的空偏好。
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try values.decode(String.self, forKey: .id)
+        self.type = try values.decode(String.self, forKey: .type)
+        self.title = try values.decode(String.self, forKey: .title)
+        self.year = try values.decodeIfPresent(Int.self, forKey: .year)
+        self.artworkAvailable = try values.decode(Bool.self, forKey: .artworkAvailable)
+        self.isSeries = try values.decodeIfPresent(Bool.self, forKey: .isSeries) ?? false
+        self.userState = try values.decodeIfPresent(ServerMediaUserState.self, forKey: .userState)
+        self.userPreference = try values.decodeIfPresent(ServerMediaUserPreference.self, forKey: .userPreference) ?? .empty
+    }
+}
+
+/// 系列详情页的季摘要。`seasonNumber == nil` 代表扫描来源没有提供季信息；
+/// `id` 是服务端生成的展示键，不是数据库主键或路径。
+public struct ServerSeriesSeason: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let seasonNumber: Int?
+    public let title: String
+    public let episodeCount: Int
+    public let watchedCount: Int
+    public let inProgressCount: Int
+
+    public init(
+        id: String,
+        seasonNumber: Int?,
+        title: String,
+        episodeCount: Int,
+        watchedCount: Int,
+        inProgressCount: Int
+    ) {
+        self.id = id
+        self.seasonNumber = seasonNumber
+        self.title = title
+        self.episodeCount = max(episodeCount, 0)
+        self.watchedCount = min(max(watchedCount, 0), self.episodeCount)
+        self.inProgressCount = min(max(inProgressCount, 0), self.episodeCount)
+    }
+}
+
+/// 已授权系列的首屏详情。只含页面展示字段与当前用户偏好，不包含媒体路径、
+/// 来源、外部提供商 ID、子项父键或其他用户状态。
+public struct ServerSeriesDetail: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let type: String
+    public let title: String
+    public let originalTitle: String?
+    public let year: Int?
+    public let overview: String?
+    public let genres: [String]
+    public let communityRating: Double?
+    public let artworkAvailable: Bool
+    public let backdropAvailable: Bool
+    public let totalEpisodeCount: Int
+    public let seasons: [ServerSeriesSeason]
+    public let userPreference: ServerMediaUserPreference
+
+    public init(
+        id: String,
+        type: String,
+        title: String,
+        originalTitle: String?,
+        year: Int?,
+        overview: String?,
+        genres: [String],
+        communityRating: Double?,
+        artworkAvailable: Bool,
+        backdropAvailable: Bool,
+        totalEpisodeCount: Int,
+        seasons: [ServerSeriesSeason],
+        userPreference: ServerMediaUserPreference = .empty
+    ) {
+        self.id = id
+        self.type = type
+        self.title = title
+        self.originalTitle = originalTitle
+        self.year = year
+        self.overview = overview
+        self.genres = genres
+        self.communityRating = communityRating.flatMap { $0.isFinite ? min(max($0, 0), 10) : nil }
+        self.artworkAvailable = artworkAvailable
+        self.backdropAvailable = backdropAvailable
+        self.totalEpisodeCount = max(totalEpisodeCount, 0)
+        self.seasons = seasons
+        self.userPreference = userPreference
+    }
+}
+
+/// 系列页按需加载的单集卡片。具体播放仍跳转到受权 `/item/{id}`，由网页播放器解码。
+public struct ServerSeriesEpisode: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let title: String
+    public let seasonNumber: Int?
+    public let episodeNumber: Int?
+    public let runtimeSeconds: Double?
+    public let artworkAvailable: Bool
+    public let userState: ServerMediaUserState?
+
+    public init(
+        id: String,
+        title: String,
+        seasonNumber: Int?,
+        episodeNumber: Int?,
+        runtimeSeconds: Double?,
+        artworkAvailable: Bool,
+        userState: ServerMediaUserState? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.seasonNumber = seasonNumber
+        self.episodeNumber = episodeNumber
+        self.runtimeSeconds = runtimeSeconds.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        self.artworkAvailable = artworkAvailable
+        self.userState = userState
+    }
+}
+
+public struct ServerSeriesEpisodesPage: Codable, Equatable, Sendable {
+    public let totalItemCount: Int
+    public let offset: Int
+    public let limit: Int
+    public let hasMore: Bool
+    public let items: [ServerSeriesEpisode]
+
+    public init(totalItemCount: Int, offset: Int, limit: Int, items: [ServerSeriesEpisode]) {
+        self.totalItemCount = max(totalItemCount, 0)
+        self.offset = max(offset, 0)
+        self.limit = max(limit, 1)
+        self.hasMore = self.offset + items.count < self.totalItemCount
+        self.items = items
     }
 }
 
@@ -93,6 +260,23 @@ public enum ServerLibrarySort: String, Codable, CaseIterable, Equatable, Sendabl
     case updatedDescending
     case titleAscending
     case yearDescending
+    case lastPlayedDescending
+}
+
+/// 资料库查询允许的当前用户播放状态筛选。该值只能由服务端 SQL 映射，
+/// 不能表达任意列名、其他用户或桌面端全局播放痕迹。
+public enum ServerLibraryPlaybackFilter: String, Codable, CaseIterable, Equatable, Sendable {
+    case inProgress
+    case watched
+    case unwatched
+    case history
+}
+
+/// 当前用户自己的媒体清单筛选。查询方只能选择固定语义，不能指定偏好表字段。
+public enum ServerLibraryPreferenceFilter: String, Codable, CaseIterable, Equatable, Sendable {
+    case favorite
+    case watchlist
+    case rated
 }
 
 /// 已通过服务端边界校验的资料库分页查询。路由限制查询长度、分类白名单及页大小，
@@ -103,19 +287,25 @@ public struct ServerLibraryQuery: Equatable, Sendable {
     public let offset: Int
     public let limit: Int
     public let sort: ServerLibrarySort
+    public let playbackFilter: ServerLibraryPlaybackFilter?
+    public let preferenceFilter: ServerLibraryPreferenceFilter?
 
     public init(
         searchText: String? = nil,
         type: String? = nil,
         offset: Int = 0,
         limit: Int = 48,
-        sort: ServerLibrarySort = .updatedDescending
+        sort: ServerLibrarySort = .updatedDescending,
+        playbackFilter: ServerLibraryPlaybackFilter? = nil,
+        preferenceFilter: ServerLibraryPreferenceFilter? = nil
     ) {
         self.searchText = searchText
         self.type = type
         self.offset = offset
         self.limit = limit
         self.sort = sort
+        self.playbackFilter = playbackFilter
+        self.preferenceFilter = preferenceFilter
     }
 }
 
@@ -168,6 +358,18 @@ public struct ServerLibraryItemsResponse: Codable, Equatable, Sendable {
     }
 }
 
+/// 相邻剧集的最小导航 DTO。只允许服务端从已经授权的剧集顺序派生，不能携带
+/// 路径、来源、文件名或任意集合查询条件。
+public struct ServerEpisodeNavigation: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let title: String
+
+    public init(id: String, title: String) {
+        self.id = id
+        self.title = title
+    }
+}
+
 /// Web/Mlink 媒体详情所需的安全字段。`userState` 只来自服务端逐用户状态表，
 /// 不读取桌面端全局播放痕迹；本地文件/封面路径、来源路径和外部提供商标识永不传输。
 public struct ServerMediaItemDetail: Codable, Equatable, Sendable, Identifiable {
@@ -187,7 +389,10 @@ public struct ServerMediaItemDetail: Codable, Equatable, Sendable, Identifiable 
     public let backdropAvailable: Bool
     public let canDirectPlay: Bool
     public let canTranscode: Bool
+    public let previousEpisode: ServerEpisodeNavigation?
+    public let nextEpisode: ServerEpisodeNavigation?
     public let userState: ServerMediaUserState?
+    public let userPreference: ServerMediaUserPreference
 
     public init(
         id: String,
@@ -206,7 +411,10 @@ public struct ServerMediaItemDetail: Codable, Equatable, Sendable, Identifiable 
         backdropAvailable: Bool,
         canDirectPlay: Bool,
         canTranscode: Bool,
-        userState: ServerMediaUserState? = nil
+        previousEpisode: ServerEpisodeNavigation? = nil,
+        nextEpisode: ServerEpisodeNavigation? = nil,
+        userState: ServerMediaUserState? = nil,
+        userPreference: ServerMediaUserPreference = .empty
     ) {
         self.id = id
         self.type = type
@@ -224,7 +432,43 @@ public struct ServerMediaItemDetail: Codable, Equatable, Sendable, Identifiable 
         self.backdropAvailable = backdropAvailable
         self.canDirectPlay = canDirectPlay
         self.canTranscode = canTranscode
+        self.previousEpisode = previousEpisode
+        self.nextEpisode = nextEpisode
         self.userState = userState
+        self.userPreference = userPreference
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, type, title, originalTitle, year, overview, genres, communityRating, runtimeSeconds
+        case videoCodec, audioCodec, resolution, artworkAvailable, backdropAvailable, canDirectPlay
+        case canTranscode, previousEpisode, nextEpisode, userState, userPreference
+    }
+
+    /// 与资料库卡片相同，旧服务端未包含该字段时使用空偏好，保证渐进升级。
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try values.decode(String.self, forKey: .id),
+            type: try values.decode(String.self, forKey: .type),
+            title: try values.decode(String.self, forKey: .title),
+            originalTitle: try values.decodeIfPresent(String.self, forKey: .originalTitle),
+            year: try values.decodeIfPresent(Int.self, forKey: .year),
+            overview: try values.decodeIfPresent(String.self, forKey: .overview),
+            genres: try values.decode([String].self, forKey: .genres),
+            communityRating: try values.decodeIfPresent(Double.self, forKey: .communityRating),
+            runtimeSeconds: try values.decodeIfPresent(Double.self, forKey: .runtimeSeconds),
+            videoCodec: try values.decodeIfPresent(String.self, forKey: .videoCodec),
+            audioCodec: try values.decodeIfPresent(String.self, forKey: .audioCodec),
+            resolution: try values.decodeIfPresent(String.self, forKey: .resolution),
+            artworkAvailable: try values.decode(Bool.self, forKey: .artworkAvailable),
+            backdropAvailable: try values.decode(Bool.self, forKey: .backdropAvailable),
+            canDirectPlay: try values.decode(Bool.self, forKey: .canDirectPlay),
+            canTranscode: try values.decode(Bool.self, forKey: .canTranscode),
+            previousEpisode: try values.decodeIfPresent(ServerEpisodeNavigation.self, forKey: .previousEpisode),
+            nextEpisode: try values.decodeIfPresent(ServerEpisodeNavigation.self, forKey: .nextEpisode),
+            userState: try values.decodeIfPresent(ServerMediaUserState.self, forKey: .userState),
+            userPreference: try values.decodeIfPresent(ServerMediaUserPreference.self, forKey: .userPreference) ?? .empty
+        )
     }
 }
 
@@ -255,6 +499,22 @@ public struct ServerMediaUserState: Codable, Equatable, Sendable {
         self.playCount = max(playCount, 0)
         self.lastPlayedAt = lastPlayedAt
         self.updatedAt = updatedAt
+    }
+}
+
+/// 当前认证用户对媒体的收藏、想看和评分。该 DTO 永不包含 userID、路径、
+/// 桌面端全局偏好或其他用户状态；没有偏好记录时显式使用安全默认值。
+public struct ServerMediaUserPreference: Codable, Equatable, Sendable {
+    public let isFavorite: Bool
+    public let isWatchlist: Bool
+    public let rating: Double?
+
+    public static let empty = ServerMediaUserPreference(isFavorite: false, isWatchlist: false, rating: nil)
+
+    public init(isFavorite: Bool, isWatchlist: Bool, rating: Double?) {
+        self.isFavorite = isFavorite
+        self.isWatchlist = isWatchlist
+        self.rating = rating.flatMap { $0.isFinite && $0 > 0 && $0 <= 5 ? $0 : nil }
     }
 }
 
@@ -344,26 +604,13 @@ public struct ServerMediaStreamInfo: Codable, Equatable, Sendable, Identifiable 
     }
 }
 
-/// 一次 HLS 转码会话的安全描述。`manifestPath` 是服务端 API 路径而不是文件系统路径，
-/// 其后续访问仍必须落在同一用户、资料库和会话授权边界内。
-public struct ServerHLSPlaybackSession: Codable, Equatable, Sendable, Identifiable {
-    public let id: String
-    public let itemID: String
-    public let manifestPath: String
-
-    public init(id: String, itemID: String, manifestPath: String) {
-        self.id = id
-        self.itemID = itemID
-        self.manifestPath = manifestPath
-    }
-}
-
 /// 远程管理用户清单中的最小安全视图。它刻意不包含凭据、登录失败详情、
 /// token/摘要、客户端地址或任何本地媒体路径。
 public struct ServerManagedUserSummary: Codable, Equatable, Sendable, Identifiable {
     public let id: String
     public let username: String
     public let displayName: String
+    public let isBuiltInAdministrator: Bool
     public let isDisabled: Bool
     public let requiresInitialPassword: Bool
     public let roleIDs: [String]
@@ -375,6 +622,7 @@ public struct ServerManagedUserSummary: Codable, Equatable, Sendable, Identifiab
         id: String,
         username: String,
         displayName: String,
+        isBuiltInAdministrator: Bool,
         isDisabled: Bool,
         requiresInitialPassword: Bool,
         roleIDs: [String],
@@ -385,6 +633,7 @@ public struct ServerManagedUserSummary: Codable, Equatable, Sendable, Identifiab
         self.id = id
         self.username = username
         self.displayName = displayName
+        self.isBuiltInAdministrator = isBuiltInAdministrator
         self.isDisabled = isDisabled
         self.requiresInitialPassword = requiresInitialPassword
         self.roleIDs = roleIDs.sorted()
@@ -403,6 +652,77 @@ public struct ServerManagedUsersResponse: Codable, Equatable, Sendable {
         self.totalCount = max(totalCount, 0)
         self.isTruncated = isTruncated
         self.users = users
+    }
+}
+
+/// Web 服务管理中媒体源的最小安全视图。它不包含本地路径、远程地址、账号、密码、
+/// token、Cookie 或任何可用于重新连接来源的配置。
+public struct ServerManagedSourceSummary: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let mediaType: String
+    public let sourceKind: String
+    public let autoScan: Bool
+    public let includeInMetadataFetch: Bool
+    public let includeInHealthCheck: Bool
+    public let updatedAt: Date
+
+    public init(
+        id: String,
+        name: String,
+        mediaType: String,
+        sourceKind: String,
+        autoScan: Bool,
+        includeInMetadataFetch: Bool,
+        includeInHealthCheck: Bool,
+        updatedAt: Date
+    ) {
+        self.id = id
+        self.name = name
+        self.mediaType = mediaType
+        self.sourceKind = sourceKind
+        self.autoScan = autoScan
+        self.includeInMetadataFetch = includeInMetadataFetch
+        self.includeInHealthCheck = includeInHealthCheck
+        self.updatedAt = updatedAt
+    }
+}
+
+public struct ServerManagedSourcesResponse: Codable, Equatable, Sendable {
+    public let totalCount: Int
+    public let isTruncated: Bool
+    public let sources: [ServerManagedSourceSummary]
+
+    public init(totalCount: Int, isTruncated: Bool, sources: [ServerManagedSourceSummary]) {
+        self.totalCount = max(totalCount, 0)
+        self.isTruncated = isTruncated
+        self.sources = sources
+    }
+}
+
+/// Web 成员创建时可选择的最小资料库视图。它刻意不包含来源路径、URL、连接设置或
+/// 任何磁盘可达性信息；保险库来源绝不出现在此契约中。
+public struct ServerManagedLibrarySummary: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let mediaType: String
+
+    public init(id: String, name: String, mediaType: String) {
+        self.id = id
+        self.name = name
+        self.mediaType = mediaType
+    }
+}
+
+public struct ServerManagedLibrariesResponse: Codable, Equatable, Sendable {
+    public let totalCount: Int
+    public let isTruncated: Bool
+    public let libraries: [ServerManagedLibrarySummary]
+
+    public init(totalCount: Int, isTruncated: Bool, libraries: [ServerManagedLibrarySummary]) {
+        self.totalCount = max(totalCount, 0)
+        self.isTruncated = isTruncated
+        self.libraries = libraries
     }
 }
 

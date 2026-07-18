@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import AVFoundation
 import Foundation
@@ -508,3 +509,4 @@ private struct SendableVideoPreviewImage: @unchecked Sendable {
         self.image = image
     }
 }
+#endif

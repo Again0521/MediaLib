@@ -2672,6 +2672,7 @@ struct HomeView: View {
         case .emby: return "EMBY 服务器"
         case .jellyfin: return "Jellyfin 服务器"
         case .plex: return "Plex 服务器"
+        case .mlink: return "MediaLIB 服务器"
         case .url: return appState.localized("网络视频")
         }
     }
@@ -2764,7 +2765,7 @@ struct HomeView: View {
         switch source.sourceKind {
         case .local: return source.mediaType == .music ? "music.note" : "externaldrive"
         case .smb, .ftp: return "network"
-        case .emby, .jellyfin, .plex: return "server.rack"
+        case .emby, .jellyfin, .plex, .mlink: return "server.rack"
         case .url: return "link"
         }
     }
@@ -3815,7 +3816,7 @@ struct HomeTabBar: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(8)
-        .staticSurfaceBackground(cornerRadius: 18, thickness: 1.04)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 1.04)
     }
 
     private var singleRowTabs: some View {
@@ -3976,7 +3977,7 @@ struct HomeSectionBlock: View {
             }
         }
         .padding(16)
-        .staticSurfaceBackground(cornerRadius: 20, thickness: 1.02)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 1.02)
         .repeatedCardChrome(false, cornerRadius: 20)
         .onAppear { notifyRestoreIfNeeded() }
         .onChange(of: restoreAnchorID) { _ in notifyRestoreIfNeeded() }
@@ -4118,7 +4119,7 @@ struct HomeOverviewBoard: View {
             }
         }
         .padding(16)
-        .staticSurfaceBackground(cornerRadius: 20, thickness: 1.02)
+        .staticSurfaceBackground(cornerRadius: AppRadius.card, thickness: 1.02)
         .repeatedCardChrome(false, cornerRadius: 20)
     }
 

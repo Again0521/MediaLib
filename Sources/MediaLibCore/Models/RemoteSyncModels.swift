@@ -4,6 +4,8 @@ public enum RemoteConnectorProvider: String, Codable, CaseIterable, Identifiable
     case emby
     case jellyfin
     case plex
+    /// MediaLIB 自有服务端协议。它与第三方媒体服务器的兼容层分离，避免凭据和 API 语义串用。
+    case mlink
     case trakt
     case iCloud
 
@@ -14,6 +16,7 @@ public enum RemoteConnectorProvider: String, Codable, CaseIterable, Identifiable
         case .emby: return "Emby"
         case .jellyfin: return "Jellyfin"
         case .plex: return "Plex"
+        case .mlink: return "MediaLIB Server"
         case .trakt: return "Trakt"
         case .iCloud: return "iCloud"
         }

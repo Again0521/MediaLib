@@ -25,34 +25,43 @@ struct MediaLibServer {
                 )
             )
         case "--serve":
-            let directories = try FileAccessService.appDirectories()
+            let defaultDirectories = try FileAccessService.appDirectories()
+            let dataDirectories = try ServerDataDirectories.fromEnvironment() ?? ServerDataDirectories(
+                root: defaultDirectories.applicationSupport,
+                database: defaultDirectories.database,
+                databaseBackups: defaultDirectories.databaseBackups
+            )
             let database = try DatabaseManager(
-                url: directories.database,
-                backupDirectory: directories.databaseBackups
+                url: dataDirectories.database,
+                backupDirectory: dataDirectories.databaseBackups
             )
             let catalog = ServerLibraryCatalog(database: database)
             let administrationCatalog = ServerAdministrationCatalog(database: database)
             let authentication = try ServerAuthenticationService(database: database)
             let inspector = FFprobeMediaInspector()
-            let hlsSessionManager = FFmpegHLSSessionManager()
             let server = try LocalLoopbackHTTPServer(
                 configuration: configuration,
                 librarySnapshotProvider: { try catalog.snapshot(for: $0) },
                 libraryBrowseProvider: { try catalog.browse($0, for: $1) },
                 libraryCategoriesProvider: { try catalog.categories(for: $0) },
                 mediaDetailProvider: { try catalog.publicDetail(id: $0, for: $1) },
+                seriesDetailProvider: { try catalog.seriesDetail(id: $0, for: $1) },
+                seriesEpisodesProvider: { try catalog.seriesEpisodes(id: $0, season: $1, offset: $2, limit: $3, for: $4) },
                 mediaPlaybackStateUpdater: { try catalog.updatePlaybackState(id: $0, request: $1, for: $2) },
+                mediaPreferenceUpdater: { try catalog.updatePreference(id: $0, preference: $1, for: $2) },
                 mediaAssetProvider: { try catalog.publicAsset(id: $0, for: $1, requiring: $2) },
+                webVTTSubtitleTracksProvider: { try catalog.webVTTSubtitleTracks(id: $0, for: $1) },
+                webVTTSubtitleAssetProvider: { try catalog.publicWebVTTSubtitleAsset(id: $0, trackID: $1, for: $2) },
                 artworkAssetProvider: { try catalog.publicArtwork(id: $0, kind: $1, for: $2) },
                 playbackInfoProvider: { itemID, principal in
                     guard let asset = try catalog.publicAsset(
                         id: itemID,
                         for: principal,
-                        requiring: .playMedia
+                        requiring: ServerPermission.playMedia
                     ) else { return nil }
                     return try inspector.inspect(asset: asset)
                 },
-                hlsSessionManager: hlsSessionManager,
+                currentUserProfileProvider: { try authentication.currentUserProfile(for: $0) },
                 administrationCatalog: administrationCatalog,
                 authenticationService: authentication,
                 authenticationProvider: { try authentication.principal(forRequestHead: $0) }
@@ -70,6 +79,60 @@ struct MediaLibServer {
     }
 }
 
+/// Docker/服务进程的数据根目录适配层。当前服务仍只监听回环；该目录注入只为让
+/// 数据库与备份不再强制依赖 macOS Application Support，为后续纯服务端拆分预留稳定边界。
+struct ServerDataDirectories: Equatable {
+    let root: URL
+    let database: URL
+    let databaseBackups: URL
+
+    static func fromEnvironment(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) throws -> Self? {
+        guard let rawValue = environment["MEDIALIB_SERVER_DATA_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawValue.isEmpty else {
+            return nil
+        }
+        guard rawValue.hasPrefix("/") else {
+            throw ServerDataDirectoryError.notAbsolute(rawValue)
+        }
+        let root = URL(fileURLWithPath: rawValue, isDirectory: true).standardizedFileURL
+        try fileManager.createDirectory(
+            at: root,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw ServerDataDirectoryError.notDirectory(root.path)
+        }
+        let backups = root.appendingPathComponent("backups", isDirectory: true)
+        try fileManager.createDirectory(
+            at: backups,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return Self(
+            root: root,
+            database: root.appendingPathComponent("medialib.sqlite", isDirectory: false),
+            databaseBackups: backups
+        )
+    }
+}
+
+enum ServerDataDirectoryError: LocalizedError, Equatable {
+    case notAbsolute(String)
+    case notDirectory(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .notAbsolute(path): return "MEDIALIB_SERVER_DATA_DIR 必须是绝对路径：\(path)。"
+        case let .notDirectory(path): return "MEDIALIB_SERVER_DATA_DIR 不是可用目录：\(path)。"
+        }
+    }
+}
+
 enum ServerCommandOutput {
     static let capabilities = [
         "administration-read",
@@ -77,7 +140,6 @@ enum ServerCommandOutput {
         "categorized-library-browse",
         "protected-artwork",
         "health",
-        "loopback-hls-transcode",
         "loopback-range-streaming",
         "media-detail",
         "media-probe",
@@ -93,7 +155,7 @@ enum ServerCommandOutput {
       --serve    仅在 127.0.0.1 上启动认证 Web/媒体预览服务
 
     当前具备登录/刷新/注销、桌面多用户与逐资料库授权、安全审计、
-    Web 列表/详情/播放、逐用户续播/已看、只读管理、播放探测、HTTP Range、HLS 与分级限速。限速参数压测、
+    Web 列表/详情/浏览器原生播放、逐用户续播/已看、只读管理、播放探测、HTTP Range 与分级限速。限速参数压测、
     告警聚合、可信代理、TLS 与远程部署尚未完成，因此不会接受局域网或公网监听地址。
     """
 

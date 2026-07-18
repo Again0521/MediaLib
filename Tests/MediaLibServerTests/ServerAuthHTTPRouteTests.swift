@@ -41,6 +41,9 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         router = LocalHTTPRouter(
             serverID: "server",
             serverName: "Server",
+            currentUserProfileProvider: { [authentication] in
+                try authentication?.currentUserProfile(for: $0)
+            },
             authenticationService: authentication,
             authenticationProvider: { [authentication] in try authentication?.principal(forRequestHead: $0) }
         )
@@ -175,6 +178,120 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         XCTAssertFalse(responseText.localizedCaseInsensitiveContains("recover"))
     }
 
+    func testCurrentUserProfileAndAccountPageAreAuthenticatedAndTokenFree() throws {
+        let login = try requestBody([
+            "username": "alice",
+            "password": "correct horse battery staple",
+            "deviceName": "Web Browser",
+            "platform": "Web",
+            "delivery": "token"
+        ])
+        let tokens = try decodeTokens(router.response(
+            for: "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            body: login
+        ).body)
+        let profile = router.response(for: authenticatedRequest("/api/v1/auth/me", token: tokens.accessToken))
+        let page = router.response(for: authenticatedRequest("/account", token: tokens.accessToken))
+        let asset = router.response(for: "GET /assets/account.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let stylesheet = router.response(for: "GET /assets/account.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let profileObject = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: profile.body) as? [String: Any]
+        )
+        let html = String(data: page.body, encoding: .utf8) ?? ""
+        let script = String(data: asset.body, encoding: .utf8) ?? ""
+
+        XCTAssertEqual(router.response(for: "GET /api/v1/auth/me HTTP/1.1\r\nHost: localhost\r\n\r\n").statusCode, 401)
+        XCTAssertEqual(profile.statusCode, 200)
+        XCTAssertEqual(profileObject["username"] as? String, "alice")
+        XCTAssertEqual(profileObject["displayName"] as? String, "Alice")
+        XCTAssertNotNil(profileObject["roleIDs"] as? [String])
+        XCTAssertNotNil(profileObject["permissionIDs"] as? [String])
+        XCTAssertNil(profileObject["id"])
+        XCTAssertNil(profileObject["sessionID"])
+        XCTAssertNil(profileObject["deviceID"])
+        XCTAssertFalse(String(data: profile.body, encoding: .utf8)?.contains(tokens.accessToken) ?? true)
+        XCTAssertEqual(page.statusCode, 200)
+        XCTAssertTrue(html.contains("src=\"/assets/account.js\""))
+        XCTAssertTrue(html.contains("href=\"/assets/account.css\""))
+        XCTAssertFalse(html.contains("<style>"))
+        XCTAssertTrue(html.contains("我的账户"))
+        XCTAssertTrue(html.contains("content=\"test-csrf-token\""))
+        XCTAssertEqual(asset.statusCode, 200)
+        XCTAssertTrue(script.contains("/api/v1/auth/me"))
+        XCTAssertTrue(script.contains("/api/v1/auth/logout"))
+        XCTAssertTrue(script.contains("/api/v1/auth/password"))
+        XCTAssertTrue(script.contains("X-MediaLIB-CSRF"))
+        XCTAssertTrue(script.contains("JSON.stringify({ currentPassword, newPassword })"))
+        XCTAssertTrue(script.contains("currentField.value = ''"))
+        XCTAssertTrue(script.contains("textContent"))
+        XCTAssertTrue(script.contains("replaceChildren"))
+        XCTAssertFalse(script.contains("innerHTML"))
+        XCTAssertFalse(script.contains("document.cookie"))
+        XCTAssertFalse(script.contains("localStorage"))
+        XCTAssertFalse(script.contains("sessionStorage"))
+        XCTAssertFalse(script.contains("eval("))
+        let stylesheetHeaders = String(data: stylesheet.serializedHeaders(), encoding: .utf8) ?? ""
+        let stylesheetText = String(data: stylesheet.body, encoding: .utf8) ?? ""
+        XCTAssertEqual(stylesheet.statusCode, 200)
+        XCTAssertTrue(stylesheetHeaders.contains("Content-Type: text/css; charset=utf-8"))
+        XCTAssertTrue(stylesheetHeaders.contains("Cache-Control: private, max-age=300"))
+        XCTAssertFalse(stylesheetHeaders.contains("Cache-Control: no-store"))
+        XCTAssertTrue(stylesheetText.contains(".password-submit"))
+        XCTAssertFalse(stylesheetText.contains("alice"))
+        XCTAssertFalse(stylesheetText.contains(tokens.accessToken))
+    }
+
+    func testCurrentUserPasswordChangeRequiresExactBodyAndRevokesEverySession() throws {
+        let login = try requestBody([
+            "username": "alice",
+            "password": "correct horse battery staple",
+            "deviceName": "Web Browser",
+            "platform": "Web",
+            "delivery": "token"
+        ])
+        let tokens = try decodeTokens(router.response(
+            for: "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            body: login
+        ).body)
+        let body = Data(#"{"currentPassword":"correct horse battery staple","newPassword":"new horse battery staple"}"#.utf8)
+        let response = router.response(
+            for: passwordChangeRequest(token: tokens.accessToken, bodyLength: body.count),
+            body: body
+        )
+        let headers = String(data: response.serializedHeaders(), encoding: .utf8) ?? ""
+        let oldLogin = router.response(
+            for: "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            body: login
+        )
+        let newLogin = try requestBody([
+            "username": "alice",
+            "password": "new horse battery staple",
+            "deviceName": "Web Browser",
+            "platform": "Web",
+            "delivery": "token"
+        ])
+        let unexpected = Data(#"{"currentPassword":"new horse battery staple","newPassword":"another secure password","userID":"other"}"#.utf8)
+
+        XCTAssertEqual(response.statusCode, 204)
+        XCTAssertTrue(response.body.isEmpty)
+        XCTAssertTrue(headers.contains("Max-Age=0"))
+        XCTAssertNil(try authentication.principal(forAccessToken: tokens.accessToken))
+        XCTAssertEqual(oldLogin.statusCode, 401)
+        let newSession = router.response(
+            for: "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            body: newLogin
+        )
+        let newTokens = try decodeTokens(newSession.body)
+        XCTAssertEqual(newSession.statusCode, 200)
+        XCTAssertEqual(router.response(
+            for: passwordChangeRequest(token: newTokens.accessToken, bodyLength: unexpected.count),
+            body: unexpected
+        ).statusCode, 400)
+        XCTAssertTrue(try repository.securityEvents(limit: 20).contains {
+            $0.action == "credential.changed" && $0.actorUserID == "user-alice" && $0.detailCode == "sessions.revoked"
+        })
+    }
+
     private func requestBody(_ value: [String: String]) throws -> Data {
         try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
     }
@@ -183,6 +300,14 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(ServerIssuedTokens.self, from: data)
+    }
+
+    private func authenticatedRequest(_ path: String, token: String) -> String {
+        "GET \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(token)\r\n\r\n"
+    }
+
+    private func passwordChangeRequest(token: String, bodyLength: Int) -> String {
+        "POST /api/v1/auth/password HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nContent-Length: \(bodyLength)\r\nX-MediaLIB-CSRF: test-csrf-token\r\n\r\n"
     }
 
     private func cookieValue(named name: String, in headers: String) -> String? {

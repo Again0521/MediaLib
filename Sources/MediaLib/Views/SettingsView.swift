@@ -53,6 +53,10 @@ struct SettingsView: View {
     @State private var autoStartMusicMetadataConsole = false
     @State private var serverModeNameDraft = ""
     @State private var serverModePortDraft = ""
+    /// 高级选项开关：关闭时（默认）隐藏未做完 / 不建议小白修改的进阶分区
+    /// （服务端预览、Trakt、账号同步、数据诊断，以及音乐主题 JSON 微调行）。
+    /// 仅控制显隐，不影响已保存的配置。用 AppStorage 持久化，属纯 UI 偏好。
+    @AppStorage("MediaLib.settings.showAdvancedOptions") private var showAdvancedOptions = false
     var body: some View {
         ZStack(alignment: .topLeading) {
             // 设置分组继续使用原生 List 虚拟化；标题区移出 List，避免 List 行内边距和
@@ -64,6 +68,7 @@ struct SettingsView: View {
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
 
+                // 小白友好分区：始终可见。
                 settingsRow(topPadding: 0) { appearanceSettings }
                 settingsRow { videoPlaybackSettings }
                 settingsRow { musicPlaybackSettings }
@@ -71,11 +76,17 @@ struct SettingsView: View {
                 settingsRow { metadataSettings }
                 settingsRow { subtitleSettings }
                 settingsRow { thumbnailSettings }
-                settingsRow { connectorStateSettings }
-                settingsRow { serverModeSettings }
-                settingsRow { traktSettings }
                 settingsRow { privacySettings }
-                settingsRow { advancedSettings }
+
+                // 高级选项开关：其下进阶分区仅在开启时显示。
+                settingsRow { advancedOptionsSection }
+                if showAdvancedOptions {
+                    settingsRow { traktSettings }
+                    settingsRow { connectorStateSettings }
+                    settingsRow { serverModeSettings }
+                    settingsRow { advancedSettings }
+                }
+
                 settingsRow { aboutSettings }
                 Color.clear
                     .frame(height: 18)
@@ -419,17 +430,19 @@ struct SettingsView: View {
                 SettingsToggleRow(title: "封面发光", systemImage: "sparkles", isOn: binding(\.musicAlbumCoverGlowEnabled))
                 SettingsDescription(text: "开启时展开播放器使用封面原图的多层柔光；关闭后只保留主色的浅柔阴影，暂停时同样收起光效。")
 
-                SettingsRow(title: "主题参数自定义", systemImage: "slider.horizontal.3") {
-                    HStack(spacing: 8) {
-                        Button("打开配置文件") { appState.revealMusicThemeConfigFile() }
-                            .settingsActionButton(width: nil)
-                        Button("重新加载") { appState.reloadMusicThemeConfig() }
-                            .settingsActionButton(width: nil)
-                        Button("恢复默认") { appState.resetMusicThemeConfig() }
-                            .settingsActionButton(width: nil)
+                if showAdvancedOptions {
+                    SettingsRow(title: "主题参数自定义", systemImage: "slider.horizontal.3") {
+                        HStack(spacing: 8) {
+                            Button("打开配置文件") { appState.revealMusicThemeConfigFile() }
+                                .settingsActionButton(width: nil)
+                            Button("重新加载") { appState.reloadMusicThemeConfig() }
+                                .settingsActionButton(width: nil)
+                            Button("恢复默认") { appState.resetMusicThemeConfig() }
+                                .settingsActionButton(width: nil)
+                        }
                     }
+                    SettingsDescription(text: "高级：编辑 ~/Library/Application Support/MediaLib/Themes/music-theme.json 可微调三套主题（琉璃 / 无界 / 湖光）的玻璃浓度、发光、圆角、字号、间距等数值。改完点「重新加载」即时生效，无需重启；「恢复默认」清空全部自定义。极端数值可能影响观感或性能，随时可「恢复默认」还原。")
                 }
-                SettingsDescription(text: "高级：编辑 ~/Library/Application Support/MediaLib/Themes/music-theme.json 可微调三套主题（琉璃 / 无界 / 湖光）的玻璃浓度、发光、圆角、字号、间距等数值。改完点「重新加载」即时生效，无需重启；「恢复默认」清空全部自定义。极端数值可能影响观感或性能，随时可「恢复默认」还原。")
 
                 SettingsRow(title: "音乐响度均衡", systemImage: "waveform.badge.magnifyingglass") {
                     Picker("音乐响度均衡", selection: binding(\.musicLoudnessNormalization)) {
@@ -1029,6 +1042,23 @@ struct SettingsView: View {
         }
     }
 
+    private var advancedOptionsSection: some View {
+        SettingsSection(title: "高级选项", subtitle: "显示服务端预览、Trakt、账号同步和数据诊断等进阶设置。", systemImage: "wrench.and.screwdriver") {
+            SettingsRow(title: "显示高级选项", systemImage: "slider.horizontal.3") {
+                Toggle("", isOn: Binding(get: {
+                    showAdvancedOptions
+                }, set: { value in
+                    withSettingsRevealAnimation {
+                        showAdvancedOptions = value
+                    }
+                }))
+                .labelsHidden()
+                .toggleStyle(AppSwitchToggleStyle())
+            }
+            SettingsDescription(text: "这些功能面向进阶用户，或仍在完善中（如服务端预览）。关闭后会从设置里隐藏，不影响已保存的配置。")
+        }
+    }
+
     private var advancedSettings: some View {
         SettingsSection(title: "数据、存储与诊断", subtitle: "管理备份、存储位置、清理和性能记录。", systemImage: "externaldrive") {
             SettingsToggleRow(title: "性能记录", systemImage: "gauge.with.dots.needle.67percent", isOn: binding(\.debugLoggingEnabled))
@@ -1105,6 +1135,17 @@ struct SettingsView: View {
                 }))
                 .labelsHidden()
                 .toggleStyle(.switch)
+            }
+
+            SettingsRow(title: "轻量服务模式", systemImage: "leaf") {
+                Toggle("轻量服务模式", isOn: Binding(get: {
+                    appState.serverModeConfiguration.isLightweightMode
+                }, set: { enabled in
+                    appState.setServerLightweightModeEnabled(enabled)
+                }))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .disabled(!appState.serverModeConfiguration.isEnabled)
             }
 
             SettingsRow(title: "当前状态", systemImage: "circle.fill") {
@@ -1205,7 +1246,7 @@ struct SettingsView: View {
                 )
             }
 
-            SettingsDescription(text: "名称或端口在按 Return 后生效；服务运行时会自动重启。当前仅监听 127.0.0.1，登录后可在本机 Web 查看资料库并通过 Range/HLS 播放；尚不接受局域网或公网连接。服务器身份会持久化保存。")
+            SettingsDescription(text: "轻量服务模式会停止桌面端封面/横版图等非必要视觉预热，并将服务子进程设为 utility QoS；扫描、索引、认证和媒体分发不会被关闭。名称、端口或轻量策略在服务运行时会安全重启。当前仅监听 127.0.0.1，登录后可在本机 Web 查看资料库，并由浏览器通过受权 Range 媒体源原生解码；服务端不会启动网页转码。尚不接受局域网或公网连接。服务器身份会持久化保存。")
         }
     }
 

@@ -11,16 +11,8 @@ enum ServerWebLoginPage {
           <meta name="color-scheme" content="light">
           <meta name="medialib-csrf-token" content="\(escape(csrfToken))">
           <title>登录 · \(escape(serverName))</title>
-          <style>
-            :root { --blue:#2e90fa; --ink:#172033; --muted:#68758a; --line:#dbe4f0; --danger:#c4324b; }
-            * { box-sizing:border-box; } body { min-height:100vh; margin:0; display:grid; place-items:center; padding:24px; color:var(--ink); background:radial-gradient(circle at 15% 5%,#dff4ff,transparent 38%),linear-gradient(145deg,#f8fbff,#edf4fb); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-            main { width:min(100%,420px); padding:30px; border:1px solid #ffffff; border-radius:24px; background:#ffffffed; box-shadow:0 24px 70px #22568a24; }
-            .brand { display:flex; align-items:center; gap:11px; font-weight:800; } .mark { display:grid; place-items:center; width:38px; height:38px; border-radius:12px; color:white; background:linear-gradient(145deg,#176dcc,#36bffa); }
-            h1 { margin:26px 0 6px; font-size:28px; letter-spacing:-.03em; } .server { margin:0 0 24px; color:var(--muted); }
-            label { display:block; margin-top:15px; font-size:13px; font-weight:700; } input { width:100%; margin-top:7px; padding:12px 13px; border:1px solid var(--line); border-radius:11px; color:inherit; background:#fff; font:inherit; } input:focus { outline:3px solid #2e90fa25; border-color:var(--blue); }
-            button { width:100%; margin-top:22px; padding:12px 16px; border:0; border-radius:12px; color:#fff; background:linear-gradient(135deg,#1d78d3,#36bffa); font:inherit; font-weight:800; cursor:pointer; } button:disabled { opacity:.6; cursor:wait; }
-            #status { min-height:20px; margin:14px 0 0; color:var(--danger); font-size:13px; line-height:1.5; } footer { margin-top:20px; color:var(--muted); font-size:11px; line-height:1.5; }
-          </style>
+          <link rel="stylesheet" href="/assets/login.css">
+          <link rel="stylesheet" href="/assets/app-shell.css">
           <script src="/assets/login.js" defer></script>
         </head>
         <body>
@@ -42,6 +34,19 @@ enum ServerWebLoginPage {
         </html>
         """
     }
+
+    /// Public but data-free login presentation. Credentials and CSRF remain in the
+    /// non-cacheable page/form flow and are never serialized into this stylesheet.
+    static let style = """
+    :root { --blue:#2e90fa; --ink:#172033; --muted:#68758a; --line:#dbe4f0; --danger:#c4324b; }
+    * { box-sizing:border-box; } body { min-height:100vh; margin:0; display:grid; place-items:center; padding:24px; color:var(--ink); background:radial-gradient(circle at 15% 5%,#dff4ff,transparent 38%),linear-gradient(145deg,#f8fbff,#edf4fb); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(100%,420px); padding:30px; border:1px solid #ffffff; border-radius:24px; background:#ffffffed; box-shadow:0 24px 70px #22568a24; }
+    .brand { display:flex; align-items:center; gap:11px; font-weight:800; } .mark { display:grid; place-items:center; width:38px; height:38px; border-radius:12px; color:white; background:linear-gradient(145deg,#176dcc,#36bffa); }
+    h1 { margin:26px 0 6px; font-size:28px; letter-spacing:-.03em; } .server { margin:0 0 24px; color:var(--muted); }
+    label { display:block; margin-top:15px; font-size:13px; font-weight:700; } input { width:100%; margin-top:7px; padding:12px 13px; border:1px solid var(--line); border-radius:11px; color:inherit; background:#fff; font:inherit; } input:focus { outline:3px solid #2e90fa25; border-color:var(--blue); }
+    button { width:100%; margin-top:22px; padding:12px 16px; border:0; border-radius:12px; color:#fff; background:linear-gradient(135deg,#1d78d3,#36bffa); font:inherit; font-weight:800; cursor:pointer; } button:disabled { opacity:.6; cursor:wait; }
+    #status { min-height:20px; margin:14px 0 0; color:var(--danger); font-size:13px; line-height:1.5; } footer { margin-top:20px; color:var(--muted); font-size:11px; line-height:1.5; }
+    """
 
     static let script = """
     (() => {
