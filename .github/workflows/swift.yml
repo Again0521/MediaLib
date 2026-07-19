@@ -34,8 +34,17 @@ jobs:
       - name: Toolchain version
         run: swift --version && xcodebuild -version
 
+      # 分产物依次构建（而非一次 swift build 全量并行）：CI 上曾出现 MediaLib 链接期找不到
+      # MediaLibServerProtocol 的类型符号（undefined symbols），但同一构建里 MediaLibServer
+      # 用同一依赖早先已经链接成功——本地用完全相同的 Xcode/Swift 版本复现不出来，判断是
+      # Swift Build 在一次调用里并行构建多个共享库依赖的可执行产物时的构建图竞态，不是依赖
+      # 声明错误。scripts/package_dmg.sh 一直是分产物顺序调用且从未出现过这个问题，这里改成
+      # 同样的顺序结构。
       - name: Build (debug)
-        run: swift build
+        run: |
+          swift build --product MediaLib
+          swift build --product MediaLibServer
+          swift build --product MediaLibChecks
 
       - name: Unit tests
         run: swift test
