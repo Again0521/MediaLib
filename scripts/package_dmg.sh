@@ -15,10 +15,11 @@ resolve_script_dir() {
 SCRIPT_DIR="$(resolve_script_dir)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 APP_NAME="MediaLib"
+SERVER_NAME="MediaLibServer"
 DISPLAY_NAME="MediaLIB"
 BUNDLE_ID="com.local.MediaLib"
-VERSION="1.5.2"
-BUILD="77"
+VERSION="1.5.5"
+BUILD="82"
 DIST_DIR="$ROOT_DIR/dist"
 ROOT_HASH="$(printf '%s' "$ROOT_DIR" | shasum -a 256 | awk '{print substr($1, 1, 12)}')"
 BUILD_ROOT="/private/tmp/MediaLib-package-$(id -u)-$ROOT_HASH"
@@ -82,16 +83,23 @@ find "$ROOT_DIR/Sources" -type d -name Resources -print0 2>/dev/null | while IFS
   xattr -cr "$res_dir" 2>/dev/null || true
 done
 swift build "${swift_package_args[@]}" --product "$APP_NAME"
+swift build "${swift_package_args[@]}" --product "$SERVER_NAME"
 SWIFT_PRODUCT_DIR="$(swift build "${swift_package_args[@]}" --show-bin-path)"
 SWIFT_PRODUCT_BINARY="$SWIFT_PRODUCT_DIR/$APP_NAME"
+SWIFT_SERVER_BINARY="$SWIFT_PRODUCT_DIR/$SERVER_NAME"
 if [[ ! -x "$SWIFT_PRODUCT_BINARY" ]]; then
   echo "error: expected release product was not produced at $SWIFT_PRODUCT_BINARY" >&2
+  exit 1
+fi
+if [[ ! -x "$SWIFT_SERVER_BINARY" ]]; then
+  echo "error: expected release product was not produced at $SWIFT_SERVER_BINARY" >&2
   exit 1
 fi
 
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources" "$DMG_ROOT"
 
 cp "$SWIFT_PRODUCT_BINARY" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+cp "$SWIFT_SERVER_BINARY" "$APP_BUNDLE/Contents/MacOS/$SERVER_NAME"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIcon.png" "$APP_BUNDLE/Contents/Resources/AppIcon.png"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIconDark.png" "$APP_BUNDLE/Contents/Resources/AppIconDark.png"
@@ -245,6 +253,29 @@ bundle_libmpv_runtime() {
   else
     echo "warning: ffmpeg was not found; MKV video-frame artwork fallback will use system ffmpeg only if available on the target Mac." >&2
   fi
+
+  local ffprobe_source=""
+  if [[ -x "/opt/homebrew/bin/ffprobe" ]]; then
+    ffprobe_source="/opt/homebrew/bin/ffprobe"
+  elif [[ -x "/usr/local/bin/ffprobe" ]]; then
+    ffprobe_source="/usr/local/bin/ffprobe"
+  fi
+
+  if [[ -n "$ffprobe_source" ]]; then
+    local ffprobe_target="$APP_BUNDLE/Contents/MacOS/ffprobe"
+    cp -L "$ffprobe_source" "$ffprobe_target"
+    chmod u+w,a+x "$ffprobe_target"
+
+    local ffprobe_dep=""
+    while IFS= read -r ffprobe_dep; do
+      [[ "$ffprobe_dep" == /System/* || "$ffprobe_dep" == /usr/lib/* || "$ffprobe_dep" == @* ]] && continue
+      [[ -f "$ffprobe_dep" ]] || continue
+      copy_dependency "$ffprobe_dep"
+      rewrite_dependency_path "$ffprobe_dep" "$(bundled_dependency_reference "$ffprobe_dep" "yes")" "$ffprobe_target"
+    done < <(otool -L "$ffprobe_target" | awk 'NR > 1 {print $1}')
+  else
+    echo "warning: ffprobe was not found; MediaLIB Server will not be able to inspect media streams on the target Mac." >&2
+  fi
 }
 
 bundle_libmpv_runtime
@@ -335,6 +366,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 PLIST
 
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+chmod +x "$APP_BUNDLE/Contents/MacOS/$SERVER_NAME"
 plutil -lint "$APP_BUNDLE/Contents/Info.plist"
 strip_bundle_metadata "$APP_BUNDLE"
 

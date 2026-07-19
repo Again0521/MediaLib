@@ -35,7 +35,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "MediaLib",
-            dependencies: ["MediaLibCore"],
+            dependencies: ["MediaLibCore", "MediaLibServerProtocol"],
             path: "Sources/MediaLib",
             resources: [
                 .process("Resources")
