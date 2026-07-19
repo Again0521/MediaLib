@@ -165,9 +165,15 @@ final class BackgroundTaskPersistenceTests: XCTestCase {
 
         scheduler.schedule([task(title: "first")], to: url)
         scheduler.schedule([task(title: "second")], to: url)
-        try await Task.sleep(nanoseconds: 140_000_000)
 
-        let calls = await recorder.recordedCalls()
+        // 轮询而非单次固定 sleep：CI 共享 runner 的调度抖动可能让 50ms 防抖窗口
+        // 之上的固定 140ms 余量不够，导致断言时写入还没发生（非真实回归）。
+        var calls: [[String]] = []
+        for _ in 0..<50 {
+            calls = await recorder.recordedCalls()
+            if !calls.isEmpty { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
         XCTAssertEqual(calls, [["second"]])
     }
 
