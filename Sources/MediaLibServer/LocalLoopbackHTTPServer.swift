@@ -45,6 +45,12 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         mediaDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerMediaItemDetail? = { _, _ in nil },
         seriesDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerSeriesDetail? = { _, _ in nil },
         seriesEpisodesProvider: @escaping (String, ServerSeriesSeasonSelector, Int, Int, ServerRequestPrincipal) throws -> ServerSeriesEpisodesPage? = { _, _, _, _, _ in nil },
+        peopleProvider: @escaping (String?, Int, Int, ServerRequestPrincipal) throws -> ServerPeoplePage = { _, offset, limit, _ in ServerPeoplePage(totalItemCount: 0, offset: offset, limit: limit, items: []) },
+        personDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerPersonDetail? = { _, _, _, _ in nil },
+        collectionsProvider: @escaping (Int, Int, ServerRequestPrincipal) throws -> ServerCollectionsPage = { offset, limit, _ in ServerCollectionsPage(totalItemCount: 0, offset: offset, limit: limit, items: []) },
+        collectionDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerCollectionDetail? = { _, _, _, _ in nil },
+        queueProvider: @escaping (ServerRequestPrincipal) throws -> ServerQueueResponse = { _ in ServerQueueResponse(repeatMode: "sequential", shuffleEnabled: false, currentPosition: 0, items: []) },
+        queueMutationProvider: @escaping (ServerQueueMutationRequest, ServerRequestPrincipal) throws -> ServerQueueResponse? = { _, _ in nil },
         mediaPlaybackStateUpdater: @escaping (String, ServerPlaybackStateUpdateRequest, ServerRequestPrincipal) throws -> ServerMediaUserState? = { _, _, _ in nil },
         mediaPreferenceUpdater: @escaping (String, ServerUserMediaPreferenceUpdate, ServerRequestPrincipal) throws -> ServerMediaUserPreference? = { _, _, _ in nil },
         mediaAssetProvider: @escaping (String, ServerRequestPrincipal, ServerPermission) throws -> ServerMediaAsset? = { _, _, _ in nil },
@@ -77,6 +83,12 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             mediaDetailProvider: mediaDetailProvider,
             seriesDetailProvider: seriesDetailProvider,
             seriesEpisodesProvider: seriesEpisodesProvider,
+            peopleProvider: peopleProvider,
+            personDetailProvider: personDetailProvider,
+            collectionsProvider: collectionsProvider,
+            collectionDetailProvider: collectionDetailProvider,
+            queueProvider: queueProvider,
+            queueMutationProvider: queueMutationProvider,
             mediaPlaybackStateUpdater: mediaPlaybackStateUpdater,
             mediaPreferenceUpdater: mediaPreferenceUpdater,
             mediaAssetProvider: mediaAssetProvider,
@@ -431,6 +443,12 @@ struct LocalHTTPRouter {
     private let mediaDetailProvider: (String, ServerRequestPrincipal) throws -> ServerMediaItemDetail?
     private let seriesDetailProvider: (String, ServerRequestPrincipal) throws -> ServerSeriesDetail?
     private let seriesEpisodesProvider: (String, ServerSeriesSeasonSelector, Int, Int, ServerRequestPrincipal) throws -> ServerSeriesEpisodesPage?
+    private let peopleProvider: (String?, Int, Int, ServerRequestPrincipal) throws -> ServerPeoplePage
+    private let personDetailProvider: (String, Int, Int, ServerRequestPrincipal) throws -> ServerPersonDetail?
+    private let collectionsProvider: (Int, Int, ServerRequestPrincipal) throws -> ServerCollectionsPage
+    private let collectionDetailProvider: (String, Int, Int, ServerRequestPrincipal) throws -> ServerCollectionDetail?
+    private let queueProvider: (ServerRequestPrincipal) throws -> ServerQueueResponse
+    private let queueMutationProvider: (ServerQueueMutationRequest, ServerRequestPrincipal) throws -> ServerQueueResponse?
     private let mediaPlaybackStateUpdater: (String, ServerPlaybackStateUpdateRequest, ServerRequestPrincipal) throws -> ServerMediaUserState?
     private let mediaPreferenceUpdater: (String, ServerUserMediaPreferenceUpdate, ServerRequestPrincipal) throws -> ServerMediaUserPreference?
     private let mediaAssetProvider: (String, ServerRequestPrincipal, ServerPermission) throws -> ServerMediaAsset?
@@ -463,6 +481,12 @@ struct LocalHTTPRouter {
         mediaDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerMediaItemDetail? = { _, _ in nil },
         seriesDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerSeriesDetail? = { _, _ in nil },
         seriesEpisodesProvider: @escaping (String, ServerSeriesSeasonSelector, Int, Int, ServerRequestPrincipal) throws -> ServerSeriesEpisodesPage? = { _, _, _, _, _ in nil },
+        peopleProvider: @escaping (String?, Int, Int, ServerRequestPrincipal) throws -> ServerPeoplePage = { _, offset, limit, _ in ServerPeoplePage(totalItemCount: 0, offset: offset, limit: limit, items: []) },
+        personDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerPersonDetail? = { _, _, _, _ in nil },
+        collectionsProvider: @escaping (Int, Int, ServerRequestPrincipal) throws -> ServerCollectionsPage = { offset, limit, _ in ServerCollectionsPage(totalItemCount: 0, offset: offset, limit: limit, items: []) },
+        collectionDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerCollectionDetail? = { _, _, _, _ in nil },
+        queueProvider: @escaping (ServerRequestPrincipal) throws -> ServerQueueResponse = { _ in ServerQueueResponse(repeatMode: "sequential", shuffleEnabled: false, currentPosition: 0, items: []) },
+        queueMutationProvider: @escaping (ServerQueueMutationRequest, ServerRequestPrincipal) throws -> ServerQueueResponse? = { _, _ in nil },
         mediaPlaybackStateUpdater: @escaping (String, ServerPlaybackStateUpdateRequest, ServerRequestPrincipal) throws -> ServerMediaUserState? = { _, _, _ in nil },
         mediaPreferenceUpdater: @escaping (String, ServerUserMediaPreferenceUpdate, ServerRequestPrincipal) throws -> ServerMediaUserPreference? = { _, _, _ in nil },
         mediaAssetProvider: @escaping (String, ServerRequestPrincipal, ServerPermission) throws -> ServerMediaAsset? = { _, _, _ in nil },
@@ -485,6 +509,12 @@ struct LocalHTTPRouter {
         self.mediaDetailProvider = mediaDetailProvider
         self.seriesDetailProvider = seriesDetailProvider
         self.seriesEpisodesProvider = seriesEpisodesProvider
+        self.peopleProvider = peopleProvider
+        self.personDetailProvider = personDetailProvider
+        self.collectionsProvider = collectionsProvider
+        self.collectionDetailProvider = collectionDetailProvider
+        self.queueProvider = queueProvider
+        self.queueMutationProvider = queueMutationProvider
         self.mediaPlaybackStateUpdater = mediaPlaybackStateUpdater
         self.mediaPreferenceUpdater = mediaPreferenceUpdater
         self.mediaAssetProvider = mediaAssetProvider
@@ -596,6 +626,18 @@ struct LocalHTTPRouter {
             ) { return limited }
             return .stylesheet(body: Data(ServerWebSeriesPage.style.utf8), omitBody: isHeadRequest)
         }
+        if (method == "GET" || isHeadRequest), path == "/assets/people.css" {
+            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
+            return .stylesheet(body: Data(ServerWebPeoplePage.style.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/collections.css" {
+            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
+            return .stylesheet(body: Data(ServerWebCollectionsPage.style.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/photos.css" {
+            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
+            return .stylesheet(body: Data(ServerWebPhotosPage.style.utf8), omitBody: isHeadRequest)
+        }
         if (method == "GET" || isHeadRequest), path == "/assets/admin.js" {
             if let limited = limitedResponse(
                 scope: .publicProbe, identityComponents: [clientAddressKey]
@@ -631,6 +673,18 @@ struct LocalHTTPRouter {
                 scope: .publicProbe, identityComponents: [clientAddressKey]
             ) { return limited }
             return .javascript(body: Data(ServerWebSeriesPage.script.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/people.js" {
+            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
+            return .javascript(body: Data(ServerWebPeoplePage.script.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/collections.js" {
+            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
+            return .javascript(body: Data(ServerWebCollectionsPage.script.utf8), omitBody: isHeadRequest)
+        }
+        if (method == "GET" || isHeadRequest), path == "/assets/photos.js" {
+            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
+            return .javascript(body: Data(ServerWebPhotosPage.script.utf8), omitBody: isHeadRequest)
         }
         if (method == "GET" || isHeadRequest), path == "/assets/library.js" {
             if let limited = limitedResponse(
@@ -826,6 +880,43 @@ struct LocalHTTPRouter {
                 ),
                 omitBody: isHeadRequest
             )
+        case "/people":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            do {
+                let page = try peopleProvider(nil, 0, 24, principal)
+                return .html(
+                    body: Data(ServerWebPeoplePage.directory(
+                        serverName: serverName, page: page, csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer
+                    ).utf8),
+                    omitBody: isHeadRequest
+                )
+            } catch { return .serviceUnavailable() }
+        case "/collections":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            do {
+                let page = try collectionsProvider(0, 24, principal)
+                return .html(
+                    body: Data(ServerWebCollectionsPage.directory(
+                        serverName: serverName, page: page, csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer
+                    ).utf8),
+                    omitBody: isHeadRequest
+                )
+            } catch { return .serviceUnavailable() }
+        case "/photos":
+            if let limited = limitedResponse(scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            do {
+                let page = try libraryBrowseProvider(ServerLibraryQuery(type: "photo", offset: 0, limit: 24), principal)
+                return .html(body: Data(ServerWebPhotosPage.gallery(serverName: serverName, page: page, csrfToken: csrfToken, showAdministration: principal.canManageServer).utf8), omitBody: isHeadRequest)
+            } catch { return .serviceUnavailable() }
         case "/search":
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
@@ -844,6 +935,18 @@ struct LocalHTTPRouter {
                         categories: categories.categories
                     ).utf8
                 ),
+                omitBody: isHeadRequest
+            )
+        case "/queue":
+            if let limited = limitedResponse(scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let categories = try? libraryCategoriesProvider(principal) else { return .serviceUnavailable() }
+            return .html(
+                body: Data(ServerWebLibraryPage.render(
+                    serverName: serverName, csrfToken: csrfToken,
+                    showAdministration: principal.canManageServer,
+                    page: .queue, categories: categories.categories
+                ).utf8),
                 omitBody: isHeadRequest
             )
         case "/watching":
@@ -1032,6 +1135,47 @@ struct LocalHTTPRouter {
             } catch {
                 return .serviceUnavailable()
             }
+        case let personPagePath where personPagePath.hasPrefix("/people/"):
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let personID = decodedPathIdentifier(personPagePath, prefix: "/people/") else {
+                return .notFound()
+            }
+            do {
+                guard let detail = try personDetailProvider(personID, 0, 24, principal) else { return .notFound() }
+                return .html(
+                    body: Data(ServerWebPeoplePage.detail(
+                        serverName: serverName, detail: detail, csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer
+                    ).utf8),
+                    omitBody: isHeadRequest
+                )
+            } catch { return .serviceUnavailable() }
+        case let collectionPagePath where collectionPagePath.hasPrefix("/collections/"):
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let collectionID = decodedPathIdentifier(collectionPagePath, prefix: "/collections/") else {
+                return .notFound()
+            }
+            do {
+                guard let detail = try collectionDetailProvider(collectionID, 0, 24, principal) else { return .notFound() }
+                return .html(
+                    body: Data(ServerWebCollectionsPage.detail(
+                        serverName: serverName, detail: detail, csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer
+                    ).utf8),
+                    omitBody: isHeadRequest
+                )
+            } catch { return .serviceUnavailable() }
+        case let photoPagePath where photoPagePath.hasPrefix("/photo/"):
+            if let limited = limitedResponse(scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey) { return limited }
+            guard let itemID = decodedPathIdentifier(photoPagePath, prefix: "/photo/") else { return .notFound() }
+            do {
+                guard let detail = try mediaDetailProvider(itemID, principal), detail.type == "photo" else { return .notFound() }
+                return .html(body: Data(ServerWebPhotosPage.detail(serverName: serverName, item: detail, csrfToken: csrfToken, showAdministration: principal.canManageServer).utf8), omitBody: isHeadRequest)
+            } catch { return .serviceUnavailable() }
         case "/api/v1/library/summary":
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
@@ -1105,6 +1249,58 @@ struct LocalHTTPRouter {
             } catch {
                 return .serviceUnavailable()
             }
+        case "/api/v1/people":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let query = peopleQuery(from: target) else { return .badRequest() }
+            do {
+                guard let encoded = ServerCommandOutput.jsonData(try peopleProvider(query.searchText, query.offset, query.limit, principal)) else {
+                    return .serviceUnavailable()
+                }
+                body = encoded
+            } catch { return .serviceUnavailable() }
+        case let personCreditsPath where personCreditsPath.hasPrefix("/api/v1/people/"):
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let request = personCreditsQuery(from: target) else { return .badRequest() }
+            do {
+                guard let detail = try personDetailProvider(request.id, request.offset, request.limit, principal),
+                      let encoded = ServerCommandOutput.jsonData(detail.credits)
+                else { return .notFound() }
+                body = encoded
+            } catch { return .serviceUnavailable() }
+        case "/api/v1/collections":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let query = collectionsQuery(from: target) else { return .badRequest() }
+            do {
+                guard let encoded = ServerCommandOutput.jsonData(try collectionsProvider(query.offset, query.limit, principal)) else {
+                    return .serviceUnavailable()
+                }
+                body = encoded
+            } catch { return .serviceUnavailable() }
+        case "/api/v1/photos":
+            if let limited = limitedResponse(scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey) { return limited }
+            guard let query = photosQuery(from: target) else { return .badRequest() }
+            do {
+                let page = try libraryBrowseProvider(ServerLibraryQuery(type: "photo", offset: query.offset, limit: query.limit), principal)
+                guard let encoded = ServerCommandOutput.jsonData(page) else { return .serviceUnavailable() }
+                body = encoded
+            } catch { return .serviceUnavailable() }
+        case let collectionItemsPath where collectionItemsPath.hasPrefix("/api/v1/collections/"):
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let request = collectionItemsQuery(from: target) else { return .badRequest() }
+            do {
+                guard let detail = try collectionDetailProvider(request.id, request.offset, request.limit, principal),
+                      let encoded = ServerCommandOutput.jsonData(detail.items)
+                else { return .notFound() }
+                body = encoded
+            } catch { return .serviceUnavailable() }
         case let imagePath where imagePath.hasPrefix("/api/v1/images/"):
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
@@ -1360,6 +1556,138 @@ struct LocalHTTPRouter {
               let limit = strictNonnegativeInteger(values["limit"] ?? "50"), (1...100).contains(limit)
         else { return nil }
         return (id, season, offset, limit)
+    }
+
+    /// 人物目录只接受固定搜索键和有界分页。搜索语句最终是 SQLite 绑定参数，且这里
+    /// 先拒绝重复键、控制字符、畸形百分号和超长输入，避免把目录接口变成枚举入口。
+    private func peopleQuery(from target: String) -> (searchText: String?, offset: Int, limit: Int)? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.first == "/api/v1/people" else { return nil }
+        var values: [String: String] = [:]
+        if pieces.count == 2, !pieces[1].isEmpty {
+            for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
+                let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard keyValue.count == 2,
+                      let key = decodeQueryComponent(String(keyValue[0])),
+                      let value = decodeQueryComponent(String(keyValue[1])),
+                      ["q", "offset", "limit"].contains(key), values[key] == nil,
+                      value.utf8.count <= 512,
+                      !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
+                else { return nil }
+                values[key] = value
+            }
+        }
+        let search = values["q"].flatMap { value -> String? in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : String(trimmed.prefix(128))
+        }
+        if let raw = values["q"], raw.count > 128 { return nil }
+        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
+              let limit = strictNonnegativeInteger(values["limit"] ?? "24"), (1...100).contains(limit)
+        else { return nil }
+        return (search, offset, limit)
+    }
+
+    private func personCreditsQuery(from target: String) -> (id: String, offset: Int, limit: Int)? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.count == 2 else { return nil }
+        let path = String(pieces[0])
+        let prefix = "/api/v1/people/"
+        let suffix = "/credits"
+        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
+        let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
+        guard let id = decodedPathIdentifier("/people/\(encodedID)", prefix: "/people/") else { return nil }
+        var values: [String: String] = [:]
+        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
+            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard keyValue.count == 2,
+                  let key = decodeQueryComponent(String(keyValue[0])),
+                  let value = decodeQueryComponent(String(keyValue[1])),
+                  ["offset", "limit"].contains(key), values[key] == nil,
+                  value.utf8.count <= 32,
+                  !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
+            else { return nil }
+            values[key] = value
+        }
+        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
+              let limit = strictNonnegativeInteger(values["limit"] ?? "24"), (1...100).contains(limit)
+        else { return nil }
+        return (id, offset, limit)
+    }
+
+    /// 合集仅接受分页参数。合集 ID 经过同一套路径段解码与控制字符检查，查询键
+    /// 不能携带账号、资料库或任意排序字段，从路由边界阻断横向枚举。
+    private func collectionsQuery(from target: String) -> (offset: Int, limit: Int)? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.first == "/api/v1/collections" else { return nil }
+        var values: [String: String] = [:]
+        if pieces.count == 2, !pieces[1].isEmpty {
+            for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
+                let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard keyValue.count == 2,
+                      let key = decodeQueryComponent(String(keyValue[0])),
+                      let value = decodeQueryComponent(String(keyValue[1])),
+                      ["offset", "limit"].contains(key), values[key] == nil,
+                      value.utf8.count <= 32,
+                      !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
+                else { return nil }
+                values[key] = value
+            }
+        }
+        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
+              let limit = strictNonnegativeInteger(values["limit"] ?? "24"), (1...100).contains(limit)
+        else { return nil }
+        return (offset, limit)
+    }
+
+    private func collectionItemsQuery(from target: String) -> (id: String, offset: Int, limit: Int)? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.count == 2 else { return nil }
+        let path = String(pieces[0])
+        let prefix = "/api/v1/collections/"
+        let suffix = "/items"
+        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
+        let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
+        guard let id = decodedPathIdentifier("/collections/\(encodedID)", prefix: "/collections/") else { return nil }
+        var values: [String: String] = [:]
+        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
+            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard keyValue.count == 2,
+                  let key = decodeQueryComponent(String(keyValue[0])),
+                  let value = decodeQueryComponent(String(keyValue[1])),
+                  ["offset", "limit"].contains(key), values[key] == nil,
+                  value.utf8.count <= 32,
+                  !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
+            else { return nil }
+            values[key] = value
+        }
+        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
+              let limit = strictNonnegativeInteger(values["limit"] ?? "24"), (1...100).contains(limit)
+        else { return nil }
+        return (id, offset, limit)
+    }
+
+    private func photosQuery(from target: String) -> (offset: Int, limit: Int)? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.first == "/api/v1/photos" else { return nil }
+        var values: [String: String] = [:]
+        if pieces.count == 2, !pieces[1].isEmpty {
+            for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
+                let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard keyValue.count == 2,
+                      let key = decodeQueryComponent(String(keyValue[0])),
+                      let value = decodeQueryComponent(String(keyValue[1])),
+                      ["offset", "limit"].contains(key), values[key] == nil,
+                      value.utf8.count <= 32,
+                      !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
+                else { return nil }
+                values[key] = value
+            }
+        }
+        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
+              let limit = strictNonnegativeInteger(values["limit"] ?? "24"), (1...100).contains(limit)
+        else { return nil }
+        return (offset, limit)
     }
 
     /// Returns an active category only when the page query contains one unique,

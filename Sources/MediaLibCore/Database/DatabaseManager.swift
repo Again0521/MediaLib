@@ -4,7 +4,7 @@ import SQLite3
 // 内部所有可变状态（db 句柄）只通过私有串行 queue 访问，线程安全由队列约束保证，
 // 编译器无法静态验证这一点，因此显式标注 @unchecked Sendable（而非让调用处到处 @Sendable 警告）。
 public final class DatabaseManager: @unchecked Sendable {
-    public static let currentSchemaVersion = 26
+    public static let currentSchemaVersion = 27
 
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
@@ -435,6 +435,13 @@ public final class DatabaseManager: @unchecked Sendable {
                 try execute("PRAGMA user_version = 26")
             }
             version = 26
+        }
+        if version < 27 {
+            try transaction {
+                try migrateToVersion27()
+                try execute("PRAGMA user_version = 27")
+            }
+            version = 27
         }
         guard version == Self.currentSchemaVersion else {
             throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
@@ -1388,6 +1395,32 @@ public final class DatabaseManager: @unchecked Sendable {
         """)
         try execute("CREATE INDEX IF NOT EXISTS index_server_user_media_preferences_favorite ON server_user_media_preferences(user_id, is_favorite, updated_at DESC)")
         try execute("CREATE INDEX IF NOT EXISTS index_server_user_media_preferences_watchlist ON server_user_media_preferences(user_id, is_watchlist, updated_at DESC)")
+    }
+
+    /// 服务端网页播放队列按用户隔离；不复用桌面 music_queue_state，避免不同用户互相覆盖。
+    private func migrateToVersion27() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_user_queue_state (
+          user_id TEXT PRIMARY KEY,
+          repeat_mode TEXT NOT NULL DEFAULT 'sequential' CHECK (repeat_mode IN ('sequential', 'repeatOne', 'repeatAll')),
+          shuffle_enabled INTEGER NOT NULL DEFAULT 0 CHECK (shuffle_enabled IN (0, 1)),
+          current_position INTEGER NOT NULL DEFAULT 0 CHECK (current_position >= 0),
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_user_queue_items (
+          user_id TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          position INTEGER NOT NULL CHECK (position >= 0),
+          added_at TEXT NOT NULL,
+          PRIMARY KEY(user_id, media_id),
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE,
+          FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_server_user_queue_position ON server_user_queue_items(user_id, position)")
     }
 
     private func validateBackup(at backupURL: URL) throws {

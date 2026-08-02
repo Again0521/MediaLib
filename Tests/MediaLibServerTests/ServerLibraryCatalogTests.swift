@@ -421,6 +421,130 @@ final class ServerLibraryCatalogTests: XCTestCase {
         XCTAssertFalse(text.contains("series-other"))
     }
 
+    func testPeopleDirectoryAndCreditsStayWithinAuthorizedSources() throws {
+        let sources = SourceRepository(database: database)
+        let media = MediaRepository(database: database)
+        try sources.save(MediaSource(id: "people-allowed", name: "人物允许", path: "/Volumes/PeopleAllowed", mediaType: .movie))
+        try sources.save(MediaSource(id: "people-denied", name: "人物拒绝", path: "/Volumes/PeopleDenied", mediaType: .movie))
+        try media.upsert(MediaItem(id: "people-visible", type: .tvShow, title: "可见系列", year: 2026, sourcePath: "/Volumes/PeopleAllowed"))
+        try media.upsert(MediaItem(id: "people-hidden", type: .movie, title: "隐藏电影", sourcePath: "/Volumes/PeopleDenied"))
+        try database.execute(
+            "INSERT INTO media_people (id, name, profile_url, biography, known_for_department, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            bindings: [.text("person-visible"), .text("可见人物"), .text("https://tracker.example/profile.jpg"), .text("人物简介"), .text("演员"), .optionalDate(Date())]
+        )
+        try database.execute(
+            "INSERT INTO media_people (id, name, updated_at) VALUES (?, ?, ?)",
+            bindings: [.text("person-hidden"), .text("隐藏人物"), .optionalDate(Date())]
+        )
+        try database.execute(
+            "INSERT INTO media_credits (id, media_id, person_id, category, role, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+            bindings: [.text("credit-visible"), .text("people-visible"), .text("person-visible"), .text("cast"), .text("主角"), .int(0)]
+        )
+        try database.execute(
+            "INSERT INTO media_credits (id, media_id, person_id, category, role, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+            bindings: [.text("credit-hidden-person"), .text("people-hidden"), .text("person-hidden"), .text("cast"), .text("不应出现"), .int(0)]
+        )
+        try database.execute(
+            "INSERT INTO media_credits (id, media_id, person_id, category, role, sort_order) VALUES (?, ?, ?, ?, ?, ?)",
+            bindings: [.text("credit-hidden-work"), .text("people-hidden"), .text("person-visible"), .text("cast"), .text("不应出现"), .int(1)]
+        )
+        let grant = ServerLibraryGrant(userID: "people-member", libraryID: "people-allowed", canView: true, canPlay: true, canDownload: false)
+        let principal = ServerRequestPrincipal(
+            userID: "people-member", deviceID: "device", sessionID: "session", permissions: [.viewMedia, .playMedia],
+            libraryGrants: [grant.libraryID: grant]
+        )
+        let catalog = ServerLibraryCatalog(database: database)
+
+        let people = try catalog.people(searchText: "可见", offset: 0, limit: 24, for: principal)
+        let detail = try XCTUnwrap(catalog.personDetail(id: "person-visible", offset: 0, limit: 24, for: principal))
+        let encoded = String(data: try JSONEncoder().encode(detail), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(people.items.map(\.id), ["person-visible"])
+        XCTAssertEqual(detail.credits.items.map(\.id), ["people-visible"])
+        XCTAssertTrue(detail.credits.items.first?.isSeries == true)
+        XCTAssertEqual(detail.credits.items.first?.role, "主角")
+        XCTAssertNil(try catalog.personDetail(id: "person-hidden", offset: 0, limit: 24, for: principal))
+        XCTAssertFalse(encoded.contains("tracker.example"))
+        XCTAssertFalse(encoded.contains("/Volumes/"))
+        XCTAssertFalse(encoded.localizedCaseInsensitiveContains("profileURL"))
+        XCTAssertFalse(encoded.contains("隐藏电影"))
+    }
+
+    func testManualCollectionsStayWithinAuthorizedSources() throws {
+        let sources = SourceRepository(database: database)
+        let media = MediaRepository(database: database)
+        try sources.save(MediaSource(id: "collections-allowed", name: "合集允许", path: "/Volumes/CollectionsAllowed", mediaType: .movie))
+        try sources.save(MediaSource(id: "collections-denied", name: "合集拒绝", path: "/Volumes/CollectionsDenied", mediaType: .movie))
+        try media.upsert(MediaItem(id: "collection-visible", type: .tvShow, title: "可见系列", sourcePath: "/Volumes/CollectionsAllowed"))
+        try media.upsert(MediaItem(id: "collection-hidden", type: .movie, title: "隐藏电影", sourcePath: "/Volumes/CollectionsDenied"))
+        try database.execute(
+            "INSERT INTO video_manual_collections (id, name, show_on_home, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            bindings: [.text("mixed-collection"), .text("混合合集"), .bool(true), .optionalDate(Date()), .optionalDate(Date())]
+        )
+        try database.execute(
+            "INSERT INTO video_manual_collections (id, name, show_on_home, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            bindings: [.text("hidden-collection"), .text("隐藏合集"), .bool(false), .optionalDate(Date()), .optionalDate(Date())]
+        )
+        for (collectionID, mediaID, position) in [("mixed-collection", "collection-visible", 0), ("mixed-collection", "collection-hidden", 1), ("hidden-collection", "collection-hidden", 0)] {
+            try database.execute(
+                "INSERT INTO video_manual_collection_items (collection_id, media_id, position, added_at) VALUES (?, ?, ?, ?)",
+                bindings: [.text(collectionID), .text(mediaID), .int(Int64(position)), .optionalDate(Date())]
+            )
+        }
+        let grant = ServerLibraryGrant(userID: "collections-member", libraryID: "collections-allowed", canView: true, canPlay: true, canDownload: false)
+        let principal = ServerRequestPrincipal(
+            userID: "collections-member", deviceID: "device", sessionID: "session", permissions: [.viewMedia, .playMedia],
+            libraryGrants: [grant.libraryID: grant]
+        )
+        let catalog = ServerLibraryCatalog(database: database)
+
+        let collections = try catalog.collections(offset: 0, limit: 24, for: principal)
+        let detail = try XCTUnwrap(catalog.collectionDetail(id: "mixed-collection", offset: 0, limit: 24, for: principal))
+        let encoded = String(data: try JSONEncoder().encode(detail), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(collections.items.map(\.id), ["mixed-collection"])
+        XCTAssertEqual(collections.items.first?.mediaCount, 1)
+        XCTAssertEqual(detail.items.items.map(\.id), ["collection-visible"])
+        XCTAssertTrue(detail.items.items.first?.isSeries == true)
+        XCTAssertNil(try catalog.collectionDetail(id: "hidden-collection", offset: 0, limit: 24, for: principal))
+        XCTAssertFalse(encoded.contains("/Volumes/"))
+        XCTAssertFalse(encoded.contains("隐藏电影"))
+        XCTAssertFalse(encoded.contains("hidden-collection"))
+    }
+
+    func testPhotoArtworkStaysWithinAuthorizedSourcesAndNeverReturnsPaths() throws {
+        let sources = SourceRepository(database: database)
+        let media = MediaRepository(database: database)
+        let allowedDirectory = temporaryDirectory.appendingPathComponent("photo-allowed", isDirectory: true)
+        let deniedDirectory = temporaryDirectory.appendingPathComponent("photo-denied", isDirectory: true)
+        try FileManager.default.createDirectory(at: allowedDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: deniedDirectory, withIntermediateDirectories: true)
+        let allowedPhoto = allowedDirectory.appendingPathComponent("sunset.jpg")
+        let deniedPhoto = deniedDirectory.appendingPathComponent("private.jpg")
+        try Data([0xFF, 0xD8, 0xFF, 0xD9]).write(to: allowedPhoto)
+        try Data([0xFF, 0xD8, 0xFF, 0xD9]).write(to: deniedPhoto)
+        try sources.save(MediaSource(id: "photo-allowed", name: "照片允许", path: allowedDirectory.path, mediaType: .photo))
+        try sources.save(MediaSource(id: "photo-denied", name: "照片拒绝", path: deniedDirectory.path, mediaType: .photo))
+        try media.upsert(MediaItem(id: "photo-visible", type: .photo, title: "公开日落", posterPath: allowedPhoto.path, sourcePath: allowedDirectory.path, filePath: allowedPhoto.path))
+        try media.upsert(MediaItem(id: "photo-hidden", type: .photo, title: "隐藏照片", posterPath: deniedPhoto.path, sourcePath: deniedDirectory.path, filePath: deniedPhoto.path))
+        let grant = ServerLibraryGrant(userID: "photo-member", libraryID: "photo-allowed", canView: true, canPlay: true, canDownload: false)
+        let principal = ServerRequestPrincipal(userID: "photo-member", deviceID: "device", sessionID: "session", permissions: [.viewMedia, .playMedia], libraryGrants: [grant.libraryID: grant])
+        let catalog = ServerLibraryCatalog(database: database)
+
+        let page = try catalog.browse(ServerLibraryQuery(type: MediaType.photo.rawValue, offset: 0, limit: 24), for: principal)
+        let artwork = try XCTUnwrap(catalog.publicArtwork(id: "photo-visible", kind: .poster, for: principal))
+        let visibleDetail = try XCTUnwrap(catalog.publicDetail(id: "photo-visible", for: principal))
+
+        XCTAssertEqual(page.items.map(\.id), ["photo-visible"])
+        XCTAssertEqual(try Data(contentsOf: artwork.fileURL), Data([0xFF, 0xD8, 0xFF, 0xD9]))
+        XCTAssertNil(try catalog.publicArtwork(id: "photo-hidden", kind: .poster, for: principal))
+        XCTAssertNil(try catalog.publicDetail(id: "photo-hidden", for: principal))
+        let encoded = String(data: try JSONEncoder().encode(visibleDetail), encoding: .utf8) ?? ""
+        XCTAssertFalse(encoded.contains(allowedDirectory.path))
+        XCTAssertFalse(encoded.contains("sourcePath"))
+        XCTAssertFalse(encoded.contains("filePath"))
+    }
+
     func testBrowseUsesServerCategoriesPaginationSearchAndCurrentUserState() throws {
         let sourceRepository = SourceRepository(database: database)
         let mediaRepository = MediaRepository(database: database)

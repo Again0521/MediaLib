@@ -7,6 +7,7 @@ enum ServerWebLibraryPage {
     enum Page {
         case library
         case search
+        case queue
         case continuing
         case history
         case favorites
@@ -19,6 +20,7 @@ enum ServerWebLibraryPage {
             switch self {
             case .library: return "/library"
             case .search: return "/search"
+            case .queue: return "/queue"
             case .continuing: return "/watching"
             case .history: return "/history"
             case .favorites: return "/favorites"
@@ -33,6 +35,7 @@ enum ServerWebLibraryPage {
             switch self {
             case .library: return "浏览资料库"
             case .search: return "全局搜索"
+            case .queue: return "播放队列"
             case .continuing: return "继续观看"
             case .history: return "播放历史"
             case .favorites: return "我的收藏"
@@ -47,6 +50,7 @@ enum ServerWebLibraryPage {
             switch self {
             case .library: return "Mlink Library"
             case .search: return "MediaLIB Search"
+            case .queue: return "Web Queue"
             case .continuing: return "Continue Watching"
             case .history: return "Playback History"
             case .favorites: return "My Favorites"
@@ -61,6 +65,7 @@ enum ServerWebLibraryPage {
             switch self {
             case .library: return "按服务端分类查找内容。结果每页最多 100 项，降低浏览器与服务端的瞬时占用。"
             case .search: return "跨当前账号获授权的服务端资料库搜索。结果按服务端分类返回，且不会暴露文件路径或其他用户痕迹。"
+            case .queue: return "只显示当前账号正在观看的内容；打开后由浏览器继续播放，队列与播放状态不会发送给其他用户。"
             case .continuing: return "只显示你尚未看完的内容；筛选、计数和分页均在服务端针对当前账号执行。"
             case .history: return "只显示当前账号已开始播放过的内容，并按最近播放时间由新到旧排列。"
             case .favorites: return "只显示当前账号收藏的内容。收藏状态与其他用户隔离，并可在详情页随时修改。"
@@ -73,7 +78,7 @@ enum ServerWebLibraryPage {
 
         var playbackFilter: String? {
             switch self {
-            case .continuing: return ServerLibraryPlaybackFilter.inProgress.rawValue
+            case .queue, .continuing: return ServerLibraryPlaybackFilter.inProgress.rawValue
             case .history: return ServerLibraryPlaybackFilter.history.rawValue
             case .watched: return ServerLibraryPlaybackFilter.watched.rawValue
             case .unwatched: return ServerLibraryPlaybackFilter.unwatched.rawValue
@@ -107,6 +112,7 @@ enum ServerWebLibraryPage {
             switch page {
             case .library: return .library
             case .search: return .search
+            case .queue: return .queue
             case .continuing: return .watching
             case .history: return .history
             case .favorites: return .favorites
@@ -216,7 +222,7 @@ enum ServerWebLibraryPage {
       const previous = document.getElementById('previous');
       const next = document.getElementById('next');
       const pageLabel = document.getElementById('page-label');
-      const pageRoute = ['/library', '/search', '/watching', '/history', '/favorites', '/watchlist', '/ratings', '/watched', '/unwatched'].includes(document.body.dataset.pageRoute) ? document.body.dataset.pageRoute : '/library';
+      const pageRoute = ['/library', '/search', '/queue', '/watching', '/history', '/favorites', '/watchlist', '/ratings', '/watched', '/unwatched'].includes(document.body.dataset.pageRoute) ? document.body.dataset.pageRoute : '/library';
       const playbackFilter = ['inProgress', 'history', 'watched', 'unwatched'].includes(document.body.dataset.playbackFilter) ? document.body.dataset.playbackFilter : '';
       const preferenceFilter = ['favorite', 'watchlist', 'rated'].includes(document.body.dataset.preferenceFilter) ? document.body.dataset.preferenceFilter : '';
       const defaultSort = document.body.dataset.defaultSort === 'lastPlayedDescending' ? 'lastPlayedDescending' : 'updatedDescending';

@@ -9,12 +9,14 @@ final class ServerLibraryCatalog {
     private let sourceRepository: SourceRepository
     private let userMediaStateRepository: ServerUserMediaStateRepository
     private let userMediaPreferenceRepository: ServerUserMediaPreferenceRepository
+    private let userQueueRepository: ServerUserQueueRepository
 
     init(database: DatabaseManager) {
         self.mediaRepository = MediaRepository(database: database)
         self.sourceRepository = SourceRepository(database: database)
         self.userMediaStateRepository = ServerUserMediaStateRepository(database: database)
         self.userMediaPreferenceRepository = ServerUserMediaPreferenceRepository(database: database)
+        self.userQueueRepository = ServerUserQueueRepository(database: database)
     }
 
     func snapshot(for principal: ServerRequestPrincipal) throws -> ServerLibrarySnapshot {
@@ -257,6 +259,134 @@ final class ServerLibraryCatalog {
             limit: min(max(limit, 1), 100),
             items: items
         )
+    }
+
+    func people(searchText: String?, offset: Int, limit: Int, for principal: ServerRequestPrincipal) throws -> ServerPeoplePage {
+        guard principal.permissions.contains(.viewMedia) else {
+            return ServerPeoplePage(totalItemCount: 0, offset: offset, limit: limit, items: [])
+        }
+        let page = try mediaRepository.fetchServerPeoplePage(
+            allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
+            searchText: searchText,
+            offset: offset,
+            limit: limit
+        )
+        return ServerPeoplePage(
+            totalItemCount: page.totalItemCount,
+            offset: offset,
+            limit: min(max(limit, 1), 100),
+            items: page.items.map {
+                ServerPersonCard(
+                    id: $0.id,
+                    name: Self.boundedText($0.name, maximumLength: 512) ?? "未命名人物",
+                    department: Self.boundedText($0.department, maximumLength: 128),
+                    mediaCount: $0.mediaCount
+                )
+            }
+        )
+    }
+
+    func personDetail(id: String, offset: Int, limit: Int, for principal: ServerRequestPrincipal) throws -> ServerPersonDetail? {
+        guard principal.permissions.contains(.viewMedia) else { return nil }
+        let allowedSourcePaths = try allowedPublicSourcePaths(for: principal, requiring: .viewMedia)
+        guard let profile = try mediaRepository.fetchServerPersonProfile(
+            allowedSourcePaths: allowedSourcePaths,
+            personID: id
+        ) else { return nil }
+        let credits = try mediaRepository.fetchServerPersonCreditsPage(
+            allowedSourcePaths: allowedSourcePaths,
+            personID: id,
+            offset: offset,
+            limit: limit
+        )
+        return ServerPersonDetail(
+            id: profile.id,
+            name: Self.boundedText(profile.name, maximumLength: 512) ?? "未命名人物",
+            biography: Self.boundedText(profile.biography, maximumLength: 8_000),
+            birthday: Self.boundedText(profile.birthday, maximumLength: 64),
+            deathday: Self.boundedText(profile.deathday, maximumLength: 64),
+            placeOfBirth: Self.boundedText(profile.placeOfBirth, maximumLength: 256),
+            department: Self.boundedText(profile.department, maximumLength: 128),
+            credits: ServerPeopleCreditsPage(
+                totalItemCount: credits.totalItemCount,
+                offset: offset,
+                limit: min(max(limit, 1), 100),
+                items: credits.items.map { credit in
+                    ServerPersonCredit(
+                        id: credit.media.id,
+                        type: credit.media.type.rawValue,
+                        title: Self.boundedText(credit.media.cardTitle, maximumLength: 512) ?? "未命名媒体",
+                        year: credit.media.year,
+                        artworkAvailable: credit.media.posterPath?.isEmpty == false,
+                        isSeries: Self.isSeriesContainer(credit.media),
+                        category: Self.boundedText(credit.category, maximumLength: 64) ?? "cast",
+                        role: Self.boundedText(credit.role, maximumLength: 256)
+                    )
+                }
+            )
+        )
+    }
+
+    func collections(offset: Int, limit: Int, for principal: ServerRequestPrincipal) throws -> ServerCollectionsPage {
+        guard principal.permissions.contains(.viewMedia) else {
+            return ServerCollectionsPage(totalItemCount: 0, offset: offset, limit: limit, items: [])
+        }
+        let page = try mediaRepository.fetchServerManualCollectionsPage(
+            allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
+            offset: offset, limit: limit
+        )
+        return ServerCollectionsPage(
+            totalItemCount: page.totalItemCount, offset: offset, limit: min(max(limit, 1), 100),
+            items: page.items.map {
+                ServerCollectionCard(id: $0.id, name: Self.boundedText($0.name, maximumLength: 512) ?? "未命名合集", mediaCount: $0.mediaCount)
+            }
+        )
+    }
+
+    func collectionDetail(id: String, offset: Int, limit: Int, for principal: ServerRequestPrincipal) throws -> ServerCollectionDetail? {
+        guard principal.permissions.contains(.viewMedia),
+              let detail = try mediaRepository.fetchServerManualCollectionDetail(
+                allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
+                collectionID: id, offset: offset, limit: limit
+              ) else { return nil }
+        return ServerCollectionDetail(
+            id: detail.id, name: Self.boundedText(detail.name, maximumLength: 512) ?? "未命名合集",
+            items: ServerCollectionItemsPage(
+                totalItemCount: detail.totalItemCount, offset: offset, limit: min(max(limit, 1), 100),
+                items: detail.items.map {
+                    ServerCollectionMedia(
+                        id: $0.id, type: $0.type.rawValue,
+                        title: Self.boundedText($0.cardTitle, maximumLength: 512) ?? "未命名媒体",
+                        year: $0.year, artworkAvailable: $0.posterPath?.isEmpty == false,
+                        isSeries: Self.isSeriesContainer($0)
+                    )
+                }
+            )
+        )
+    }
+
+    func queue(for principal: ServerRequestPrincipal) throws -> ServerQueueResponse {
+        guard principal.permissions.contains(.viewMedia) else { return ServerQueueResponse(repeatMode: "sequential", shuffleEnabled: false, currentPosition: 0, items: []) }
+        let snapshot = try userQueueRepository.fetch(userID: principal.userID)
+        let authorized = try publicItems(for: principal, requiring: .viewMedia)
+        let byID = Dictionary(uniqueKeysWithValues: authorized.map { ($0.id, $0) })
+        let items = snapshot.itemIDs.compactMap { id -> ServerQueueItem? in
+            guard let item = byID[id] else { return nil }
+            return ServerQueueItem(id: item.id, type: item.type.rawValue, title: Self.boundedText(item.cardTitle, maximumLength: 512) ?? "未命名媒体", year: item.year, artworkAvailable: item.posterPath?.isEmpty == false, isSeries: Self.isSeriesContainer(item))
+        }
+        return ServerQueueResponse(repeatMode: snapshot.repeatMode.rawValue, shuffleEnabled: snapshot.shuffleEnabled, currentPosition: min(snapshot.currentPosition, max(items.count - 1, 0)), items: items)
+    }
+
+    func mutateQueue(request: ServerQueueMutationRequest, for principal: ServerRequestPrincipal) throws -> ServerQueueResponse? {
+        guard request.isValid, principal.permissions.contains(.viewMedia), let action = ServerQueueMutationAction(rawValue: request.action) else { return nil }
+        if action == .add {
+            guard let mediaID = request.mediaID,
+                  try publicItems(for: principal, requiring: .playMedia).contains(where: { $0.id == mediaID }) else { return nil }
+        }
+        let repeatMode = request.repeatMode.flatMap(ServerQueueRepeatMode.init(rawValue:))
+        guard request.repeatMode == nil || repeatMode != nil else { return nil }
+        _ = try userQueueRepository.mutate(userID: principal.userID, action: action, mediaID: request.mediaID, fromIndex: request.fromIndex, toIndex: request.toIndex, repeatMode: repeatMode, shuffleEnabled: request.shuffleEnabled, currentPosition: request.currentPosition)
+        return try queue(for: principal)
     }
 
     func updatePlaybackState(

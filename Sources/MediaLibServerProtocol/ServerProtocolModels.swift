@@ -256,6 +256,186 @@ public struct ServerSeriesEpisodesPage: Codable, Equatable, Sendable {
     }
 }
 
+/// 人物目录的最小卡片。人物头像 URL 可能来自第三方元数据服务，因此不会下发到
+/// 网页；页面以服务端生成的姓名首字母头像显示，避免浏览人物页时泄露客户端地址。
+public struct ServerPersonCard: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let department: String?
+    public let mediaCount: Int
+
+    public init(id: String, name: String, department: String?, mediaCount: Int) {
+        self.id = id
+        self.name = name
+        self.department = department
+        self.mediaCount = max(mediaCount, 0)
+    }
+}
+
+/// 授权人物目录的有界分页结果。它只统计当前用户看得到的作品。
+public struct ServerPeoplePage: Codable, Equatable, Sendable {
+    public let totalItemCount: Int
+    public let offset: Int
+    public let limit: Int
+    public let hasMore: Bool
+    public let items: [ServerPersonCard]
+
+    public init(totalItemCount: Int, offset: Int, limit: Int, items: [ServerPersonCard]) {
+        self.totalItemCount = max(totalItemCount, 0)
+        self.offset = max(offset, 0)
+        self.limit = max(limit, 1)
+        self.hasMore = self.offset + items.count < self.totalItemCount
+        self.items = items
+    }
+}
+
+/// 人物作品中的安全媒体卡。作品可播放时仍进入已有的 `/item` 或 `/series` 授权页；
+/// 绝不携带文件路径、来源路径、元数据提供方 ID 或其它用户状态。
+public struct ServerPersonCredit: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let type: String
+    public let title: String
+    public let year: Int?
+    public let artworkAvailable: Bool
+    public let isSeries: Bool
+    public let category: String
+    public let role: String?
+
+    public init(
+        id: String, type: String, title: String, year: Int?, artworkAvailable: Bool,
+        isSeries: Bool, category: String, role: String?
+    ) {
+        self.id = id
+        self.type = type
+        self.title = title
+        self.year = year
+        self.artworkAvailable = artworkAvailable
+        self.isSeries = isSeries
+        self.category = category
+        self.role = role
+    }
+}
+
+/// 人物页首屏及其有界作品分页。出生地、简介等公开元数据均为展示字段；没有
+/// 任一授权作品的人物不会得到此 DTO，避免据此枚举其它资料库的元数据。
+public struct ServerPersonDetail: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let biography: String?
+    public let birthday: String?
+    public let deathday: String?
+    public let placeOfBirth: String?
+    public let department: String?
+    public let credits: ServerPeopleCreditsPage
+
+    public init(
+        id: String, name: String, biography: String?, birthday: String?, deathday: String?,
+        placeOfBirth: String?, department: String?, credits: ServerPeopleCreditsPage
+    ) {
+        self.id = id
+        self.name = name
+        self.biography = biography
+        self.birthday = birthday
+        self.deathday = deathday
+        self.placeOfBirth = placeOfBirth
+        self.department = department
+        self.credits = credits
+    }
+}
+
+public struct ServerPeopleCreditsPage: Codable, Equatable, Sendable {
+    public let totalItemCount: Int
+    public let offset: Int
+    public let limit: Int
+    public let hasMore: Bool
+    public let items: [ServerPersonCredit]
+
+    public init(totalItemCount: Int, offset: Int, limit: Int, items: [ServerPersonCredit]) {
+        self.totalItemCount = max(totalItemCount, 0)
+        self.offset = max(offset, 0)
+        self.limit = max(limit, 1)
+        self.hasMore = self.offset + items.count < self.totalItemCount
+        self.items = items
+    }
+}
+
+/// 服务器手动合集的目录卡。计数已经按当前账号的资料库授权过滤，不能用于推断
+/// 合集中其它不可见项目的数量。
+public struct ServerCollectionCard: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let mediaCount: Int
+
+    public init(id: String, name: String, mediaCount: Int) {
+        self.id = id
+        self.name = name
+        self.mediaCount = max(mediaCount, 0)
+    }
+}
+
+public struct ServerCollectionsPage: Codable, Equatable, Sendable {
+    public let totalItemCount: Int
+    public let offset: Int
+    public let limit: Int
+    public let hasMore: Bool
+    public let items: [ServerCollectionCard]
+
+    public init(totalItemCount: Int, offset: Int, limit: Int, items: [ServerCollectionCard]) {
+        self.totalItemCount = max(totalItemCount, 0)
+        self.offset = max(offset, 0)
+        self.limit = max(limit, 1)
+        self.hasMore = self.offset + items.count < self.totalItemCount
+        self.items = items
+    }
+}
+
+/// 合集内项目的只读网页卡。它不暴露本机路径、媒体源、桌面端状态或其它用户数据。
+public struct ServerCollectionMedia: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let type: String
+    public let title: String
+    public let year: Int?
+    public let artworkAvailable: Bool
+    public let isSeries: Bool
+
+    public init(id: String, type: String, title: String, year: Int?, artworkAvailable: Bool, isSeries: Bool) {
+        self.id = id
+        self.type = type
+        self.title = title
+        self.year = year
+        self.artworkAvailable = artworkAvailable
+        self.isSeries = isSeries
+    }
+}
+
+public struct ServerCollectionItemsPage: Codable, Equatable, Sendable {
+    public let totalItemCount: Int
+    public let offset: Int
+    public let limit: Int
+    public let hasMore: Bool
+    public let items: [ServerCollectionMedia]
+
+    public init(totalItemCount: Int, offset: Int, limit: Int, items: [ServerCollectionMedia]) {
+        self.totalItemCount = max(totalItemCount, 0)
+        self.offset = max(offset, 0)
+        self.limit = max(limit, 1)
+        self.hasMore = self.offset + items.count < self.totalItemCount
+        self.items = items
+    }
+}
+
+public struct ServerCollectionDetail: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let items: ServerCollectionItemsPage
+
+    public init(id: String, name: String, items: ServerCollectionItemsPage) {
+        self.id = id
+        self.name = name
+        self.items = items
+    }
+}
+
 public enum ServerLibrarySort: String, Codable, CaseIterable, Equatable, Sendable {
     case updatedDescending
     case titleAscending
@@ -499,6 +679,55 @@ public struct ServerMediaUserState: Codable, Equatable, Sendable {
         self.playCount = max(playCount, 0)
         self.lastPlayedAt = lastPlayedAt
         self.updatedAt = updatedAt
+    }
+}
+
+public struct ServerQueueItem: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let type: String
+    public let title: String
+    public let year: Int?
+    public let artworkAvailable: Bool
+    public let isSeries: Bool
+
+    public init(id: String, type: String, title: String, year: Int?, artworkAvailable: Bool, isSeries: Bool) {
+        self.id = id; self.type = type; self.title = title; self.year = year
+        self.artworkAvailable = artworkAvailable; self.isSeries = isSeries
+    }
+}
+
+public struct ServerQueueResponse: Codable, Equatable, Sendable {
+    public let repeatMode: String
+    public let shuffleEnabled: Bool
+    public let currentPosition: Int
+    public let items: [ServerQueueItem]
+
+    public init(repeatMode: String, shuffleEnabled: Bool, currentPosition: Int, items: [ServerQueueItem]) {
+        self.repeatMode = repeatMode; self.shuffleEnabled = shuffleEnabled
+        self.currentPosition = max(currentPosition, 0); self.items = items
+    }
+}
+
+/// 队列写入只接受固定动作与有界索引；用户和媒体源授权来自认证/目录层。
+public struct ServerQueueMutationRequest: Codable, Equatable, Sendable {
+    public let action: String
+    public let mediaID: String?
+    public let fromIndex: Int?
+    public let toIndex: Int?
+    public let repeatMode: String?
+    public let shuffleEnabled: Bool?
+    public let currentPosition: Int?
+
+    public init(action: String, mediaID: String? = nil, fromIndex: Int? = nil, toIndex: Int? = nil, repeatMode: String? = nil, shuffleEnabled: Bool? = nil, currentPosition: Int? = nil) {
+        self.action = action; self.mediaID = mediaID; self.fromIndex = fromIndex; self.toIndex = toIndex
+        self.repeatMode = repeatMode; self.shuffleEnabled = shuffleEnabled; self.currentPosition = currentPosition
+    }
+
+    public var isValid: Bool {
+        ["add", "remove", "clear", "move", "settings"].contains(action) &&
+        (mediaID == nil || (mediaID!.utf8.count <= 512 && !mediaID!.contains("/"))) &&
+        [fromIndex, toIndex, currentPosition].compactMap { $0 }.allSatisfy { (0...100).contains($0) } &&
+        (repeatMode == nil || ["sequential", "repeatOne", "repeatAll"].contains(repeatMode!))
     }
 }
 

@@ -7,13 +7,17 @@ import MediaLibServerProtocol
 /// different link orders, active states, mobile behavior, or management exposure.
 enum ServerWebNavigation {
     enum Active: String {
-        case home, library, watching, history, search, favorites, watchlist, ratings, watched, unwatched
+        case home, library, people, collections, photos, queue, watching, history, search, favorites, watchlist, ratings, watched, unwatched
         case sources, status, administration, account
 
         var title: String {
             switch self {
             case .home: return "首页"
             case .library: return "浏览资料库"
+            case .people: return "人物"
+            case .collections: return "合集"
+            case .photos: return "照片"
+            case .queue: return "播放队列"
             case .watching: return "继续观看"
             case .history: return "播放历史"
             case .search: return "全局搜索"
@@ -55,7 +59,7 @@ enum ServerWebNavigation {
     }
 
     private enum Icon {
-        case home, library, play, history, search, heart, bookmark, star, check, circle, source, dashboard, users, account
+        case home, library, people, collections, photos, play, history, search, heart, bookmark, star, check, circle, source, dashboard, users, account
 
         var paths: String {
             switch self {
@@ -63,6 +67,12 @@ enum ServerWebNavigation {
                 return #"<path d="M3 10.5 12 3l9 7.5"></path><path d="M5.5 9.5V21h13V9.5"></path><path d="M9 21v-7h6v7"></path>"#
             case .library:
                 return #"<rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M7 8h10M7 12h10M7 16h6"></path>"#
+            case .people:
+                return #"<circle cx="9" cy="8" r="3"></circle><path d="M3.5 20v-2a5.5 5.5 0 0 1 11 0v2M17 5a3 3 0 0 1 0 6M17 13a5 5 0 0 1 3.5 4.8V20"></path>"#
+            case .collections:
+                return #"<rect x="4" y="5" width="16" height="14" rx="2"></rect><path d="M8 5V3h8v2M8 10h8M8 14h5"></path>"#
+            case .photos:
+                return #"<rect x="3" y="4" width="18" height="16" rx="2"></rect><circle cx="8" cy="9" r="1.5"></circle><path d="m4 17 5-5 3 3 2-2 5 4"></path>"#
             case .play:
                 return #"<circle cx="12" cy="12" r="9"></circle><path d="m10 8 6 4-6 4Z"></path>"#
             case .history:
@@ -94,6 +104,10 @@ enum ServerWebNavigation {
     private static let mediaItems: [Item] = [
         Item(active: .home, path: "/", icon: .home, managementOnly: false),
         Item(active: .library, path: "/library", icon: .library, managementOnly: false),
+        Item(active: .people, path: "/people", icon: .people, managementOnly: false),
+        Item(active: .collections, path: "/collections", icon: .collections, managementOnly: false),
+        Item(active: .photos, path: "/photos", icon: .photos, managementOnly: false),
+        Item(active: .queue, path: "/queue", icon: .play, managementOnly: false),
         Item(active: .watching, path: "/watching", icon: .play, managementOnly: false),
         Item(active: .history, path: "/history", icon: .history, managementOnly: false),
         Item(active: .search, path: "/search", icon: .search, managementOnly: false)

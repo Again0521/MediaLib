@@ -62,6 +62,60 @@ public struct ServerSeriesDatabaseEpisodePage: Sendable {
     public let items: [MediaItem]
 }
 
+/// 在数据库内完成授权资料库过滤后的人物目录项。头像地址不会离开 Core 层。
+public struct ServerPersonDatabaseCard: Sendable {
+    public let id: String
+    public let name: String
+    public let department: String?
+    public let mediaCount: Int
+}
+
+public struct ServerPeopleDatabasePage: Sendable {
+    public let totalItemCount: Int
+    public let items: [ServerPersonDatabaseCard]
+}
+
+public struct ServerPersonDatabaseProfile: Sendable {
+    public let id: String
+    public let name: String
+    public let biography: String?
+    public let birthday: String?
+    public let deathday: String?
+    public let placeOfBirth: String?
+    public let department: String?
+}
+
+public struct ServerPersonDatabaseCredit: Sendable {
+    public let media: MediaItem
+    public let category: String
+    public let role: String?
+}
+
+public struct ServerPeopleDatabaseCreditsPage: Sendable {
+    public let totalItemCount: Int
+    public let items: [ServerPersonDatabaseCredit]
+}
+
+/// 手动合集在数据库内先与授权媒体源相交。合集的原始项目数不能返回到网页，
+/// 因为它可能包含当前账户没有权限看到的项目。
+public struct ServerCollectionDatabaseCard: Sendable {
+    public let id: String
+    public let name: String
+    public let mediaCount: Int
+}
+
+public struct ServerCollectionsDatabasePage: Sendable {
+    public let totalItemCount: Int
+    public let items: [ServerCollectionDatabaseCard]
+}
+
+public struct ServerCollectionDatabaseDetail: Sendable {
+    public let id: String
+    public let name: String
+    public let totalItemCount: Int
+    public let items: [MediaItem]
+}
+
 public final class MediaRepository {
     private let database: DatabaseManager
 
@@ -441,6 +495,233 @@ public final class MediaRepository {
                 map: map(row:)
             )
             return ServerSeriesDatabaseEpisodePage(totalItemCount: total, items: items)
+        }
+    }
+
+    /// 人物目录只通过「至少一部当前用户可见作品」关联人物。所有计数、搜索、排序
+    /// 和分页均发生在授权来源临时表内，不能借人物名旁路枚举未授权资料库。
+    public func fetchServerPeoplePage(
+        allowedSourcePaths: Set<String>,
+        searchText: String?,
+        offset: Int,
+        limit: Int
+    ) throws -> ServerPeopleDatabasePage {
+        guard !allowedSourcePaths.isEmpty else {
+            return ServerPeopleDatabasePage(totalItemCount: 0, items: [])
+        }
+        let safeOffset = min(max(offset, 0), 1_000_000)
+        let safeLimit = min(max(limit, 1), 100)
+        let query = searchText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let search = query?.isEmpty == false ? String(query!.prefix(128)) : nil
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let visibleJoin = """
+            FROM media_people AS person
+            INNER JOIN media_credits AS credit ON credit.person_id = person.id
+            INNER JOIN media_items AS item ON item.id = credit.media_id
+            INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            """
+            var predicate = " WHERE item.type != ?"
+            var bindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
+            if let search {
+                predicate += " AND person.name LIKE ? ESCAPE '\\'"
+                bindings.append(.text(Self.escapedLikeContainsPattern(for: search)))
+            }
+            let count = try database.query(
+                "SELECT COUNT(DISTINCT person.id) " + visibleJoin + predicate,
+                bindings: bindings
+            ) { $0.int(0) ?? 0 }.first ?? 0
+            let items = try database.query(
+                """
+                SELECT person.id, person.name, person.known_for_department, COUNT(DISTINCT item.id)
+                \(visibleJoin)
+                \(predicate)
+                GROUP BY person.id, person.name, person.known_for_department
+                ORDER BY person.name COLLATE NOCASE ASC, person.id ASC
+                LIMIT ? OFFSET ?
+                """,
+                bindings: bindings + [.int(Int64(safeLimit)), .int(Int64(safeOffset))]
+            ) { row in
+                ServerPersonDatabaseCard(
+                    id: row.string(0) ?? "",
+                    name: row.string(1) ?? "",
+                    department: row.string(2),
+                    mediaCount: row.int(3) ?? 0
+                )
+            }.filter { !$0.id.isEmpty && !$0.name.isEmpty }
+            return ServerPeopleDatabasePage(totalItemCount: count, items: items)
+        }
+    }
+
+    /// 仅在该人物至少关联一部授权作品时返回公开人物资料。其 profile_url 未被查询，
+    /// 防止页面把浏览者请求直接转发给第三方头像主机。
+    public func fetchServerPersonProfile(
+        allowedSourcePaths: Set<String>,
+        personID: String
+    ) throws -> ServerPersonDatabaseProfile? {
+        guard !allowedSourcePaths.isEmpty, !personID.isEmpty else { return nil }
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            return try database.query(
+                """
+                SELECT person.id, person.name, person.biography, person.birthday, person.deathday,
+                       person.place_of_birth, person.known_for_department
+                FROM media_people AS person
+                WHERE person.id = ?
+                  AND EXISTS (
+                    SELECT 1
+                    FROM media_credits AS credit
+                    INNER JOIN media_items AS item ON item.id = credit.media_id
+                    INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+                    WHERE credit.person_id = person.id AND item.type != ?
+                  )
+                LIMIT 1
+                """,
+                bindings: [.text(personID), .text(MediaType.privateCollection.rawValue)]
+            ) { row in
+                ServerPersonDatabaseProfile(
+                    id: row.string(0) ?? "", name: row.string(1) ?? "", biography: row.string(2),
+                    birthday: row.string(3), deathday: row.string(4), placeOfBirth: row.string(5),
+                    department: row.string(6)
+                )
+            }.first
+        }
+    }
+
+    /// 人物作品列表复用同一授权来源临时表，先验证人物可见性再分页。作品媒体列始终
+    /// 来自 `item` 别名，角色文字仅作为该作品下的公开演职员展示。
+    public func fetchServerPersonCreditsPage(
+        allowedSourcePaths: Set<String>,
+        personID: String,
+        offset: Int,
+        limit: Int
+    ) throws -> ServerPeopleDatabaseCreditsPage {
+        guard !allowedSourcePaths.isEmpty, !personID.isEmpty else {
+            return ServerPeopleDatabaseCreditsPage(totalItemCount: 0, items: [])
+        }
+        let safeOffset = min(max(offset, 0), 1_000_000)
+        let safeLimit = min(max(limit, 1), 100)
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let from = """
+            FROM media_credits AS credit
+            INNER JOIN media_items AS item ON item.id = credit.media_id
+            INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            """
+            let predicate = " WHERE credit.person_id = ? AND item.type != ?"
+            let bindings: [SQLiteValue] = [.text(personID), .text(MediaType.privateCollection.rawValue)]
+            let total = try database.query("SELECT COUNT(*) " + from + predicate, bindings: bindings) {
+                $0.int(0) ?? 0
+            }.first ?? 0
+            let items = try database.query(
+                serverSelectSQL.replacingOccurrences(
+                    of: "FROM media_items",
+                    with: ", credit.category, credit.role " + from
+                )
+                    + predicate
+                    + " ORDER BY item.year DESC, item.title COLLATE NOCASE ASC, item.id ASC LIMIT ? OFFSET ?",
+                bindings: bindings + [.int(Int64(safeLimit)), .int(Int64(safeOffset))]
+            ) { row in
+                ServerPersonDatabaseCredit(
+                    media: self.map(row: row),
+                    category: row.string(42) ?? "cast",
+                    role: row.string(43)
+                )
+            }
+            return ServerPeopleDatabaseCreditsPage(totalItemCount: total, items: items)
+        }
+    }
+
+    /// 手动合集目录和合集内项目均使用同一份事务内的授权媒体源临时表。即使合集
+    /// 同时含有可见、不可见项目，也只能看到可见子集及其重新计算后的数目。
+    public func fetchServerManualCollectionsPage(
+        allowedSourcePaths: Set<String>,
+        offset: Int,
+        limit: Int
+    ) throws -> ServerCollectionsDatabasePage {
+        guard !allowedSourcePaths.isEmpty else {
+            return ServerCollectionsDatabasePage(totalItemCount: 0, items: [])
+        }
+        let safeOffset = min(max(offset, 0), 1_000_000)
+        let safeLimit = min(max(limit, 1), 100)
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let visibleJoin = """
+            FROM video_manual_collections AS collection
+            INNER JOIN video_manual_collection_items AS entry ON entry.collection_id = collection.id
+            INNER JOIN media_items AS item ON item.id = entry.media_id
+            INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            """
+            let predicate = " WHERE item.type != ?"
+            let bindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
+            let total = try database.query(
+                "SELECT COUNT(DISTINCT collection.id) " + visibleJoin + predicate,
+                bindings: bindings
+            ) { $0.int(0) ?? 0 }.first ?? 0
+            let items = try database.query(
+                """
+                SELECT collection.id, collection.name, COUNT(DISTINCT item.id)
+                \(visibleJoin)
+                \(predicate)
+                GROUP BY collection.id, collection.name, collection.updated_at
+                ORDER BY collection.updated_at DESC, collection.name COLLATE NOCASE ASC, collection.id ASC
+                LIMIT ? OFFSET ?
+                """,
+                bindings: bindings + [.int(Int64(safeLimit)), .int(Int64(safeOffset))]
+            ) { row in
+                ServerCollectionDatabaseCard(
+                    id: row.string(0) ?? "", name: row.string(1) ?? "", mediaCount: row.int(2) ?? 0
+                )
+            }.filter { !$0.id.isEmpty && !$0.name.isEmpty }
+            return ServerCollectionsDatabasePage(totalItemCount: total, items: items)
+        }
+    }
+
+    public func fetchServerManualCollectionDetail(
+        allowedSourcePaths: Set<String>,
+        collectionID: String,
+        offset: Int,
+        limit: Int
+    ) throws -> ServerCollectionDatabaseDetail? {
+        guard !allowedSourcePaths.isEmpty, !collectionID.isEmpty else { return nil }
+        let safeOffset = min(max(offset, 0), 1_000_000)
+        let safeLimit = min(max(limit, 1), 100)
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let from = """
+            FROM video_manual_collection_items AS entry
+            INNER JOIN media_items AS item ON item.id = entry.media_id
+            INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            """
+            let predicate = " WHERE entry.collection_id = ? AND item.type != ?"
+            let bindings: [SQLiteValue] = [.text(collectionID), .text(MediaType.privateCollection.rawValue)]
+            let collectionRows = try database.query(
+                """
+                SELECT collection.id, collection.name
+                FROM video_manual_collections AS collection
+                WHERE collection.id = ?
+                  AND EXISTS (SELECT 1 \(from) \(predicate))
+                LIMIT 1
+                """,
+                bindings: [.text(collectionID)] + bindings
+            ) { ($0.string(0) ?? "", $0.string(1) ?? "") }.first
+            guard let collection = collectionRows, !collection.0.isEmpty, !collection.1.isEmpty else { return nil }
+            let total = try database.query("SELECT COUNT(*) " + from + predicate, bindings: bindings) {
+                $0.int(0) ?? 0
+            }.first ?? 0
+            let items = try database.query(
+                serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: from)
+                    + predicate
+                    + " ORDER BY entry.position ASC, item.id ASC LIMIT ? OFFSET ?",
+                bindings: bindings + [.int(Int64(safeLimit)), .int(Int64(safeOffset))],
+                map: map(row:)
+            )
+            return ServerCollectionDatabaseDetail(id: collection.0, name: collection.1, totalItemCount: total, items: items)
         }
     }
 
