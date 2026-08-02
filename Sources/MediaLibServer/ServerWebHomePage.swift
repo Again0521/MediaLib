@@ -91,7 +91,8 @@ enum ServerWebHomePage {
           <meta name="medialib-csrf-token" content="\(escape(csrfToken))">
           <title>\(escape(serverName)) · MediaLIB</title>
           <link rel="stylesheet" href="/assets/home.css">
-          <link rel="stylesheet" href="/assets/app-shell.css">
+          <link rel="stylesheet" href="/assets/app-shell.css?v=68">
+          <script src="/assets/app-shell.js?v=68" defer></script>
         </head>
         <body>
           <a class="skip" href="#main">跳到主要内容</a>

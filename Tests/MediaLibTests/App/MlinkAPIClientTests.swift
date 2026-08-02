@@ -111,6 +111,25 @@ final class MlinkAPIClientTests: XCTestCase {
         }
     }
 
+    func testBrowseRejectsServerItemIDsThatCouldEscapeWebPath() async throws {
+        let token = String(repeating: "a", count: 48)
+        let page = ServerLibraryItemsPage(
+            totalItemCount: 1,
+            offset: 0,
+            limit: 100,
+            items: [ServerLibraryItem(id: "movie/../admin", type: "movie", title: "危险条目", year: nil, artworkAvailable: false)]
+        )
+        let client = MlinkAPIClient { request in
+            (try self.encoded(page), self.response(for: request, status: 200))
+        }
+
+        await XCTAssertThrowsErrorAsync(try await client.browse(
+            serverURL: try XCTUnwrap(URL(string: "https://media.example.test")), accessToken: token, type: "movie"
+        )) { error in
+            XCTAssertEqual(error as? MlinkAPIClient.Error, .untrustedResponse)
+        }
+    }
+
     func testRefreshPostsTokenInBodyAndNotURL() async throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let oldRefresh = String(repeating: "r", count: 48)

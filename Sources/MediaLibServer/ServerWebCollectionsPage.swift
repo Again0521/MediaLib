@@ -4,13 +4,14 @@ import MediaLibServerProtocol
 /// 经授权的手动合集网页。它不显示桌面端的编辑入口：服务器网页只读展示，
 /// 所有卡片和分页都由同源 API 重新按当前账户授权过滤。
 enum ServerWebCollectionsPage {
-    static func directory(serverName: String, page: ServerCollectionsPage, csrfToken: String, showAdministration: Bool) -> String {
+    static func directory(serverName: String, page: ServerCollectionsPage, csrfToken: String, showAdministration: Bool, categories: [ServerLibraryCategory] = []) -> String {
         let cards = page.items.map(collectionCard).joined(separator: "\n")
+        let pageHeader = ServerWebPageHeader.render(icon: .collections, eyebrow: "合集", title: "合集", subtitle: "由本机资料库整理的手动合集；只展示当前账号可访问的媒体。")
         return document(
             title: "合集 · \(serverName)", csrfToken: csrfToken, bodyData: "",
-            sidebar: ServerWebNavigation.render(active: .collections, showAdministration: showAdministration, note: .library),
+            sidebar: ServerWebNavigation.render(active: .collections, showAdministration: showAdministration, note: .library, categories: categories),
             content: """
-            <section class="heading" aria-labelledby="page-title"><p class="eyebrow">Collections</p><h1 id="page-title">合集</h1><p>由本机资料库整理的手动合集；只展示当前账号可访问的媒体。</p><p id="collection-status" role="status" aria-live="polite">共 \(page.totalItemCount) 个合集</p></section>
+            \(pageHeader)<p id="collection-status" class="status" role="status" aria-live="polite">共 \(page.totalItemCount) 个合集</p>
             <section id="collection-grid" class="collection-grid" aria-live="polite">\(cards)</section>
             <button id="collections-load-more" class="load-more" type="button"\(page.hasMore ? "" : " hidden")>载入更多合集</button>
             <p id="collections-empty" class="empty"\(page.items.isEmpty ? "" : " hidden")>尚无可访问的手动合集。请在桌面端创建合集并加入已授权的媒体。</p>
@@ -18,15 +19,16 @@ enum ServerWebCollectionsPage {
         )
     }
 
-    static func detail(serverName: String, detail: ServerCollectionDetail, csrfToken: String, showAdministration: Bool) -> String {
+    static func detail(serverName: String, detail: ServerCollectionDetail, csrfToken: String, showAdministration: Bool, categories: [ServerLibraryCategory] = []) -> String {
         let cards = detail.items.items.map(mediaCard).joined(separator: "\n")
+        let pageHeader = ServerWebPageHeader.render(icon: .collections, eyebrow: "合集", title: detail.name, subtitle: "共 \(detail.items.totalItemCount) 部当前账号可访问媒体。")
         return document(
             title: "\(detail.name) · \(serverName)", csrfToken: csrfToken,
             bodyData: " data-collection-id=\"\(escape(detail.id))\"",
-            sidebar: ServerWebNavigation.render(active: .collections, showAdministration: showAdministration, note: .playback),
+            sidebar: ServerWebNavigation.render(active: .collections, showAdministration: showAdministration, note: .playback, categories: categories),
             content: """
             <a class="back" href="/collections">← 返回合集</a>
-            <section class="heading" aria-labelledby="collection-title"><p class="eyebrow">Collection</p><h1 id="collection-title">\(escape(detail.name))</h1><p id="collection-count" role="status" aria-live="polite">共 \(detail.items.totalItemCount) 部可访问媒体</p></section>
+            \(pageHeader)<p id="collection-count" class="status" role="status" aria-live="polite">共 \(detail.items.totalItemCount) 部可访问媒体</p>
             <section id="collection-media-grid" class="media-grid" aria-live="polite">\(cards)</section>
             <button id="collection-items-load-more" class="load-more" type="button"\(detail.items.hasMore ? "" : " hidden")>载入更多媒体</button>
             <p id="collection-items-status" class="status" role="status" aria-live="polite"></p>
@@ -36,7 +38,7 @@ enum ServerWebCollectionsPage {
 
     private static func document(title: String, csrfToken: String, bodyData: String, sidebar: String, content: String) -> String {
         """
-        <!doctype html><html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="medialib-csrf-token" content="\(escape(csrfToken))"><title>\(escape(title))</title><link rel="stylesheet" href="/assets/collections.css"><link rel="stylesheet" href="/assets/app-shell.css"><script src="/assets/collections.js" defer></script></head><body\(bodyData)><a class="skip" href="#main">跳到主要内容</a><div class="shell">\(sidebar)<main id="main" tabindex="-1">\(content)</main></div></body></html>
+        <!doctype html><html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="medialib-csrf-token" content="\(escape(csrfToken))"><title>\(escape(title))</title><link rel="stylesheet" href="/assets/collections.css"><link rel="stylesheet" href="/assets/app-shell.css?v=68"><script src="/assets/app-shell.js?v=68" defer></script><script src="/assets/collections.js" defer></script></head><body\(bodyData)><a class="skip" href="#main">跳到主要内容</a><div class="shell">\(sidebar)<main id="main" tabindex="-1">\(content)</main></div></body></html>
         """
     }
 

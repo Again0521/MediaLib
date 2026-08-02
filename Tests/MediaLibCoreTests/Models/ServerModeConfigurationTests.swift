@@ -9,6 +9,8 @@ final class ServerModeConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.loopbackBaseURL.absoluteString, "http://127.0.0.1:8098")
         XCTAssertEqual(configuration.serverID, "server-a")
         XCTAssertFalse(configuration.isLightweightMode)
+        XCTAssertNil(configuration.publicOrigin)
+        XCTAssertTrue(configuration.trustedProxyAddresses.isEmpty)
     }
 
     func testDecoderMigratesPartialAndInvalidValues() throws {
@@ -28,6 +30,24 @@ final class ServerModeConfigurationTests: XCTestCase {
 
         XCTAssertTrue(configuration.isEnabled)
         XCTAssertTrue(configuration.isLightweightMode)
+    }
+
+    func testNormalizesExplicitHTTPSProxyConfiguration() {
+        var configuration = ServerModeConfiguration(
+            serverID: "server-a",
+            publicOrigin: "https://media.example.test/",
+            trustedProxyAddresses: [" 192.168.1.10", "127.0.0.1", "bad", "127.0.0.1"]
+        )
+        XCTAssertEqual(configuration.publicOrigin, "https://media.example.test")
+        XCTAssertEqual(configuration.trustedProxyAddresses, ["127.0.0.1", "192.168.1.10"])
+
+        configuration.updatePublicOrigin("http://media.example.test")
+        configuration.updateTrustedProxyAddresses(["10.0.0.1,10.0.0.2"])
+        XCTAssertNil(configuration.publicOrigin)
+        XCTAssertTrue(configuration.trustedProxyAddresses.isEmpty)
+
+        configuration.updateTrustedProxyAddresses(["127.0.0.1"])
+        XCTAssertTrue(configuration.trustedProxyAddresses.isEmpty)
     }
 
     func testStoreKeepsGeneratedIdentityAcrossLoads() {

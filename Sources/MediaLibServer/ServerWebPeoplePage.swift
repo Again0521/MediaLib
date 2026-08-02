@@ -8,15 +8,17 @@ enum ServerWebPeoplePage {
         serverName: String,
         page: ServerPeoplePage,
         csrfToken: String,
-        showAdministration: Bool
+        showAdministration: Bool,
+        categories: [ServerLibraryCategory] = []
     ) -> String {
         let cards = page.items.map(personCard).joined(separator: "\n")
-        let sidebar = ServerWebNavigation.render(active: .people, showAdministration: showAdministration, note: .library)
+        let sidebar = ServerWebNavigation.render(active: .people, showAdministration: showAdministration, note: .library, categories: categories)
+        let pageHeader = ServerWebPageHeader.render(icon: .people, eyebrow: "人物", title: "人物", subtitle: "只显示当前账号可访问作品中的演职人员。")
         return document(
             title: "人物 · \(serverName)", csrfToken: csrfToken, bodyData: "",
             sidebar: sidebar,
             content: """
-            <section class="people-heading" aria-labelledby="page-title"><p class="eyebrow">People</p><h1 id="page-title">人物</h1><p>只显示当前账号可访问作品中的演职人员。</p><form id="people-search" role="search"><label for="people-query">搜索人物</label><input id="people-query" name="q" type="search" maxlength="128" autocomplete="off" placeholder="姓名、演员、导演"><button type="submit">搜索</button></form><p id="people-status" role="status" aria-live="polite">共 \(page.totalItemCount) 位人物</p></section>
+            \(pageHeader)<section class="people-heading"><form id="people-search" role="search"><label for="people-query">搜索人物</label><input id="people-query" name="q" type="search" maxlength="128" autocomplete="off" placeholder="姓名、演员、导演"><button type="submit">搜索</button></form><p id="people-status" role="status" aria-live="polite">共 \(page.totalItemCount) 位人物</p></section>
             <section id="people-grid" class="people-grid" aria-live="polite">\(cards)</section>
             <button id="people-load-more" class="load-more" type="button"\(page.hasMore ? "" : " hidden")>载入更多</button>
             <p id="people-empty" class="empty"\(page.items.isEmpty ? "" : " hidden")>没有匹配的人物。请调整搜索词，或确认媒体库已完成元数据扫描。</p>
@@ -28,9 +30,10 @@ enum ServerWebPeoplePage {
         serverName: String,
         detail: ServerPersonDetail,
         csrfToken: String,
-        showAdministration: Bool
+        showAdministration: Bool,
+        categories: [ServerLibraryCategory] = []
     ) -> String {
-        let sidebar = ServerWebNavigation.render(active: .people, showAdministration: showAdministration, note: .playback)
+        let sidebar = ServerWebNavigation.render(active: .people, showAdministration: showAdministration, note: .playback, categories: categories)
         let facts = [detail.department, detail.birthday.map { "出生 \($0)" }, detail.deathday.map { "逝世 \($0)" }, detail.placeOfBirth].compactMap { $0 }.map { "<li>\(escape($0))</li>" }.joined()
         let credits = detail.credits.items.map(creditCard).joined(separator: "\n")
         return document(
@@ -46,7 +49,7 @@ enum ServerWebPeoplePage {
 
     private static func document(title: String, csrfToken: String, bodyData: String, sidebar: String, content: String) -> String {
         """
-        <!doctype html><html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="medialib-csrf-token" content="\(escape(csrfToken))"><title>\(escape(title))</title><link rel="stylesheet" href="/assets/people.css"><link rel="stylesheet" href="/assets/app-shell.css"><script src="/assets/people.js" defer></script></head><body\(bodyData)><a class="skip" href="#main">跳到主要内容</a><div class="shell">\(sidebar)<main id="main" tabindex="-1">\(content)</main></div></body></html>
+        <!doctype html><html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="medialib-csrf-token" content="\(escape(csrfToken))"><title>\(escape(title))</title><link rel="stylesheet" href="/assets/people.css"><link rel="stylesheet" href="/assets/app-shell.css?v=68"><script src="/assets/app-shell.js?v=68" defer></script><script src="/assets/people.js" defer></script></head><body\(bodyData)><a class="skip" href="#main">跳到主要内容</a><div class="shell">\(sidebar)<main id="main" tabindex="-1">\(content)</main></div></body></html>
         """
     }
 

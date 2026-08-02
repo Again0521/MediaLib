@@ -129,6 +129,12 @@ enum ServerWebLibraryPage {
             categories: categories,
             activeCategoryID: page == .library ? selectedCategoryID : nil
         )
+        let pageHeader = ServerWebPageHeader.render(
+            icon: .library,
+            eyebrow: page.eyebrow,
+            title: page.title,
+            subtitle: "在 \(serverName) 中\(page.subtitle)"
+        )
         let playbackFilter = page.playbackFilter ?? ""
         let preferenceFilter = page.preferenceFilter ?? ""
         let historySortOption = page == .history ? "<option value=\"lastPlayedDescending\">最近播放</option>" : ""
@@ -146,7 +152,8 @@ enum ServerWebLibraryPage {
           <meta name="medialib-csrf-token" content="\(escape(csrfToken))">
           <title>\(page.title) · \(escape(serverName))</title>
           <link rel="stylesheet" href="/assets/library.css">
-          <link rel="stylesheet" href="/assets/app-shell.css">
+          <link rel="stylesheet" href="/assets/app-shell.css?v=68">
+          <script src="/assets/app-shell.js?v=68" defer></script>
           <script src="/assets/library.js" defer></script>
         </head>
         <body data-page-route="\(page.path)" data-playback-filter="\(playbackFilter)" data-preference-filter="\(preferenceFilter)" data-default-sort="\(page.defaultSort.rawValue)">
@@ -154,7 +161,7 @@ enum ServerWebLibraryPage {
           <div class="shell">
             \(sidebar)
             <main id="main" tabindex="-1">
-              <p class="eyebrow">\(page.eyebrow)</p><h1>\(page.title)</h1><p class="subtitle">在 \(escape(serverName)) 中\(page.subtitle)</p>
+              \(pageHeader)
               <form class="filters" id="filters" role="search">
                 <div class="field search-field"><label for="query">搜索标题、年份或类型</label><input id="query" name="q" type="search" maxlength="128" autocomplete="off" placeholder="输入关键词"></div>
                 <div class="field"><label for="type">服务端分类</label><select id="type" name="type"><option value="">全部分类</option>\(categoryOptions)</select></div>
@@ -199,6 +206,7 @@ enum ServerWebLibraryPage {
     .copy { padding:12px; } .title { overflow:hidden; margin:0; font-size:14px; line-height:1.4; text-overflow:ellipsis; white-space:nowrap; } .meta { margin:6px 0 0; color:var(--muted); font-size:12px; }
     .user-rating { display:block; margin-top:7px; color:#8a5a00; font-size:12px; font-weight:750; }
     .progress-label { display:block; margin-top:9px; color:var(--primary-strong); font-size:12px; } progress { display:block; width:100%; height:7px; margin-top:4px; accent-color:var(--accent); }
+    .queue-add { display:block; width:calc(100% - 24px); min-height:40px; margin:0 12px 12px; padding:7px 10px; border:1px solid #9dbbd7; border-radius:9px; color:#174d82; background:#f7fbff; font:inherit; font-size:13px; font-weight:750; cursor:pointer; } .queue-add:hover { color:#fff; background:var(--primary); } .queue-add:disabled { cursor:wait; opacity:.58; }
     .pager { display:flex; gap:12px; align-items:center; justify-content:center; margin-top:28px; } .pager button { min-width:96px; } .page-label { min-width:120px; text-align:center; color:var(--muted); font-variant-numeric:tabular-nums; }
     footer { margin-top:42px; color:var(--muted); font-size:12px; }
     @media (max-width:900px) { .filters { grid-template-columns:1fr 1fr; } .search-field { grid-column:1/-1; } }
@@ -222,6 +230,7 @@ enum ServerWebLibraryPage {
       const previous = document.getElementById('previous');
       const next = document.getElementById('next');
       const pageLabel = document.getElementById('page-label');
+      const csrfToken = document.querySelector('meta[name="medialib-csrf-token"]')?.content || '';
       const pageRoute = ['/library', '/search', '/queue', '/watching', '/history', '/favorites', '/watchlist', '/ratings', '/watched', '/unwatched'].includes(document.body.dataset.pageRoute) ? document.body.dataset.pageRoute : '/library';
       const playbackFilter = ['inProgress', 'history', 'watched', 'unwatched'].includes(document.body.dataset.playbackFilter) ? document.body.dataset.playbackFilter : '';
       const preferenceFilter = ['favorite', 'watchlist', 'rated'].includes(document.body.dataset.preferenceFilter) ? document.body.dataset.preferenceFilter : '';
@@ -256,6 +265,24 @@ enum ServerWebLibraryPage {
         const response = await fetch(path, { credentials: 'same-origin', headers: { Accept: 'application/json' }, signal });
         if (!response.ok) throw new Error(response.status === 401 ? '登录已失效，请重新登录。' : `服务暂时不可用（${response.status}）。`);
         return response.json();
+      }
+
+      async function addToQueue(mediaID) {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 10000);
+        try {
+          const response = await fetch('/api/v1/queue', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-MediaLIB-CSRF': csrfToken },
+            body: JSON.stringify({ action: 'add', mediaID }),
+            signal: controller.signal
+          });
+          if (response.status === 401) { window.location.assign('/login'); return false; }
+          if (!response.ok) throw new Error();
+          await response.json();
+          return true;
+        } finally { window.clearTimeout(timer); }
       }
 
       function renderItem(item) {
@@ -300,7 +327,19 @@ enum ServerWebLibraryPage {
           copy.append(label, progress);
         }
         link.append(poster, copy);
-        article.append(badge, link);
+        const add = element('button', 'queue-add', '加入队列');
+        add.type = 'button';
+        add.addEventListener('click', async event => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (add.disabled) return;
+          add.disabled = true;
+          try {
+            if (await addToQueue(String(item.id || ''))) { add.textContent = '已加入队列'; }
+            else { add.textContent = '请重新登录'; }
+          } catch { add.textContent = '加入失败，重试'; add.disabled = false; }
+        });
+        article.append(badge, link, add);
         return article;
       }
 

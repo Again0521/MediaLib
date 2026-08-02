@@ -72,7 +72,9 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         self.requestSecurityPolicy = HTTPRequestSecurityPolicy(
             allowedHosts: ["127.0.0.1", "localhost"],
             allowedPort: configuration.port,
-            csrfToken: csrfToken
+            csrfToken: csrfToken,
+            trustedProxyAddresses: configuration.trustedProxyAddresses,
+            publicOrigin: configuration.publicOrigin
         )
         self.router = LocalHTTPRouter(
             serverID: configuration.serverID,
@@ -200,7 +202,11 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
                 write(response: response(for: rejection), to: client)
                 return
             }
-            if let rejection = requestSecurityPolicy.validate(request.head, bodyLength: request.body.count) {
+            if let rejection = requestSecurityPolicy.validate(
+                request.head,
+                bodyLength: request.body.count,
+                clientAddressKey: clientAddressKey
+            ) {
                 let response: LocalHTTPResponse
                 switch rejection {
                 case .badRequest: response = .badRequest()
@@ -217,7 +223,10 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
                 response: router.response(
                     for: request.head,
                     body: request.body,
-                    clientAddressKey: clientAddressKey
+                    clientAddressKey: requestSecurityPolicy.effectiveClientAddressKey(
+                        for: request.head,
+                        connectedAddressKey: clientAddressKey
+                    )
                 ),
                 to: client,
                 keepAlive: keepAlive
@@ -385,6 +394,48 @@ private struct ServerAdministrationMemberCreateRequest: Decodable {
         displayName = try values.decode(String.self, forKey: .displayName)
         password = try values.decode(String.self, forKey: .password)
         libraryIDs = try values.decode([String].self, forKey: .libraryIDs)
+    }
+}
+
+/// 普通成员编辑只允许显示名和资料库不透明 ID；权限位、角色、路径和用户身份
+/// 均由服务端固定/认证 principal 派生，不能由网页任意提交。
+private struct ServerAdministrationMemberAccessRequest: Decodable {
+    let displayName: String
+    let libraryIDs: [String]
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case displayName, libraryIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
+        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.rawValue)) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unexpected fields"))
+        }
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        displayName = try values.decode(String.self, forKey: .displayName)
+        libraryIDs = try values.decode([String].self, forKey: .libraryIDs)
+    }
+}
+
+/// 管理员重置成员密码时正文只含新口令；不能指定 userID、角色、会话或恢复票据。
+private struct ServerAdministrationPasswordResetRequest: Decodable {
+    let password: String
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case password
+    }
+
+    init(from decoder: Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
+        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.rawValue)) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unexpected fields"))
+        }
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        password = try values.decode(String.self, forKey: .password)
+        guard (12...1_024).contains(password.utf8.count) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "invalid password length"))
+        }
     }
 }
 
@@ -578,6 +629,12 @@ struct LocalHTTPRouter {
             ) { return limited }
             return .stylesheet(body: Data(ServerWebShellStyle.css.utf8), omitBody: isHeadRequest)
         }
+        if (method == "GET" || isHeadRequest), path == "/assets/app-shell.js" {
+            if let limited = limitedResponse(
+                scope: .publicProbe, identityComponents: [clientAddressKey]
+            ) { return limited }
+            return .javascript(body: Data(ServerWebShellScript.script.utf8), omitBody: isHeadRequest)
+        }
         if (method == "GET" || isHeadRequest), path == "/assets/library.css" {
             if let limited = limitedResponse(
                 scope: .publicProbe, identityComponents: [clientAddressKey]
@@ -638,6 +695,10 @@ struct LocalHTTPRouter {
             if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
             return .stylesheet(body: Data(ServerWebPhotosPage.style.utf8), omitBody: isHeadRequest)
         }
+        if (method == "GET" || isHeadRequest), path == "/assets/queue.css" {
+            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
+            return .stylesheet(body: Data(ServerWebQueuePage.style.utf8), omitBody: isHeadRequest)
+        }
         if (method == "GET" || isHeadRequest), path == "/assets/admin.js" {
             if let limited = limitedResponse(
                 scope: .publicProbe, identityComponents: [clientAddressKey]
@@ -686,6 +747,10 @@ struct LocalHTTPRouter {
             if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
             return .javascript(body: Data(ServerWebPhotosPage.script.utf8), omitBody: isHeadRequest)
         }
+        if (method == "GET" || isHeadRequest), path == "/assets/queue.js" {
+            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
+            return .javascript(body: Data(ServerWebQueuePage.script.utf8), omitBody: isHeadRequest)
+        }
         if (method == "GET" || isHeadRequest), path == "/assets/library.js" {
             if let limited = limitedResponse(
                 scope: .publicProbe, identityComponents: [clientAddressKey]
@@ -724,6 +789,14 @@ struct LocalHTTPRouter {
                     clientAddressKey: clientAddressKey
                 ) { return limited }
                 return logoutResponse(principal: principal)
+            }
+            if path == "/api/v1/queue" {
+                if let limited = limitedResponse(
+                    scope: .authenticatedMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                ) { return limited }
+                return mutateQueueResponse(body: body, principal: principal)
             }
             if path.hasPrefix("/api/v1/playback/state/") {
                 if let limited = limitedResponse(
@@ -770,6 +843,13 @@ struct LocalHTTPRouter {
                     clientAddressKey: clientAddressKey
                 ) { return limited }
                 guard principal.permissions.contains(.manageUsers) else { return .forbidden() }
+                if path.hasSuffix("/access") {
+                    guard principal.permissions.contains(.manageLibraries) else { return .forbidden() }
+                    return updateAdministrationMemberAccessResponse(path: path, body: body, principal: principal)
+                }
+                if path.hasSuffix("/password") {
+                    return resetAdministrationMemberPasswordResponse(path: path, body: body, principal: principal)
+                }
                 return updateAdministrationUserAvailabilityResponse(path: path, principal: principal)
             }
             return .methodNotAllowed()
@@ -804,11 +884,13 @@ struct LocalHTTPRouter {
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+            let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
             return .html(
                 body: Data(
                     ServerWebAdministrationPage.render(
                         serverName: serverName,
-                        csrfToken: csrfToken
+                        csrfToken: csrfToken,
+                        categories: categories
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -818,11 +900,13 @@ struct LocalHTTPRouter {
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+            let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
             return .html(
                 body: Data(
                     ServerWebSourcesPage.render(
                         serverName: serverName,
-                        csrfToken: csrfToken
+                        csrfToken: csrfToken,
+                        categories: categories
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -832,12 +916,14 @@ struct LocalHTTPRouter {
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
             return .html(
                 body: Data(
                     ServerWebStatusPage.render(
                         serverName: serverName,
                         csrfToken: csrfToken,
-                        showAdministration: principal.canManageServer
+                        showAdministration: principal.canManageServer,
+                        categories: categories
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -846,12 +932,14 @@ struct LocalHTTPRouter {
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
+            let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
             return .html(
                 body: Data(
                     ServerWebAccountPage.render(
                         serverName: serverName,
                         csrfToken: csrfToken,
-                        showAdministration: principal.canManageServer
+                        showAdministration: principal.canManageServer,
+                        categories: categories
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -887,10 +975,12 @@ struct LocalHTTPRouter {
             guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
             do {
                 let page = try peopleProvider(nil, 0, 24, principal)
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
                 return .html(
                     body: Data(ServerWebPeoplePage.directory(
                         serverName: serverName, page: page, csrfToken: csrfToken,
-                        showAdministration: principal.canManageServer
+                        showAdministration: principal.canManageServer,
+                        categories: categories
                     ).utf8),
                     omitBody: isHeadRequest
                 )
@@ -902,10 +992,12 @@ struct LocalHTTPRouter {
             guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
             do {
                 let page = try collectionsProvider(0, 24, principal)
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
                 return .html(
                     body: Data(ServerWebCollectionsPage.directory(
                         serverName: serverName, page: page, csrfToken: csrfToken,
-                        showAdministration: principal.canManageServer
+                        showAdministration: principal.canManageServer,
+                        categories: categories
                     ).utf8),
                     omitBody: isHeadRequest
                 )
@@ -915,7 +1007,8 @@ struct LocalHTTPRouter {
             guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
             do {
                 let page = try libraryBrowseProvider(ServerLibraryQuery(type: "photo", offset: 0, limit: 24), principal)
-                return .html(body: Data(ServerWebPhotosPage.gallery(serverName: serverName, page: page, csrfToken: csrfToken, showAdministration: principal.canManageServer).utf8), omitBody: isHeadRequest)
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
+                return .html(body: Data(ServerWebPhotosPage.gallery(serverName: serverName, page: page, csrfToken: csrfToken, showAdministration: principal.canManageServer, categories: categories).utf8), omitBody: isHeadRequest)
             } catch { return .serviceUnavailable() }
         case "/search":
             if let limited = limitedResponse(
@@ -940,13 +1033,10 @@ struct LocalHTTPRouter {
         case "/queue":
             if let limited = limitedResponse(scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey) { return limited }
             guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
-            guard let categories = try? libraryCategoriesProvider(principal) else { return .serviceUnavailable() }
+            guard let queue = try? queueProvider(principal) else { return .serviceUnavailable() }
+            let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
             return .html(
-                body: Data(ServerWebLibraryPage.render(
-                    serverName: serverName, csrfToken: csrfToken,
-                    showAdministration: principal.canManageServer,
-                    page: .queue, categories: categories.categories
-                ).utf8),
+                body: Data(ServerWebQueuePage.render(serverName: serverName, queue: queue, csrfToken: csrfToken, showAdministration: principal.canManageServer, categories: categories).utf8),
                 omitBody: isHeadRequest
             )
         case "/watching":
@@ -1098,13 +1188,15 @@ struct LocalHTTPRouter {
             }
             do {
                 guard let detail = try mediaDetailProvider(itemID, principal) else { return .notFound() }
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
                 return .html(
                     body: Data(
                         ServerWebMediaDetailPage.render(
                             serverName: serverName,
                             detail: detail,
                             csrfToken: csrfToken,
-                            showAdministration: principal.canManageServer
+                            showAdministration: principal.canManageServer,
+                            categories: categories
                         ).utf8
                     ),
                     omitBody: isHeadRequest
@@ -1121,13 +1213,15 @@ struct LocalHTTPRouter {
             }
             do {
                 guard let detail = try seriesDetailProvider(seriesID, principal) else { return .notFound() }
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
                 return .html(
                     body: Data(
                         ServerWebSeriesPage.render(
                             serverName: serverName,
                             detail: detail,
                             csrfToken: csrfToken,
-                            showAdministration: principal.canManageServer
+                            showAdministration: principal.canManageServer,
+                            categories: categories
                         ).utf8
                     ),
                     omitBody: isHeadRequest
@@ -1144,10 +1238,12 @@ struct LocalHTTPRouter {
             }
             do {
                 guard let detail = try personDetailProvider(personID, 0, 24, principal) else { return .notFound() }
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
                 return .html(
                     body: Data(ServerWebPeoplePage.detail(
                         serverName: serverName, detail: detail, csrfToken: csrfToken,
-                        showAdministration: principal.canManageServer
+                        showAdministration: principal.canManageServer,
+                        categories: categories
                     ).utf8),
                     omitBody: isHeadRequest
                 )
@@ -1161,10 +1257,12 @@ struct LocalHTTPRouter {
             }
             do {
                 guard let detail = try collectionDetailProvider(collectionID, 0, 24, principal) else { return .notFound() }
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
                 return .html(
                     body: Data(ServerWebCollectionsPage.detail(
                         serverName: serverName, detail: detail, csrfToken: csrfToken,
-                        showAdministration: principal.canManageServer
+                        showAdministration: principal.canManageServer,
+                        categories: categories
                     ).utf8),
                     omitBody: isHeadRequest
                 )
@@ -1174,7 +1272,8 @@ struct LocalHTTPRouter {
             guard let itemID = decodedPathIdentifier(photoPagePath, prefix: "/photo/") else { return .notFound() }
             do {
                 guard let detail = try mediaDetailProvider(itemID, principal), detail.type == "photo" else { return .notFound() }
-                return .html(body: Data(ServerWebPhotosPage.detail(serverName: serverName, item: detail, csrfToken: csrfToken, showAdministration: principal.canManageServer).utf8), omitBody: isHeadRequest)
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
+                return .html(body: Data(ServerWebPhotosPage.detail(serverName: serverName, item: detail, csrfToken: csrfToken, showAdministration: principal.canManageServer, categories: categories).utf8), omitBody: isHeadRequest)
             } catch { return .serviceUnavailable() }
         case "/api/v1/library/summary":
             if let limited = limitedResponse(
@@ -1221,6 +1320,17 @@ struct LocalHTTPRouter {
             } catch {
                 return .serviceUnavailable()
             }
+        case "/api/v1/queue":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            do {
+                guard let encoded = ServerCommandOutput.jsonData(try queueProvider(principal)) else {
+                    return .serviceUnavailable()
+                }
+                body = encoded
+            } catch { return .serviceUnavailable() }
         case let itemDetailPath where itemDetailPath.hasPrefix("/api/v1/items/"):
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
@@ -1422,6 +1532,19 @@ struct LocalHTTPRouter {
                 return .notFound()
             }
             return streamResponse(
+                itemID: itemID,
+                principal: principal,
+                rangeHeader: httpHeader(named: "Range", in: requestHead),
+                omitBody: isHeadRequest
+            )
+        case let downloadPath where downloadPath.hasPrefix("/api/v1/download/"):
+            if let limited = limitedResponse(
+                scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let itemID = decodedPathIdentifier(downloadPath, prefix: "/api/v1/download/") else {
+                return .notFound()
+            }
+            return downloadResponse(
                 itemID: itemID,
                 principal: principal,
                 rangeHeader: httpHeader(named: "Range", in: requestHead),
@@ -1746,6 +1869,43 @@ struct LocalHTTPRouter {
         return .fullFile(asset: asset, omitBody: omitBody)
     }
 
+    private func downloadResponse(
+        itemID: String,
+        principal: ServerRequestPrincipal,
+        rangeHeader: String?,
+        omitBody: Bool
+    ) -> LocalHTTPResponse {
+        guard let asset = try? mediaAssetProvider(itemID, principal, .downloadMedia) else {
+            // 下载与播放使用同一条目隐藏策略；无权时不能通过状态码差异枚举媒体。
+            return .notFound()
+        }
+        guard asset.byteLength > 0 else { return .rangeNotSatisfiable(totalLength: asset.byteLength) }
+        let headers = ["Content-Disposition: attachment; filename=\"\(safeDownloadFileName(for: asset))\""]
+        if let rangeHeader {
+            guard let request = HTTPByteRangeRequest(headerValue: rangeHeader),
+                  let range = request.resolve(totalLength: asset.byteLength)
+            else {
+                return .rangeNotSatisfiable(totalLength: asset.byteLength)
+            }
+            return .partialFile(asset: asset, range: range, omitBody: omitBody, additionalHeaders: headers)
+        }
+        return .fullFile(asset: asset, omitBody: omitBody, additionalHeaders: headers)
+    }
+
+    private func safeDownloadFileName(for asset: ServerMediaAsset) -> String {
+        let ext = asset.fileURL.pathExtension.lowercased()
+        guard ext.utf8.count <= 16,
+              !ext.isEmpty,
+              ext.unicodeScalars.allSatisfy({ scalar in
+                  (scalar.value >= 48 && scalar.value <= 57) ||
+                      (scalar.value >= 97 && scalar.value <= 122)
+              })
+        else {
+            return "MediaLIB-download"
+        }
+        return "MediaLIB-download.\(ext)"
+    }
+
     private func webVTTSubtitleTracksResponse(
         itemID: String,
         principal: ServerRequestPrincipal,
@@ -1783,6 +1943,28 @@ struct LocalHTTPRouter {
             contentType: "text/vtt; charset=utf-8",
             omitBody: omitBody
         )
+    }
+
+    private func mutateQueueResponse(body: Data, principal: ServerRequestPrincipal) -> LocalHTTPResponse {
+        guard let object = try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed]),
+              let dictionary = object as? [String: Any],
+              !dictionary.isEmpty,
+              Set(dictionary.keys).isSubset(of: ["action", "mediaID", "fromIndex", "toIndex", "repeatMode", "shuffleEnabled", "currentPosition"]),
+              let action = dictionary["action"] as? String,
+              ["add", "remove", "clear", "move", "settings"].contains(action),
+              let request = try? JSONDecoder().decode(ServerQueueMutationRequest.self, from: body),
+              request.isValid
+        else { return .badRequest() }
+        do {
+            guard let queue = try queueMutationProvider(request, principal),
+                  let encoded = ServerCommandOutput.jsonData(queue)
+            else { return .notFound() }
+            return .json(body: encoded)
+        } catch is ServerUserQueueRepositoryError {
+            return .badRequest()
+        } catch {
+            return .serviceUnavailable()
+        }
     }
 
     private func updatePlaybackStateResponse(
@@ -1910,6 +2092,66 @@ struct LocalHTTPRouter {
         } catch {
             return .notFound()
         }
+    }
+
+    private func updateAdministrationMemberAccessResponse(
+        path: String,
+        body: Data,
+        principal: ServerRequestPrincipal
+    ) -> LocalHTTPResponse {
+        guard let userID = administrationUserID(path: path, suffix: "/access"),
+              let request = try? JSONDecoder().decode(ServerAdministrationMemberAccessRequest.self, from: body),
+              let administrationCatalog
+        else { return .badRequest() }
+        do {
+            try administrationCatalog.updateMemberAccess(
+                id: userID,
+                displayName: request.displayName,
+                libraryIDs: request.libraryIDs,
+                actorUserID: principal.userID
+            )
+            return .noContent()
+        } catch {
+            // 不区分成员是否存在、是否是内置管理员或资料库 ID 是否有效，避免管理接口
+            // 形成账户/资料库枚举器；前端只显示通用失败提示。
+            return .badRequest()
+        }
+    }
+
+    private func resetAdministrationMemberPasswordResponse(
+        path: String,
+        body: Data,
+        principal: ServerRequestPrincipal
+    ) -> LocalHTTPResponse {
+        guard let userID = administrationUserID(path: path, suffix: "/password"),
+              let request = try? JSONDecoder().decode(ServerAdministrationPasswordResetRequest.self, from: body),
+              let administrationCatalog
+        else { return .badRequest() }
+        do {
+            try administrationCatalog.resetMemberPassword(
+                id: userID,
+                password: request.password,
+                actorUserID: principal.userID
+            )
+            return .noContent()
+        } catch {
+            return .badRequest()
+        }
+    }
+
+    private func administrationUserID(path: String, suffix: String) -> String? {
+        let prefix = "/api/v1/admin/users/"
+        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
+        let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
+        guard !encodedID.isEmpty,
+              let userID = encodedID.removingPercentEncoding,
+              !userID.isEmpty,
+              !userID.contains("/"),
+              !userID.contains("\\"),
+              !userID.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }),
+              userID.utf8.count <= 512
+        else { return nil }
+        return userID
     }
 
     private func createAdministrationMemberResponse(
@@ -2280,7 +2522,12 @@ struct LocalHTTPResponse {
         )
     }
 
-    static func fullFile(asset: ServerMediaAsset, omitBody: Bool, cacheControl: String? = nil) -> Self {
+    static func fullFile(
+        asset: ServerMediaAsset,
+        omitBody: Bool,
+        cacheControl: String? = nil,
+        additionalHeaders: [String] = []
+    ) -> Self {
         Self(
             statusCode: 200,
             reason: "OK",
@@ -2289,11 +2536,16 @@ struct LocalHTTPResponse {
                 ? .data(Data())
                 : .fileRange(LocalHTTPFileRange(url: asset.fileURL, offset: 0, length: asset.byteLength)),
             declaredContentLength: Int(asset.byteLength),
-            additionalHeaders: ["Accept-Ranges: bytes"] + (cacheControl.map { ["Cache-Control: \($0)"] } ?? [])
+            additionalHeaders: ["Accept-Ranges: bytes"] + (cacheControl.map { ["Cache-Control: \($0)"] } ?? []) + additionalHeaders
         )
     }
 
-    static func partialFile(asset: ServerMediaAsset, range: ResolvedHTTPByteRange, omitBody: Bool) -> Self {
+    static func partialFile(
+        asset: ServerMediaAsset,
+        range: ResolvedHTTPByteRange,
+        omitBody: Bool,
+        additionalHeaders: [String] = []
+    ) -> Self {
         Self(
             statusCode: 206,
             reason: "Partial Content",
@@ -2305,7 +2557,7 @@ struct LocalHTTPResponse {
             additionalHeaders: [
                 "Accept-Ranges: bytes",
                 "Content-Range: \(range.contentRangeHeader)"
-            ]
+            ] + additionalHeaders
         )
     }
 
@@ -2434,7 +2686,7 @@ struct LocalHTTPResponse {
     }
 
     private static let securityHeaders = [
-        "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
+        "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
         "Cross-Origin-Embedder-Policy: require-corp",
         "Cross-Origin-Opener-Policy: same-origin",
         "Cross-Origin-Resource-Policy: same-origin",

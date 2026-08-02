@@ -32,7 +32,7 @@ final class ServerWebSeriesRouteTests: XCTestCase {
         XCTAssertFalse(html.contains("<script>bad()</script>"))
         XCTAssertTrue(html.contains("href=\"/assets/series.css\""))
         XCTAssertTrue(html.contains("src=\"/assets/series.js\""))
-        XCTAssertTrue(html.contains("href=\"/assets/app-shell.css\""))
+        XCTAssertTrue(html.contains("href=\"/assets/app-shell.css?v=68\""))
         XCTAssertTrue(html.contains("data-season-key=\"1\" open"))
         XCTAssertTrue(html.contains("data-season-key=\"unspecified\""))
         XCTAssertTrue(html.contains("src=\"/api/v1/images/series%20id%2B1/poster\""))

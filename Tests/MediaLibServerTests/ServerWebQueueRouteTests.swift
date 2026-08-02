@@ -31,6 +31,63 @@ final class ServerWebQueueRouteTests: XCTestCase {
         XCTAssertEqual(router.response(for: "GET /queue HTTP/1.1\r\nHost: localhost\r\n\r\n").statusCode, 401)
     }
 
+    func testQueueAPIIsPerPrincipalAndMutationIsStrict() {
+        let expected = ServerQueueResponse(
+            repeatMode: "repeatAll",
+            shuffleEnabled: true,
+            currentPosition: 0,
+            items: [ServerQueueItem(id: "movie-1", type: "movie", title: "电影", year: 2026, artworkAvailable: false, isSeries: false)]
+        )
+        var received: (ServerQueueMutationRequest, String)?
+        let router = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            queueProvider: { principal in
+                XCTAssertEqual(principal.userID, "viewer")
+                return expected
+            },
+            queueMutationProvider: { request, principal in
+                received = (request, principal.userID)
+                return expected
+            },
+            authenticationProvider: { head in head.contains("Authorization: Bearer viewer") ? self.viewer : nil }
+        )
+        let api = router.response(for: request("/api/v1/queue"))
+        XCTAssertEqual(api.statusCode, 200)
+        XCTAssertTrue(String(data: api.body, encoding: .utf8)?.contains("\"repeatMode\":\"repeatAll\"") == true)
+
+        let body = Data(#"{"action":"settings","repeatMode":"repeatAll","shuffleEnabled":true}"#.utf8)
+        let updated = router.response(
+            for: "POST /api/v1/queue HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer viewer\r\n\r\n",
+            body: body
+        )
+        XCTAssertEqual(updated.statusCode, 200)
+        XCTAssertEqual(received?.0.action, "settings")
+        XCTAssertEqual(received?.0.repeatMode, "repeatAll")
+        XCTAssertEqual(received?.1, "viewer")
+
+        let unknown = Data(#"{"action":"clear","unexpected":true}"#.utf8)
+        XCTAssertEqual(router.response(for: "POST /api/v1/queue HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer viewer\r\n\r\n", body: unknown).statusCode, 400)
+    }
+
+    func testQueuePageAndAssetsUseSafeDOM() {
+        let router = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            queueProvider: { _ in ServerQueueResponse(repeatMode: "sequential", shuffleEnabled: false, currentPosition: 0, items: []) },
+            authenticationProvider: { head in head.contains("Authorization: Bearer viewer") ? self.viewer : nil }
+        )
+        let html = String(data: router.response(for: request("/queue")).body, encoding: .utf8) ?? ""
+        XCTAssertTrue(html.contains("href=\"/assets/queue.css\""))
+        XCTAssertTrue(html.contains("src=\"/assets/queue.js\""))
+        let script = String(data: router.response(for: "GET /assets/queue.js HTTP/1.1\r\nHost: localhost\r\n\r\n").body, encoding: .utf8) ?? ""
+        XCTAssertTrue(script.contains("textContent"))
+        XCTAssertTrue(script.contains("credentials: 'same-origin'"))
+        XCTAssertFalse(script.contains("innerHTML"))
+        XCTAssertFalse(script.contains("document.cookie"))
+        XCTAssertFalse(script.contains("localStorage"))
+        XCTAssertFalse(script.contains("eval("))
+        XCTAssertEqual(router.response(for: "GET /assets/queue.css HTTP/1.1\r\nHost: localhost\r\n\r\n").statusCode, 200)
+    }
+
     private var viewer: ServerRequestPrincipal {
         ServerRequestPrincipal(userID: "viewer", deviceID: "device", sessionID: "session", permissions: [.viewMedia, .playMedia], libraryGrants: [:])
     }

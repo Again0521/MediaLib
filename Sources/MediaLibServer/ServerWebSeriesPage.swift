@@ -8,10 +8,12 @@ enum ServerWebSeriesPage {
         serverName: String,
         detail: ServerSeriesDetail,
         csrfToken: String,
-        showAdministration: Bool
+        showAdministration: Bool,
+        categories: [ServerLibraryCategory] = []
     ) -> String {
         let sidebar = ServerWebNavigation.render(
-            active: .library, showAdministration: showAdministration, note: .playback
+            active: .library, showAdministration: showAdministration, note: .playback,
+            categories: categories
         )
         let encodedID = ServerWebURL.pathSegment(detail.id)
         let poster: String
@@ -50,7 +52,8 @@ enum ServerWebSeriesPage {
           <meta name="medialib-csrf-token" content="\(escape(csrfToken))">
           <title>\(escape(detail.title)) · \(escape(serverName))</title>
           <link rel="stylesheet" href="/assets/series.css">
-          <link rel="stylesheet" href="/assets/app-shell.css">
+          <link rel="stylesheet" href="/assets/app-shell.css?v=68">
+          <script src="/assets/app-shell.js?v=68" defer></script>
           <script src="/assets/series.js" defer></script>
         </head>
         <body data-series-id="\(escape(detail.id))" data-is-favorite="\(detail.userPreference.isFavorite ? "true" : "false")" data-is-watchlist="\(detail.userPreference.isWatchlist ? "true" : "false")" data-preference-rating="\(preferenceRating)">
@@ -83,9 +86,9 @@ enum ServerWebSeriesPage {
     .preferences { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-top:28px; padding:18px; border:1px solid var(--line); border-radius:16px; background:var(--surface); } .preferences>div { flex:1 1 240px; } .preferences h2 { margin:0; font-size:18px; } .preferences p { margin:5px 0 0; color:var(--muted); font-size:13px; } .preferences p.error { color:var(--danger); } .preferences button[aria-pressed="true"] { border-color:var(--primary); color:#fff; background:var(--primary); } .preferences label { display:flex; align-items:center; gap:10px; min-height:44px; font-size:14px; font-weight:750; } .preferences input { width:min(170px,35vw); accent-color:var(--primary); } .preferences output { min-width:58px; color:var(--primary-strong); text-align:right; }
     .episodes { margin-top:34px; } .section-heading { display:flex; align-items:end; justify-content:space-between; gap:16px; margin-bottom:14px; } .section-heading h2 { margin:0; font-size:28px; } .section-heading>span { color:var(--muted); font-variant-numeric:tabular-nums; }
     .season { overflow:hidden; margin-top:10px; border:1px solid var(--line); border-radius:14px; background:var(--surface); } .season>summary { display:flex; min-height:56px; padding:8px 16px; align-items:center; justify-content:space-between; gap:14px; cursor:pointer; list-style:none; } .season>summary::-webkit-details-marker { display:none; } .season>summary:hover { background:#f6faff; } .season>summary span:first-child { display:grid; gap:2px; } .season>summary small { color:var(--muted); font-size:12px; font-weight:500; } .season-chevron { width:10px; height:10px; border-right:2px solid #60738a; border-bottom:2px solid #60738a; transform:rotate(45deg); transition:transform .18s ease; } .season[open] .season-chevron { transform:rotate(225deg); }
-    .season-body { padding:0 14px 14px; border-top:1px solid #edf1f6; } .season-status { margin:12px 0; color:var(--muted); } .season-status.error { color:var(--danger); } .episode-list { display:grid; gap:8px; } .episode-row { display:grid; grid-template-columns:144px minmax(0,1fr) auto; gap:14px; align-items:center; min-width:0; padding:10px; border:1px solid #e4eaf2; border-radius:12px; background:#fbfdff; } .episode-art { position:relative; display:grid; overflow:hidden; aspect-ratio:16/9; place-items:center; border-radius:9px; color:#fff; background:linear-gradient(145deg,#174d82,#56b8ed); font-weight:800; text-decoration:none; } .episode-art img { width:100%; height:100%; object-fit:cover; } .mlink { position:absolute; top:6px; left:6px; padding:3px 6px; border-radius:6px; color:#fff; background:#123b68e8; font-size:10px; } .episode-copy { min-width:0; } .episode-copy h3 { margin:0; font-size:15px; overflow-wrap:anywhere; } .episode-copy p { margin:5px 0 0; color:var(--muted); font-size:13px; } .episode-state { color:var(--success)!important; font-weight:700; } .play-link { display:inline-flex; min-height:44px; padding:9px 15px; align-items:center; border-radius:10px; color:#fff; background:var(--primary); font-weight:750; text-decoration:none; } .play-link:hover { background:var(--primary-strong); } .load-more { display:block; min-width:132px; margin:14px auto 0; }
+    .season-body { padding:0 14px 14px; border-top:1px solid #edf1f6; } .season-status { margin:12px 0; color:var(--muted); } .season-status.error { color:var(--danger); } .episode-list { display:grid; gap:8px; } .episode-row { display:grid; grid-template-columns:144px minmax(0,1fr) auto; gap:14px; align-items:center; min-width:0; padding:10px; border:1px solid #e4eaf2; border-radius:12px; background:#fbfdff; } .episode-art { position:relative; display:grid; overflow:hidden; aspect-ratio:16/9; place-items:center; border-radius:9px; color:#fff; background:linear-gradient(145deg,#174d82,#56b8ed); font-weight:800; text-decoration:none; } .episode-art img { width:100%; height:100%; object-fit:cover; } .mlink { position:absolute; top:6px; left:6px; padding:3px 6px; border-radius:6px; color:#fff; background:#123b68e8; font-size:10px; } .episode-copy { min-width:0; } .episode-copy h3 { margin:0; font-size:15px; overflow-wrap:anywhere; } .episode-copy p { margin:5px 0 0; color:var(--muted); font-size:13px; } .episode-state { color:var(--success)!important; font-weight:700; } .episode-actions { display:grid; gap:7px; } .play-link,.queue-add { display:inline-flex; min-height:44px; padding:9px 15px; align-items:center; justify-content:center; border:0; border-radius:10px; color:#fff; background:var(--primary); font:inherit; font-weight:750; text-decoration:none; cursor:pointer; } .play-link:hover,.queue-add:hover { background:var(--primary-strong); } .queue-add { color:var(--primary-strong); border:1px solid #a9c3dc; background:#f7fbff; } .queue-add:disabled { cursor:wait; opacity:.55; } .load-more { display:block; min-width:132px; margin:14px auto 0; }
     footer { margin-top:34px; color:var(--muted); font-size:13px; }
-    @media (max-width:780px) { main { padding:24px 18px 40px; } .series-hero { grid-template-columns:110px minmax(0,1fr); gap:20px; align-items:center; } .series-poster { border-radius:14px; font-size:40px; } h1 { font-size:clamp(30px,8vw,50px); } .overview,.genres { grid-column:1/-1; } .episode-row { grid-template-columns:112px minmax(0,1fr); } .play-link { grid-column:1/-1; justify-content:center; } }
+    @media (max-width:780px) { main { padding:24px 18px 40px; } .series-hero { grid-template-columns:110px minmax(0,1fr); gap:20px; align-items:center; } .series-poster { border-radius:14px; font-size:40px; } h1 { font-size:clamp(30px,8vw,50px); } .overview,.genres { grid-column:1/-1; } .episode-row { grid-template-columns:112px minmax(0,1fr); } .episode-actions { grid-column:1/-1; grid-template-columns:1fr 1fr; } .play-link,.queue-add { justify-content:center; } }
     @media (max-width:480px) { .series-hero { grid-template-columns:82px minmax(0,1fr); gap:15px; } .facts { grid-column:1/-1; } .preferences button { flex:1 1 120px; } .preferences label { flex:1 0 100%; flex-wrap:wrap; } .episode-row { grid-template-columns:92px minmax(0,1fr); gap:10px; } }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition-duration:.01ms!important; } }
     """
@@ -148,7 +151,23 @@ enum ServerWebSeriesPage {
         const play = element('a', 'play-link', '播放');
         play.href = mediaURL;
         play.setAttribute('aria-label', `播放 ${String(item.title || '未命名剧集')}`);
-        row.append(art, copy, play);
+        const add = element('button', 'queue-add', '加入队列');
+        add.type = 'button';
+        add.addEventListener('click', async event => {
+          event.preventDefault();
+          if (add.disabled) return;
+          add.disabled = true;
+          try {
+            const response = await fetch('/api/v1/queue', { method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-MediaLIB-CSRF': csrfToken }, body: JSON.stringify({ action: 'add', mediaID: id }) });
+            if (response.status === 401) { window.location.assign('/login'); return; }
+            if (!response.ok) throw new Error();
+            await response.json();
+            add.textContent = '已加入';
+          } catch (_) { add.disabled = false; add.textContent = '加入失败，重试'; }
+        });
+        const actions = element('span', 'episode-actions');
+        actions.append(play, add);
+        row.append(art, copy, actions);
         return row;
       }
       const seasonState = new WeakMap();

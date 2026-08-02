@@ -8,6 +8,14 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
         csrfToken: "known-csrf-token"
     )
 
+    private let proxyPolicy = HTTPRequestSecurityPolicy(
+        allowedHosts: ["127.0.0.1", "localhost"],
+        allowedPort: 8098,
+        csrfToken: "known-csrf-token",
+        trustedProxyAddresses: ["127.0.0.1"],
+        publicOrigin: URL(string: "https://media.example.test")!
+    )
+
     func testAcceptsStrictSameOriginProbe() {
         XCTAssertNil(policy.validate("GET /health HTTP/1.1\r\nHost: localhost:8098\r\n\r\n"))
     }
@@ -44,6 +52,16 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
             policy.validate("GET /health HTTP/1.1\r\nHost: localhost\r\n\r\nunexpected-body"),
             .badRequest
         )
+    }
+
+    func testRejectsDuplicateSingletonSecurityHeaders() {
+        let duplicateOrigin = "POST /api/v1/playback/state/movie-1 HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nOrigin: http://attacker.example\r\nContent-Length: 0\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
+        let duplicateCSRF = duplicateOrigin.replacingOccurrences(of: "Origin: http://attacker.example\r\n", with: "X-MediaLIB-CSRF: known-csrf-token\r\n")
+        let duplicateClientMarker = duplicateOrigin.replacingOccurrences(of: "Origin: http://localhost:8098\r\nOrigin: http://attacker.example\r\n", with: "Origin: http://localhost:8098\r\nX-MediaLIB-Client: mlink-native/1\r\nX-MediaLIB-Client: mlink-native/1\r\n")
+
+        XCTAssertEqual(policy.validate(duplicateOrigin), .badRequest)
+        XCTAssertEqual(policy.validate(duplicateCSRF), .badRequest)
+        XCTAssertEqual(policy.validate(duplicateClientMarker), .badRequest)
     }
 
     func testMutationsRequireCSRFAndSameOrigin() {
@@ -88,6 +106,21 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
             policy.validate(request.replacingOccurrences(of: "/api/v1/admin/users", with: "/api/v1/admin/users/unknown"), bodyLength: 128),
             .badRequest
         )
+    }
+
+    func testMemberAccessAndPasswordJSONKeepTheSameCSRFAndPathBoundary() {
+        for suffix in ["access", "password"] {
+            let request = "POST /api/v1/admin/users/member-1/\(suffix) HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Type: application/json\r\nContent-Length: 128\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
+            XCTAssertNil(policy.validate(request, bodyLength: 128))
+            XCTAssertEqual(
+                policy.validate(request.replacingOccurrences(of: "X-MediaLIB-CSRF: known-csrf-token\r\n", with: ""), bodyLength: 128),
+                .forbidden
+            )
+            XCTAssertEqual(
+                policy.validate(request.replacingOccurrences(of: "/member-1/\(suffix)", with: "/member-1/\(suffix)/extra"), bodyLength: 128),
+                .badRequest
+            )
+        }
     }
 
     func testCurrentUserPasswordChangeJSONKeepsTheSameCSRFAndContentTypeBoundary() {
@@ -137,6 +170,13 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
         )
         let unrelated = request.replacingOccurrences(of: "/api/v1/user-media/preferences/movie-1", with: "/api/v1/user-media/preference/movie-1")
         XCTAssertEqual(policy.validate(unrelated, bodyLength: 17), .badRequest)
+    }
+
+    func testQueueMutationUsesTheSameBoundedJSONAndCSRFBoundary() {
+        let request = "POST /api/v1/queue HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Type: application/json\r\nContent-Length: 64\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
+        XCTAssertNil(policy.validate(request, bodyLength: 64))
+        XCTAssertEqual(policy.validate(request.replacingOccurrences(of: "X-MediaLIB-CSRF: known-csrf-token\r\n", with: ""), bodyLength: 64), .forbidden)
+        XCTAssertEqual(policy.validate(request.replacingOccurrences(of: "/api/v1/queue", with: "/api/v1/queue/unknown"), bodyLength: 64), .badRequest)
     }
 
     func testNativeMlinkMutationNeedsItsMarkerAndCannotCarryBrowserState() {
@@ -191,5 +231,41 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
             policy.validate("GET /health HTTP/1.1\r\nHost: local\u{0001}host\r\n\r\n"),
             .badRequest
         )
+    }
+
+    func testTrustedHTTPSProxyMayUseOnlyConfiguredPublicOrigin() {
+        let request = "GET /health HTTP/1.1\r\nHost: media.example.test\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: 192.168.1.44\r\n\r\n"
+        XCTAssertNil(proxyPolicy.validate(request, clientAddressKey: "127.0.0.1"))
+        XCTAssertEqual(proxyPolicy.validate(request, clientAddressKey: "192.168.1.20"), .forbidden)
+        XCTAssertEqual(
+            proxyPolicy.validate(request.replacingOccurrences(of: "X-Forwarded-Proto: https", with: "X-Forwarded-Proto: http"), clientAddressKey: "127.0.0.1"),
+            .forbidden
+        )
+        XCTAssertEqual(
+            proxyPolicy.validate(request.replacingOccurrences(of: "Host: media.example.test", with: "Host: attacker.example"), clientAddressKey: "127.0.0.1"),
+            .forbidden
+        )
+    }
+
+    func testTrustedProxyOriginAndForwardedClientAddressKeepCSRFAndRateLimitIdentityBound() {
+        let request = "POST /api/v1/playback/state/movie-1 HTTP/1.1\r\nHost: media.example.test\r\nOrigin: https://media.example.test\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: 10.0.0.7\r\nContent-Length: 0\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
+        XCTAssertNil(proxyPolicy.validate(request, clientAddressKey: "127.0.0.1"))
+        XCTAssertEqual(
+            proxyPolicy.effectiveClientAddressKey(for: request, connectedAddressKey: "127.0.0.1"),
+            "10.0.0.7"
+        )
+        XCTAssertEqual(
+            proxyPolicy.effectiveClientAddressKey(for: request, connectedAddressKey: "192.168.1.20"),
+            "192.168.1.20"
+        )
+        XCTAssertEqual(
+            proxyPolicy.validate(request.replacingOccurrences(of: "X-Forwarded-For: 10.0.0.7", with: "X-Forwarded-For: 10.0.0.7, 10.0.0.8"), clientAddressKey: "127.0.0.1"),
+            .forbidden
+        )
+    }
+
+    func testForwardedHeadersAreRejectedWhenProxyModeIsNotConfigured() {
+        let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-Proto: https\r\n\r\n"
+        XCTAssertEqual(policy.validate(request, clientAddressKey: "127.0.0.1"), .forbidden)
     }
 }

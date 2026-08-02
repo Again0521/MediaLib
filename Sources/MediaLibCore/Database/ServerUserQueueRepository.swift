@@ -67,7 +67,7 @@ public final class ServerUserQueueRepository: @unchecked Sendable {
         let now = Date()
         try database.transaction {
             for id in ids {
-                guard try database.query("SELECT 1 FROM media_items WHERE id = ? LIMIT 1", bindings: [.text(id)]) { _ in true }.first == true else { throw ServerUserQueueRepositoryError.mediaNotFound }
+                guard try database.query("SELECT 1 FROM media_items WHERE id = ? LIMIT 1", bindings: [.text(id)], map: { _ in true }).first == true else { throw ServerUserQueueRepositoryError.mediaNotFound }
             }
             try saveState(userID: userID, repeatMode: repeatMode, shuffleEnabled: shuffleEnabled, currentPosition: currentPosition, at: now)
             try database.execute("DELETE FROM server_user_queue_items WHERE user_id = ?", bindings: [.text(userID)])

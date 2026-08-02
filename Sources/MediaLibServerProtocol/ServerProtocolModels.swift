@@ -567,8 +567,13 @@ public struct ServerMediaItemDetail: Codable, Equatable, Sendable, Identifiable 
     public let resolution: String?
     public let artworkAvailable: Bool
     public let backdropAvailable: Bool
+    /// Browser-facing MIME hint used only to explain native decoder support.
+    /// It is never a path, URL, token, or authorization decision.
+    public let browserContentType: String?
     public let canDirectPlay: Bool
     public let canTranscode: Bool
+    /// 当前 principal 是否可将该条目作为附件下载；下载能力与播放能力严格分离。
+    public let canDownload: Bool
     public let previousEpisode: ServerEpisodeNavigation?
     public let nextEpisode: ServerEpisodeNavigation?
     public let userState: ServerMediaUserState?
@@ -589,8 +594,10 @@ public struct ServerMediaItemDetail: Codable, Equatable, Sendable, Identifiable 
         resolution: String?,
         artworkAvailable: Bool,
         backdropAvailable: Bool,
+        browserContentType: String? = nil,
         canDirectPlay: Bool,
         canTranscode: Bool,
+        canDownload: Bool = false,
         previousEpisode: ServerEpisodeNavigation? = nil,
         nextEpisode: ServerEpisodeNavigation? = nil,
         userState: ServerMediaUserState? = nil,
@@ -610,8 +617,10 @@ public struct ServerMediaItemDetail: Codable, Equatable, Sendable, Identifiable 
         self.resolution = resolution
         self.artworkAvailable = artworkAvailable
         self.backdropAvailable = backdropAvailable
+        self.browserContentType = browserContentType?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         self.canDirectPlay = canDirectPlay
         self.canTranscode = canTranscode
+        self.canDownload = canDownload
         self.previousEpisode = previousEpisode
         self.nextEpisode = nextEpisode
         self.userState = userState
@@ -620,8 +629,8 @@ public struct ServerMediaItemDetail: Codable, Equatable, Sendable, Identifiable 
 
     private enum CodingKeys: String, CodingKey {
         case id, type, title, originalTitle, year, overview, genres, communityRating, runtimeSeconds
-        case videoCodec, audioCodec, resolution, artworkAvailable, backdropAvailable, canDirectPlay
-        case canTranscode, previousEpisode, nextEpisode, userState, userPreference
+        case videoCodec, audioCodec, resolution, artworkAvailable, backdropAvailable, browserContentType, canDirectPlay
+        case canTranscode, canDownload, previousEpisode, nextEpisode, userState, userPreference
     }
 
     /// 与资料库卡片相同，旧服务端未包含该字段时使用空偏好，保证渐进升级。
@@ -642,8 +651,10 @@ public struct ServerMediaItemDetail: Codable, Equatable, Sendable, Identifiable 
             resolution: try values.decodeIfPresent(String.self, forKey: .resolution),
             artworkAvailable: try values.decode(Bool.self, forKey: .artworkAvailable),
             backdropAvailable: try values.decode(Bool.self, forKey: .backdropAvailable),
+            browserContentType: try values.decodeIfPresent(String.self, forKey: .browserContentType),
             canDirectPlay: try values.decode(Bool.self, forKey: .canDirectPlay),
             canTranscode: try values.decode(Bool.self, forKey: .canTranscode),
+            canDownload: try values.decodeIfPresent(Bool.self, forKey: .canDownload) ?? false,
             previousEpisode: try values.decodeIfPresent(ServerEpisodeNavigation.self, forKey: .previousEpisode),
             nextEpisode: try values.decodeIfPresent(ServerEpisodeNavigation.self, forKey: .nextEpisode),
             userState: try values.decodeIfPresent(ServerMediaUserState.self, forKey: .userState),
@@ -725,7 +736,7 @@ public struct ServerQueueMutationRequest: Codable, Equatable, Sendable {
 
     public var isValid: Bool {
         ["add", "remove", "clear", "move", "settings"].contains(action) &&
-        (mediaID == nil || (mediaID!.utf8.count <= 512 && !mediaID!.contains("/"))) &&
+        (mediaID == nil || (mediaID!.utf8.count <= 512 && !mediaID!.contains("/") && !mediaID!.contains("\\") && !mediaID!.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }))) &&
         [fromIndex, toIndex, currentPosition].compactMap { $0 }.allSatisfy { (0...100).contains($0) } &&
         (repeatMode == nil || ["sequential", "repeatOne", "repeatAll"].contains(repeatMode!))
     }
@@ -843,6 +854,8 @@ public struct ServerManagedUserSummary: Codable, Equatable, Sendable, Identifiab
     public let isDisabled: Bool
     public let requiresInitialPassword: Bool
     public let roleIDs: [String]
+    /// 仅返回资料库不透明 ID，不返回路径、来源配置或逐库连接信息。
+    public let libraryIDs: [String]
     public let libraryGrantCount: Int
     public let activeDeviceCount: Int
     public let activeSessionCount: Int
@@ -855,6 +868,7 @@ public struct ServerManagedUserSummary: Codable, Equatable, Sendable, Identifiab
         isDisabled: Bool,
         requiresInitialPassword: Bool,
         roleIDs: [String],
+        libraryIDs: [String] = [],
         libraryGrantCount: Int,
         activeDeviceCount: Int,
         activeSessionCount: Int
@@ -866,9 +880,33 @@ public struct ServerManagedUserSummary: Codable, Equatable, Sendable, Identifiab
         self.isDisabled = isDisabled
         self.requiresInitialPassword = requiresInitialPassword
         self.roleIDs = roleIDs.sorted()
+        self.libraryIDs = Array(Set(libraryIDs)).sorted()
         self.libraryGrantCount = max(libraryGrantCount, 0)
         self.activeDeviceCount = max(activeDeviceCount, 0)
         self.activeSessionCount = max(activeSessionCount, 0)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, username, displayName, isBuiltInAdministrator, isDisabled
+        case requiresInitialPassword, roleIDs, libraryIDs, libraryGrantCount
+        case activeDeviceCount, activeSessionCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try values.decode(String.self, forKey: .id),
+            username: try values.decode(String.self, forKey: .username),
+            displayName: try values.decode(String.self, forKey: .displayName),
+            isBuiltInAdministrator: try values.decode(Bool.self, forKey: .isBuiltInAdministrator),
+            isDisabled: try values.decode(Bool.self, forKey: .isDisabled),
+            requiresInitialPassword: try values.decode(Bool.self, forKey: .requiresInitialPassword),
+            roleIDs: try values.decodeIfPresent([String].self, forKey: .roleIDs) ?? [],
+            libraryIDs: try values.decodeIfPresent([String].self, forKey: .libraryIDs) ?? [],
+            libraryGrantCount: try values.decodeIfPresent(Int.self, forKey: .libraryGrantCount) ?? 0,
+            activeDeviceCount: try values.decodeIfPresent(Int.self, forKey: .activeDeviceCount) ?? 0,
+            activeSessionCount: try values.decodeIfPresent(Int.self, forKey: .activeSessionCount) ?? 0
+        )
     }
 }
 

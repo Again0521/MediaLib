@@ -1,10 +1,17 @@
 import Foundation
+import MediaLibServerProtocol
 
 /// Web 媒体源只读清单。服务端配置本身仍由桌面端管理，避免把路径和凭据引入浏览器。
 enum ServerWebSourcesPage {
-    static func render(serverName: String, csrfToken: String) -> String {
+    static func render(serverName: String, csrfToken: String, categories: [ServerLibraryCategory] = []) -> String {
         let sidebar = ServerWebNavigation.render(
-            active: .sources, showAdministration: true, note: .security
+            active: .sources, showAdministration: true, note: .security, categories: categories
+        )
+        let pageHeader = ServerWebPageHeader.render(
+            icon: .sources,
+            eyebrow: "媒体库",
+            title: "媒体源",
+            subtitle: "\(serverName) 当前已配置的媒体来源；添加、编辑、删除与扫描仍须在本机 App 中完成。"
         )
         return """
         <!doctype html>
@@ -16,12 +23,13 @@ enum ServerWebSourcesPage {
           <meta name="medialib-csrf-token" content="\(escape(csrfToken))">
           <title>媒体源 · \(escape(serverName))</title>
           <link rel="stylesheet" href="/assets/sources.css">
-          <link rel="stylesheet" href="/assets/app-shell.css">
+          <link rel="stylesheet" href="/assets/app-shell.css?v=68">
+          <script src="/assets/app-shell.js?v=68" defer></script>
         </head>
         <body>
           <a class="skip" href="#main">跳到主要内容</a>
           <div class="shell">\(sidebar)
-          <main id="main" tabindex="-1"><div class="topline"><div><h1>媒体源</h1><p class="subtitle">\(escape(serverName)) 当前已配置的媒体来源。网页端现在仅提供受保护的可见性；添加、编辑、删除与扫描仍须在本机 App 中完成。</p></div><button id="refresh" type="button">刷新数据</button></div><div id="global-status" class="notice" role="status" aria-live="polite">正在加载媒体源…</div><section class="panel" aria-labelledby="sources-title"><div class="panel-head"><div><h2 id="sources-title">已配置来源</h2><p class="panel-copy">需要 server.manage 权限；最多显示 500 项</p></div><span id="sources-count" class="count" aria-label="媒体源数量">—</span></div><p id="sources-state" class="state">正在加载…</p><div id="sources-content" class="content" hidden></div></section><footer>此响应不包含路径、网络地址、账号、密码、令牌、Cookie 或来源连接配置。</footer></main></div>
+          <main id="main" tabindex="-1"><div class="topline">\(pageHeader)<button id="refresh" type="button">刷新数据</button></div><div id="global-status" class="notice" role="status" aria-live="polite">正在加载媒体源…</div><section class="panel" aria-labelledby="sources-title"><div class="panel-head"><div><h2 id="sources-title">已配置来源</h2><p class="panel-copy">需要 server.manage 权限；最多显示 500 项</p></div><span id="sources-count" class="count" aria-label="媒体源数量">—</span></div><p id="sources-state" class="state">正在加载…</p><div id="sources-content" class="content" hidden></div></section><footer>此响应不包含路径、网络地址、账号、密码、令牌、Cookie 或来源连接配置。</footer></main></div>
           <script src="/assets/sources.js" defer></script>
         </body>
         </html>

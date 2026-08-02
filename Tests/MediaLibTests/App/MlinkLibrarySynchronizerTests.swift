@@ -18,7 +18,7 @@ final class MlinkLibrarySynchronizerTests: XCTestCase {
         let item = synchronizer.localItem(card, sourceID: "source-1", sourcePath: "mlink://server-1/source-1")
 
         XCTAssertEqual(item.id, "mlink:source-1:server/item?opaque")
-        XCTAssertEqual(item.sourcePath, "mlink://server-1/source-1/item/server/item%3Fopaque")
+        XCTAssertEqual(item.sourcePath, "mlink://server-1/source-1/item/server%2Fitem%3Fopaque")
         XCTAssertNil(item.filePath)
         XCTAssertEqual(item.externalID, "server/item?opaque")
         XCTAssertEqual(item.metadataProvider, "Mlink")

@@ -131,8 +131,11 @@ final class ServerLibraryCatalog {
         guard let item = try publicItems(for: principal, requiring: .viewMedia).first(where: { $0.id == id }) else {
             return nil
         }
-        let hasReadableAsset = item.filePath.flatMap(Self.localReadableFileURL(from:)) != nil
+        let readableAssetURL = item.filePath.flatMap(Self.localReadableFileURL(from:))
+        let hasReadableAsset = readableAssetURL != nil
         let isPlayable = try publicItems(for: principal, requiring: .playMedia)
+            .contains(where: { $0.id == id })
+        let canDownload = try publicItems(for: principal, requiring: .downloadMedia)
             .contains(where: { $0.id == id })
         let canDirectPlay = hasReadableAsset && isPlayable
         let episodeNavigation = try authorizedEpisodeNavigation(for: item, principal: principal)
@@ -158,8 +161,10 @@ final class ServerLibraryCatalog {
             resolution: Self.boundedText(item.resolution, maximumLength: 64),
             artworkAvailable: item.posterPath?.isEmpty == false,
             backdropAvailable: item.backdropPath?.isEmpty == false,
+            browserContentType: readableAssetURL.map { ServerMediaAsset(id: item.id, fileURL: $0, byteLength: 0).contentType },
             canDirectPlay: canDirectPlay,
             canTranscode: false,
+            canDownload: canDownload,
             previousEpisode: episodeNavigation.previous,
             nextEpisode: episodeNavigation.next,
             userState: userState.map(Self.protocolState),

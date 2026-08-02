@@ -195,6 +195,10 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertTrue(script.contains("encodeURIComponent"))
         XCTAssertTrue(script.contains("/api/v1/admin/libraries"))
         XCTAssertTrue(script.contains("/api/v1/admin/users"))
+        XCTAssertTrue(script.contains("/access`"))
+        XCTAssertTrue(script.contains("/password`"))
+        XCTAssertTrue(script.contains("edit-member"))
+        XCTAssertTrue(script.contains("editLibraryID"))
         XCTAssertTrue(script.contains("JSON.stringify({ username, displayName, password, libraryIDs })"))
         XCTAssertTrue(script.contains("passwordField.value = ''"))
         XCTAssertEqual(stylesheet.statusCode, 200)
@@ -346,6 +350,70 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertTrue(try repository.securityEvents(limit: 20).contains {
             $0.action == "user.created" &&
                 $0.actorUserID == ServerIdentityRepository.initialAdministratorUserID && $0.targetUserID == created.id
+        })
+    }
+
+    func testMemberAccessEditRequiresLibraryPermissionRevokesSessionsAndUsesStrictBody() throws {
+        let request = Data(#"{"displayName":"Bob Updated","libraryIDs":["source-private"]}"#.utf8)
+        let denied = router.response(
+            for: mutationRequest("/api/v1/admin/users/user-bob/access", token: "user-manager", bodyLength: request.count),
+            body: request
+        )
+        let success = router.response(
+            for: mutationRequest("/api/v1/admin/users/user-bob/access", token: "administrator", bodyLength: request.count),
+            body: request
+        )
+        let updated = try XCTUnwrap(repository.user(id: "user-bob"))
+        let grants = try repository.libraryGrants(userID: updated.id)
+        let extraField = Data(#"{"displayName":"Bob","libraryIDs":[],"roleID":"administrator"}"#.utf8)
+        let protected = router.response(
+            for: mutationRequest("/api/v1/admin/users/server-user-local-admin/access", token: "administrator", bodyLength: request.count),
+            body: request
+        )
+
+        XCTAssertEqual(denied.statusCode, 403)
+        XCTAssertEqual(success.statusCode, 204)
+        XCTAssertEqual(updated.displayName, "Bob Updated")
+        XCTAssertEqual(grants.map(\.libraryID), ["source-private"])
+        XCTAssertTrue(grants.allSatisfy { $0.canView && $0.canPlay && !$0.canDownload && !$0.canEditMetadata && !$0.canDeleteItems })
+        XCTAssertTrue(try repository.sessions(userID: "user-bob").isEmpty)
+        XCTAssertEqual(router.response(
+            for: mutationRequest("/api/v1/admin/users/user-bob/access", token: "administrator", bodyLength: extraField.count),
+            body: extraField
+        ).statusCode, 400)
+        XCTAssertEqual(protected.statusCode, 400)
+        XCTAssertTrue(try repository.securityEvents(limit: 20).contains {
+            $0.action == "user.access.updated" && $0.targetUserID == "user-bob"
+        })
+    }
+
+    func testMemberPasswordResetRequiresUserPermissionRevokesSessionsAndUsesStrictBody() throws {
+        let request = Data(#"{"password":"a freshly rotated password"}"#.utf8)
+        let denied = router.response(
+            for: mutationRequest("/api/v1/admin/users/user-bob/password", token: "member", bodyLength: request.count),
+            body: request
+        )
+        let success = router.response(
+            for: mutationRequest("/api/v1/admin/users/user-bob/password", token: "user-manager", bodyLength: request.count),
+            body: request
+        )
+        let extraField = Data(#"{"password":"a freshly rotated password","roleID":"administrator"}"#.utf8)
+        let protected = router.response(
+            for: mutationRequest("/api/v1/admin/users/server-user-local-admin/password", token: "administrator", bodyLength: request.count),
+            body: request
+        )
+
+        XCTAssertEqual(denied.statusCode, 403)
+        XCTAssertEqual(success.statusCode, 204)
+        XCTAssertTrue(try repository.hasCredential(userID: "user-bob"))
+        XCTAssertTrue(try repository.sessions(userID: "user-bob").isEmpty)
+        XCTAssertEqual(router.response(
+            for: mutationRequest("/api/v1/admin/users/user-bob/password", token: "user-manager", bodyLength: extraField.count),
+            body: extraField
+        ).statusCode, 400)
+        XCTAssertEqual(protected.statusCode, 400)
+        XCTAssertTrue(try repository.securityEvents(limit: 20).contains {
+            $0.action == "credential.reset" && $0.targetUserID == "user-bob"
         })
     }
 

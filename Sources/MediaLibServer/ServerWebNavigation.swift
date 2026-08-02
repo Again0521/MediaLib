@@ -101,16 +101,20 @@ enum ServerWebNavigation {
         }
     }
 
-    private static let mediaItems: [Item] = [
-        Item(active: .home, path: "/", icon: .home, managementOnly: false),
-        Item(active: .library, path: "/library", icon: .library, managementOnly: false),
-        Item(active: .people, path: "/people", icon: .people, managementOnly: false),
-        Item(active: .collections, path: "/collections", icon: .collections, managementOnly: false),
-        Item(active: .photos, path: "/photos", icon: .photos, managementOnly: false),
+    private static let homeItems: [Item] = [
+        Item(active: .home, path: "/", icon: .home, managementOnly: false)
+    ]
+
+    private static let playbackItems: [Item] = [
         Item(active: .queue, path: "/queue", icon: .play, managementOnly: false),
         Item(active: .watching, path: "/watching", icon: .play, managementOnly: false),
         Item(active: .history, path: "/history", icon: .history, managementOnly: false),
         Item(active: .search, path: "/search", icon: .search, managementOnly: false)
+    ]
+
+    private static let exploreItems: [Item] = [
+        Item(active: .people, path: "/people", icon: .people, managementOnly: false),
+        Item(active: .collections, path: "/collections", icon: .collections, managementOnly: false)
     ]
 
     private static let personalItems: [Item] = [
@@ -154,9 +158,17 @@ enum ServerWebNavigation {
         let noteMarkup = note == .none ? "" : "<div class=\"sidebar-note\">\(note.html)</div>"
         return """
         <aside class="app-sidebar">
-          <a class="app-brand" href="/" aria-label="MediaLIB 首页"><span class="brand-mark" aria-hidden="true">M</span><span>MediaLIB</span></a>
+          <a class="app-brand" href="/" aria-label="MediaLIB 首页" data-native-navigation="true">
+            <span class="brand-mark" aria-hidden="true"><span class="brand-mark-card brand-mark-card-back"></span><span class="brand-mark-card brand-mark-card-front"><span class="brand-mark-play"></span></span></span>
+            <span class="brand-copy"><strong>MediaLIB</strong><small>家庭影音库</small></span>
+          </a>
           \(navigation)
           <details class="app-mobile-nav"><summary>导航 · \(active.title)</summary>\(mobileNavigation)</details>
+          <a class="sidebar-status-card" href="/status" data-native-navigation="true" aria-label="查看服务状态">
+            <span class="sidebar-status-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0 1 16 0"></path><path d="M7 12a5 5 0 0 1 10 0"></path><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"></circle></svg></span>
+            <span class="sidebar-status-copy"><strong>服务状态</strong><small>查看运行详情</small></span>
+            <svg class="sidebar-status-chevron" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 5 7 7-7 7"></path></svg>
+          </a>
           \(noteMarkup)
         </aside>
         """
@@ -170,20 +182,54 @@ enum ServerWebNavigation {
         ariaLabel: String,
         className: String
     ) -> String {
-        let media = links(
-            mediaItems,
+        let home = links(
+            homeItems,
             active: active,
             showAdministration: showAdministration,
-            suppressLibraryActiveState: activeCategoryID != nil
+            primary: true
         )
-        let categoryLinks = categoryMarkup(categories, activeCategoryID: activeCategoryID)
+        let videoCategories = categories.filter { $0.id != "music" && $0.id != "photo" }
+        let musicCategories = categories.filter { $0.id == "music" }
+        let videoActive = active == .library && (activeCategoryID == nil || videoCategories.contains { $0.id == activeCategoryID })
+        let musicActive = musicCategories.contains { $0.id == activeCategoryID }
+        let video = disclosure(
+            icon: .library,
+            title: "视频",
+            active: videoActive,
+            count: videoCategories.reduce(0) { $0 + $1.itemCount },
+            content: categoryMarkup(videoCategories, activeCategoryID: activeCategoryID, emptyTitle: "浏览资料库", emptyPath: "/library")
+        )
+        let musicContent = musicCategories.isEmpty
+            ? disabledItem(title: "音乐展开页待设计", icon: .play)
+            : categoryMarkup(musicCategories, activeCategoryID: activeCategoryID, emptyTitle: "暂无音乐")
+        let music = disclosure(
+            icon: .play,
+            title: "音乐",
+            active: musicActive,
+            count: musicCategories.reduce(0) { $0 + $1.itemCount },
+            content: musicContent
+        )
+        let photos = disclosure(
+            icon: .photos,
+            title: "相册",
+            active: active == .photos,
+            count: categories.first(where: { $0.id == "photo" })?.itemCount ?? 0,
+            content: links([Item(active: .photos, path: "/photos", icon: .photos, managementOnly: false)], active: active, showAdministration: showAdministration)
+        )
+        let playback = links(playbackItems, active: active, showAdministration: showAdministration)
+        let explore = links(exploreItems, active: active, showAdministration: showAdministration)
         let personal = links(personalItems, active: active, showAdministration: showAdministration)
         let management = links(managementItems, active: active, showAdministration: showAdministration)
         return """
         <nav class="\(className)" aria-label="\(ariaLabel)">
           <span class="nav-group-title">媒体库</span>
-          \(media)
-          \(categoryLinks)
+          \(home)
+          \(video)
+          \(music)
+          \(photos)
+          <span class="nav-subgroup-title">播放与探索</span>
+          \(playback)
+          \(explore)
           <span class="nav-subgroup-title">我的媒体</span>
           \(personal)
           <span class="nav-group-title nav-management-title">管理</span>
@@ -196,29 +242,51 @@ enum ServerWebNavigation {
         _ items: [Item],
         active: Active,
         showAdministration: Bool,
-        suppressLibraryActiveState: Bool = false
+        suppressLibraryActiveState: Bool = false,
+        primary: Bool = false
     ) -> String {
         items.compactMap { item in
             guard showAdministration || !item.managementOnly else { return nil }
             let isActive = item.active == active && !(suppressLibraryActiveState && item.active == .library)
             let state = isActive ? " active\" aria-current=\"page" : ""
+            let itemClass = primary ? " nav-item-primary" : ""
             return """
-            <a class="nav-item\(state)" href="\(item.path)"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">\(item.icon.paths)</svg><span>\(item.active.title)</span></a>
+            <a class="nav-item\(itemClass)\(state)" href="\(item.path)" data-native-navigation="true"><span class="nav-icon-tile"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">\(item.icon.paths)</svg></span><span>\(item.active.title)</span></a>
             """
         }.joined(separator: "\n")
     }
 
+    private static func disclosure(icon: Icon, title: String, active: Bool, count: Int, content: String) -> String {
+        let open = active ? " open" : ""
+        let activeClass = active ? " active" : ""
+        return """
+        <details class="nav-disclosure"\(open)>
+          <summary class="nav-group-row\(activeClass)"><span class="nav-icon-tile"><svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">\(icon.paths)</svg></span><span>\(title)</span><span class="nav-disclosure-count">\(max(count, 0))</span><svg class="nav-chevron" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 5 7 7-7 7"></path></svg></summary>
+          <div class="nav-subitems">\(content)</div>
+        </details>
+        """
+    }
+
+    private static func disabledItem(title: String, icon: Icon) -> String {
+        "<span class=\"nav-item nav-item-disabled\" aria-disabled=\"true\"><span class=\"nav-icon-tile\"><svg class=\"nav-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\(icon.paths)</svg></span><span>\(title)</span></span>"
+    }
+
     private static func categoryMarkup(
         _ categories: [ServerLibraryCategory],
-        activeCategoryID: String?
+        activeCategoryID: String?,
+        emptyTitle: String = "暂无分类",
+        emptyPath: String? = nil
     ) -> String {
         let links = categories.prefix(32).compactMap { category -> String? in
             guard let encodedID = ServerWebURL.queryValue(category.id) else { return nil }
             let selected = category.id == activeCategoryID ? " active\" aria-current=\"page" : ""
-            return "<a class=\"nav-item nav-category\(selected)\" href=\"/library?type=\(encodedID)\"><span class=\"nav-category-dot\" aria-hidden=\"true\"></span><span>\(escape(category.title))</span><small>\(max(category.itemCount, 0))</small></a>"
+            return "<a class=\"nav-item nav-category\(selected)\" href=\"/library?type=\(encodedID)\" data-native-navigation=\"true\"><span class=\"nav-category-dot\" aria-hidden=\"true\"></span><span>\(escape(category.title))</span><small>\(max(category.itemCount, 0))</small></a>"
         }.joined(separator: "\n")
-        guard !links.isEmpty else { return "" }
-        return "<span class=\"nav-subgroup-title\">服务端分类</span>\n\(links)"
+        guard !links.isEmpty else {
+            guard let emptyPath else { return "<span class=\"nav-empty\">\(escape(emptyTitle))</span>" }
+            return "<a class=\"nav-item nav-empty-link\" href=\"\(emptyPath)\" data-native-navigation=\"true\"><span class=\"nav-icon-tile\"><svg class=\"nav-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\(Icon.library.paths)</svg></span><span>\(escape(emptyTitle))</span></a>"
+        }
+        return links
     }
 
     private static func escape(_ value: String) -> String {

@@ -101,7 +101,7 @@ final class LocalHTTPRouterTests: XCTestCase {
         let head = router.response(for: "HEAD /assets/app-shell.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
         let headers = String(data: asset.serializedHeaders(), encoding: .utf8) ?? ""
         let style = String(data: asset.body, encoding: .utf8) ?? ""
-        let pages = ["/", "/library", "/search", "/watching", "/history", "/favorites", "/watchlist", "/ratings", "/watched", "/unwatched", "/status", "/account", "/admin", "/sources"]
+        let pages = ["/", "/library", "/search", "/watching", "/history", "/favorites", "/watchlist", "/ratings", "/watched", "/unwatched", "/people", "/collections", "/photos", "/queue", "/status", "/account", "/admin", "/sources"]
 
         XCTAssertEqual(asset.statusCode, 200)
         XCTAssertEqual(asset.contentType, "text/css; charset=utf-8")
@@ -111,7 +111,78 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertTrue(style.contains("--ml-sidebar"))
         XCTAssertTrue(style.contains(".app-nav .nav-group-title"))
         XCTAssertTrue(style.contains(".app-mobile-nav"))
+        XCTAssertTrue(style.contains(".app-mobile-nav summary"))
+        XCTAssertTrue(style.contains("--ml-pink"))
+        XCTAssertTrue(style.contains(".brand-copy"))
+        XCTAssertTrue(style.contains(".nav-disclosure"))
+        XCTAssertTrue(style.contains(".sidebar-status-card"))
+        XCTAssertTrue(style.contains("width:252px"))
+        XCTAssertTrue(style.contains("min-height:44px"))
+        XCTAssertTrue(style.contains("app-shell-navigating::before"))
+        XCTAssertTrue(style.contains("touch-action:manipulation"))
         XCTAssertTrue(style.contains("position:sticky"))
+        XCTAssertTrue(style.contains("display:grid"))
+        XCTAssertTrue(style.contains("min-height:100dvh"))
+
+        let scriptAsset = router.response(for: "GET /assets/app-shell.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let scriptHeaders = String(data: scriptAsset.serializedHeaders(), encoding: .utf8) ?? ""
+        let script = String(data: scriptAsset.body, encoding: .utf8) ?? ""
+        XCTAssertEqual(scriptAsset.statusCode, 200)
+        XCTAssertEqual(scriptAsset.contentType, "text/javascript; charset=utf-8")
+        XCTAssertTrue(scriptHeaders.contains("Cache-Control: private, max-age=300"))
+        XCTAssertTrue(script.contains("DOMParser"))
+        XCTAssertTrue(script.contains("replaceChildren"))
+        XCTAssertTrue(script.contains("credentials: 'same-origin'"))
+        XCTAssertTrue(script.contains("medialib:pagewillunload"))
+        XCTAssertTrue(script.contains("maxPageCacheEntries = 32"))
+        XCTAssertTrue(script.contains("navigationSerial"))
+        XCTAssertTrue(script.contains("activeNavigationRequest"))
+        XCTAssertTrue(script.contains("navigationFallbackTimer"))
+        XCTAssertTrue(script.contains("prefersNativeNavigation"))
+        XCTAssertTrue(script.contains("supportsProgressiveNavigation"))
+        XCTAssertTrue(script.contains("window.navigator?.maxTouchPoints"))
+        XCTAssertTrue(script.contains("eventAnchor"))
+        XCTAssertTrue(script.contains("composedPath"))
+        XCTAssertTrue(script.contains("pointerdown"))
+        XCTAssertTrue(script.contains("{ capture: true }"))
+        XCTAssertTrue(script.contains("window.location.assign(url.href)"))
+        XCTAssertTrue(script.contains("window.location.assign(anchor.href)"))
+        XCTAssertTrue(script.contains("window.location.href = href"))
+        XCTAssertTrue(script.contains("const assignNativeLocation = href"))
+        XCTAssertTrue(script.contains("data-native-navigation"))
+        XCTAssertTrue(script.contains("isSidebarNavigation"))
+        XCTAssertTrue(script.contains("if (isSidebarNavigation(anchor)) return false;"))
+        XCTAssertTrue(script.contains("if (isSidebarNavigation(anchor)) {"))
+        XCTAssertTrue(script.contains("assignNativeLocation(anchor.href)"))
+        XCTAssertTrue(script.contains("prefersNativeNavigation() || !supportsProgressiveNavigation()"))
+        XCTAssertTrue(script.contains("isPrimaryUnmodifiedClick"))
+        XCTAssertTrue(script.contains("document.documentElement.classList.add('app-shell-navigating')"))
+        XCTAssertFalse(script.contains("if (anchor.hasAttribute('data-native-navigation')) return false"))
+        XCTAssertTrue(script.contains("__medialibFetchInstalled"))
+        XCTAssertTrue(script.contains("refreshPromise"))
+        XCTAssertTrue(script.contains("/api/v1/auth/refresh"))
+        XCTAssertTrue(script.contains("X-MediaLIB-CSRF"))
+        XCTAssertTrue(script.contains("response.redirected"))
+        XCTAssertTrue(script.contains("request.clone()"))
+        XCTAssertTrue(script.contains("new window.Request(input, init)"))
+        XCTAssertTrue(script.contains("['GET', 'HEAD', 'OPTIONS']"))
+        XCTAssertTrue(script.contains("8_000"))
+        XCTAssertTrue(script.contains("isAnchorElement"))
+        XCTAssertTrue(script.contains("different realm"))
+        XCTAssertTrue(script.contains("1800"))
+        XCTAssertTrue(script.contains("new AbortController()"))
+        XCTAssertTrue(script.contains("oldestEntry?.controller.abort()"))
+        XCTAssertTrue(script.contains("content-length"))
+        XCTAssertTrue(script.contains("base-element"))
+        XCTAssertTrue(script.contains("cross-origin-asset"))
+        XCTAssertTrue(script.contains("inline-handler"))
+        XCTAssertTrue(script.contains("headResourceKey"))
+        XCTAssertTrue(script.contains("existingHeadResources"))
+        XCTAssertTrue(script.contains("/assets/app-shell.js"))
+        XCTAssertFalse(script.contains("innerHTML"))
+        XCTAssertFalse(script.contains("document.cookie"))
+        XCTAssertFalse(script.contains("localStorage"))
+
         XCTAssertEqual(head.statusCode, 200)
         XCTAssertTrue(head.body.isEmpty)
         XCTAssertEqual(head.declaredContentLength, asset.declaredContentLength)
@@ -120,8 +191,13 @@ final class LocalHTTPRouterTests: XCTestCase {
             let response = router.response(for: "GET \(path) HTTP/1.1\r\nHost: localhost\r\n\r\n")
             let html = String(data: response.body, encoding: .utf8) ?? ""
             XCTAssertEqual(response.statusCode, 200, path)
-            XCTAssertTrue(html.contains("href=\"/assets/app-shell.css\""), path)
+            XCTAssertTrue(html.contains("href=\"/assets/app-shell.css?v=68\""), path)
+            XCTAssertTrue(html.contains("src=\"/assets/app-shell.js?v=68\""), path)
             XCTAssertTrue(html.contains("class=\"app-sidebar\""), path)
+            XCTAssertTrue(html.contains("class=\"brand-copy\""), path)
+            XCTAssertTrue(html.contains("家庭影音库"), path)
+            XCTAssertTrue(html.contains("class=\"nav-disclosure\""), path)
+            XCTAssertTrue(html.contains("class=\"sidebar-status-card\""), path)
             XCTAssertTrue(html.contains("aria-label=\"主导航\""), path)
             XCTAssertTrue(html.contains("aria-label=\"移动端主导航\""), path)
             XCTAssertTrue(html.contains("class=\"nav-icon\""), path)
@@ -139,15 +215,40 @@ final class LocalHTTPRouterTests: XCTestCase {
         )
 
         XCTAssertTrue(member.contains("href=\"/watching\""))
+        XCTAssertTrue(member.contains("data-native-navigation=\"true\""))
         XCTAssertTrue(member.contains("class=\"nav-item active\" aria-current=\"page\" href=\"/watching\""))
         XCTAssertFalse(member.contains("href=\"/admin\""))
         XCTAssertFalse(member.contains("href=\"/sources\""))
         XCTAssertTrue(member.contains("href=\"/status\""))
         XCTAssertTrue(member.contains("href=\"/account\""))
+        XCTAssertTrue(member.contains("href=\"/library\""))
+        XCTAssertTrue(member.contains("class=\"nav-disclosure\""))
+        XCTAssertTrue(member.contains("class=\"sidebar-status-card\""))
         XCTAssertTrue(administrator.contains("class=\"nav-item active\" aria-current=\"page\" href=\"/admin\""))
         XCTAssertTrue(administrator.contains("href=\"/sources\""))
         XCTAssertTrue(administrator.contains("路径、连接地址、凭据、Cookie 和令牌"))
-        XCTAssertFalse(administrator.contains("<script"))
+        XCTAssertFalse(administrator.contains("app-shell.js"))
+        XCTAssertFalse(administrator.contains("<script>"))
+    }
+
+    func testOrdinaryWebPagesRenderTheSharedPageHeader() {
+        let library = String(
+            data: router.response(for: "GET /library HTTP/1.1\r\nHost: localhost\r\n\r\n").body,
+            encoding: .utf8
+        ) ?? ""
+        let status = String(
+            data: router.response(for: "GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n").body,
+            encoding: .utf8
+        ) ?? ""
+
+        for html in [library, status] {
+            XCTAssertTrue(html.contains("class=\"page-heading\""))
+            XCTAssertTrue(html.contains("class=\"page-title-icon\""))
+            XCTAssertTrue(html.contains("id=\"page-icon-blue\""))
+            XCTAssertTrue(html.contains("class=\"page-title-copy\""))
+        }
+        XCTAssertTrue(library.contains("浏览资料库"))
+        XCTAssertTrue(status.contains("服务状态"))
     }
 
     func testDynamicAuthenticatedHTMLAndAPIsRemainNoStoreWhenStaticAssetsAreCacheable() {
@@ -333,6 +434,8 @@ final class LocalHTTPRouterTests: XCTestCase {
         let headers = String(data: response.serializedHeaders(), encoding: .utf8) ?? ""
 
         XCTAssertTrue(headers.contains("Content-Security-Policy: default-src 'none'"))
+        XCTAssertTrue(headers.contains("style-src 'self'"))
+        XCTAssertFalse(headers.contains("style-src 'self' 'unsafe-inline'"))
         XCTAssertTrue(headers.contains("frame-ancestors 'none'"))
         XCTAssertTrue(headers.contains("Cross-Origin-Resource-Policy: same-origin"))
         XCTAssertTrue(headers.contains("Referrer-Policy: no-referrer"))
@@ -456,6 +559,41 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertFalse(script.contains("localStorage"))
         XCTAssertFalse(script.contains("document.cookie"))
         XCTAssertFalse(script.contains("eval("))
+    }
+
+    func testAuthenticatedPageCopyUsesRuntimeServerNameAndDetailSidebarKeepsCategories() {
+        let categories = [
+            ServerLibraryCategory(id: "movie", title: "电影", itemCount: 12)
+        ]
+        let status = ServerWebStatusPage.render(
+            serverName: "客厅 <服务器>", csrfToken: "csrf", categories: categories
+        )
+        let sources = ServerWebSourcesPage.render(
+            serverName: "客厅 <服务器>", csrfToken: "csrf", categories: categories
+        )
+        let administration = ServerWebAdministrationPage.render(
+            serverName: "客厅 <服务器>", csrfToken: "csrf", categories: categories
+        )
+        let detail = ServerMediaItemDetail(
+            id: "movie-1", type: "movie", title: "电影", originalTitle: nil,
+            year: nil, overview: nil, genres: [], communityRating: nil,
+            runtimeSeconds: nil, videoCodec: nil, audioCodec: nil, resolution: nil,
+            artworkAvailable: false, backdropAvailable: false,
+            canDirectPlay: true, canTranscode: false
+        )
+        let detailPage = ServerWebMediaDetailPage.render(
+            serverName: "客厅 <服务器>", detail: detail, csrfToken: "csrf",
+            showAdministration: false, categories: categories
+        )
+
+        XCTAssertTrue(status.contains("客厅 &lt;服务器&gt; 的受认证状态视图"))
+        XCTAssertTrue(sources.contains("客厅 &lt;服务器&gt; 当前已配置的媒体来源"))
+        XCTAssertTrue(administration.contains("客厅 &lt;服务器&gt; 的用户"))
+        XCTAssertFalse(status.contains("(serverName)"))
+        XCTAssertFalse(sources.contains("(serverName)"))
+        XCTAssertFalse(administration.contains("(serverName)"))
+        XCTAssertTrue(detailPage.contains("class=\"nav-item nav-category\" href=\"/library?type=movie\""))
+        XCTAssertTrue(detailPage.contains(">电影</span>"))
     }
 
     func testLibraryStyleIsPrivateCacheableAndContainsNoServerOrUserData() {

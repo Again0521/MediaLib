@@ -7,7 +7,7 @@ extension AppState {
     }
 
     var serverModeEndpointDisplayText: String {
-        serverModeConfiguration.loopbackBaseURL.absoluteString
+        serverModeConfiguration.publicOrigin ?? serverModeConfiguration.loopbackBaseURL.absoluteString
     }
 
     var isServerLightweightModeActive: Bool {
@@ -40,7 +40,7 @@ extension AppState {
                 applyServerLightweightPolicyIfNeeded()
                 showFloatingNotice(
                     title: "服务模式已启动",
-                    message: "当前仅允许本机通过 \(serverModeEndpointDisplayText) 登录并访问 Web 服务。",
+                    message: "正在确认 Web 健康状态；就绪后可通过 \(serverModeEndpointDisplayText) 登录并访问。",
                     kind: .success
                 )
             } catch {
@@ -72,6 +72,18 @@ extension AppState {
     func updateServerModePort(_ port: Int) {
         var configuration = serverModeConfiguration
         configuration.updatePort(port)
+        applyServerModeConfiguration(configuration)
+    }
+
+    func updateServerModePublicOrigin(_ origin: String) {
+        var configuration = serverModeConfiguration
+        configuration.updatePublicOrigin(origin)
+        applyServerModeConfiguration(configuration)
+    }
+
+    func updateServerModeTrustedProxyAddresses(_ value: String) {
+        var configuration = serverModeConfiguration
+        configuration.updateTrustedProxyAddresses(value.split(separator: ",").map(String.init))
         applyServerModeConfiguration(configuration)
     }
 

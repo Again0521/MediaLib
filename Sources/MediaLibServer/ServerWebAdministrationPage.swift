@@ -1,11 +1,18 @@
 import Foundation
+import MediaLibServerProtocol
 
 /// 只读 Web 管理总览。动态数据全部由同源脚本通过受保护 API 获取，并使用
 /// `textContent` 渲染；页面本身不内嵌用户数据、令牌或数据库实体。
 enum ServerWebAdministrationPage {
-    static func render(serverName: String, csrfToken: String) -> String {
+    static func render(serverName: String, csrfToken: String, categories: [ServerLibraryCategory] = []) -> String {
         let sidebar = ServerWebNavigation.render(
-            active: .administration, showAdministration: true, note: .security
+            active: .administration, showAdministration: true, note: .security, categories: categories
+        )
+        let pageHeader = ServerWebPageHeader.render(
+            icon: .administration,
+            eyebrow: "管理",
+            title: "服务管理",
+            subtitle: "\(serverName) 的用户、资料库授权、活动设备、会话与安全事件均经逐操作权限检查。"
         )
         return """
         <!doctype html>
@@ -17,22 +24,24 @@ enum ServerWebAdministrationPage {
           <meta name="medialib-csrf-token" content="\(escape(csrfToken))">
           <title>服务管理 · \(escape(serverName))</title>
           <link rel="stylesheet" href="/assets/admin.css">
-          <link rel="stylesheet" href="/assets/app-shell.css">
+          <link rel="stylesheet" href="/assets/app-shell.css?v=68">
+          <script src="/assets/app-shell.js?v=68" defer></script>
         </head>
         <body>
           <a class="skip" href="#main">跳到主要内容</a>
           <div class="shell">
             \(sidebar)
             <main id="main" tabindex="-1">
-              <div class="topline"><div><h1>服务管理</h1><p class="subtitle">\(escape(serverName)) 的用户、活动设备、登录会话与安全事件。当前为只读总览，所有数据均经逐操作权限检查。</p></div><button id="refresh" type="button">刷新数据</button></div>
+              <div class="topline">\(pageHeader)<button id="refresh" type="button">刷新数据</button></div>
               <div id="global-status" class="notice" role="status" aria-live="polite">正在加载管理数据…</div>
               <section class="panel" aria-labelledby="create-user-title"><div class="panel-head"><div><h2 id="create-user-title">创建成员</h2><p class="panel-copy">仅创建普通成员；资料库访问必须显式勾选，并要求 libraries.manage 权限。</p></div></div><form id="create-member" class="create-form"><div class="form-grid"><label>显示名称<input id="new-display-name" name="displayName" type="text" maxlength="256" autocomplete="name" required></label><label>用户名<input id="new-username" name="username" type="text" maxlength="128" autocomplete="username" required></label></div><label>初始密码<input id="new-password" name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required></label><fieldset><legend>允许播放的资料库</legend><p id="library-selection-state" class="form-note" role="status">正在加载可授权资料库…</p><div id="library-options" class="library-options" hidden></div></fieldset><p class="form-note">新成员默认不具备下载、编辑或管理员权限。密码只用于本次提交，不会显示、保存或写入审计。</p><button id="create-member-submit" type="submit">创建成员</button><p id="create-member-state" class="state" role="status" aria-live="polite"></p></form></section>
+              <section id="member-edit-panel" class="panel" aria-labelledby="edit-user-title" hidden><div class="panel-head"><div><h2 id="edit-user-title">编辑成员访问</h2><p class="panel-copy">只可编辑普通成员显示名和资料库访问；保存后该成员的现有会话会失效。</p></div></div><form id="edit-member" class="create-form"><div class="form-grid"><label>显示名称<input id="edit-display-name" name="displayName" type="text" maxlength="256" autocomplete="name" required></label><label>用户名<input id="edit-username" type="text" readonly></label></div><fieldset><legend>允许播放的资料库</legend><p id="edit-library-selection-state" class="form-note">请选择资料库。</p><div id="edit-library-options" class="library-options" hidden></div></fieldset><label>重置密码（可选）<input id="edit-password" name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" placeholder="留空则不修改"></label><div class="edit-actions"><button id="edit-member-submit" type="submit">保存访问</button><button id="edit-member-cancel" type="button">取消</button></div><p id="edit-member-state" class="state" role="status" aria-live="polite"></p></form></section>
               <div class="dashboard">
                 <section class="panel" aria-labelledby="users-title"><div class="panel-head"><div><h2 id="users-title">用户</h2><p class="panel-copy">需要 users.manage 权限</p></div><span id="users-count" class="count" aria-label="用户数量">—</span></div><p id="users-state" class="state">正在加载…</p><div id="users-content" class="content" hidden></div></section>
                 <section class="panel" aria-labelledby="sessions-title"><div class="panel-head"><div><h2 id="sessions-title">活动设备与会话</h2><p class="panel-copy">需要 sessions.manage 权限；不显示 IP、User-Agent 或令牌</p></div><span id="sessions-count" class="count" aria-label="会话数量">—</span></div><p id="sessions-state" class="state">正在加载…</p><div id="sessions-content" class="content" hidden></div></section>
                 <section class="panel events" aria-labelledby="events-title"><div class="panel-head"><div><h2 id="events-title">安全事件</h2><p class="panel-copy">需要 server.manage 权限；最多显示最近 100 条</p></div><span id="events-count" class="count" aria-label="安全事件数量">—</span></div><p id="events-state" class="state">正在加载…</p><div id="events-content" class="content" hidden></div></section>
               </div>
-              <footer>只读管理预览 · 响应不包含密码、Cookie、token、摘要、媒体路径、请求头或客户端地址。</footer>
+              <footer>管理操作受角色、资料库授权、CSRF、限速和审计保护 · 响应不包含密码、Cookie、token、摘要、媒体路径、请求头或客户端地址。</footer>
             </main>
           </div>
           <script src="/assets/admin.js" defer></script>
@@ -60,12 +69,12 @@ enum ServerWebAdministrationPage {
     .dashboard { display:grid; gap:18px; margin-top:24px; } .panel { overflow:hidden; border:1px solid var(--line); border-radius:16px; background:var(--surface); box-shadow:0 10px 28px #243a620d; }
     .panel-head { display:flex; gap:16px; align-items:flex-start; justify-content:space-between; padding:18px 20px; border-bottom:1px solid var(--line); } .panel h2 { margin:0; font-size:18px; } .panel-copy { margin:4px 0 0; color:var(--muted); font-size:14px; }
     .count { flex:none; min-width:36px; padding:4px 9px; border-radius:999px; color:#185f9c; background:#e7f3ff; text-align:center; font-variant-numeric:tabular-nums; font-size:13px; font-weight:800; }
-    .state { min-height:76px; padding:22px 20px; color:var(--muted); } .state.error { color:var(--danger); } .state[hidden],.content[hidden] { display:none; }
+    .state { min-height:76px; padding:22px 20px; color:var(--muted); } .state.error { color:var(--danger); } .state[hidden],.content[hidden],.panel[hidden] { display:none; }
     .content { padding:4px 20px 20px; } .rows { display:grid; } .row { display:grid; grid-template-columns:minmax(150px,1.2fr) minmax(130px,1fr) minmax(160px,1.2fr) minmax(120px,.8fr); gap:16px; align-items:center; min-height:66px; border-bottom:1px solid #edf1f6; } .row:last-child { border-bottom:0; }
     .primary { min-width:0; font-weight:700; overflow-wrap:anywhere; } .secondary,.meta { color:var(--muted); font-size:14px; overflow-wrap:anywhere; } .mono { font-variant-numeric:tabular-nums; font-feature-settings:"tnum"; }
     .pill { display:inline-flex; align-items:center; min-height:28px; padding:3px 9px; border:1px solid #b9d7ef; border-radius:999px; color:#155b92; background:#f0f8ff; font-size:12px; font-weight:700; } .pill.danger { border-color:#f2c0bc; color:var(--danger); background:#fff3f2; }
     .events .row { grid-template-columns:minmax(155px,.9fr) minmax(180px,1.2fr) minmax(100px,.6fr) minmax(190px,1.2fr); }
-    .create-form { display:grid; gap:14px; padding:20px; } .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; } label { display:grid; gap:6px; color:var(--muted); font-size:14px; font-weight:700; } input { min-height:44px; width:100%; padding:10px 11px; border:1px solid #b9c9dd; border-radius:10px; color:var(--ink); background:#fff; font:inherit; } input:focus { border-color:var(--focus); outline:0; box-shadow:0 0 0 3px #1570ef22; } fieldset { margin:0; padding:14px; border:1px solid var(--line); border-radius:12px; } legend { padding:0 5px; color:var(--muted); font-size:14px; font-weight:700; } .library-options { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; } .library-option { display:flex; gap:9px; align-items:flex-start; min-height:44px; padding:8px; border-radius:9px; color:var(--ink); background:#f7faff; font-weight:600; } .library-option input { flex:none; width:18px; min-height:18px; margin:3px 0 0; accent-color:var(--primary); } .form-note { margin:0; color:var(--muted); font-size:13px; } .create-form button { justify-self:start; }
+    .create-form { display:grid; gap:14px; padding:20px; } .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; } label { display:grid; gap:6px; color:var(--muted); font-size:14px; font-weight:700; } input { min-height:44px; width:100%; padding:10px 11px; border:1px solid #b9c9dd; border-radius:10px; color:var(--ink); background:#fff; font:inherit; } input[readonly] { color:var(--muted); background:#f6f8fb; } input:focus { border-color:var(--focus); outline:0; box-shadow:0 0 0 3px #1570ef22; } fieldset { margin:0; padding:14px; border:1px solid var(--line); border-radius:12px; } legend { padding:0 5px; color:var(--muted); font-size:14px; font-weight:700; } .library-options { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; } .library-option { display:flex; gap:9px; align-items:flex-start; min-height:44px; padding:8px; border-radius:9px; color:var(--ink); background:#f7faff; font-weight:600; } .library-option input { flex:none; width:18px; min-height:18px; margin:3px 0 0; accent-color:var(--primary); } .form-note { margin:0; color:var(--muted); font-size:13px; } .create-form button { justify-self:start; } .edit-actions { display:flex; flex-wrap:wrap; gap:10px; } .edit-actions button { min-width:120px; } .edit-actions button[type=button] { color:var(--muted); background:#f7f9fc; }
     footer { margin:28px 0 8px; color:var(--muted); font-size:13px; }
     @media (max-width:880px) { .shell { display:block; } aside { padding:16px 18px; } nav { display:flex; overflow-x:auto; margin-top:14px; } nav a { flex:none; } .boundary { display:none; } main { padding:24px 18px 40px; } .row,.events .row { grid-template-columns:1fr 1fr; gap:7px 14px; padding:13px 0; } }
     @media (max-width:560px) { .topline { display:block; } .topline button { width:100%; margin-top:18px; } .panel-head { padding:16px; } .content { padding:2px 16px 16px; } .row,.events .row,.form-grid { grid-template-columns:1fr; gap:4px; min-height:0; padding:14px 0; } .create-form button { width:100%; } }
@@ -83,6 +92,18 @@ enum ServerWebAdministrationPage {
       const createState = byID('create-member-state');
       const librarySelectionState = byID('library-selection-state');
       const libraryOptions = byID('library-options');
+      const editPanel = byID('member-edit-panel');
+      const editForm = byID('edit-member');
+      const editSubmit = byID('edit-member-submit');
+      const editCancel = byID('edit-member-cancel');
+      const editState = byID('edit-member-state');
+      const editDisplayName = byID('edit-display-name');
+      const editUsername = byID('edit-username');
+      const editPassword = byID('edit-password');
+      const editLibrarySelectionState = byID('edit-library-selection-state');
+      const editLibraryOptions = byID('edit-library-options');
+      let availableLibraries = [];
+      let editingUser = null;
       const dateFormatter = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
       const safeDate = (value) => {
         const date = new Date(value);
@@ -136,16 +157,37 @@ enum ServerWebAdministrationPage {
           window.clearTimeout(timer);
         }
       }
+      function renderEditLibraryOptions(selectedIDs) {
+        const selected = new Set(Array.isArray(selectedIDs) ? selectedIDs : []);
+        editLibraryOptions.replaceChildren();
+        availableLibraries.forEach((library) => {
+          const label = element('label', 'library-option');
+          const checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.name = 'editLibraryID';
+          checkbox.value = library.id;
+          checkbox.checked = selected.has(library.id);
+          const text = element('span', '', `${library.name} · ${library.mediaType}`);
+          label.append(checkbox, text);
+          editLibraryOptions.append(label);
+        });
+        editLibraryOptions.hidden = !editLibraryOptions.childElementCount;
+        editLibrarySelectionState.textContent = availableLibraries.length ? '仅勾选成员可浏览和播放的资料库。' : '当前没有可授权的非保险库资料库。';
+      }
       function renderLibraries(data) {
-        const libraries = Array.isArray(data.libraries) ? data.libraries : [];
+        const libraries = Array.isArray(data.libraries) ? data.libraries.filter((library) =>
+          library && typeof library.id === 'string' && library.id.length > 0 && library.id.length <= 512 &&
+          typeof library.name === 'string' && typeof library.mediaType === 'string'
+        ) : [];
+        availableLibraries = libraries.slice(0, 500);
         libraryOptions.replaceChildren();
-        if (!libraries.length) {
+        if (!availableLibraries.length) {
           librarySelectionState.textContent = '当前没有可授权的非保险库资料库；可创建无资料库访问的成员。';
           libraryOptions.hidden = true;
+          renderEditLibraryOptions([]);
           return;
         }
-        libraries.forEach((library) => {
-          if (typeof library.id !== 'string' || !library.id || typeof library.name !== 'string') return;
+        availableLibraries.forEach((library) => {
           const label = element('label', 'library-option');
           const checkbox = document.createElement('input');
           checkbox.type = 'checkbox';
@@ -157,11 +199,14 @@ enum ServerWebAdministrationPage {
         });
         libraryOptions.hidden = !libraryOptions.childElementCount;
         librarySelectionState.textContent = libraryOptions.childElementCount ? '仅勾选新成员可浏览和播放的资料库。' : '当前没有可授权的非保险库资料库。';
+        renderEditLibraryOptions(editingUser ? editingUser.libraryIDs : []);
       }
       function setLibraryLoadFailure(message) {
+        availableLibraries = [];
         libraryOptions.hidden = true;
         libraryOptions.replaceChildren();
         librarySelectionState.textContent = message;
+        renderEditLibraryOptions([]);
       }
       async function createMember(event) {
         event.preventDefault();
@@ -203,9 +248,98 @@ enum ServerWebAdministrationPage {
           createSubmit.disabled = false;
         }
       }
+      function closeEditUser() {
+        editingUser = null;
+        editForm.reset();
+        editForm.removeAttribute('data-user-id');
+        editPanel.hidden = true;
+        editState.textContent = '';
+        editState.classList.remove('error');
+      }
+      function openEditUser(user, focusPassword = false) {
+        if (!user || typeof user.id !== 'string' || !user.id || user.isBuiltInAdministrator) return;
+        editingUser = user;
+        editForm.dataset.userID = user.id;
+        editDisplayName.value = typeof user.displayName === 'string' ? user.displayName : '';
+        editUsername.value = typeof user.username === 'string' ? user.username : '';
+        editPassword.value = '';
+        renderEditLibraryOptions(user.libraryIDs);
+        editState.classList.remove('error');
+        editState.textContent = '编辑普通成员访问；保存后其现有会话会失效。';
+        editPanel.hidden = false;
+        editPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        (focusPassword ? editPassword : editDisplayName).focus({ preventScroll: true });
+      }
+      async function saveMemberEdit(event) {
+        event.preventDefault();
+        if (!editingUser || typeof editingUser.id !== 'string' || !editingUser.id) return;
+        const displayName = editDisplayName.value.trim();
+        const password = editPassword.value;
+        const libraryIDs = Array.from(editLibraryOptions.querySelectorAll('input[name="editLibraryID"]:checked'))
+          .map((input) => input.value)
+          .filter((value) => typeof value === 'string' && value.length > 0 && value.length <= 512)
+          .slice(0, 100);
+        if (!displayName || new TextEncoder().encode(displayName).length > 256) {
+          editState.classList.add('error');
+          editState.textContent = '显示名称不能为空且不能超过 256 字节。';
+          editDisplayName.focus();
+          return;
+        }
+        if (password && password.length < 12) {
+          editState.classList.add('error');
+          editState.textContent = '新密码至少需要 12 个字符。';
+          editPassword.focus();
+          return;
+        }
+        const token = document.querySelector('meta[name="medialib-csrf-token"]')?.getAttribute('content');
+        if (!token) { editState.classList.add('error'); editState.textContent = '页面安全令牌不可用，请刷新后重试。'; return; }
+        editSubmit.disabled = true;
+        editState.classList.remove('error');
+        editState.textContent = '正在保存成员访问…';
+        try {
+          const encodedID = encodeURIComponent(editingUser.id);
+          const accessResponse = await fetch(`/api/v1/admin/users/${encodedID}/access`, {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-MediaLIB-CSRF': token },
+            body: JSON.stringify({ displayName, libraryIDs })
+          });
+          if (accessResponse.status === 401) { window.location.assign('/login'); return; }
+          if (accessResponse.status === 403) throw new Error('当前账号没有编辑成员资料库权限。');
+          if (!accessResponse.ok) throw new Error(accessResponse.status === 429 ? '操作过于频繁，请稍后重试。' : '无法保存成员访问，请检查输入后重试。');
+          if (password) {
+            const passwordResponse = await fetch(`/api/v1/admin/users/${encodedID}/password`, {
+              method: 'POST', credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json', 'X-MediaLIB-CSRF': token },
+              body: JSON.stringify({ password })
+            });
+            if (passwordResponse.status === 401) { window.location.assign('/login'); return; }
+            if (passwordResponse.status === 403) throw new Error('当前账号没有重置成员密码权限。');
+            if (!passwordResponse.ok) throw new Error(passwordResponse.status === 429 ? '操作过于频繁，请稍后重试。' : '访问已保存，但密码未更新。');
+          }
+          editPassword.value = '';
+          editState.textContent = password ? '成员访问和密码已更新；现有会话已撤销。' : '成员访问已更新；现有会话已撤销。';
+          await load();
+        } catch (error) {
+          editState.classList.add('error');
+          editState.textContent = error && error.message ? error.message : '无法保存成员访问，请稍后重试。';
+        } finally {
+          editPassword.value = '';
+          editSubmit.disabled = false;
+        }
+      }
       function renderUsers(data) {
         const users = Array.isArray(data.users) ? data.users : [];
         byID('users-count').textContent = String(Number.isFinite(data.totalCount) ? data.totalCount : users.length);
+        if (editingUser) {
+          const refreshed = users.find((user) => user && user.id === editingUser.id);
+          if (refreshed) {
+            editingUser = refreshed;
+            editDisplayName.value = typeof refreshed.displayName === 'string' ? refreshed.displayName : '';
+            editUsername.value = typeof refreshed.username === 'string' ? refreshed.username : '';
+          } else {
+            closeEditUser();
+          }
+        }
         if (!users.length) { setState('users', '还没有可显示的用户。'); return; }
         const rows = element('div', 'rows');
         users.forEach((user) => {
@@ -213,10 +347,19 @@ enum ServerWebAdministrationPage {
           identity.append(element('div', 'primary', user.displayName || user.username || '未命名用户'));
           identity.append(element('div', 'secondary', `@${user.username || 'unknown'}`));
           const role = element('div', 'secondary', Array.isArray(user.roleIDs) ? user.roleIDs.join('、') : '未分配角色');
-          const access = element('div', 'meta mono', `${user.libraryGrantCount || 0} 个资料库 · ${user.activeDeviceCount || 0} 台设备`);
+          const libraryCount = Array.isArray(user.libraryIDs) ? user.libraryIDs.length : (user.libraryGrantCount || 0);
+          const access = element('div', 'meta mono', `${libraryCount} 个资料库 · ${user.activeDeviceCount || 0} 台设备`);
           const actions = element('div');
           actions.append(element('span', `pill${user.isDisabled ? ' danger' : ''}`, user.isBuiltInAdministrator ? '内置管理员' : (user.isDisabled ? '已停用' : (user.requiresInitialPassword ? '待设置密码' : '正常'))));
           if (!user.isBuiltInAdministrator) {
+            const edit = element('button', 'user-toggle', '编辑访问');
+            edit.type = 'button';
+            edit.addEventListener('click', () => openEditUser(user));
+            actions.append(edit);
+            const resetPassword = element('button', 'user-toggle', '重置密码');
+            resetPassword.type = 'button';
+            resetPassword.addEventListener('click', () => openEditUser(user, true));
+            actions.append(resetPassword);
             const toggle = element('button', 'user-toggle', user.isDisabled ? '启用' : '停用');
             toggle.type = 'button';
             toggle.addEventListener('click', () => setUserAvailability(user.id, !user.isDisabled, toggle));
@@ -338,6 +481,8 @@ enum ServerWebAdministrationPage {
       }
       refreshButton.addEventListener('click', load);
       createForm.addEventListener('submit', createMember);
+      editForm.addEventListener('submit', saveMemberEdit);
+      editCancel.addEventListener('click', closeEditUser);
       load().catch(() => {
         globalStatus.textContent = '加载失败，请稍后重试。';
         refreshButton.disabled = false;

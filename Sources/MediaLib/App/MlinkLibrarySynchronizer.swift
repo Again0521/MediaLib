@@ -60,7 +60,10 @@ struct MlinkLibrarySynchronizer: Sendable {
         let state = item.userState
         let localID = "mlink:\(sourceID):\(item.id)"
         let localType = MediaType(rawValue: item.type) ?? .other
-        let encodedItemID = item.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? item.id
+        // Never let an untrusted server response turn an opaque ID into additional
+        // path segments. `fetchItems` rejects such IDs before persistence, while this
+        // value-type helper also remains safe when used directly in tests/import tools.
+        let encodedItemID = Self.encodedOpaqueIdentifier(item.id)
         // 本地只读来源 URI 记录网页目的地种类，但仍不含 HTTP 地址、Cookie、token 或媒体 URL。
         let itemSourcePath = sourcePath + (item.isSeries ? "/series/" : "/item/") + encodedItemID
         let playCount = state?.playCount ?? 0
@@ -87,5 +90,15 @@ struct MlinkLibrarySynchronizer: Sendable {
             metadataProvider: "Mlink",
             lastPlayedAt: lastPlayedAt
         )
+    }
+
+    private static let opaqueIdentifierAllowed: CharacterSet = {
+        var characters = CharacterSet.alphanumerics
+        characters.insert(charactersIn: "-._~")
+        return characters
+    }()
+
+    private static func encodedOpaqueIdentifier(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: opaqueIdentifierAllowed) ?? value
     }
 }

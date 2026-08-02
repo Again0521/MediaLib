@@ -1,16 +1,23 @@
 import Foundation
+import MediaLibServerProtocol
 
 /// 面向已认证用户的服务状态页；保留 `/health` 作为机器可读探针，避免把运维探针混作网页。
 enum ServerWebStatusPage {
-    static func render(serverName: String, csrfToken: String, showAdministration: Bool = false) -> String {
+    static func render(serverName: String, csrfToken: String, showAdministration: Bool = false, categories: [ServerLibraryCategory] = []) -> String {
         let sidebar = ServerWebNavigation.render(
-            active: .status, showAdministration: showAdministration, note: .none
+            active: .status, showAdministration: showAdministration, note: .none, categories: categories
+        )
+        let pageHeader = ServerWebPageHeader.render(
+            icon: .status,
+            eyebrow: "仪表盘",
+            title: "服务状态",
+            subtitle: "\(serverName) 的受认证状态视图；机器探针仍使用独立的 /health。"
         )
         return """
         <!doctype html>
         <html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="medialib-csrf-token" content="\(escape(csrfToken))"><title>服务状态 · \(escape(serverName))</title>
-        <link rel="stylesheet" href="/assets/status.css"><link rel="stylesheet" href="/assets/app-shell.css"></head>
-        <body><a class="skip" href="#main">跳到主要内容</a><div class="shell">\(sidebar)<main id="main" tabindex="-1"><h1>服务状态</h1><p class="subtitle">\(escape(serverName)) 的受认证状态视图。机器探针仍使用独立的 <code>/health</code>，本页不暴露路径、配置或凭据。</p><section class="card" aria-labelledby="state-title"><div class="state"><span class="dot" aria-hidden="true"></span><span id="state-title">正在检查服务…</span></div><dl class="meta"><dt>服务器名称</dt><dd id="server-name">—</dd><dt>服务器 ID</dt><dd id="server-id">—</dd><dt>协议版本</dt><dd id="protocol-version">—</dd></dl><button id="refresh" type="button">刷新状态</button></section></main></div><script src="/assets/status.js" defer></script></body></html>
+        <link rel="stylesheet" href="/assets/status.css"><link rel="stylesheet" href="/assets/app-shell.css?v=68"><script src="/assets/app-shell.js?v=68" defer></script></head>
+        <body><a class="skip" href="#main">跳到主要内容</a><div class="shell">\(sidebar)<main id="main" tabindex="-1">\(pageHeader)<section class="card" aria-labelledby="state-title"><div class="state"><span class="dot" aria-hidden="true"></span><span id="state-title">正在检查服务…</span></div><dl class="meta"><dt>服务器名称</dt><dd id="server-name">—</dd><dt>服务器 ID</dt><dd id="server-id">—</dd><dt>协议版本</dt><dd id="protocol-version">—</dd></dl><button id="refresh" type="button">刷新状态</button></section></main></div><script src="/assets/status.js" defer></script></body></html>
         """
     }
 

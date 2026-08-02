@@ -144,12 +144,14 @@ enum ServerCommandOutput {
         "administration-read",
         "authenticated-library",
         "categorized-library-browse",
+        "download-media",
         "protected-artwork",
         "health",
         "loopback-range-streaming",
         "media-detail",
         "media-probe",
         "per-user-playback-state",
+        "per-user-playback-queue",
         "server-discovery",
         "web-playback"
     ]
@@ -162,7 +164,9 @@ enum ServerCommandOutput {
 
     当前具备登录/刷新/注销、桌面多用户与逐资料库授权、安全审计、
     Web 列表/详情/浏览器原生播放、逐用户续播/已看、只读管理、播放探测、HTTP Range 与分级限速。限速参数压测、
-    告警聚合、可信代理、TLS 与远程部署尚未完成，因此不会接受局域网或公网监听地址。
+    告警聚合、应用内 TLS 与远程部署尚未完成；如需远程访问，只能由本机 HTTPS 反向代理
+    显式配置 MEDIALIB_SERVER_PUBLIC_ORIGIN 与 MEDIALIB_SERVER_TRUSTED_PROXIES 后转发到回环服务，
+    不会接受局域网或公网监听地址。
     """
 
     static func write<T: Encodable>(_ value: T) throws {
@@ -188,6 +192,8 @@ struct ServerLaunchConfiguration: Sendable {
     let port: Int
     let serverID: String
     let serverName: String
+    let publicOrigin: URL?
+    let trustedProxyAddresses: Set<String>
 
     static func load(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> Self {
         let host = environment["MEDIALIB_SERVER_HOST"]?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -204,19 +210,62 @@ struct ServerLaunchConfiguration: Sendable {
 
         let serverID = environment["MEDIALIB_SERVER_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         let serverName = environment["MEDIALIB_SERVER_NAME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let publicOriginValue = environment["MEDIALIB_SERVER_PUBLIC_ORIGIN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let publicOrigin: URL?
+        if let publicOriginValue, !publicOriginValue.isEmpty {
+            guard let url = URL(string: publicOriginValue),
+                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                  components.scheme?.lowercased() == "https",
+                  components.host?.isEmpty == false,
+                  components.user == nil,
+                  components.password == nil,
+                  (components.path.isEmpty || components.path == "/"),
+                  components.query == nil,
+                  components.fragment == nil,
+                  components.port == nil || (1...65_535).contains(components.port ?? 0)
+            else {
+                throw ServerConfigurationError.invalidPublicOrigin(publicOriginValue)
+            }
+            publicOrigin = url
+        } else {
+            publicOrigin = nil
+        }
+
+        let proxyValues = (environment["MEDIALIB_SERVER_TRUSTED_PROXIES"] ?? "")
+            .split(separator: ",", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let trustedProxyAddresses = Set(proxyValues)
+        guard proxyValues.allSatisfy(Self.isIPv4Address),
+              trustedProxyAddresses.isEmpty || publicOrigin != nil
+        else {
+            throw ServerConfigurationError.invalidTrustedProxyConfiguration
+        }
         return Self(
             host: normalizedHost,
             port: port,
             // App/容器必须注入持久化 ID；默认值只用于开发命令和本机健康探测。
             serverID: serverID?.isEmpty == false ? serverID! : "medialib-development",
-            serverName: serverName?.isEmpty == false ? serverName! : "MediaLIB Server"
+            serverName: serverName?.isEmpty == false ? serverName! : "MediaLIB Server",
+            publicOrigin: publicOrigin,
+            trustedProxyAddresses: trustedProxyAddresses
         )
+    }
+
+    private static func isIPv4Address(_ value: String) -> Bool {
+        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        return parts.allSatisfy { part in
+            !part.isEmpty && part.count <= 3 && part.allSatisfy(\.isNumber) &&
+                Int(part).map { (0...255).contains($0) } == true
+        }
     }
 }
 
-enum ServerConfigurationError: LocalizedError {
+enum ServerConfigurationError: LocalizedError, Equatable {
     case invalidPort(String)
     case nonLoopbackHost(String)
+    case invalidPublicOrigin(String)
+    case invalidTrustedProxyConfiguration
     case runtimeNotInstalled(host: String, port: Int)
 
     var errorDescription: String? {
@@ -225,6 +274,10 @@ enum ServerConfigurationError: LocalizedError {
             return "MEDIALIB_SERVER_PORT 无效：\(value)。端口必须在 1 到 65535 之间。"
         case let .nonLoopbackHost(host):
             return "当前安全门槛下服务端只允许监听本机回环地址，不能使用：\(host)。"
+        case let .invalidPublicOrigin(origin):
+            return "MEDIALIB_SERVER_PUBLIC_ORIGIN 必须是无路径的 HTTPS 地址：\(origin)。"
+        case .invalidTrustedProxyConfiguration:
+            return "MEDIALIB_SERVER_TRUSTED_PROXIES 必须是 IPv4 地址列表，并且只能与 HTTPS 公开 Origin 一起使用。"
         case let .runtimeNotInstalled(host, port):
             return "MediaLibServer 未选择运行命令，尚未监听 \(host):\(port)。使用 --health、--describe、--serve 或 --help。"
         }

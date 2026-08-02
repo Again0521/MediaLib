@@ -273,6 +273,7 @@ final class ServerLibraryCatalogTests: XCTestCase {
         XCTAssertEqual(detail.runtimeSeconds, 7_200)
         XCTAssertEqual(detail.communityRating, 8.6)
         XCTAssertTrue(detail.canDirectPlay)
+        XCTAssertEqual(detail.browserContentType, "video/mp4")
         XCTAssertFalse(detail.canTranscode)
         XCTAssertNil(try catalog.publicDetail(id: "detail-item", for: deniedPrincipal))
         let encoded = try JSONEncoder().encode(detail)

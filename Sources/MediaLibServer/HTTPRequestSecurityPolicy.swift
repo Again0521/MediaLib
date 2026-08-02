@@ -12,8 +12,31 @@ struct HTTPRequestSecurityPolicy {
     let allowedHosts: Set<String>
     let allowedPort: Int
     let csrfToken: String
+    /// A reverse proxy may terminate TLS and forward to the loopback listener, but
+    /// only an explicitly listed peer may assert that boundary. The public origin
+    /// is kept as a parsed URL so Host/Origin cannot be widened by string prefixes.
+    let trustedProxyAddresses: Set<String>
+    let publicOrigin: URL?
 
-    func validate(_ rawRequest: String, bodyLength: Int = 0) -> Rejection? {
+    init(
+        allowedHosts: Set<String>,
+        allowedPort: Int,
+        csrfToken: String,
+        trustedProxyAddresses: Set<String> = [],
+        publicOrigin: URL? = nil
+    ) {
+        self.allowedHosts = allowedHosts
+        self.allowedPort = allowedPort
+        self.csrfToken = csrfToken
+        self.trustedProxyAddresses = trustedProxyAddresses
+        self.publicOrigin = publicOrigin
+    }
+
+    func validate(
+        _ rawRequest: String,
+        bodyLength: Int = 0,
+        clientAddressKey: String? = nil
+    ) -> Rejection? {
         guard let headerEnd = rawRequest.range(of: "\r\n\r\n") else { return .badRequest }
         guard rawRequest[headerEnd.upperBound...].isEmpty else { return .badRequest }
         let head = String(rawRequest[..<headerEnd.lowerBound])
@@ -62,8 +85,26 @@ struct HTTPRequestSecurityPolicy {
             headers[name.lowercased(), default: []].append(value)
         }
 
+        let hasForwardedHeaders = headers.keys.contains { key in
+            key == "forwarded" || key.hasPrefix("x-forwarded-")
+        }
+        let isTrustedProxyRequest: Bool
+        if hasForwardedHeaders {
+            guard let clientAddressKey,
+                  trustedProxyAddresses.contains(clientAddressKey),
+                  headers["x-forwarded-proto"] == ["https"],
+                  headers["forwarded"] == nil,
+                  headers["x-forwarded-host"] == nil
+            else {
+                return .forbidden
+            }
+            isTrustedProxyRequest = true
+        } else {
+            isTrustedProxyRequest = false
+        }
+
         guard let hostValues = headers["host"], hostValues.count == 1,
-              isAllowedHost(hostValues[0])
+              isAllowedHost(hostValues[0], allowPublicOrigin: isTrustedProxyRequest)
         else {
             return .forbidden
         }
@@ -72,9 +113,23 @@ struct HTTPRequestSecurityPolicy {
               (headers["range"]?.count ?? 0) <= 1,
               (headers["authorization"]?.count ?? 0) <= 1,
               (headers["cookie"]?.count ?? 0) <= 1,
-              (headers["content-type"]?.count ?? 0) <= 1
+              (headers["content-type"]?.count ?? 0) <= 1,
+              (headers["origin"]?.count ?? 0) <= 1,
+              (headers["x-medialib-csrf"]?.count ?? 0) <= 1,
+              (headers["x-medialib-client"]?.count ?? 0) <= 1,
+              (headers["sec-fetch-site"]?.count ?? 0) <= 1,
+              (headers["connection"]?.count ?? 0) <= 1,
+              (headers["x-forwarded-proto"]?.count ?? 0) <= 1,
+              (headers["x-forwarded-host"]?.count ?? 0) <= 1,
+              (headers["x-forwarded-for"]?.count ?? 0) <= 1,
+              (headers["forwarded"]?.count ?? 0) <= 1
         else {
             return .badRequest
+        }
+        if let forwardedFor = headers["x-forwarded-for"]?.first {
+            guard isTrustedProxyRequest, Self.isIPv4Address(forwardedFor) else {
+                return .forbidden
+            }
         }
         let declaredBodyLength: Int
         if let contentLength = headers["content-length"]?.first {
@@ -112,7 +167,7 @@ struct HTTPRequestSecurityPolicy {
             } else {
                 guard let token = headers["x-medialib-csrf"]?.first,
                       Self.constantTimeEqual(token, csrfToken),
-                      originIsAllowed(headers["origin"]?.first)
+                      originIsAllowed(headers["origin"]?.first, allowPublicOrigin: isTrustedProxyRequest)
                 else {
                     return .forbidden
                 }
@@ -121,7 +176,7 @@ struct HTTPRequestSecurityPolicy {
         return nil
     }
 
-    private func isAllowedHost(_ value: String) -> Bool {
+    private func isAllowedHost(_ value: String, allowPublicOrigin: Bool) -> Bool {
         let normalized = value.lowercased()
         guard !normalized.contains("@"),
               !normalized.contains("/"),
@@ -130,26 +185,25 @@ struct HTTPRequestSecurityPolicy {
         else {
             return false
         }
-        let pieces = normalized.split(separator: ":", omittingEmptySubsequences: false)
-        guard pieces.count == 1 || pieces.count == 2,
-              let host = pieces.first,
-              allowedHosts.contains(String(host))
-        else {
-            return false
+        if allowPublicOrigin, let publicOrigin {
+            guard let components = URLComponents(url: publicOrigin, resolvingAgainstBaseURL: false),
+                  components.scheme?.lowercased() == "https",
+                  let publicHost = components.host?.lowercased(),
+                  let hostAndPort = Self.hostAndPort(from: normalized)
+            else { return false }
+            return hostAndPort.host == publicHost &&
+                (hostAndPort.port ?? 443) == (components.port ?? 443)
         }
-        if pieces.count == 2 {
-            return Int(pieces[1]) == allowedPort
-        }
-        return true
+        guard let hostAndPort = Self.hostAndPort(from: normalized),
+              allowedHosts.contains(hostAndPort.host)
+        else { return false }
+        return hostAndPort.port == nil || hostAndPort.port == allowedPort
     }
 
-    private func originIsAllowed(_ value: String?) -> Bool {
+    private func originIsAllowed(_ value: String?, allowPublicOrigin: Bool) -> Bool {
         // 原生客户端不发送 Origin；浏览器只允许当前服务自身的明确 Origin。
         guard let value else { return true }
         guard let components = URLComponents(string: value),
-              components.scheme?.lowercased() == "http",
-              let host = components.host?.lowercased(),
-              allowedHosts.contains(host),
               components.user == nil,
               components.password == nil,
               components.path.isEmpty,
@@ -158,7 +212,60 @@ struct HTTPRequestSecurityPolicy {
         else {
             return false
         }
-        return components.port == nil || components.port == allowedPort
+        if allowPublicOrigin, let publicOrigin,
+           let publicComponents = URLComponents(url: publicOrigin, resolvingAgainstBaseURL: false) {
+            return components.scheme?.lowercased() == "https" &&
+                components.host?.lowercased() == publicComponents.host?.lowercased() &&
+                (components.port ?? 443) == (publicComponents.port ?? 443)
+        }
+        return components.scheme?.lowercased() == "http" &&
+            components.host.map { allowedHosts.contains($0.lowercased()) } == true &&
+            (components.port == nil || components.port == allowedPort)
+    }
+
+    /// Returns the one client address asserted by a trusted proxy, or the socket
+    /// peer for direct loopback requests. The caller invokes this only after
+    /// `validate` has accepted the request, so an untrusted header cannot reach
+    /// rate-limit or audit keys.
+    func effectiveClientAddressKey(
+        for rawRequest: String,
+        connectedAddressKey: String
+    ) -> String {
+        guard let headerValue = Self.headerValues(in: rawRequest)["x-forwarded-for"]?.first,
+              trustedProxyAddresses.contains(connectedAddressKey),
+              Self.isIPv4Address(headerValue)
+        else { return connectedAddressKey }
+        return headerValue
+    }
+
+    private static func headerValues(in rawRequest: String) -> [String: [String]] {
+        guard let headerEnd = rawRequest.range(of: "\r\n\r\n") else { return [:] }
+        let head = rawRequest[..<headerEnd.lowerBound]
+        return head.components(separatedBy: "\r\n").dropFirst().reduce(into: [:]) { result, line in
+            guard let colon = line.firstIndex(of: ":") else { return }
+            let name = line[..<colon].lowercased()
+            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            result[name, default: []].append(value)
+        }
+    }
+
+    private static func hostAndPort(from value: String) -> (host: String, port: Int?)? {
+        let pieces = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard pieces.count == 1 || pieces.count == 2,
+              let host = pieces.first, !host.isEmpty
+        else { return nil }
+        if pieces.count == 1 { return (String(host), nil) }
+        guard let port = Int(pieces[1]), (1...65_535).contains(port) else { return nil }
+        return (String(host), port)
+    }
+
+    private static func isIPv4Address(_ value: String) -> Bool {
+        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        return parts.allSatisfy { part in
+            !part.isEmpty && part.count <= 3 && part.allSatisfy(\.isNumber) &&
+                Int(part).map { (0...255).contains($0) } == true
+        }
     }
 
     private func isVerifiedNativeMlinkRequest(_ headers: [String: [String]], path: String) -> Bool {
@@ -179,15 +286,27 @@ struct HTTPRequestSecurityPolicy {
 
     private static func isJSONBodyPath(_ path: String) -> Bool {
         jsonBodyPaths.contains(path) ||
-            path == "/api/v1/auth/password" ||
-            path == "/api/v1/admin/users" ||
-            path.hasPrefix("/api/v1/playback/state/") ||
+        path == "/api/v1/auth/password" ||
+        path == "/api/v1/admin/users" ||
+        isAdminMemberJSONPath(path) ||
+        path == "/api/v1/queue" ||
+        path.hasPrefix("/api/v1/playback/state/") ||
             path.hasPrefix("/api/v1/user-media/preferences/")
     }
 
     private static func isNativeMlinkMutationPath(_ path: String) -> Bool {
         isSingleOpaqueIdentifierPath(path, prefix: "/api/v1/playback/state/") ||
             isSingleOpaqueIdentifierPath(path, prefix: "/api/v1/user-media/preferences/")
+    }
+
+    private static func isAdminMemberJSONPath(_ path: String) -> Bool {
+        let prefix = "/api/v1/admin/users/"
+        for suffix in ["/access", "/password"] {
+            guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { continue }
+            let identifier = path.dropFirst(prefix.count).dropLast(suffix.count)
+            return !identifier.isEmpty && !identifier.contains("/") && !identifier.contains("\\")
+        }
+        return false
     }
 
     /// 不要用前缀作为长期授权边界：未来在同一资源树增加子路由时，原生 CSRF

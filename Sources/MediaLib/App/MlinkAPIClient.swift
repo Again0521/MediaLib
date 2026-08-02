@@ -347,8 +347,8 @@ struct MlinkAPIClient: Sendable {
     }
 
     private func isTrustedLibraryItem(_ item: ServerLibraryItem) -> Bool {
-        !item.id.isEmpty && item.id.utf8.count <= 512 &&
-            MediaType(rawValue: item.type) != nil &&
+        Self.isSafeWebItemIdentifier(item.id) &&
+            MediaType(rawValue: item.type).map { $0 != .auto && $0 != .privateCollection } == true &&
             !item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && item.title.utf8.count <= 1_024 &&
             (item.year == nil || (1800...3000).contains(item.year!)) &&
             isTrustedPreference(item.userPreference) &&

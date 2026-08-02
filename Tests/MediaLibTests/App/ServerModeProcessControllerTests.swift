@@ -18,11 +18,15 @@ final class ServerModeProcessControllerTests: XCTestCase {
         temporaryDirectory = nil
     }
 
-    func testControllerStartsAndStopsInjectedServerRuntime() throws {
+    func testControllerStartsAndStopsInjectedServerRuntime() async throws {
         let executableURL = try makeLongRunningExecutable()
-        let controller = ServerModeProcessController(executableURLProvider: { executableURL })
+        let controller = ServerModeProcessController(
+            executableURLProvider: { executableURL },
+            readinessChecker: { _ in true }
+        )
 
         try controller.start(configuration: ServerModeConfiguration(serverID: "server-test"))
+        await waitForRunning(controller)
         XCTAssertEqual(controller.status, .running)
 
         controller.stop()
@@ -31,8 +35,12 @@ final class ServerModeProcessControllerTests: XCTestCase {
 
     func testRecoveryStopWaitsUntilInjectedRuntimeActuallyExits() async throws {
         let executableURL = try makeLongRunningExecutable()
-        let controller = ServerModeProcessController(executableURLProvider: { executableURL })
+        let controller = ServerModeProcessController(
+            executableURLProvider: { executableURL },
+            readinessChecker: { _ in true }
+        )
         try controller.start(configuration: ServerModeConfiguration(serverID: "server-recovery-test"))
+        await waitForRunning(controller)
 
         let stopped = await controller.stopAndWaitForExit(timeout: 3)
 
@@ -48,6 +56,30 @@ final class ServerModeProcessControllerTests: XCTestCase {
         XCTAssertThrowsError(try controller.start(configuration: ServerModeConfiguration(serverID: "server-test")))
         guard case .failed = controller.status else {
             return XCTFail("无法启动服务端时状态必须为 failed")
+        }
+    }
+
+    func testControllerFailsAndTerminatesWhenHealthCheckDoesNotBecomeReady() async throws {
+        let executableURL = try makeLongRunningExecutable()
+        let controller = ServerModeProcessController(
+            executableURLProvider: { executableURL },
+            readinessChecker: { _ in false },
+            readinessTimeout: 0.1
+        )
+
+        try controller.start(configuration: ServerModeConfiguration(serverID: "server-not-ready"))
+        for _ in 0..<30 where controller.status == .starting {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        guard case .failed(let message) = controller.status else {
+            return XCTFail("健康检查超时后必须进入 failed 状态")
+        }
+        XCTAssertTrue(message.contains("健康检查"))
+    }
+
+    private func waitForRunning(_ controller: ServerModeProcessController) async {
+        for _ in 0..<30 where controller.status == .starting {
+            try? await Task.sleep(nanoseconds: 20_000_000)
         }
     }
 

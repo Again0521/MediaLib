@@ -4,27 +4,28 @@ import MediaLibServerProtocol
 /// 本地相册源的网页查看器。系统 PhotoKit 相册不会被服务端伪造为文件媒体；这里只
 /// 输出已经由媒体扫描器索引、并再次通过当前 principal 授权的 `.photo` 条目。
 enum ServerWebPhotosPage {
-    static func gallery(serverName: String, page: ServerLibraryItemsPage, csrfToken: String, showAdministration: Bool) -> String {
+    static func gallery(serverName: String, page: ServerLibraryItemsPage, csrfToken: String, showAdministration: Bool, categories: [ServerLibraryCategory] = []) -> String {
         let cards = page.items.map(photoCard).joined(separator: "\n")
-        return document(title: "照片 · \(serverName)", csrfToken: csrfToken, bodyData: "", sidebar: ServerWebNavigation.render(active: .photos, showAdministration: showAdministration, note: .library), content: """
-        <section class="heading" aria-labelledby="page-title"><p class="eyebrow">Photos</p><h1 id="page-title">照片</h1><p>浏览已授权的本地相册源。图片由浏览器解码，服务端只提供同源字节。</p><p id="photo-status" role="status" aria-live="polite">共 \(page.totalItemCount) 张照片</p></section>
+        let pageHeader = ServerWebPageHeader.render(icon: .photos, eyebrow: "相册", title: "照片", subtitle: "浏览已授权的本地相册源。图片由浏览器解码，服务端只提供同源字节。")
+        return document(title: "照片 · \(serverName)", csrfToken: csrfToken, bodyData: "", sidebar: ServerWebNavigation.render(active: .photos, showAdministration: showAdministration, note: .library, categories: categories), content: """
+        \(pageHeader)<p id="photo-status" class="status" role="status" aria-live="polite">共 \(page.totalItemCount) 张照片</p>
         <section id="photo-grid" class="photo-grid" aria-live="polite">\(cards)</section>
         <button id="photo-load-more" class="load-more" type="button"\(page.hasMore ? "" : " hidden")>载入更多照片</button>
         <p id="photo-empty" class="empty"\(page.items.isEmpty ? "" : " hidden")>没有可访问的照片。请在桌面端添加照片源并完成扫描。</p>
         """)
     }
 
-    static func detail(serverName: String, item: ServerMediaItemDetail, csrfToken: String, showAdministration: Bool) -> String {
+    static func detail(serverName: String, item: ServerMediaItemDetail, csrfToken: String, showAdministration: Bool, categories: [ServerLibraryCategory] = []) -> String {
         let encodedID = ServerWebURL.pathSegment(item.id)
         let image = item.artworkAvailable && encodedID != nil ? "<img src=\"/api/v1/images/\(encodedID!)/poster\" alt=\"\(escape(item.title))\" loading=\"eager\" decoding=\"async\">" : "<div class=\"placeholder\" role=\"img\" aria-label=\"暂无照片预览\">PHOTO</div>"
-        return document(title: "\(item.title) · \(serverName)", csrfToken: csrfToken, bodyData: "", sidebar: ServerWebNavigation.render(active: .photos, showAdministration: showAdministration, note: .library), content: """
+        return document(title: "\(item.title) · \(serverName)", csrfToken: csrfToken, bodyData: "", sidebar: ServerWebNavigation.render(active: .photos, showAdministration: showAdministration, note: .library, categories: categories), content: """
         <a class="back" href="/photos">← 返回照片</a><section class="photo-detail" aria-labelledby="photo-title"><div class="photo-stage">\(image)</div><div class="photo-meta"><p class="eyebrow">Photo</p><h1 id="photo-title">\(escape(item.title))</h1><p>\(escape(item.year.map(String.init) ?? "已索引照片"))</p><p class="note">媒体内容在浏览器中解码；MediaLIB 不把照片文件下载到客户端应用。</p></div></section>
         """)
     }
 
     private static func document(title: String, csrfToken: String, bodyData: String, sidebar: String, content: String) -> String {
         """
-        <!doctype html><html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="medialib-csrf-token" content="\(escape(csrfToken))"><title>\(escape(title))</title><link rel="stylesheet" href="/assets/photos.css"><link rel="stylesheet" href="/assets/app-shell.css"><script src="/assets/photos.js" defer></script></head><body\(bodyData)><a class="skip" href="#main">跳到主要内容</a><div class="shell">\(sidebar)<main id="main" tabindex="-1">\(content)</main></div></body></html>
+        <!doctype html><html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="medialib-csrf-token" content="\(escape(csrfToken))"><title>\(escape(title))</title><link rel="stylesheet" href="/assets/photos.css"><link rel="stylesheet" href="/assets/app-shell.css?v=68"><script src="/assets/app-shell.js?v=68" defer></script><script src="/assets/photos.js" defer></script></head><body\(bodyData)><a class="skip" href="#main">跳到主要内容</a><div class="shell">\(sidebar)<main id="main" tabindex="-1">\(content)</main></div></body></html>
         """
     }
 

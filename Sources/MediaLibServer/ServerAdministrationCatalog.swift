@@ -36,7 +36,8 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
         let allUsers = try repository.users()
         let selected = allUsers.prefix(Self.maximumUserCount)
         let summaries = try selected.map { user in
-            ServerManagedUserSummary(
+            let grants = try repository.libraryGrants(userID: user.id)
+            return ServerManagedUserSummary(
                 id: user.id,
                 username: user.username,
                 displayName: user.displayName,
@@ -44,7 +45,8 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
                 isDisabled: user.isDisabled,
                 requiresInitialPassword: user.requiresInitialPassword,
                 roleIDs: try repository.roleIDs(userID: user.id),
-                libraryGrantCount: try repository.libraryGrants(userID: user.id).count,
+                libraryIDs: grants.map(\.libraryID),
+                libraryGrantCount: grants.count,
                 activeDeviceCount: try repository.devices(userID: user.id).count,
                 activeSessionCount: try repository.sessions(userID: user.id).count
             )
@@ -222,6 +224,69 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
 
     func setUserDisabled(id: String, disabled: Bool, actorUserID: String) throws {
         try repository.setUserDisabled(id: id, disabled: disabled, actorUserID: actorUserID)
+    }
+
+    /// 编辑普通成员的显示名与资料库访问。网页管理不允许通过此入口提升角色、
+    /// 授予下载/编辑/删除权限，也不能修改内置管理员；权限变化由仓储事务撤销旧会话。
+    func updateMemberAccess(
+        id: String,
+        displayName: String,
+        libraryIDs: [String],
+        actorUserID: String
+    ) throws {
+        guard let user = try repository.user(id: id),
+              id != ServerIdentityRepository.initialAdministratorUserID,
+              try repository.roleIDs(userID: id) == [ServerIdentityRepository.memberRoleID],
+              let sourceRepository
+        else { throw ServerIdentityRepositoryError.userNotFound }
+        let trimmedDisplayName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1...256).contains(trimmedDisplayName.utf8.count),
+              libraryIDs.count <= 100,
+              Set(libraryIDs).count == libraryIDs.count,
+              libraryIDs.allSatisfy(Self.isSafeIdentifier)
+        else { throw ServerIdentityRepositoryError.invalidIdentifier }
+        let permittedLibraryIDs = Set(
+            try sourceRepository.fetchAll()
+                .filter { $0.mediaType != .privateCollection }
+                .map(\.id)
+        )
+        guard Set(libraryIDs).isSubset(of: permittedLibraryIDs) else {
+            throw ServerIdentityRepositoryError.invalidIdentifier
+        }
+        let grants = libraryIDs.map {
+            ServerLibraryGrant(
+                userID: id,
+                libraryID: $0,
+                canView: true,
+                canPlay: true,
+                canDownload: false
+            )
+        }
+        try repository.updateManagedUser(
+            userID: id,
+            displayName: trimmedDisplayName,
+            roleID: ServerIdentityRepository.memberRoleID,
+            libraryGrants: grants,
+            disabled: user.isDisabled,
+            actorUserID: actorUserID
+        )
+    }
+
+    /// 管理员只能重置普通成员密码；仓储会在同一事务中撤销其全部会话并写审计。
+    func resetMemberPassword(id: String, password: String, actorUserID: String) throws {
+        guard id != ServerIdentityRepository.initialAdministratorUserID,
+              try repository.roleIDs(userID: id) == [ServerIdentityRepository.memberRoleID],
+              let passwordHasher
+        else { throw ServerIdentityRepositoryError.userNotFound }
+        guard (12...1_024).contains(password.utf8.count) else {
+            throw ServerIdentityRepositoryError.invalidIdentifier
+        }
+        let hash = try passwordHasher.hash(password: password)
+        try repository.resetCredential(
+            userID: id,
+            argon2idEncodedHash: hash,
+            actorUserID: actorUserID
+        )
     }
 
     private static func isSafeIdentifier(_ value: String) -> Bool {

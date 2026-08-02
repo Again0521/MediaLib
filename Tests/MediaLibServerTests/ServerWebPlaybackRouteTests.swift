@@ -20,6 +20,7 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         resolution: "1920x1080",
         artworkAvailable: true,
         backdropAvailable: false,
+        browserContentType: "video/mp4",
         canDirectPlay: true,
         canTranscode: true,
         userState: ServerMediaUserState(
@@ -68,9 +69,10 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertFalse(html.contains("<script>alert(1)</script>"))
         XCTAssertFalse(html.contains("</style><script>bad()</script>"))
         XCTAssertTrue(html.contains("content=\"known-csrf\""))
-        XCTAssertTrue(html.contains("src=\"/assets/player.js\""))
+        XCTAssertTrue(html.contains("src=\"/assets/player.js?v=66\""))
         XCTAssertTrue(html.contains("href=\"/assets/player.css\""))
         XCTAssertTrue(html.contains("data-item-id=\"movie-1\""))
+        XCTAssertTrue(html.contains("data-browser-content-type=\"video/mp4\""))
         XCTAssertTrue(html.contains("data-resume-position=\"300.0\""))
         XCTAssertTrue(html.contains("id=\"user-playback-state\""))
         XCTAssertTrue(html.contains("id=\"technical-info\""))
@@ -131,6 +133,9 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertTrue(script.contains("credentials: 'same-origin'"))
         XCTAssertTrue(script.contains("encodeURIComponent(itemID)"))
         XCTAssertTrue(script.contains("pagehide"))
+        XCTAssertTrue(script.contains("medialib:pagewillunload"))
+        XCTAssertTrue(script.contains("AbortController"))
+        XCTAssertTrue(script.contains("lifecycle.signal"))
         XCTAssertTrue(script.contains("timeupdate"))
         XCTAssertTrue(script.contains("loadedmetadata"))
         XCTAssertTrue(script.contains("JSON.stringify({ event, positionSeconds, durationSeconds })"))
@@ -140,10 +145,15 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertTrue(script.contains("requestPictureInPicture"))
         XCTAssertTrue(script.contains("keydown"))
         XCTAssertTrue(script.contains("scheduleAutomaticNext"))
+        XCTAssertTrue(script.contains("播放完成。"))
+        XCTAssertTrue(script.contains("已暂停。"))
         XCTAssertTrue(script.contains("#autoplay"))
         XCTAssertTrue(script.contains("window.location.assign"))
         XCTAssertTrue(script.contains("textContent"))
         XCTAssertTrue(script.contains("replaceChildren"))
+        XCTAssertTrue(script.contains("browserCanPlay"))
+        XCTAssertTrue(script.contains("canPlayType(browserContentType)"))
+        XCTAssertTrue(script.contains("当前浏览器不支持"))
         XCTAssertFalse(script.contains("innerHTML"))
         XCTAssertFalse(script.contains("insertAdjacentHTML"))
         XCTAssertFalse(script.contains("document.cookie"))
@@ -153,6 +163,55 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertFalse(script.contains("/api/v1/playback/hls/"))
         XCTAssertFalse(script.contains("/api/v1/hls/"))
         XCTAssertFalse(script.contains("ffmpeg"))
+    }
+
+    func testDownloadRouteRequiresSeparatePermissionAndUsesGenericAttachmentName() {
+        let asset = ServerMediaAsset(
+            id: "movie-1",
+            fileURL: URL(fileURLWithPath: "/Users/example/Private Title.mkv"),
+            byteLength: 42
+        )
+        let allowed = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            mediaAssetProvider: { itemID, principal, permission in
+                guard itemID == "movie-1",
+                      permission == .downloadMedia,
+                      principal.permissions.contains(.downloadMedia)
+                else { return nil }
+                return asset
+            },
+            authenticationProvider: { head in
+                head.contains("Authorization: Bearer viewer")
+                    ? ServerRequestPrincipal(
+                        userID: "viewer", deviceID: "device", sessionID: "session",
+                        permissions: [.viewMedia, .playMedia, .downloadMedia], libraryGrants: [:]
+                    )
+                    : nil
+            }
+        )
+        let response = allowed.response(for: request("/api/v1/download/movie-1", token: "viewer"))
+        let headers = String(data: response.serializedHeaders(), encoding: .utf8) ?? ""
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(response.declaredContentLength, 42)
+        XCTAssertTrue(headers.contains("Content-Disposition: attachment; filename=\"MediaLIB-download.mkv\""))
+        XCTAssertFalse(headers.contains("Private Title"))
+
+        let denied = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            mediaAssetProvider: { _, principal, permission in
+                principal.permissions.contains(.downloadMedia) && permission == .downloadMedia ? asset : nil
+            },
+            authenticationProvider: { head in
+                head.contains("Authorization: Bearer viewer")
+                    ? ServerRequestPrincipal(
+                        userID: "viewer", deviceID: "device", sessionID: "session",
+                        permissions: [.viewMedia, .playMedia], libraryGrants: [:]
+                    )
+                    : nil
+            }
+        )
+        XCTAssertEqual(denied.response(for: request("/api/v1/download/movie-1", token: "viewer")).statusCode, 404)
     }
 
     func testEpisodeNavigationControlsUseSafeServerDerivedLinks() {
@@ -172,6 +231,7 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertTrue(html.contains("href=\"/item/episode-1\""))
         XCTAssertTrue(html.contains("id=\"next-episode\""))
         XCTAssertTrue(html.contains("href=\"/item/episode-3\""))
+        XCTAssertTrue(html.contains("class=\"back\" href=\"/library\""))
         XCTAssertTrue(html.contains("id=\"automatic-next\""))
         XCTAssertTrue(html.contains("id=\"cancel-automatic-next\""))
         XCTAssertTrue(html.contains("&lt;上一集&gt;"))

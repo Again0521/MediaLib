@@ -22,17 +22,29 @@ final class ServerModeProcessController: ObservableObject {
 
     @Published private(set) var status: Status = .stopped
     private var process: Process?
+    private var readinessTask: Task<Void, Never>?
     private let executableURLProvider: @MainActor () throws -> URL
+    private let readinessChecker: (ServerModeConfiguration) async -> Bool
+    private let readinessTimeout: TimeInterval
 
     init() {
         executableURLProvider = Self.defaultServerExecutableURL
+        readinessChecker = ServerModeProcessController.defaultReadinessChecker
+        readinessTimeout = 5
     }
 
-    init(executableURLProvider: @escaping @MainActor () throws -> URL) {
+    init(
+        executableURLProvider: @escaping @MainActor () throws -> URL,
+        readinessChecker: @escaping (ServerModeConfiguration) async -> Bool = ServerModeProcessController.defaultReadinessChecker,
+        readinessTimeout: TimeInterval = 5
+    ) {
         self.executableURLProvider = executableURLProvider
+        self.readinessChecker = readinessChecker
+        self.readinessTimeout = max(readinessTimeout, 0.05)
     }
 
     deinit {
+        readinessTask?.cancel()
         process?.terminate()
     }
 
@@ -51,6 +63,16 @@ final class ServerModeProcessController: ObservableObject {
             environment["MEDIALIB_SERVER_ID"] = configuration.serverID
             environment["MEDIALIB_SERVER_NAME"] = configuration.serverName
             environment["MEDIALIB_SERVER_LIGHTWEIGHT"] = configuration.isLightweightMode ? "1" : "0"
+            if let publicOrigin = configuration.publicOrigin {
+                environment["MEDIALIB_SERVER_PUBLIC_ORIGIN"] = publicOrigin
+            } else {
+                environment.removeValue(forKey: "MEDIALIB_SERVER_PUBLIC_ORIGIN")
+            }
+            if configuration.trustedProxyAddresses.isEmpty {
+                environment.removeValue(forKey: "MEDIALIB_SERVER_TRUSTED_PROXIES")
+            } else {
+                environment["MEDIALIB_SERVER_TRUSTED_PROXIES"] = configuration.trustedProxyAddresses.joined(separator: ",")
+            }
             process.environment = environment
             process.qualityOfService = configuration.isLightweightMode ? .utility : .userInitiated
             process.standardOutput = FileHandle.nullDevice
@@ -59,6 +81,8 @@ final class ServerModeProcessController: ObservableObject {
                 let code = terminatedProcess.terminationStatus
                 Task { @MainActor in
                     guard let self, self.process === process else { return }
+                    self.readinessTask?.cancel()
+                    self.readinessTask = nil
                     self.process = nil
                     if terminatedProcess.terminationReason == .exit && code == 0 {
                         self.status = .stopped
@@ -70,7 +94,29 @@ final class ServerModeProcessController: ObservableObject {
 
             try process.run()
             self.process = process
-            status = .running
+            // Process.run() only proves that the child was forked. The Web button and
+            // status must not claim availability until the actual HTTP health endpoint
+            // responds; this closes the port-race/slow-database startup window.
+            readinessTask?.cancel()
+            readinessTask = Task { [weak self, weak process] in
+                guard let self, let process else { return }
+                let deadline = Date().addingTimeInterval(self.readinessTimeout)
+                while !Task.isCancelled, Date() < deadline {
+                    guard process.isRunning else { return }
+                    if await self.readinessChecker(configuration) {
+                        guard process.isRunning, self.process === process else { return }
+                        self.status = .running
+                        self.readinessTask = nil
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                guard !Task.isCancelled, self.process === process else { return }
+                self.process = nil
+                if process.isRunning { process.terminate() }
+                self.status = .failed("服务进程未在 \(Int(self.readinessTimeout.rounded(.up))) 秒内通过 Web 健康检查。")
+                self.readinessTask = nil
+            }
         } catch {
             status = .failed(error.localizedDescription)
             throw error
@@ -78,6 +124,8 @@ final class ServerModeProcessController: ObservableObject {
     }
 
     func stop() {
+        readinessTask?.cancel()
+        readinessTask = nil
         guard let process else {
             status = .stopped
             return
@@ -93,9 +141,13 @@ final class ServerModeProcessController: ObservableObject {
     /// 避免仅更新 UI 状态后仍有旧进程短暂持有数据库或认证状态。
     func stopAndWaitForExit(timeout: TimeInterval = 5) async -> Bool {
         guard let process else {
+            readinessTask?.cancel()
+            readinessTask = nil
             status = .stopped
             return true
         }
+        readinessTask?.cancel()
+        readinessTask = nil
         // 先解除 terminationHandler 与当前控制器的身份关联，主动终止不应被报告为崩溃。
         self.process = nil
         if process.isRunning { process.terminate() }
@@ -109,6 +161,17 @@ final class ServerModeProcessController: ObservableObject {
         }
         status = .stopped
         return true
+    }
+
+    private static func defaultReadinessChecker(_ configuration: ServerModeConfiguration) async -> Bool {
+        var request = URLRequest(url: configuration.loopbackBaseURL.appendingPathComponent("health"))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 0.5
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let httpResponse = response as? HTTPURLResponse
+        else { return false }
+        return httpResponse.statusCode == 200
     }
 
     private static func defaultServerExecutableURL() throws -> URL {

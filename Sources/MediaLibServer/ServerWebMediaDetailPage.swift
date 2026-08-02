@@ -8,7 +8,8 @@ enum ServerWebMediaDetailPage {
         serverName: String,
         detail: ServerMediaItemDetail,
         csrfToken: String,
-        showAdministration: Bool
+        showAdministration: Bool,
+        categories: [ServerLibraryCategory] = []
     ) -> String {
         let year = detail.year.map(String.init) ?? "年份未知"
         let runtime = detail.runtimeSeconds.map(formatDuration) ?? "片长未知"
@@ -19,10 +20,16 @@ enum ServerWebMediaDetailPage {
             "<p class=\"original-title\">\(escape($0))</p>"
         } ?? ""
         let sidebar = ServerWebNavigation.render(
-            active: .library, showAdministration: showAdministration, note: .playback
+            active: .library, showAdministration: showAdministration, note: .playback,
+            categories: categories
         )
         let canDirectPlay = detail.canDirectPlay ? "true" : "false"
         let directDisabled = detail.canDirectPlay ? "" : " disabled aria-disabled=\"true\""
+        let browserContentType = detail.browserContentType.map(escape) ?? ""
+        let downloadControl: String = {
+            guard detail.canDownload, let encodedID = ServerWebURL.pathSegment(detail.id) else { return "" }
+            return "<a id=\"download-media\" class=\"download-control\" href=\"/api/v1/download/\(encodedID)\" download>下载原文件</a>"
+        }()
         let resumePosition = detail.userState?.positionSeconds ?? 0
         let preferenceRating = detail.userPreference.rating.map { String(format: "%.1f", $0) } ?? "0"
         let preferenceRatingSummary = detail.userPreference.rating.map { String(format: "%.1f / 5", $0) } ?? "未评分"
@@ -58,14 +65,15 @@ enum ServerWebMediaDetailPage {
           <meta name="medialib-csrf-token" content="\(escape(csrfToken))">
           <title>\(escape(detail.title)) · \(escape(serverName))</title>
           <link rel="stylesheet" href="/assets/player.css">
-          <link rel="stylesheet" href="/assets/app-shell.css">
+          <link rel="stylesheet" href="/assets/app-shell.css?v=68">
+          <script src="/assets/app-shell.js?v=68" defer></script>
         </head>
-        <body data-item-id="\(escape(detail.id))" data-can-direct-play="\(canDirectPlay)" data-resume-position="\(resumePosition)" data-is-watched="\(detail.userState?.isWatched == true ? "true" : "false")" data-is-favorite="\(detail.userPreference.isFavorite ? "true" : "false")" data-is-watchlist="\(detail.userPreference.isWatchlist ? "true" : "false")" data-preference-rating="\(preferenceRating)">
+        <body data-item-id="\(escape(detail.id))" data-can-direct-play="\(canDirectPlay)" data-browser-content-type="\(browserContentType)" data-resume-position="\(resumePosition)" data-is-watched="\(detail.userState?.isWatched == true ? "true" : "false")" data-is-favorite="\(detail.userPreference.isFavorite ? "true" : "false")" data-is-watchlist="\(detail.userPreference.isWatchlist ? "true" : "false")" data-preference-rating="\(preferenceRating)">
           <a class="skip" href="#main">跳到主要内容</a>
           <div class="shell">
             \(sidebar)
             <main id="main" tabindex="-1">
-              <a class="back" href="/">← 返回资料库</a>
+              <a class="back" href="/library">← 返回资料库</a>
               <section class="hero" aria-labelledby="item-title">
                 \(posterContent)
                 <div><h1 id="item-title">\(escape(detail.title))</h1>\(originalTitle)<ul class="facts"><li>\(escape(detail.type))</li><li>\(escape(year))</li><li>\(escape(runtime))</li><li>\(escape(rating))</li><li>\(escape(genres))</li></ul><p class="overview">\(escape(overview))</p></div>
@@ -73,16 +81,16 @@ enum ServerWebMediaDetailPage {
               <section class="player-card" aria-labelledby="player-heading">
                 <h2 id="player-heading" class="skip">Web 播放器</h2>
                 <div id="player-stage" class="player-stage"><video id="player" controls playsinline preload="metadata" aria-label="\(escape(detail.title)) 播放器"></video></div>
-                <div class="player-controls"><button id="direct-play" class="primary" type="button"\(directDisabled)>在浏览器中播放</button>\(previousEpisodeControl)\(nextEpisodeControl)\(automaticNextEpisodeControls)<button id="reset-playback" type="button">重置观看进度</button><label class="speed-control" for="playback-speed">速度<select id="playback-speed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label><button id="fullscreen" type="button" hidden>全屏</button><button id="picture-in-picture" type="button" hidden>画中画</button><p id="player-status" class="status" role="status" aria-live="polite">网页播放器会使用浏览器原生媒体解码能力。</p></div>
+                <div class="player-controls"><button id="direct-play" class="primary" type="button"\(directDisabled)>在浏览器中播放</button>\(downloadControl)\(previousEpisodeControl)\(nextEpisodeControl)\(automaticNextEpisodeControls)<button id="reset-playback" type="button">重置观看进度</button><label class="speed-control" for="playback-speed">速度<select id="playback-speed"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label><button id="fullscreen" type="button" hidden>全屏</button><button id="picture-in-picture" type="button" hidden>画中画</button><p id="player-status" class="status" role="status" aria-live="polite">网页播放器会使用浏览器原生媒体解码能力。</p></div>
                 <p id="support-note" class="support-note">MediaLIB 仅提供当前账号有权访问的同源媒体字节流、续播状态和元数据；编码格式是否可播放由当前浏览器决定。</p>
                 <details id="technical-info" class="technical-info"><summary>播放信息与轨道</summary><p id="stream-info-status" role="status" aria-live="polite">展开后显示此媒体的容器、码率及浏览器原生控制栏可使用的音频/字幕轨道。</p><ul id="stream-list" class="stream-list" aria-label="媒体轨道"></ul></details>
               </section>
-              <section class="preferences" aria-labelledby="preferences-heading"><h2 id="preferences-heading">我的清单</h2><button id="toggle-favorite" type="button" aria-pressed="\(detail.userPreference.isFavorite ? "true" : "false")">\(detail.userPreference.isFavorite ? "已收藏" : "收藏")</button><button id="toggle-watchlist" type="button" aria-pressed="\(detail.userPreference.isWatchlist ? "true" : "false")">\(detail.userPreference.isWatchlist ? "已加入想看" : "加入想看")</button><label class="rating-control" for="user-rating">我的评分<input id="user-rating" type="range" min="0" max="5" step="0.5" value="\(preferenceRating)"><output id="user-rating-value" for="user-rating">\(preferenceRatingSummary)</output></label><p>这些标记仅属于当前登录用户；不会修改媒体文件，也不会向其他用户公开。</p></section>
+              <section class="preferences" aria-labelledby="preferences-heading"><h2 id="preferences-heading">我的清单</h2><button id="add-to-queue" type="button">加入播放队列</button><button id="toggle-favorite" type="button" aria-pressed="\(detail.userPreference.isFavorite ? "true" : "false")">\(detail.userPreference.isFavorite ? "已收藏" : "收藏")</button><button id="toggle-watchlist" type="button" aria-pressed="\(detail.userPreference.isWatchlist ? "true" : "false")">\(detail.userPreference.isWatchlist ? "已加入想看" : "加入想看")</button><label class="rating-control" for="user-rating">我的评分<input id="user-rating" type="range" min="0" max="5" step="0.5" value="\(preferenceRating)"><output id="user-rating-value" for="user-rating">\(preferenceRatingSummary)</output></label><p>这些标记仅属于当前登录用户；不会修改媒体文件，也不会向其他用户公开。</p></section>
               <section class="details" aria-label="媒体与用户信息"><article class="detail-card"><span>当前用户</span><strong id="user-playback-state">\(escape(userStateSummary))</strong></article><article class="detail-card"><span>分辨率</span><strong>\(escape(detail.resolution ?? "未知"))</strong></article><article class="detail-card"><span>视频编码</span><strong>\(escape(detail.videoCodec ?? "未知"))</strong></article><article class="detail-card"><span>音频编码</span><strong>\(escape(detail.audioCodec ?? "未知"))</strong></article></section>
               <footer>播放信息与媒体字节继续受当前用户、设备、会话和资料库权限检查；未知或无权媒体统一返回 404。</footer>
             </main>
           </div>
-          <script src="/assets/player.js" defer></script>
+          <script src="/assets/player.js?v=66" defer></script>
         </body>
         </html>
         """
@@ -104,7 +112,7 @@ enum ServerWebMediaDetailPage {
     .facts { display:flex; flex-wrap:wrap; gap:8px; margin:20px 0 0; padding:0; list-style:none; } .facts li { padding:6px 10px; border:1px solid #cad8e7; border-radius:999px; color:#42526a; background:#fff; font-size:13px; }
     .overview { max-width:75ch; margin:24px 0 0; color:#3d4b60; white-space:pre-wrap; overflow-wrap:anywhere; }
     .player-card { margin-top:36px; overflow:hidden; border:1px solid var(--stage-line); border-radius:18px; background:var(--stage); box-shadow:0 20px 50px #0b1d3040; } .player-stage { display:grid; place-items:center; min-width:0; min-height:260px; background:#030a12; } video { display:block; inline-size:100%; max-inline-size:100%; min-inline-size:0; block-size:auto; max-height:min(72vh,820px); background:#000; }
-    .player-controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:16px; color:#dcecff; } button,.player-nav,.speed-control select { min-height:44px; padding:10px 16px; border:1px solid #5c7894; border-radius:11px; color:#fff; background:#173b5d; font:inherit; font-weight:750; cursor:pointer; transition:background-color .18s ease,border-color .18s ease; } .player-nav { display:inline-flex; align-items:center; text-decoration:none; } button.primary { border-color:#4ba4f4; background:#1469b4; } button:hover,.player-nav:hover,.speed-control select:hover { border-color:#8bc8ff; background:#21527d; } button:disabled { cursor:not-allowed; opacity:.48; } .speed-control { display:flex; align-items:center; gap:7px; min-height:44px; color:#dcecff; font-size:14px; font-weight:700; } .speed-control select { min-width:78px; padding-block:7px; }
+    .player-controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:16px; color:#dcecff; } button,.player-nav,.download-control,.speed-control select { min-height:44px; padding:10px 16px; border:1px solid #5c7894; border-radius:11px; color:#fff; background:#173b5d; font:inherit; font-weight:750; cursor:pointer; transition:background-color .18s ease,border-color .18s ease; } .player-nav,.download-control { display:inline-flex; align-items:center; text-decoration:none; } button.primary { border-color:#4ba4f4; background:#1469b4; } button:hover,.player-nav:hover,.download-control:hover,.speed-control select:hover { border-color:#8bc8ff; background:#21527d; } button:disabled { cursor:not-allowed; opacity:.48; } .speed-control { display:flex; align-items:center; gap:7px; min-height:44px; color:#dcecff; font-size:14px; font-weight:700; } .speed-control select { min-width:78px; padding-block:7px; }
     .status { flex:1 1 280px; margin:0; color:#c7d9eb; } .status.error { color:#ffb4ae; } .automatic-next-controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; color:#dcecff; font-size:14px; font-weight:700; } .automatic-next-controls label { display:flex; gap:8px; align-items:center; min-height:44px; padding:10px 12px; border:1px solid #5c7894; border-radius:11px; background:#102f4b; } .automatic-next-controls input { width:18px; height:18px; accent-color:#4ba4f4; } .support-note { margin:0; padding:0 16px 16px; color:#9fb6cc; font-size:13px; }
     .technical-info { margin:0 16px 16px; border-top:1px solid #29445d; color:#dcecff; } .technical-info summary { min-height:44px; padding:12px 0; font-weight:750; cursor:pointer; } .technical-info p { margin:0 0 12px; color:#c7d9eb; font-size:14px; } .stream-list { display:grid; gap:8px; margin:0; padding:0 0 2px; list-style:none; } .stream-list li { padding:9px 11px; border:1px solid #34536f; border-radius:9px; color:#dcecff; background:#0e2439; font-size:13px; overflow-wrap:anywhere; }
     .preferences { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-top:24px; padding:18px; border:1px solid var(--line); border-radius:15px; background:var(--surface); } .preferences h2 { flex:1 0 100%; margin:0; font-size:18px; } .preferences p { flex:1 0 100%; margin:0; color:var(--muted); font-size:14px; } .preferences button { border-color:#b8cae0; color:var(--primary-strong); background:#f5f9fd; } .preferences button[aria-pressed=\"true\"] { border-color:#2e90fa; color:#fff; background:var(--primary); } .rating-control { display:flex; flex:1 1 220px; align-items:center; gap:10px; min-height:44px; color:#34435a; font-size:14px; font-weight:750; } .rating-control input { width:min(180px,45vw); accent-color:var(--primary); } .rating-control output { min-width:52px; color:var(--primary-strong); text-align:right; }
@@ -128,6 +136,7 @@ enum ServerWebMediaDetailPage {
       const speedControl = document.getElementById('playback-speed');
       const fullscreenButton = document.getElementById('fullscreen');
       const pictureInPictureButton = document.getElementById('picture-in-picture');
+      const addToQueueButton = document.getElementById('add-to-queue');
       const favoriteButton = document.getElementById('toggle-favorite');
       const watchlistButton = document.getElementById('toggle-watchlist');
       const ratingControl = document.getElementById('user-rating');
@@ -139,7 +148,9 @@ enum ServerWebMediaDetailPage {
       const streamList = document.getElementById('stream-list');
       const itemID = document.body.dataset.itemId || '';
       const canDirectPlay = document.body.dataset.canDirectPlay === 'true';
+      const browserContentType = document.body.dataset.browserContentType || '';
       const resumePosition = Number(document.body.dataset.resumePosition || 0);
+      const lifecycle = new AbortController();
       const subtitlePath = (trackID) => `/api/v1/subtitles/${encodeURIComponent(itemID)}/${encodeURIComponent(String(trackID))}`;
       const csrfToken = document.querySelector('meta[name="medialib-csrf-token"]')?.content || '';
       let isStarting = false;
@@ -149,6 +160,7 @@ enum ServerWebMediaDetailPage {
       let streamInfoLoaded = false;
       let sidecarSubtitlesLoaded = false;
       let automaticNextTimer = null;
+      let playbackCompleted = false;
       let preference = {
         isFavorite: document.body.dataset.isFavorite === 'true',
         isWatchlist: document.body.dataset.isWatchlist === 'true',
@@ -162,6 +174,8 @@ enum ServerWebMediaDetailPage {
       const setBusy = (busy) => {
         isStarting = busy;
         directButton.disabled = busy || !canDirectPlay;
+        if (busy) directButton.textContent = '正在准备播放…';
+        else if (!playbackCompleted) directButton.textContent = hasPlayableSource() ? '重新播放' : '在浏览器中播放';
       };
       const nextEpisodeURL = () => {
         if (!(nextEpisodeLink instanceof HTMLAnchorElement)) return null;
@@ -178,7 +192,10 @@ enum ServerWebMediaDetailPage {
       };
       const scheduleAutomaticNext = () => {
         const target = nextEpisodeURL();
-        if (!automaticNextToggle?.checked || !target) return;
+        if (!automaticNextToggle?.checked || !target) {
+          setStatus('播放完成。');
+          return;
+        }
         cancelAutomaticNext();
         let remaining = 7;
         if (cancelAutomaticNextButton) cancelAutomaticNextButton.hidden = false;
@@ -256,8 +273,28 @@ enum ServerWebMediaDetailPage {
           control.disabled = false;
         }
       }
+      async function addToQueue() {
+        if (!itemID || !addToQueueButton) return;
+        addToQueueButton.disabled = true;
+        try {
+          const response = await fetch('/api/v1/queue', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'X-MediaLIB-CSRF': csrfToken },
+            body: JSON.stringify({ action: 'add', mediaID: itemID })
+          });
+          if (response.status === 401) { window.location.assign('/login'); return; }
+          if (!response.ok) throw new Error('unavailable');
+          await response.json();
+          addToQueueButton.textContent = '已加入播放队列';
+          setStatus('已加入播放队列。');
+        } catch (_) {
+          addToQueueButton.disabled = false;
+          setStatus('无法加入播放队列，请稍后重试。', true);
+        }
+      }
       const finitePlaybackNumber = (value) => Number.isFinite(value) && value >= 0 ? value : 0;
       const hasPlayableSource = () => typeof player.currentSrc === 'string' && player.currentSrc.length > 0;
+      const browserCanPlay = () => !browserContentType || typeof player.canPlayType !== 'function' || player.canPlayType(browserContentType) !== '';
       const displayValue = (value, fallback = '未知') => {
         if (typeof value !== 'string') return fallback;
         const normalized = value.trim();
@@ -385,9 +422,14 @@ enum ServerWebMediaDetailPage {
         resumeApplied = false;
         playbackStartedReported = false;
         lastProgressBucket = -1;
+        playbackCompleted = false;
       };
       async function startDirect() {
         if (!canDirectPlay || isStarting) return;
+        if (!browserCanPlay()) {
+          setStatus(`当前浏览器不支持 ${browserContentType}，服务端暂未配置转码。`, true);
+          return;
+        }
         setBusy(true);
         prepareNewSource();
         player.src = mediaPath('/api/v1/stream/');
@@ -404,8 +446,14 @@ enum ServerWebMediaDetailPage {
 
       directButton.disabled = !canDirectPlay;
       if (!canDirectPlay) setStatus('此条目没有当前账号可用的浏览器播放权限。', true);
+      else if (!browserCanPlay()) {
+        directButton.disabled = true;
+        directButton.setAttribute('aria-disabled', 'true');
+        setStatus(`当前浏览器不支持 ${browserContentType}，服务端暂未配置转码。`, true);
+      }
       renderPreference();
       directButton.addEventListener('click', startDirect);
+      addToQueueButton?.addEventListener('click', () => { void addToQueue(); });
       cancelAutomaticNextButton?.addEventListener('click', () => cancelAutomaticNext(true));
       resetPlaybackButton.addEventListener('click', resetPlaybackState);
       favoriteButton.addEventListener('click', () => {
@@ -428,7 +476,7 @@ enum ServerWebMediaDetailPage {
       fullscreenButton.addEventListener('click', toggleFullscreen);
       pictureInPictureButton.hidden = !document.pictureInPictureEnabled || typeof player.requestPictureInPicture !== 'function';
       pictureInPictureButton.addEventListener('click', togglePictureInPicture);
-      document.addEventListener('fullscreenchange', updateFullscreenLabel);
+      document.addEventListener('fullscreenchange', updateFullscreenLabel, { signal: lifecycle.signal });
       document.addEventListener('keydown', (event) => {
         if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || isEditableTarget(event.target)) return;
         if (event.key === ' ' || event.key === 'Spacebar') { event.preventDefault(); void togglePlayback(); }
@@ -436,12 +484,13 @@ enum ServerWebMediaDetailPage {
         else if (event.key === 'ArrowRight') { event.preventDefault(); seekBy(5); }
         else if (event.key.toLowerCase() === 'f' && !fullscreenButton.hidden) { event.preventDefault(); void toggleFullscreen(); }
         else if (event.key.toLowerCase() === 'm') { player.muted = !player.muted; setStatus(player.muted ? '已静音。' : '已取消静音。'); }
-      });
+      }, { signal: lifecycle.signal });
       technicalInfo.addEventListener('toggle', () => {
         if (technicalInfo.open) void loadStreamInfo();
       });
       player.addEventListener('playing', () => {
         setStatus('正在直接播放。');
+        directButton.textContent = '重新播放';
         if (!playbackStartedReported) {
           playbackStartedReported = true;
           void reportPlaybackState('started');
@@ -464,9 +513,16 @@ enum ServerWebMediaDetailPage {
           cancelAutomaticNext();
           void reportPlaybackState('stopped');
         }
+        if (!player.ended && !isStarting && hasPlayableSource()) setStatus('已暂停。');
       });
       player.addEventListener('ended', () => {
-        if (!playbackStartedReported) return;
+        playbackCompleted = true;
+        directButton.disabled = !canDirectPlay;
+        directButton.textContent = '重新播放';
+        if (!playbackStartedReported) {
+          scheduleAutomaticNext();
+          return;
+        }
         playbackStartedReported = false;
         void reportPlaybackState('completed');
         scheduleAutomaticNext();
@@ -477,7 +533,12 @@ enum ServerWebMediaDetailPage {
       window.addEventListener('pagehide', () => {
         cancelAutomaticNext();
         if (playbackStartedReported) void reportPlaybackState('stopped', true);
-      });
+      }, { signal: lifecycle.signal });
+      document.addEventListener('medialib:pagewillunload', () => {
+        cancelAutomaticNext();
+        if (playbackStartedReported) void reportPlaybackState('stopped', true);
+        lifecycle.abort();
+      }, { once: true });
       if (window.location.hash === '#autoplay' && canDirectPlay) {
         history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
         window.setTimeout(() => { void startDirect(); }, 0);

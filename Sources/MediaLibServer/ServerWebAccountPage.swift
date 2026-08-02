@@ -1,11 +1,18 @@
 import Foundation
+import MediaLibServerProtocol
 
 /// 当前认证用户自己的账户页。个人资料由受权 API 读取，注销只撤销当前会话；网页从不
 /// 读取 Cookie、令牌或其它用户资料。
 enum ServerWebAccountPage {
-    static func render(serverName: String, csrfToken: String, showAdministration: Bool) -> String {
+    static func render(serverName: String, csrfToken: String, showAdministration: Bool, categories: [ServerLibraryCategory] = []) -> String {
         let sidebar = ServerWebNavigation.render(
-            active: .account, showAdministration: showAdministration, note: .none
+            active: .account, showAdministration: showAdministration, note: .none, categories: categories
+        )
+        let pageHeader = ServerWebPageHeader.render(
+            icon: .account,
+            eyebrow: "我的媒体",
+            title: "我的账户",
+            subtitle: "查看当前登录身份和已生效权限；Cookie、令牌与会话标识不会显示。"
         )
         return """
         <!doctype html>
@@ -17,11 +24,12 @@ enum ServerWebAccountPage {
           <meta name="medialib-csrf-token" content="\(escape(csrfToken))">
           <title>我的账户 · \(escape(serverName))</title>
           <link rel="stylesheet" href="/assets/account.css">
-          <link rel="stylesheet" href="/assets/app-shell.css">
+          <link rel="stylesheet" href="/assets/app-shell.css?v=68">
+          <script src="/assets/app-shell.js?v=68" defer></script>
         </head>
         <body>
           <a class="skip" href="#main">跳到主要内容</a>
-          <div class="shell">\(sidebar)<main id="main" tabindex="-1"><h1>我的账户</h1><p class="subtitle">查看此浏览器当前登录身份和已生效权限。此页面不显示 Cookie、令牌、会话标识或其他用户数据。</p><section class="card" aria-labelledby="profile-title"><h2 id="profile-title">登录身份</h2><p id="profile-state" class="state" role="status" aria-live="polite">正在加载账户资料…</p><dl id="profile" class="meta" hidden><dt>显示名称</dt><dd id="display-name">—</dd><dt>用户名</dt><dd id="username">—</dd><dt>角色</dt><dd id="roles" class="pills">—</dd><dt>已生效权限</dt><dd id="permissions" class="pills">—</dd></dl></section><section class="card" aria-labelledby="password-title"><h2 id="password-title">修改密码</h2><p class="subtitle">验证当前密码后，所有已登录设备都会退出；请使用新密码重新登录。</p><form id="change-password"><label>当前密码<input id="current-password" type="password" autocomplete="current-password" maxlength="1024" required></label><label>新密码<input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label><label>确认新密码<input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label><button id="change-password-submit" class="password-submit" type="submit">修改密码并退出所有设备</button><p id="password-state" class="state" role="status" aria-live="polite"></p></form></section><section class="card" aria-labelledby="logout-title"><h2 id="logout-title">当前设备</h2><p class="subtitle">退出只会撤销当前浏览器会话；其它设备仍可在服务管理页按权限单独处理。</p><button id="logout" type="button">退出当前账户</button><p id="logout-state" class="state" role="status" aria-live="polite"></p></section></main></div>
+          <div class="shell">\(sidebar)<main id="main" tabindex="-1">\(pageHeader)<section class="card" aria-labelledby="profile-title"><h2 id="profile-title">登录身份</h2><p id="profile-state" class="state" role="status" aria-live="polite">正在加载账户资料…</p><dl id="profile" class="meta" hidden><dt>显示名称</dt><dd id="display-name">—</dd><dt>用户名</dt><dd id="username">—</dd><dt>角色</dt><dd id="roles" class="pills">—</dd><dt>已生效权限</dt><dd id="permissions" class="pills">—</dd></dl></section><section class="card" aria-labelledby="password-title"><h2 id="password-title">修改密码</h2><p class="subtitle">验证当前密码后，所有已登录设备都会退出；请使用新密码重新登录。</p><form id="change-password"><label>当前密码<input id="current-password" type="password" autocomplete="current-password" maxlength="1024" required></label><label>新密码<input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label><label>确认新密码<input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label><button id="change-password-submit" class="password-submit" type="submit">修改密码并退出所有设备</button><p id="password-state" class="state" role="status" aria-live="polite"></p></form></section><section class="card" aria-labelledby="logout-title"><h2 id="logout-title">当前设备</h2><p class="subtitle">退出只会撤销当前浏览器会话；其它设备仍可在服务管理页按权限单独处理。</p><button id="logout" type="button">退出当前账户</button><p id="logout-state" class="state" role="status" aria-live="polite"></p></section></main></div>
           <script src="/assets/account.js" defer></script>
         </body>
         </html>

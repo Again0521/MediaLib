@@ -127,6 +127,7 @@ final class ServerProtocolModelsTests: XCTestCase {
             resolution: "3840x2160",
             artworkAvailable: true,
             backdropAvailable: true,
+            browserContentType: " video/mp4 ",
             canDirectPlay: true,
             canTranscode: true
         )
@@ -134,6 +135,8 @@ final class ServerProtocolModelsTests: XCTestCase {
         let text = String(data: data, encoding: .utf8)?.lowercased() ?? ""
 
         XCTAssertEqual(try JSONDecoder().decode(ServerMediaItemDetail.self, from: data), detail)
+        XCTAssertEqual(detail.browserContentType, "video/mp4")
+        XCTAssertTrue(String(data: data, encoding: .utf8)?.contains("browserContentType") ?? false)
         for forbiddenField in [
             "filepath", "sourcepath", "posterpath", "backdroppath", "externalid",
             "playposition", "playprogress", "userid", "deviceid", "sessionid", "token", "digest"
@@ -148,6 +151,7 @@ final class ServerProtocolModelsTests: XCTestCase {
 
         XCTAssertNil(detail.previousEpisode)
         XCTAssertNil(detail.nextEpisode)
+        XCTAssertNil(detail.browserContentType)
     }
 
     func testPerUserPlaybackStateRoundTripsWithoutIdentityOrPathAndRejectsInvalidUpdates() throws {

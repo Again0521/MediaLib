@@ -53,6 +53,8 @@ struct SettingsView: View {
     @State private var autoStartMusicMetadataConsole = false
     @State private var serverModeNameDraft = ""
     @State private var serverModePortDraft = ""
+    @State private var serverModePublicOriginDraft = ""
+    @State private var serverModeTrustedProxiesDraft = ""
     /// 高级选项开关：关闭时（默认）隐藏未做完 / 不建议小白修改的进阶分区
     /// （服务端预览、Trakt、账号同步、数据诊断，以及音乐主题 JSON 微调行）。
     /// 仅控制显隐，不影响已保存的配置。用 AppStorage 持久化，属纯 UI 偏好。
@@ -209,6 +211,12 @@ struct SettingsView: View {
             }
             if serverModePortDraft.isEmpty {
                 serverModePortDraft = String(appState.serverModeConfiguration.port)
+            }
+            if serverModePublicOriginDraft.isEmpty {
+                serverModePublicOriginDraft = appState.serverModeConfiguration.publicOrigin ?? ""
+            }
+            if serverModeTrustedProxiesDraft.isEmpty {
+                serverModeTrustedProxiesDraft = appState.serverModeConfiguration.trustedProxyAddresses.joined(separator: ", ")
             }
         }
         .task {
@@ -1126,7 +1134,7 @@ struct SettingsView: View {
     }
 
     private var serverModeSettings: some View {
-        SettingsSection(title: "服务端（预览）", subtitle: "在本机启动 MediaLIB 服务进程，为网页与 Mlink 客户端协议做准备。", systemImage: "server.rack") {
+        SettingsSection(title: "服务端", subtitle: "启动 MediaLIB Web 服务；网页负责播放解码，桌面客户端只提供 Mlink 来源目录。", systemImage: "server.rack") {
             SettingsRow(title: "服务模式", systemImage: "power") {
                 Toggle("服务模式", isOn: Binding(get: {
                     appState.serverModeConfiguration.isEnabled
@@ -1237,7 +1245,9 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                 Button("打开 Web") {
-                    NSWorkspace.shared.open(appState.serverModeConfiguration.loopbackBaseURL)
+                    NSWorkspace.shared.open(
+                        appState.serverModeConfiguration.publicOriginURL ?? appState.serverModeConfiguration.loopbackBaseURL
+                    )
                 }
                 .settingsActionButton()
                 .disabled(
@@ -1246,7 +1256,31 @@ struct SettingsView: View {
                 )
             }
 
-            SettingsDescription(text: "轻量服务模式会停止桌面端封面/横版图等非必要视觉预热，并将服务子进程设为 utility QoS；扫描、索引、认证和媒体分发不会被关闭。名称、端口或轻量策略在服务运行时会安全重启。当前仅监听 127.0.0.1，登录后可在本机 Web 查看资料库，并由浏览器通过受权 Range 媒体源原生解码；服务端不会启动网页转码。尚不接受局域网或公网连接。服务器身份会持久化保存。")
+            SettingsRow(title: "公开 HTTPS 地址", systemImage: "lock.shield") {
+                TextField("https://media.example.com", text: $serverModePublicOriginDraft)
+                    .onSubmit {
+                        appState.updateServerModePublicOrigin(serverModePublicOriginDraft)
+                        serverModePublicOriginDraft = appState.serverModeConfiguration.publicOrigin ?? ""
+                    }
+                    .settingsTextInput(
+                        text: serverModePublicOriginDraft,
+                        maxWidth: SettingsControlMetrics.wideControlWidth
+                    )
+            }
+
+            SettingsRow(title: "受信代理地址", systemImage: "arrow.triangle.branch") {
+                TextField("127.0.0.1", text: $serverModeTrustedProxiesDraft)
+                    .onSubmit {
+                        appState.updateServerModeTrustedProxyAddresses(serverModeTrustedProxiesDraft)
+                        serverModeTrustedProxiesDraft = appState.serverModeConfiguration.trustedProxyAddresses.joined(separator: ", ")
+                    }
+                    .settingsTextInput(
+                        text: serverModeTrustedProxiesDraft,
+                        maxWidth: SettingsControlMetrics.wideControlWidth
+                    )
+            }
+
+            SettingsDescription(text: "轻量服务模式会停止桌面端封面/横版图等非必要视觉预热，并将服务子进程设为 utility QoS；扫描、索引、认证和媒体分发不会被关闭。名称、端口或轻量策略在服务运行时会安全重启。默认仅监听 127.0.0.1，登录后可在本机 Web 查看资料库，并由浏览器通过受权 Range 媒体源原生解码；服务端不会启动网页转码。若填写公开 HTTPS 地址，必须由本机反向代理终止 TLS，并只填写代理的精确 IPv4 地址；服务不会直接接受明文远程连接。服务器身份会持久化保存。")
         }
     }
 
