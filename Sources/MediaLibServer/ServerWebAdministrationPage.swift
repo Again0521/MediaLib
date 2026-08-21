@@ -4,88 +4,227 @@ import MediaLibServerProtocol
 /// 只读 Web 管理总览。动态数据全部由同源脚本通过受保护 API 获取，并使用
 /// `textContent` 渲染；页面本身不内嵌用户数据、令牌或数据库实体。
 enum ServerWebAdministrationPage {
-    static func render(serverName: String, csrfToken: String, categories: [ServerLibraryCategory] = []) -> String {
+    static func render(serverName: String, csrfToken: String, categories: [ServerLibraryCategory] = [], sidebarExtras: ServerWebSidebarExtras) -> String {
         let sidebar = ServerWebNavigation.render(
-            active: .administration, showAdministration: true, note: .security, categories: categories
+            active: .administration, showAdministration: true, note: .security, categories: categories,
+            extras: sidebarExtras
         )
-        let pageHeader = ServerWebPageHeader.render(
+        let content = """
+        \(ServerWebPageHeader.render(
             icon: .administration,
-            eyebrow: "管理",
+            eyebrow: "Administration",
             title: "服务管理",
-            subtitle: "\(serverName) 的用户、资料库授权、活动设备、会话与安全事件均经逐操作权限检查。"
-        )
-        return """
-        <!doctype html>
-        <html lang="zh-Hans">
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <meta name="color-scheme" content="light">
-          <meta name="medialib-csrf-token" content="\(escape(csrfToken))">
-          <title>服务管理 · \(escape(serverName))</title>
-          <link rel="stylesheet" href="/assets/admin.css">
-          <link rel="stylesheet" href="/assets/app-shell.css?v=68">
-          <script src="/assets/app-shell.js?v=68" defer></script>
-        </head>
-        <body>
-          <a class="skip" href="#main">跳到主要内容</a>
-          <div class="shell">
-            \(sidebar)
-            <main id="main" tabindex="-1">
-              <div class="topline">\(pageHeader)<button id="refresh" type="button">刷新数据</button></div>
-              <div id="global-status" class="notice" role="status" aria-live="polite">正在加载管理数据…</div>
-              <section class="panel" aria-labelledby="create-user-title"><div class="panel-head"><div><h2 id="create-user-title">创建成员</h2><p class="panel-copy">仅创建普通成员；资料库访问必须显式勾选，并要求 libraries.manage 权限。</p></div></div><form id="create-member" class="create-form"><div class="form-grid"><label>显示名称<input id="new-display-name" name="displayName" type="text" maxlength="256" autocomplete="name" required></label><label>用户名<input id="new-username" name="username" type="text" maxlength="128" autocomplete="username" required></label></div><label>初始密码<input id="new-password" name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required></label><fieldset><legend>允许播放的资料库</legend><p id="library-selection-state" class="form-note" role="status">正在加载可授权资料库…</p><div id="library-options" class="library-options" hidden></div></fieldset><p class="form-note">新成员默认不具备下载、编辑或管理员权限。密码只用于本次提交，不会显示、保存或写入审计。</p><button id="create-member-submit" type="submit">创建成员</button><p id="create-member-state" class="state" role="status" aria-live="polite"></p></form></section>
-              <section id="member-edit-panel" class="panel" aria-labelledby="edit-user-title" hidden><div class="panel-head"><div><h2 id="edit-user-title">编辑成员访问</h2><p class="panel-copy">只可编辑普通成员显示名和资料库访问；保存后该成员的现有会话会失效。</p></div></div><form id="edit-member" class="create-form"><div class="form-grid"><label>显示名称<input id="edit-display-name" name="displayName" type="text" maxlength="256" autocomplete="name" required></label><label>用户名<input id="edit-username" type="text" readonly></label></div><fieldset><legend>允许播放的资料库</legend><p id="edit-library-selection-state" class="form-note">请选择资料库。</p><div id="edit-library-options" class="library-options" hidden></div></fieldset><label>重置密码（可选）<input id="edit-password" name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" placeholder="留空则不修改"></label><div class="edit-actions"><button id="edit-member-submit" type="submit">保存访问</button><button id="edit-member-cancel" type="button">取消</button></div><p id="edit-member-state" class="state" role="status" aria-live="polite"></p></form></section>
-              <div class="dashboard">
-                <section class="panel" aria-labelledby="users-title"><div class="panel-head"><div><h2 id="users-title">用户</h2><p class="panel-copy">需要 users.manage 权限</p></div><span id="users-count" class="count" aria-label="用户数量">—</span></div><p id="users-state" class="state">正在加载…</p><div id="users-content" class="content" hidden></div></section>
-                <section class="panel" aria-labelledby="sessions-title"><div class="panel-head"><div><h2 id="sessions-title">活动设备与会话</h2><p class="panel-copy">需要 sessions.manage 权限；不显示 IP、User-Agent 或令牌</p></div><span id="sessions-count" class="count" aria-label="会话数量">—</span></div><p id="sessions-state" class="state">正在加载…</p><div id="sessions-content" class="content" hidden></div></section>
-                <section class="panel events" aria-labelledby="events-title"><div class="panel-head"><div><h2 id="events-title">安全事件</h2><p class="panel-copy">需要 server.manage 权限；最多显示最近 100 条</p></div><span id="events-count" class="count" aria-label="安全事件数量">—</span></div><p id="events-state" class="state">正在加载…</p><div id="events-content" class="content" hidden></div></section>
-              </div>
-              <footer>管理操作受角色、资料库授权、CSRF、限速和审计保护 · 响应不包含密码、Cookie、token、摘要、媒体路径、请求头或客户端地址。</footer>
-            </main>
+            subtitle: "管理谁能使用 \(serverName)，以及他们能看到什么。",
+            actions: ServerWebUI.button("刷新数据", variant: .secondary, icon: .refresh, id: "refresh")
+        ))
+        \(ServerWebUI.alert(.info, message: "正在加载管理数据…", id: "global-status", messageID: "global-status-text", role: "status"))
+
+        <section class="ui-card admin-panel" aria-labelledby="create-user-title">
+          <div class="ui-card-head">
+            <div>
+              <h2 class="ui-card-title" id="create-user-title">创建成员</h2>
+              <p class="t-footnote t-tertiary">仅创建普通成员；资料库访问必须显式勾选，并要求 libraries.manage 权限。</p>
+            </div>
           </div>
-          <script src="/assets/admin.js" defer></script>
-        </body>
-        </html>
+          <form id="create-member" class="admin-form">
+            <div class="admin-form-grid">
+              <div class="ui-field">
+                <label class="ui-label ui-label-required" for="new-display-name">显示名称</label>
+                <input class="ui-input" id="new-display-name" name="displayName" type="text" maxlength="256" autocomplete="name" required>
+              </div>
+              <div class="ui-field">
+                <label class="ui-label ui-label-required" for="new-username">用户名</label>
+                <input class="ui-input" id="new-username" name="username" type="text" maxlength="128" autocomplete="username" required>
+              </div>
+            </div>
+            <div class="ui-field">
+              <label class="ui-label ui-label-required" for="new-password">初始密码</label>
+              <input class="ui-input" id="new-password" name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required aria-describedby="new-password-note">
+              <p class="ui-help" id="new-password-note">至少 12 个字符。密码只用于本次提交，不会显示、保存或写入审计。</p>
+            </div>
+            <fieldset class="admin-fieldset">
+              <legend class="ui-label">允许播放的资料库</legend>
+              <p id="library-selection-state" class="ui-help" role="status">正在加载可授权资料库…</p>
+              <div id="library-options" class="library-options" hidden></div>
+            </fieldset>
+            <p class="ui-help">新成员默认不具备下载、编辑或管理员权限。</p>
+            \(ServerWebUI.button("创建成员", variant: .primary, icon: .plusCircle, id: "create-member-submit", type: "submit"))
+            <p id="create-member-state" class="ui-state-line admin-state t-footnote" role="status" aria-live="polite"></p>
+          </form>
+        </section>
+
+        <section id="member-edit-panel" class="ui-card admin-panel" aria-labelledby="edit-user-title" hidden>
+          <div class="ui-card-head">
+            <div>
+              <h2 class="ui-card-title" id="edit-user-title">编辑成员访问</h2>
+              <p class="t-footnote t-tertiary">只可编辑普通成员显示名和资料库访问；保存后该成员的现有会话会失效。</p>
+            </div>
+          </div>
+          <form id="edit-member" class="admin-form">
+            <div class="admin-form-grid">
+              <div class="ui-field">
+                <label class="ui-label ui-label-required" for="edit-display-name">显示名称</label>
+                <input class="ui-input" id="edit-display-name" name="displayName" type="text" maxlength="256" autocomplete="name" required>
+              </div>
+              <div class="ui-field">
+                <label class="ui-label" for="edit-username">用户名</label>
+                <input class="ui-input" id="edit-username" type="text" readonly>
+              </div>
+            </div>
+            <fieldset class="admin-fieldset">
+              <legend class="ui-label">允许播放的资料库</legend>
+              <p id="edit-library-selection-state" class="ui-help">请选择资料库。</p>
+              <div id="edit-library-options" class="library-options" hidden></div>
+            </fieldset>
+            <div class="ui-field">
+              <label class="ui-label" for="edit-password">重置密码（可选）</label>
+              <input class="ui-input" id="edit-password" name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" placeholder="留空则不修改">
+            </div>
+            <div class="edit-actions">
+              \(ServerWebUI.button("保存访问", variant: .primary, icon: .check, id: "edit-member-submit", type: "submit"))
+              \(ServerWebUI.button("取消", variant: .ghost, id: "edit-member-cancel"))
+            </div>
+            <p id="edit-member-state" class="ui-state-line admin-state t-footnote" role="status" aria-live="polite"></p>
+          </form>
+        </section>
+
+        <div class="admin-dashboard">
+          \(dataPanel(id: "users", title: "用户", note: "谁可以使用这台服务器"))
+          \(dataPanel(id: "sessions", title: "已登录的设备", note: "最近登录过的设备"))
+          \(dataPanel(id: "events", title: "安全记录", note: "最近 100 条登录与权限变更", extraClass: "admin-panel-wide"))
+        </div>
+        <p class="t-footnote t-tertiary admin-footnote">管理操作受角色、资料库授权、CSRF、限速和审计保护 · 响应不包含密码、Cookie、token、摘要、媒体路径、请求头或客户端地址。</p>
+        """
+        return ServerWebDocument.render(
+            title: "服务管理",
+            serverName: serverName,
+            csrfToken: csrfToken,
+            sidebar: sidebar,
+            content: content,
+            pageStylesheets: ["/assets/admin.css"],
+            pageScripts: ["/assets/overlays.js", "/assets/admin.js"],
+            tint: .admin
+        )
+    }
+
+    /// The three read-only panels share one shape, so they share one builder;
+    /// their ids remain the contract `admin.js` fills in.
+    private static func dataPanel(id: String, title: String, note: String, extraClass: String = "") -> String {
+        """
+        <section class="ui-card admin-panel \(extraClass)" aria-labelledby="\(id)-title">
+          <div class="ui-card-head">
+            <div>
+              <h2 class="ui-card-title" id="\(id)-title">\(ServerWebHTML.escape(title))</h2>
+              <p class="t-footnote t-tertiary">\(ServerWebHTML.escape(note))</p>
+            </div>
+            <span id="\(id)-count" class="ui-badge ui-badge-neutral">—</span>
+          </div>
+          <p id="\(id)-state" class="ui-state-line admin-state t-callout t-tertiary">正在加载…</p>
+          <div id="\(id)-content" class="content" hidden></div>
+        </section>
         """
     }
 
     /// Fixed administration UI. User, library, session and audit information must
     /// only come from permission-gated APIs and never from this cacheable asset.
-    static let style = """
-    :root { --primary:#1e5f9e; --primary-strong:#174d82; --sky:#2e90fa; --ink:#172033; --muted:#5d6b82; --line:#dfe7f1; --canvas:#f4f7fb; --surface:#fff; --success:#087a55; --danger:#b42318; --focus:#1570ef; }
-    * { box-sizing:border-box; } html { background:var(--canvas); } body { margin:0; color:var(--ink); background:var(--canvas); font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-    a { color:inherit; } button,a { touch-action:manipulation; } :focus-visible { outline:3px solid var(--focus); outline-offset:3px; }
-    .skip { position:fixed; z-index:1000; top:8px; left:8px; padding:10px 14px; border-radius:9px; color:#fff; background:var(--primary-strong); transform:translateY(-160%); } .skip:focus { transform:none; }
-    .shell { display:grid; grid-template-columns:232px minmax(0,1fr); min-height:100dvh; }
-    aside { padding:28px 18px; color:#eef7ff; background:linear-gradient(165deg,#183b68,#1e79cf 58%,#36bffa); }
-    .brand { display:flex; gap:10px; align-items:center; font-size:19px; font-weight:800; } .brand-mark { display:grid; place-items:center; width:36px; height:36px; border-radius:11px; color:#176cb5; background:#fff; box-shadow:0 8px 18px #123c6a55; }
-    nav { display:grid; gap:8px; margin-top:38px; } nav a { display:flex; align-items:center; min-height:44px; padding:10px 12px; border-radius:10px; text-decoration:none; } nav a:hover { background:#ffffff1c; } nav a.active { background:#ffffff2e; font-weight:700; }
-    .boundary { margin-top:28px; padding:14px; border:1px solid #ffffff38; border-radius:14px; background:#153e6d55; font-size:13px; }
-    main { width:100%; max-width:1440px; padding:clamp(22px,4vw,48px); }
-    .topline { display:flex; gap:20px; align-items:flex-start; justify-content:space-between; } h1 { margin:0; font-size:clamp(28px,4vw,42px); line-height:1.15; letter-spacing:-.035em; } .subtitle { max-width:70ch; margin:10px 0 0; color:var(--muted); }
-    button { min-height:44px; padding:10px 16px; border:1px solid #b9c9dd; border-radius:11px; color:var(--primary-strong); background:var(--surface); font:inherit; font-weight:700; cursor:pointer; transition:background-color .18s ease,border-color .18s ease; } button:hover { border-color:#7ca8d4; background:#f3f8fd; } button:disabled { cursor:not-allowed; opacity:.5; }
-    .notice { margin-top:24px; padding:13px 15px; border:1px solid #b8d8f5; border-radius:12px; color:#164f7d; background:#eaf6ff; }
-    .dashboard { display:grid; gap:18px; margin-top:24px; } .panel { overflow:hidden; border:1px solid var(--line); border-radius:16px; background:var(--surface); box-shadow:0 10px 28px #243a620d; }
-    .panel-head { display:flex; gap:16px; align-items:flex-start; justify-content:space-between; padding:18px 20px; border-bottom:1px solid var(--line); } .panel h2 { margin:0; font-size:18px; } .panel-copy { margin:4px 0 0; color:var(--muted); font-size:14px; }
-    .count { flex:none; min-width:36px; padding:4px 9px; border-radius:999px; color:#185f9c; background:#e7f3ff; text-align:center; font-variant-numeric:tabular-nums; font-size:13px; font-weight:800; }
-    .state { min-height:76px; padding:22px 20px; color:var(--muted); } .state.error { color:var(--danger); } .state[hidden],.content[hidden],.panel[hidden] { display:none; }
-    .content { padding:4px 20px 20px; } .rows { display:grid; } .row { display:grid; grid-template-columns:minmax(150px,1.2fr) minmax(130px,1fr) minmax(160px,1.2fr) minmax(120px,.8fr); gap:16px; align-items:center; min-height:66px; border-bottom:1px solid #edf1f6; } .row:last-child { border-bottom:0; }
-    .primary { min-width:0; font-weight:700; overflow-wrap:anywhere; } .secondary,.meta { color:var(--muted); font-size:14px; overflow-wrap:anywhere; } .mono { font-variant-numeric:tabular-nums; font-feature-settings:"tnum"; }
-    .pill { display:inline-flex; align-items:center; min-height:28px; padding:3px 9px; border:1px solid #b9d7ef; border-radius:999px; color:#155b92; background:#f0f8ff; font-size:12px; font-weight:700; } .pill.danger { border-color:#f2c0bc; color:var(--danger); background:#fff3f2; }
-    .events .row { grid-template-columns:minmax(155px,.9fr) minmax(180px,1.2fr) minmax(100px,.6fr) minmax(190px,1.2fr); }
-    .create-form { display:grid; gap:14px; padding:20px; } .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; } label { display:grid; gap:6px; color:var(--muted); font-size:14px; font-weight:700; } input { min-height:44px; width:100%; padding:10px 11px; border:1px solid #b9c9dd; border-radius:10px; color:var(--ink); background:#fff; font:inherit; } input[readonly] { color:var(--muted); background:#f6f8fb; } input:focus { border-color:var(--focus); outline:0; box-shadow:0 0 0 3px #1570ef22; } fieldset { margin:0; padding:14px; border:1px solid var(--line); border-radius:12px; } legend { padding:0 5px; color:var(--muted); font-size:14px; font-weight:700; } .library-options { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; } .library-option { display:flex; gap:9px; align-items:flex-start; min-height:44px; padding:8px; border-radius:9px; color:var(--ink); background:#f7faff; font-weight:600; } .library-option input { flex:none; width:18px; min-height:18px; margin:3px 0 0; accent-color:var(--primary); } .form-note { margin:0; color:var(--muted); font-size:13px; } .create-form button { justify-self:start; } .edit-actions { display:flex; flex-wrap:wrap; gap:10px; } .edit-actions button { min-width:120px; } .edit-actions button[type=button] { color:var(--muted); background:#f7f9fc; }
-    footer { margin:28px 0 8px; color:var(--muted); font-size:13px; }
-    @media (max-width:880px) { .shell { display:block; } aside { padding:16px 18px; } nav { display:flex; overflow-x:auto; margin-top:14px; } nav a { flex:none; } .boundary { display:none; } main { padding:24px 18px 40px; } .row,.events .row { grid-template-columns:1fr 1fr; gap:7px 14px; padding:13px 0; } }
-    @media (max-width:560px) { .topline { display:block; } .topline button { width:100%; margin-top:18px; } .panel-head { padding:16px; } .content { padding:2px 16px 16px; } .row,.events .row,.form-grid { grid-template-columns:1fr; gap:4px; min-height:0; padding:14px 0; } .create-form button { width:100%; } }
-    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { scroll-behavior:auto!important; transition-duration:.01ms!important; } }
-    """
+    static let style = #"""
+    /* 这条提示走公共的 `.ui-alert`。它与媒体源页的 `.sources-notice` 此前是两个
+       名字、一份逐字相同的规则，而两者本来就是同一个组件。 */
+    #global-status { margin-bottom: var(--space-5); }
+    .admin-panel + .admin-panel, .admin-dashboard { margin-top: var(--space-5); }
+    .admin-panel .ui-card-head { align-items: flex-start; }
+    .content[hidden], .admin-state[hidden] { display: none; }
+
+    .admin-form { display: grid; gap: var(--space-4); max-width: 620px; }
+    .admin-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+    .admin-form .ui-btn { justify-self: start; }
+    .admin-fieldset {
+      display: grid;
+      gap: var(--space-2);
+      padding: var(--space-4);
+      border: var(--hairline) solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--surface-sunken);
+    }
+    .admin-fieldset legend { padding: 0 var(--space-2); }
+    .library-options { display: grid; gap: var(--space-1); }
+    .library-options label {
+      display: flex;
+      min-height: var(--control-height-lg);
+      align-items: center;
+      gap: var(--space-3);
+      font-size: var(--type-callout-size);
+      cursor: pointer;
+    }
+    .library-options input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      flex: none;
+      margin: 0;
+      accent-color: var(--accent);
+    }
+    .edit-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+    /* Users and sessions sit side by side; the audit log takes the full width
+       because its rows are long and wrapping them twice is worse than scrolling. */
+    .admin-dashboard {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: var(--space-5);
+    }
+    .admin-panel-wide { grid-column: 1 / -1; }
+
+    .rows { display: grid; }
+    /* Rows adapt to the card they land in rather than assuming a wide one.
+       These panels sit in a `minmax(320px, 1fr)` dashboard, so a fixed
+       three-column row squeezed a device name and an expiry date into ~50px
+       columns and wrapped both to four lines each.  Flex with a real basis lets
+       the same row read as one line in a wide panel and as a stack in a narrow
+       one. */
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--space-1) var(--space-3);
+      min-height: 56px;
+      padding: var(--space-2) 0;
+      border-bottom: var(--hairline) solid var(--divider);
+    }
+    .row > * { min-width: 0; }
+    .row .primary { flex: 1 1 150px; }
+    .row .secondary { flex: 1 1 150px; }
+    .row .meta { flex: 1 1 190px; }
+    .row-trail {
+      display: flex;
+      flex: 0 0 auto;
+      align-items: center;
+      margin-left: auto;
+      gap: var(--space-2);
+    }
+    .row:last-child { border-bottom: 0; }
+    .row .primary { font-size: var(--type-callout-size); font-weight: var(--weight-medium); overflow-wrap: anywhere; }
+    .row .secondary, .row small, .row .meta {
+      color: var(--text-tertiary);
+      font-size: var(--type-footnote-size);
+      overflow-wrap: anywhere;
+    }
+    .admin-footnote { padding-top: var(--space-6); }
+
+    @media (max-width: 719px) {
+      .admin-form-grid { grid-template-columns: minmax(0, 1fr); }
+      .row > * { flex: 1 1 100%; }
+      .row-trail { flex: 1 1 100%; margin-left: 0; }
+      .admin-form .ui-btn, .edit-actions .ui-btn { width: 100%; }
+    }
+    """#
 
     static let script = #"""
     (() => {
       'use strict';
       const byID = (id) => document.getElementById(id);
       const globalStatus = byID('global-status');
+      // 文案写进内层节点：往外层写会把提示图标一起抹掉。
+      const globalStatusText = byID('global-status-text');
       const refreshButton = byID('refresh');
       const createForm = byID('create-member');
       const createSubmit = byID('create-member-submit');
@@ -102,8 +241,8 @@ enum ServerWebAdministrationPage {
       const editPassword = byID('edit-password');
       const editLibrarySelectionState = byID('edit-library-selection-state');
       const editLibraryOptions = byID('edit-library-options');
-      let availableLibraries = [];
-      let editingUser = null;
+      var availableLibraries = [];
+      var editingUser = null;
       const dateFormatter = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
       const safeDate = (value) => {
         const date = new Date(value);
@@ -150,7 +289,7 @@ enum ServerWebAdministrationPage {
             window.location.assign('/login');
             throw new Error('登录已失效');
           }
-          if (response.status === 403) throw new Error('当前账号没有查看此区域的权限');
+          if (response.status === 403) throw new Error('你没有查看这部分内容的权限。');
           if (!response.ok) throw new Error(response.status === 429 ? '请求过于频繁，请稍后刷新' : '服务暂时无法读取此区域');
           return await response.json();
         } finally {
@@ -172,7 +311,7 @@ enum ServerWebAdministrationPage {
           editLibraryOptions.append(label);
         });
         editLibraryOptions.hidden = !editLibraryOptions.childElementCount;
-        editLibrarySelectionState.textContent = availableLibraries.length ? '仅勾选成员可浏览和播放的资料库。' : '当前没有可授权的非保险库资料库。';
+        editLibrarySelectionState.textContent = availableLibraries.length ? '仅勾选成员可浏览和播放的资料库。' : '目前没有可以分配的资料库。';
       }
       function renderLibraries(data) {
         const libraries = Array.isArray(data.libraries) ? data.libraries.filter((library) =>
@@ -182,7 +321,7 @@ enum ServerWebAdministrationPage {
         availableLibraries = libraries.slice(0, 500);
         libraryOptions.replaceChildren();
         if (!availableLibraries.length) {
-          librarySelectionState.textContent = '当前没有可授权的非保险库资料库；可创建无资料库访问的成员。';
+          librarySelectionState.textContent = '目前没有可以分配的资料库，不过仍然可以先把人加进来。';
           libraryOptions.hidden = true;
           renderEditLibraryOptions([]);
           return;
@@ -198,7 +337,7 @@ enum ServerWebAdministrationPage {
           libraryOptions.append(label);
         });
         libraryOptions.hidden = !libraryOptions.childElementCount;
-        librarySelectionState.textContent = libraryOptions.childElementCount ? '仅勾选新成员可浏览和播放的资料库。' : '当前没有可授权的非保险库资料库。';
+        librarySelectionState.textContent = libraryOptions.childElementCount ? '仅勾选新成员可浏览和播放的资料库。' : '目前没有可以分配的资料库。';
         renderEditLibraryOptions(editingUser ? editingUser.libraryIDs : []);
       }
       function setLibraryLoadFailure(message) {
@@ -235,7 +374,7 @@ enum ServerWebAdministrationPage {
             body: JSON.stringify({ username, displayName, password, libraryIDs })
           });
           if (response.status === 401) { window.location.assign('/login'); return; }
-          if (response.status === 403) throw new Error('当前账号没有创建成员或授予所选资料库的权限。');
+          if (response.status === 403) throw new Error('你没有添加用户或分配资料库的权限。');
           if (!response.ok) throw new Error(response.status === 429 ? '操作过于频繁，请稍后重试。' : '无法创建成员，请检查输入或更换用户名后重试。');
           createForm.reset();
           createState.textContent = '成员已创建。';
@@ -281,7 +420,7 @@ enum ServerWebAdministrationPage {
           .slice(0, 100);
         if (!displayName || new TextEncoder().encode(displayName).length > 256) {
           editState.classList.add('error');
-          editState.textContent = '显示名称不能为空且不能超过 256 字节。';
+          editState.textContent = '名称不能为空，也不能太长。';
           editDisplayName.focus();
           return;
         }
@@ -304,7 +443,7 @@ enum ServerWebAdministrationPage {
             body: JSON.stringify({ displayName, libraryIDs })
           });
           if (accessResponse.status === 401) { window.location.assign('/login'); return; }
-          if (accessResponse.status === 403) throw new Error('当前账号没有编辑成员资料库权限。');
+          if (accessResponse.status === 403) throw new Error('你没有修改用户可访问范围的权限。');
           if (!accessResponse.ok) throw new Error(accessResponse.status === 429 ? '操作过于频繁，请稍后重试。' : '无法保存成员访问，请检查输入后重试。');
           if (password) {
             const passwordResponse = await fetch(`/api/v1/admin/users/${encodedID}/password`, {
@@ -313,11 +452,11 @@ enum ServerWebAdministrationPage {
               body: JSON.stringify({ password })
             });
             if (passwordResponse.status === 401) { window.location.assign('/login'); return; }
-            if (passwordResponse.status === 403) throw new Error('当前账号没有重置成员密码权限。');
+            if (passwordResponse.status === 403) throw new Error('你没有重置密码的权限。');
             if (!passwordResponse.ok) throw new Error(passwordResponse.status === 429 ? '操作过于频繁，请稍后重试。' : '访问已保存，但密码未更新。');
           }
           editPassword.value = '';
-          editState.textContent = password ? '成员访问和密码已更新；现有会话已撤销。' : '成员访问已更新；现有会话已撤销。';
+          editState.textContent = password ? '已更新。TA 的设备需要重新登录。' : '已更新。TA 的设备需要重新登录。';
           await load();
         } catch (error) {
           editState.classList.add('error');
@@ -372,10 +511,10 @@ enum ServerWebAdministrationPage {
       async function setUserAvailability(id, disabled, button) {
         if (typeof id !== 'string' || !id) return;
         const action = disabled ? '停用' : '启用';
-        if (!window.confirm(`${action}此用户${disabled ? '会撤销其所有已登录会话' : ''}。是否继续？`)) return;
+        if (!window.confirm(`${action}此用户${disabled ? '会让 TA 的所有设备退出登录' : ''}。是否继续？`)) return;
         button.disabled = true;
         globalStatus.hidden = false;
-        globalStatus.textContent = `正在${action}用户…`;
+        globalStatusText.textContent = `正在${action}用户…`;
         try {
           const token = document.querySelector('meta[name="medialib-csrf-token"]')?.getAttribute('content');
           if (!token) throw new Error('页面安全令牌不可用，请刷新后重试');
@@ -383,12 +522,12 @@ enum ServerWebAdministrationPage {
             method: 'POST', credentials: 'same-origin', headers: { 'X-MediaLIB-CSRF': token }
           });
           if (response.status === 401) { window.location.assign('/login'); return; }
-          if (response.status === 403) throw new Error('当前账号没有管理用户的权限');
+          if (response.status === 403) throw new Error('你没有管理用户的权限。');
           if (!response.ok) throw new Error(response.status === 429 ? '操作过于频繁，请稍后重试' : '无法更新用户状态');
-          globalStatus.textContent = `用户已${action}。`;
+          globalStatusText.textContent = `用户已${action}。`;
           await load();
         } catch (error) {
-          globalStatus.textContent = error && error.message ? error.message : '更新用户状态失败，请稍后重试。';
+          globalStatusText.textContent = error && error.message ? error.message : '更新用户状态失败，请稍后重试。';
           button.disabled = false;
         }
       }
@@ -396,7 +535,7 @@ enum ServerWebAdministrationPage {
         const devices = Array.isArray(data.devices) ? data.devices : [];
         const sessions = Array.isArray(data.sessions) ? data.sessions : [];
         byID('sessions-count').textContent = String(sessions.length);
-        if (!devices.length && !sessions.length) { setState('sessions', '当前没有活动设备或登录会话。'); return; }
+        if (!devices.length && !sessions.length) { setState('sessions', '目前没有设备登录。'); return; }
         const deviceByID = new Map(devices.map((device) => [device.id, device]));
         const rows = element('div', 'rows');
         sessions.forEach((session) => {
@@ -405,8 +544,8 @@ enum ServerWebAdministrationPage {
           const revoke = element('button', 'revoke-session', '撤销');
           revoke.type = 'button';
           revoke.addEventListener('click', () => revokeSession(session.id, revoke));
-          const actions = element('div');
-          actions.append(element('span', 'pill', `至 ${safeDate(session.refreshExpiresAt)}`), revoke);
+          const actions = element('div', 'row-trail');
+          actions.append(element('span', 'ui-badge ui-badge-neutral', `至 ${safeDate(session.refreshExpiresAt)}`), revoke);
           rows.append(row([
             element('div', 'primary', user ? (user.displayName || user.username) : shortID(session.userID)),
             element('div', 'secondary', device ? `${device.name} · ${device.platform}` : shortID(session.deviceID)),
@@ -417,10 +556,10 @@ enum ServerWebAdministrationPage {
         showContent('sessions', rows);
       }
       async function revokeSession(id, button) {
-        if (typeof id !== 'string' || !id || !window.confirm('撤销此会话后，该设备需要重新登录。是否继续？')) return;
+        if (typeof id !== 'string' || !id || !window.confirm('这台设备将需要重新登录。要继续吗？')) return;
         button.disabled = true;
         globalStatus.hidden = false;
-        globalStatus.textContent = '正在撤销会话…';
+        globalStatusText.textContent = '正在退出…';
         try {
           const token = document.querySelector('meta[name="medialib-csrf-token"]')?.getAttribute('content');
           if (!token) throw new Error('页面安全令牌不可用，请刷新后重试');
@@ -428,12 +567,12 @@ enum ServerWebAdministrationPage {
             method: 'POST', credentials: 'same-origin', headers: { 'X-MediaLIB-CSRF': token }
           });
           if (response.status === 401) { window.location.assign('/login'); return; }
-          if (response.status === 403) throw new Error('当前账号没有撤销会话的权限');
-          if (!response.ok) throw new Error(response.status === 429 ? '操作过于频繁，请稍后重试' : '无法撤销该会话');
-          globalStatus.textContent = '会话已撤销。';
+          if (response.status === 403) throw new Error('你没有让设备退出登录的权限。');
+          if (!response.ok) throw new Error(response.status === 429 ? '操作过于频繁，请稍后重试' : '没能让这台设备退出');
+          globalStatusText.textContent = '这台设备已退出登录。';
           await load();
         } catch (error) {
-          globalStatus.textContent = error && error.message ? error.message : '撤销会话失败，请稍后重试。';
+          globalStatusText.textContent = error && error.message ? error.message : '没能退出，请稍后再试。';
           button.disabled = false;
         }
       }
@@ -456,7 +595,7 @@ enum ServerWebAdministrationPage {
       async function load() {
         refreshButton.disabled = true;
         globalStatus.hidden = false;
-        globalStatus.textContent = '正在加载管理数据…';
+        globalStatusText.textContent = '正在加载管理数据…';
         ['users', 'sessions', 'events'].forEach((name) => setState(name, '正在加载…'));
         const results = await Promise.allSettled([
           fetchJSON('/api/v1/admin/users'),
@@ -464,19 +603,19 @@ enum ServerWebAdministrationPage {
           fetchJSON('/api/v1/admin/security-events'),
           fetchJSON('/api/v1/admin/libraries')
         ]);
-        let failures = 0;
-        let usersByID = new Map();
+        var failures = 0;
+        var usersByID = new Map();
         if (results[0].status === 'fulfilled') {
           renderUsers(results[0].value);
           usersByID = new Map((results[0].value.users || []).map((user) => [user.id, user]));
         } else { failures += 1; setState('users', results[0].reason.message || '无法读取用户。', true); }
         if (results[1].status === 'fulfilled') renderSessions(results[1].value, usersByID);
-        else { failures += 1; setState('sessions', results[1].reason.message || '无法读取会话。', true); }
+        else { failures += 1; setState('sessions', results[1].reason.message || '读不到登录设备。', true); }
         if (results[2].status === 'fulfilled') renderEvents(results[2].value);
         else { failures += 1; setState('events', results[2].reason.message || '无法读取安全事件。', true); }
         if (results[3].status === 'fulfilled') renderLibraries(results[3].value);
-        else setLibraryLoadFailure('没有读取可授权资料库的权限；仍可创建无资料库访问的成员。');
-        globalStatus.textContent = failures ? `已加载，其中 ${failures} 个区域不可用。可检查账号权限后重试。` : '管理数据已更新。';
+        else setLibraryLoadFailure('看不到可分配的资料库，不过仍然可以先把人加进来。');
+        globalStatusText.textContent = failures ? `已加载，其中 ${failures} 个区域不可用。可检查账号权限后重试。` : '管理数据已更新。';
         refreshButton.disabled = false;
       }
       refreshButton.addEventListener('click', load);
@@ -484,18 +623,17 @@ enum ServerWebAdministrationPage {
       editForm.addEventListener('submit', saveMemberEdit);
       editCancel.addEventListener('click', closeEditUser);
       load().catch(() => {
-        globalStatus.textContent = '加载失败，请稍后重试。';
+        globalStatusText.textContent = '加载失败，请稍后重试。';
         refreshButton.disabled = false;
       });
     })();
     """#
 
-    private static func escape(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&#39;")
-    }
+    /// Delegates to the shared implementation in `ServerWebHTML`.
+    ///
+    /// Every page used to carry a private copy of this function — eighteen of
+    /// them — which meant eighteen places to audit and eighteen chances for one
+    /// to drift.  The local name is kept so the hundreds of call sites in this
+    /// file stay readable.
+    private static func escape(_ value: String) -> String { ServerWebHTML.escape(value) }
 }

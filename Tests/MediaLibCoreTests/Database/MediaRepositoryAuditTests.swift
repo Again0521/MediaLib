@@ -54,6 +54,62 @@ final class MediaRepositoryAuditTests: XCTestCase {
         XCTAssertEqual(fetched.first?.rating, 9.0)
     }
 
+    func testFetchServerMediaItemUsesAuthorizedSourceAndIDFilter() throws {
+        try repo.upsert(mediaItem(id: "authorized-item", sourcePath: "/library/allowed"))
+        try repo.upsert(mediaItem(id: "other-source-item", sourcePath: "/library/other"))
+        try repo.upsert(MediaItem(
+            id: "private-item",
+            type: .privateCollection,
+            title: "private-item",
+            sourcePath: "/library/allowed"
+        ))
+
+        let authorized = try repo.fetchServerMediaItem(
+            id: "authorized-item",
+            allowedSourcePaths: ["/library/allowed"]
+        )
+        XCTAssertEqual(authorized?.id, "authorized-item")
+        let batch = try repo.fetchServerMediaItems(
+            ids: ["authorized-item", "other-source-item", "authorized-item"],
+            allowedSourcePaths: ["/library/allowed"]
+        )
+        XCTAssertEqual(batch.map(\.id), ["authorized-item"])
+        XCTAssertNil(try repo.fetchServerMediaItem(id: "other-source-item", allowedSourcePaths: ["/library/allowed"]))
+        XCTAssertNil(try repo.fetchServerMediaItem(id: "private-item", allowedSourcePaths: ["/library/allowed"]))
+    }
+
+    func testServerMusicAndSeriesQueriesStayWithinAuthorizedSource() throws {
+        try repo.upsert(MediaItem(
+            id: "allowed-track", type: .music, title: "允许歌曲", artist: "艺术家", album: "专辑",
+            sourcePath: "/library/allowed", filePath: "/library/allowed/track.m4a"
+        ))
+        try repo.upsert(MediaItem(
+            id: "denied-track", type: .music, title: "拒绝歌曲",
+            sourcePath: "/library/other", filePath: "/library/other/track.m4a"
+        ))
+        try repo.upsert(MediaItem(
+            id: "episode-2", type: .episode, title: "第二集", sourcePath: "/library/allowed", parentID: "series-1",
+            seasonNumber: 1, episodeNumber: 2, filePath: "/library/allowed/e2.mp4"
+        ))
+        try repo.upsert(MediaItem(
+            id: "episode-1", type: .episode, title: "第一集", sourcePath: "/library/allowed", parentID: "series-1",
+            seasonNumber: 1, episodeNumber: 1, filePath: "/library/allowed/e1.mp4"
+        ))
+        try repo.upsert(MediaItem(
+            id: "denied-episode", type: .episode, title: "拒绝剧集", sourcePath: "/library/other", parentID: "series-1",
+            seasonNumber: 1, episodeNumber: 3, filePath: "/library/other/e3.mp4"
+        ))
+
+        XCTAssertEqual(
+            try repo.fetchServerMusicItems(allowedSourcePaths: ["/library/allowed"]).map(\.id),
+            ["allowed-track"]
+        )
+        XCTAssertEqual(
+            try repo.fetchServerSeriesEpisodes(allowedSourcePaths: ["/library/allowed"], seriesID: "series-1").map(\.id),
+            ["episode-1", "episode-2"]
+        )
+    }
+
     /// 测试当且仅当存在未撤销的历史订正记录时，upsert 绝不覆盖用户的标题
     func testUpsertProtectsUserCorrectedTitleFromRemoteScraperOverwrite() throws {
         let item = MediaItem(id: "media-protected", type: .movie, title: "用户精修专有译名")

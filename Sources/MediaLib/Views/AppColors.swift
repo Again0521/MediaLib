@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Foundation
 import ImageIO
+import MediaLibCore
 import OSLog
 import SwiftUI
 
@@ -372,20 +373,25 @@ enum AppColors {
 }
 
 enum AppMotion {
-    // 弹簧曲线由系统按当前显示器刷新率插值，避免线性匀速感；hover 也保持短弹簧而不是 ease-out。
-    // #3 “Q 弹”：通用过渡弹簧统一下调阻尼（更明显的回弹/微过冲）并略放长 response，让切换/出现/
-    // 悬停带一点弹性而不是生硬的 ease-out。音乐/歌词弹簧（musicPlayer/lyric/lyricFlow/lyricScroll）
-    // 已单独精调过、降阻尼会过冲，保持不动。
-    static let hover = Animation.spring(response: 0.22, dampingFraction: 0.80, blendDuration: 0.02)
-    static let listHover = Animation.spring(response: 0.20, dampingFraction: 0.81, blendDuration: 0.01)
-    static let immediate = Animation.spring(response: 0.26, dampingFraction: 0.86)
-    static let fast = Animation.spring(response: 0.30, dampingFraction: 0.79)
-    static let standard = Animation.spring(response: 0.40, dampingFraction: 0.80)
+    // Apple 风格默认采用临界阻尼：普通点击、hover、选择和面板出现不应无来源地回弹。
+    // 只有真实拖拽/甩动组件可以在自己的手势实现中携带速度并使用轻微欠阻尼。
+    static let hover = Animation.spring(response: 0.18, dampingFraction: 1.0, blendDuration: 0)
+    static let listHover = Animation.spring(response: 0.18, dampingFraction: 1.0, blendDuration: 0)
+    static let immediate = Animation.spring(response: 0.22, dampingFraction: 1.0)
+    static let fast = Animation.spring(response: 0.26, dampingFraction: 1.0)
+    static let standard = Animation.spring(response: 0.34, dampingFraction: 1.0)
+    /// Reduce Motion 并非取消反馈：位移/缩放降级为短交叉淡化或颜色变化。
+    static let reducedFeedback = Animation.easeOut(duration: 0.12)
+    static let reducedContent = Animation.easeOut(duration: 0.18)
+    static let contentCrossfade = Animation.easeOut(duration: 0.18)
+    static let carousel = Animation.spring(response: 0.34, dampingFraction: 1.0)
+    static let themeCoverIn = Animation.easeOut(duration: 0.08)
+    static let themeCoverOut = Animation.easeIn(duration: 0.12)
     // 页面只做短促交叉淡入：导航需要立即响应，不能带通用弹簧的起步迟滞或回弹。
     static let page = Animation.easeOut(duration: 0.22)
-    static let panel = Animation.spring(response: 0.48, dampingFraction: 0.80, blendDuration: 0.06)
-    static let notice = Animation.spring(response: 0.42, dampingFraction: 0.78, blendDuration: 0.04)
-    static let sidebar = Animation.spring(response: 0.24, dampingFraction: 0.88, blendDuration: 0.01)
+    static let panel = Animation.spring(response: 0.38, dampingFraction: 1.0, blendDuration: 0)
+    static let notice = Animation.spring(response: 0.34, dampingFraction: 0.96, blendDuration: 0)
+    static let sidebar = Animation.spring(response: 0.24, dampingFraction: 1.0, blendDuration: 0)
     static let sidebarSelection = Animation.easeOut(duration: 0.10)
 
     // —— 活力语义色彩新增（普通页面用，均需在调用处尊重 Reduce Motion）——
@@ -394,11 +400,11 @@ enum AppMotion {
     // Hero 背景柔动：极慢、低幅；仅在 full 性能档且非 Reduce Motion 时启用，窗口不可见 / 应用后台时暂停。
     static let heroAmbient = Animation.easeInOut(duration: 6.0)
     // 区块入场：配合 AppAuroraMetrics.blockStaggerStep 做逐项 delay。
-    static let blockStagger = Animation.spring(response: 0.42, dampingFraction: 0.86)
+    static let blockStagger = Animation.spring(response: 0.36, dampingFraction: 1.0)
 
     // 音乐展开/收起由封面 shared geometry 承担空间连续性：高阻尼短弹簧可跟随连续点击，
     // 不在终点回弹，也不让重型整窗合成拖得过长。
-    static let musicPlayer = Animation.spring(response: 0.32, dampingFraction: 0.92, blendDuration: 0.0)
+    static let musicPlayer = Animation.spring(response: 0.32, dampingFraction: 0.98, blendDuration: 0.0)
     static let lyric = Animation.spring(response: 0.74, dampingFraction: 0.91, blendDuration: 0.14)
     // 歌词行级透明度/模糊切换：高阻尼（0.94）接近临界，无明显过冲；response 缩短使切换更利落，
     // 配合 lyricScroll 的长缓动平移，整体呈现平移渐变感而非”抛掷”感。
@@ -1962,7 +1968,7 @@ struct HoverLiftEffectModifier: ViewModifier {
             .shadow(color: Color.black.opacity(active ? 0.18 : 0), radius: active ? 22 : 0, y: active ? 8 : 0)
             .offset(y: active && !reduceMotion ? -4 : 0)
             .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: active)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: active)
             .onHover { hovering = $0 }
             .onChange(of: suppressHoverDuringScroll) { suppressing in
                 if suppressing { hovering = false }
@@ -2008,7 +2014,7 @@ struct ReferenceCardHoverModifier: ViewModifier {
             .scaleEffect(hovering && !reduceMotion ? scale : 1, anchor: .center)
             .offset(y: hovering && !reduceMotion ? -lift : 0)
             .shadow(color: AppColors.refCardShadow.opacity(hovering ? 0.18 : 0), radius: hovering ? 22 : 0, x: 0, y: hovering ? 8 : 0)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: hovering)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: hovering)
             .onHover { hovering = $0 }
     }
 }
@@ -2114,6 +2120,7 @@ private struct LiquidGlassButtonStyleBody: View {
     @Environment(\.isFocused) private var isFocused
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     let configuration: ButtonStyle.Configuration
     let cornerRadius: CGFloat
     let horizontalPadding: CGFloat
@@ -2142,9 +2149,9 @@ private struct LiquidGlassButtonStyleBody: View {
                     if prominent {
                         shape.fill(AppColors.refProminentGradient)
                     } else if outlined {
-                        shape.fill(AppColors.refOutlineBg)
+                        shape.fill(reduceTransparency ? AppColors.elevatedSurface : AppColors.refOutlineBg)
                     } else {
-                        shape.fill(AppColors.refScanFill)
+                        shape.fill(reduceTransparency ? AppColors.elevatedSurface : AppColors.refScanFill)
                     }
                     if active {
                         shape.fill(Color.black.opacity(pressed ? 0.07 : 0.035))
@@ -2169,7 +2176,7 @@ private struct LiquidGlassButtonStyleBody: View {
                     prominent
                         ? Color.white.opacity(active ? 0.30 : 0.18)
                         : (outlined ? AppColors.refOutlineBorder : AppColors.refCardBorder),
-                    lineWidth: 1
+                    lineWidth: colorSchemeContrast == .increased ? AppGlassMetrics.Stroke.selected : AppGlassMetrics.Stroke.surface
                 )
             }
             .clipShape(shape)
@@ -2179,9 +2186,9 @@ private struct LiquidGlassButtonStyleBody: View {
             .onHover { hovering in
                 isHovering = hovering
             }
-            .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
-            .animation(reduceMotion ? nil : AppMotion.fast, value: pressed)
-            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: isHovering)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: pressed)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.fast, value: isFocused)
     }
 }
 
@@ -2195,13 +2202,12 @@ struct RepeatedGlassButtonStyle: ButtonStyle {
     var thickness: Double = AppGlassMetrics.Thickness.repeated
 
     func makeBody(configuration: Configuration) -> some View {
-        RepeatedGlassButtonStyleBody(
-            configuration: configuration,
+        // 兼容旧调用点，但视觉与交互统一委托给全局 Standard 入口。
+        AppStandardButtonStyle(
             cornerRadius: cornerRadius,
             horizontalPadding: horizontalPadding,
-            minHeight: minHeight,
-            thickness: thickness
-        )
+            minHeight: minHeight
+        ).makeBody(configuration: configuration)
     }
 }
 
@@ -2211,6 +2217,7 @@ private struct RepeatedGlassButtonStyleBody: View {
     @Environment(\.isFocused) private var isFocused
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     let configuration: ButtonStyle.Configuration
     let cornerRadius: CGFloat
     let horizontalPadding: CGFloat
@@ -2251,7 +2258,12 @@ private struct RepeatedGlassButtonStyleBody: View {
                 }
             }
             .overlay {
-                shape.strokeBorder(active ? AppColors.refProminentStart.opacity(0.20) : Color.clear, lineWidth: 1)
+                shape.strokeBorder(
+                    active || colorSchemeContrast == .increased
+                        ? AppColors.refProminentStart.opacity(colorSchemeContrast == .increased ? 0.42 : 0.20)
+                        : Color.clear,
+                    lineWidth: colorSchemeContrast == .increased ? AppGlassMetrics.Stroke.selected : AppGlassMetrics.Stroke.surface
+                )
             }
             .clipShape(shape)
             .contentShape(shape)
@@ -2261,9 +2273,9 @@ private struct RepeatedGlassButtonStyleBody: View {
             .onHover { hovering in
                 isHovering = hovering
             }
-            .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
-            .animation(reduceMotion ? nil : AppMotion.fast, value: pressed)
-            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: isHovering)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: pressed)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.fast, value: isFocused)
     }
 }
 
@@ -2300,9 +2312,9 @@ private struct SubtleIconButtonStyleBody: View {
             .onHover { hovering in
                 isHovering = hovering
             }
-            .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
-            .animation(reduceMotion ? nil : AppMotion.fast, value: configuration.isPressed)
-            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: isHovering)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: configuration.isPressed)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.fast, value: isFocused)
     }
 }
 
@@ -2388,12 +2400,11 @@ struct HeaderActionGlassButtonStyle: ButtonStyle {
     var minHeight: CGFloat = AppControlMetrics.headerButtonHeight
 
     func makeBody(configuration: Configuration) -> some View {
-        HeaderActionGlassButtonStyleBody(
-            configuration: configuration,
+        AppStandardButtonStyle(
             cornerRadius: cornerRadius,
             horizontalPadding: horizontalPadding,
             minHeight: minHeight
-        )
+        ).makeBody(configuration: configuration)
     }
 }
 
@@ -2439,9 +2450,9 @@ private struct HeaderActionGlassButtonStyleBody: View {
             .onHover { hovering in
                 isHovering = hovering
             }
-            .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
-            .animation(reduceMotion ? nil : AppMotion.fast, value: pressed)
-            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: isHovering)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: pressed)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.fast, value: isFocused)
     }
 }
 
@@ -2454,12 +2465,11 @@ struct HeaderProminentActionButtonStyle: ButtonStyle {
     var minHeight: CGFloat = AppControlMetrics.headerButtonHeight
 
     func makeBody(configuration: Configuration) -> some View {
-        HeaderProminentActionButtonStyleBody(
-            configuration: configuration,
+        AppPrimaryButtonStyle(
             cornerRadius: cornerRadius,
             horizontalPadding: horizontalPadding,
             minHeight: minHeight
-        )
+        ).makeBody(configuration: configuration)
     }
 }
 
@@ -2502,9 +2512,9 @@ private struct HeaderProminentActionButtonStyleBody: View {
             .onHover { hovering in
                 isHovering = hovering
             }
-            .animation(reduceMotion ? nil : AppMotion.fast, value: isHovering)
-            .animation(reduceMotion ? nil : AppMotion.fast, value: pressed)
-            .animation(reduceMotion ? nil : AppMotion.fast, value: isFocused)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: isHovering)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: pressed)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.fast, value: isFocused)
     }
 }
 
@@ -3415,12 +3425,8 @@ struct AppSwitchToggleStyle: ToggleStyle {
     func makeBody(configuration: Configuration) -> some View {
         Button {
             let update = { configuration.isOn.toggle() }
-            if reduceMotion {
+            withAnimation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.fast) {
                 update()
-            } else {
-                withAnimation(.spring(response: 0.28, dampingFraction: 0.82)) {
-                    update()
-                }
             }
         } label: {
             HStack(spacing: 10) {
@@ -4371,7 +4377,20 @@ private enum PosterPerformanceTelemetry {
 
 enum ArtworkImageCache {
     /// 海报墙与远程封面预热共用同一尺寸档，避免“已预热”却因缓存键不同重新解码。
-    static let posterGridTargetSize = CGSize(width: 300, height: 450)
+    /// 256×384 pt 会落在 512×768 px 的 Retina 桶，已覆盖当前 240pt 最大海报宽度，
+    /// 相比旧 640×960 px 桶减少约 36% 的解码像素和内存带宽。
+    static let posterGridTargetSize = CGSize(width: 256, height: 384)
+    /// 预热的并发上限。
+    ///
+    /// 这里从前是 1，理由是"预热永远只占用一个解码槽，其余槽留给刚进入视口的交互
+    /// 缩略图"。但它限制的不只是解码——远程预热的绝大部分时间花在网络上（一张封面
+    /// 一次往返，解码只有毫秒级），把它压到 1 等于让 `ArtworkRemoteImageStore` 的
+    /// 4 个取图许可完全闲置：三千张海报 × 一次 RTT 就是几分钟的纯等待。
+    ///
+    /// 提到 4 与取图许可持平。解码的公平性交回 `ArtworkDecodeCoordinator`（3 个许可）：
+    /// 任一时刻排在交互解码前面的预热解码最多 4 个，而不是原来的"最多 1 个"——这是
+    /// 有意接受的代价，换掉的是一次长达数分钟的串行等待。
+    private static let maximumConcurrentPrewarms = 4
     private static let cache = NSCache<NSString, NSImage>()
     private static let remoteStore = ArtworkRemoteImageStore(
         maxConcurrentFetches: 4,
@@ -4473,7 +4492,11 @@ enum ArtworkImageCache {
         return image
     }
 
-    static func localImageAsync(path: String, targetSize: CGSize? = nil) async -> NSImage? {
+    static func localImageAsync(
+        path: String,
+        targetSize: CGSize? = nil,
+        priority: TaskPriority = .userInitiated
+    ) async -> NSImage? {
         configureIfNeeded()
 #if DEBUG
         if let debugCover = MusicPlayerVisualDebugFixtures.coverImage(
@@ -4500,7 +4523,7 @@ enum ArtworkImageCache {
             return cached
         }
 
-        let decoded = await decodeCoordinator.decode(key: key as String) {
+        let decoded = await decodeCoordinator.decode(key: key as String, priority: priority) {
             let decodeStart = CFAbsoluteTimeGetCurrent()
             guard FileManager.default.fileExists(atPath: path) else {
                 return SendableArtworkImage(nil)
@@ -4589,7 +4612,7 @@ enum ArtworkImageCache {
         guard !uniquePaths.isEmpty else { return }
         await withTaskGroup(of: Void.self) { group in
             var iterator = uniquePaths.makeIterator()
-            let parallelism = min(8, uniquePaths.count)
+            let parallelism = min(maximumConcurrentPrewarms, uniquePaths.count)
 
             func enqueueNext() {
                 guard let path = iterator.next() else { return }
@@ -4599,7 +4622,11 @@ enum ArtworkImageCache {
                     if let remoteURL = ArtworkImageCache.remoteURL(from: path) {
                         _ = await ArtworkImageCache.prewarmRemoteImage(url: remoteURL, targetSize: targetSize)
                     } else {
-                        _ = await ArtworkImageCache.localImageAsync(path: path, targetSize: targetSize)
+                        _ = await ArtworkImageCache.localImageAsync(
+                            path: path,
+                            targetSize: targetSize,
+                            priority: .utility
+                        )
                     }
                 }
             }
@@ -4701,9 +4728,13 @@ enum ArtworkImageCache {
         return min(max(image.size.width / image.size.height, 0.68), 1.78)
     }
 
+    /// 内存缓存键。远程地址先归一化掉会轮换的凭据与尺寸参数——否则每重新同步一次
+    /// Emby，`posterPath` 换成带新 `api_key` 的地址，整个内存缓存一次性全部落空。
+    /// 详见 `remoteDiskCacheID(for:)`。
     private static func cacheKey(path: String, targetSize: CGSize?) -> NSString {
         let pixelSize = roundedPixelSize(for: targetSize ?? defaultTargetSize)
-        return "\(path)#\(Int(pixelSize.width))x\(Int(pixelSize.height))" as NSString
+        let identity = remoteURL(from: path).map(RemoteArtworkURLPolicy.stableIdentity(for:)) ?? path
+        return "\(identity)#\(Int(pixelSize.width))x\(Int(pixelSize.height))" as NSString
     }
 
     private static func remoteURL(from path: String) -> URL? {
@@ -4731,9 +4762,15 @@ enum ArtworkImageCache {
         return decoded
     }
 
+    /// 磁盘缓存键：**必须**与凭据无关。
+    ///
+    /// 这里从前直接对完整 URL 取 SHA-256，而 `EmbyService.imageURL` 把
+    /// `api_key=<token>&maxWidth=700&quality=90` 都烘进了地址。于是每次重新同步、
+    /// 每次会话换 token，`posterPath` 就变成一个全新的字符串，512MB 的磁盘封面缓存
+    /// **整体失效**——所有海报重新下载、重新解码，看起来就是"Emby 封面每次都很慢"。
+    /// 服务端早就解决过同一个问题，规则现在由两端共用。
     private static func remoteDiskCacheID(for path: String) -> String {
-        let digest = SHA256.hash(data: Data(path.utf8))
-        return digest.map { String(format: "%02x", $0) }.joined()
+        RemoteArtworkURLPolicy.stableIdentity(forPath: path)
     }
 
     private static func cachedMissingPath(_ path: String) -> Bool {
@@ -4857,6 +4894,7 @@ private actor ArtworkDecodeCoordinator {
 
     func decode(
         key: String,
+        priority: TaskPriority = .userInitiated,
         operation: @escaping @Sendable () -> SendableArtworkImage
     ) async -> NSImage? {
         if let entry = inFlight[key] {
@@ -4864,9 +4902,9 @@ private actor ArtworkDecodeCoordinator {
         }
 
         let requestID = UUID()
-        let task = Task<SendableArtworkImage, Never> { [weak self] in
+        let task = Task<SendableArtworkImage, Never>(priority: priority) { [weak self] in
             guard let self else { return SendableArtworkImage(nil) }
-            return await self.runWithPermit(operation)
+            return await self.runWithPermit(operation, priority: priority)
         }
         inFlight[key] = (requestID, task)
         let result = await task.value
@@ -4877,14 +4915,15 @@ private actor ArtworkDecodeCoordinator {
     }
 
     private func runWithPermit(
-        _ operation: @escaping @Sendable () -> SendableArtworkImage
+        _ operation: @escaping @Sendable () -> SendableArtworkImage,
+        priority: TaskPriority
     ) async -> SendableArtworkImage {
         await acquire()
         guard !Task.isCancelled else {
             release()
             return SendableArtworkImage(nil)
         }
-        let result = await Task.detached(priority: .utility, operation: operation).value
+        let result = await Task.detached(priority: priority, operation: operation).value
         release()
         return result
     }

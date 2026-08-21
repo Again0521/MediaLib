@@ -4,44 +4,294 @@ import MediaLibServerProtocol
 /// 本地相册源的网页查看器。系统 PhotoKit 相册不会被服务端伪造为文件媒体；这里只
 /// 输出已经由媒体扫描器索引、并再次通过当前 principal 授权的 `.photo` 条目。
 enum ServerWebPhotosPage {
-    static func gallery(serverName: String, page: ServerLibraryItemsPage, csrfToken: String, showAdministration: Bool, categories: [ServerLibraryCategory] = []) -> String {
-        let cards = page.items.map(photoCard).joined(separator: "\n")
-        let pageHeader = ServerWebPageHeader.render(icon: .photos, eyebrow: "相册", title: "照片", subtitle: "浏览已授权的本地相册源。图片由浏览器解码，服务端只提供同源字节。")
-        return document(title: "照片 · \(serverName)", csrfToken: csrfToken, bodyData: "", sidebar: ServerWebNavigation.render(active: .photos, showAdministration: showAdministration, note: .library, categories: categories), content: """
-        \(pageHeader)<p id="photo-status" class="status" role="status" aria-live="polite">共 \(page.totalItemCount) 张照片</p>
-        <section id="photo-grid" class="photo-grid" aria-live="polite">\(cards)</section>
-        <button id="photo-load-more" class="load-more" type="button"\(page.hasMore ? "" : " hidden")>载入更多照片</button>
-        <p id="photo-empty" class="empty"\(page.items.isEmpty ? "" : " hidden")>没有可访问的照片。请在桌面端添加照片源并完成扫描。</p>
-        """)
+    /// 相册的三个分区，与客户端「相册」分组一致。
+    enum Scope {
+        case album, photos
+
+        var title: String { self == .album ? "全部" : "照片" }
+        var active: ServerWebNavigation.Active { self == .album ? .albums : .photos }
+        var subtitle: String {
+            self == .album
+                ? "你的照片和录像。"
+                : "你的照片。"
+        }
     }
 
-    static func detail(serverName: String, item: ServerMediaItemDetail, csrfToken: String, showAdministration: Bool, categories: [ServerLibraryCategory] = []) -> String {
+    static func gallery(serverName: String, page: ServerLibraryItemsPage, csrfToken: String, showAdministration: Bool, categories: [ServerLibraryCategory] = [], sidebarExtras: ServerWebSidebarExtras, scope: Scope = .photos) -> String {
+        let cards = page.items.map(photoCard).joined()
+        // 「录像」从前是一个永久禁用、且没有接任何监听的单选项——一个永远不会
+        // 发生任何事的控件比缺席更糟。它现在是一条通往「其他视频」分类的真链接，
+        // 且只在那个分类确实有内容时出现。
+        let homeVideoCount = categories.first { $0.id == "homeVideo" }?.itemCount ?? 0
+        // 三个胶囊与侧栏「相册」分组逐项对应：全部 / 照片 / 录像。
+        let kindChips: [ServerWebUI.ControlChip] = [
+            .init(label: "全部", href: "/albums", selected: scope == .album),
+            .init(label: "照片", href: "/photos", selected: scope == .photos)
+        ] + (homeVideoCount > 0 ? [ServerWebUI.ControlChip(label: "录像", href: "/category/homeVideo")] : [])
+        let content = """
+        \(ServerWebPageHeader.render(
+            icon: .photos,
+            eyebrow: "Gallery",
+            title: scope.title,
+            subtitle: scope.subtitle,
+            countID: "photo-status",
+            countUnit: "张",
+            initialCount: page.totalItemCount,
+            search: ServerWebUI.searchField(
+                id: "photo-query",
+                label: "搜索照片",
+                placeholder: "搜索照片",
+                action: "/search",
+                hiddenFields: [(name: "type", value: "photo")]
+            ),
+            actions: ServerWebUI.button("刷新", variant: .secondary, icon: .refresh, id: "photo-refresh")
+        ))
+        \(ServerWebUI.controlBar(
+            label: "相册内容类型",
+            chipsLabel: "内容类型",
+            chips: kindChips,
+            extraClass: "gallery-toolbar"
+        ))
+        <div id="photo-grid" class="gallery-grid" aria-live="polite">\(cards)</div>
+        <div class="ui-load-more"\(page.hasMore ? "" : " hidden")>\(ServerWebUI.button("载入更多照片", variant: .secondary, icon: .chevronDown, id: "photo-load-more"))</div>
+        \(ServerWebUI.emptyState(
+            icon: .image,
+            title: "没有可访问的照片",
+            message: "在 Mac 上添加照片，扫描完就会出现在这里。",
+            id: "photo-empty",
+            hidden: !page.items.isEmpty
+        ))
+        """
+        return document(
+            title: scope.title,
+            serverName: serverName,
+            csrfToken: csrfToken,
+            sidebar: ServerWebNavigation.render(active: scope.active, showAdministration: showAdministration, note: .library, categories: categories, extras: sidebarExtras),
+            content: content
+        )
+    }
+
+    /// 照片右侧那一栏。
+    ///
+    /// 它此前渲染成一个**内容完全为空**的 `<div class="photo-meta">`，而版面仍然
+    /// 给它留着一条 ≥260px 的列——照片详情页的右边永远是一块白。要么有东西可说，
+    /// 要么把这条列收掉；两者之间没有第三种选择。
+    ///
+    /// 这一页手上真正有的只有分辨率、年份、题材和简介，所以有几条给几条，一条
+    /// 都没有时整栏不渲染（`.photo-detail` 随之退回单列）。
+    private static func photoMeta(_ item: ServerMediaItemDetail) -> String {
+        var rows: [(String, String)] = []
+        if let resolution = item.resolution, !resolution.isEmpty { rows.append(("尺寸", resolution)) }
+        if let year = item.year { rows.append(("年份", String(year))) }
+        if !item.genres.isEmpty { rows.append(("标签", item.genres.prefix(4).joined(separator: " · "))) }
+        let overview = (item.overview ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rows.isEmpty || !overview.isEmpty else { return "" }
+
+        let list = rows.map { label, value in
+            #"<div class="photo-meta-row"><dt>\#(ServerWebHTML.escape(label))</dt><dd>\#(ServerWebHTML.escape(value))</dd></div>"#
+        }.joined()
+        let note = overview.isEmpty ? "" : #"<p class="t-body t-tertiary photo-meta-note">\#(ServerWebHTML.escape(overview))</p>"#
+        return #"<aside class="photo-meta"><dl class="photo-meta-list">\#(list)</dl>\#(note)</aside>"#
+    }
+
+    static func detail(
+        serverName: String, item: ServerMediaItemDetail, csrfToken: String,
+        showAdministration: Bool, categories: [ServerLibraryCategory] = [],
+        sidebarExtras: ServerWebSidebarExtras,
+        back: ServerWebBackNavigation.Target = .init(label: "返回照片", href: "/photos")
+    ) -> String {
         let encodedID = ServerWebURL.pathSegment(item.id)
-        let image = item.artworkAvailable && encodedID != nil ? "<img src=\"/api/v1/images/\(encodedID!)/poster\" alt=\"\(escape(item.title))\" loading=\"eager\" decoding=\"async\">" : "<div class=\"placeholder\" role=\"img\" aria-label=\"暂无照片预览\">PHOTO</div>"
-        return document(title: "\(item.title) · \(serverName)", csrfToken: csrfToken, bodyData: "", sidebar: ServerWebNavigation.render(active: .photos, showAdministration: showAdministration, note: .library, categories: categories), content: """
-        <a class="back" href="/photos">← 返回照片</a><section class="photo-detail" aria-labelledby="photo-title"><div class="photo-stage">\(image)</div><div class="photo-meta"><p class="eyebrow">Photo</p><h1 id="photo-title">\(escape(item.title))</h1><p>\(escape(item.year.map(String.init) ?? "已索引照片"))</p><p class="note">媒体内容在浏览器中解码；MediaLIB 不把照片文件下载到客户端应用。</p></div></section>
-        """)
+        let image: String
+        if item.artworkAvailable, let encodedID {
+            image = #"<img src="/api/v1/images/\#(encodedID)/poster" alt="\#(ServerWebHTML.escape(item.title))" loading="eager" decoding="async">"#
+        } else {
+            image = #"<div class="photo-placeholder" role="img" aria-label="暂无照片预览">\#(ServerWebIcon.image.html(size: .xl))</div>"#
+        }
+        // 照片详情从前用 .photo-detail + t-title-2 自建标题，于是同一个产品出现了
+        // 第四种页面标题尺寸。标题、eyebrow 和返回链接都交回共用页头。
+        let content = """
+        \(ServerWebPageHeader.render(
+            icon: .photos,
+            eyebrow: "Photo",
+            title: item.title,
+            subtitle: item.year.map(String.init) ?? "",
+            back: (label: back.label, href: back.href),
+            titleID: "photo-title"
+        ))
+        <section class="photo-detail" aria-labelledby="photo-title">
+          <div class="photo-stage">\(image)</div>
+          \(photoMeta(item))
+        </section>
+        """
+        return document(
+            title: item.title,
+            serverName: serverName,
+            csrfToken: csrfToken,
+            sidebar: ServerWebNavigation.render(active: .photos, showAdministration: showAdministration, note: .library, categories: categories, extras: sidebarExtras),
+            content: content
+        )
     }
 
-    private static func document(title: String, csrfToken: String, bodyData: String, sidebar: String, content: String) -> String {
-        """
-        <!doctype html><html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="medialib-csrf-token" content="\(escape(csrfToken))"><title>\(escape(title))</title><link rel="stylesheet" href="/assets/photos.css"><link rel="stylesheet" href="/assets/app-shell.css?v=68"><script src="/assets/app-shell.js?v=68" defer></script><script src="/assets/photos.js" defer></script></head><body\(bodyData)><a class="skip" href="#main">跳到主要内容</a><div class="shell">\(sidebar)<main id="main" tabindex="-1">\(content)</main></div></body></html>
-        """
+    private static func document(title: String, serverName: String, csrfToken: String, sidebar: String, content: String) -> String {
+        ServerWebDocument.render(
+            title: title,
+            serverName: serverName,
+            csrfToken: csrfToken,
+            sidebar: sidebar,
+            content: content,
+            pageStylesheets: ["/assets/photos.css"],
+            pageScripts: ["/assets/overlays.js", "/assets/photos.js"],
+            bodyClass: "gallery-web-document",
+            tint: .photo
+        )
     }
 
     private static func photoCard(_ item: ServerLibraryItem) -> String {
         guard let id = ServerWebURL.pathSegment(item.id) else { return "" }
-        let art = item.artworkAvailable ? "<img src=\"/api/v1/images/\(id)/poster\" alt=\"\" loading=\"lazy\" decoding=\"async\">" : "<span>PHOTO</span>"
-        return "<a class=\"photo-card\" href=\"/photo/\(id)\" aria-label=\"查看照片 \(escape(item.title))\"><span class=\"photo-art\">\(art)<span class=\"mlink\">Mlink</span></span><span class=\"photo-copy\"><strong>\(escape(item.title))</strong><small>\(escape(item.year.map(String.init) ?? "已索引") )</small></span></a>"
+        let palette = ServerWebArtworkPalette.token(for: item.id)
+        let art = item.artworkAvailable
+            ? #"<img src="/api/v1/images/\#(id)/poster?size=320" alt="" loading="lazy" decoding="async" data-ready="true">"#
+            : #"<span class="ui-poster-fallback">\#(ServerWebHTML.escape(item.title))</span>"#
+        let sourceBadge = item.isRemoteSource ? #"<span class="ui-media-badge">Mlink</span>"# : ""
+        return """
+        <a class="photo-card" href="/photo/\(id)" aria-label="查看照片 \(ServerWebHTML.escape(item.title))" data-artwork-palette="\(palette)">
+          <span class="ui-poster ui-poster-wide photo-art">\(art)<span class="ui-poster-corner">\(sourceBadge)</span></span>
+          <span class="photo-caption"><strong>\(ServerWebHTML.escape(item.title))</strong></span>
+        </a>
+        """
     }
 
-    static let style = """
-    :root{--ink:#172033;--muted:#607086;--line:#dce7f2;--canvas:#f4f8fc;--surface:rgba(255,255,255,.9);--primary:#236fb5;--strong:#174d82;--focus:#1570ef}*{box-sizing:border-box}body{margin:0;overflow-x:hidden;color:var(--ink);background:var(--canvas);font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}a,button{touch-action:manipulation}:focus-visible{outline:3px solid var(--focus);outline-offset:3px}.skip{position:fixed;z-index:1000;top:8px;left:8px;padding:10px 14px;border-radius:10px;color:#fff;background:var(--strong);transform:translateY(-160%)}.skip:focus{transform:none}main{width:100%;max-width:1440px;padding:clamp(22px,4vw,48px)}h1{margin:0;font-size:clamp(36px,6vw,68px);line-height:1.05;letter-spacing:-.045em;overflow-wrap:anywhere}.eyebrow{margin:0 0 6px;color:var(--primary);font-size:13px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.heading>p{max-width:66ch;margin:12px 0;color:var(--muted)}.photo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;margin-top:24px}.photo-card{display:block;overflow:hidden;border:1px solid var(--line);border-radius:16px;color:inherit;background:var(--surface);text-decoration:none;box-shadow:0 10px 28px #2345670a;transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease}.photo-card:hover{border-color:#9dc5e8;box-shadow:0 15px 30px #23456718;transform:translateY(-2px)}.photo-card:active{transform:scale(.985)}.photo-art{position:relative;display:grid;overflow:hidden;aspect-ratio:4/3;place-items:center;color:#fff;background:linear-gradient(145deg,#174d82,#4aa2df);font-weight:800}.photo-art img{width:100%;height:100%;object-fit:cover}.mlink{position:absolute;top:8px;left:8px;padding:3px 6px;border-radius:6px;color:#fff;background:#123b68e8;font-size:10px;font-weight:800}.photo-copy{display:block;padding:12px}.photo-copy strong{display:block;overflow-wrap:anywhere}.photo-copy small{display:block;margin-top:4px;color:var(--muted);font-size:13px}.load-more{display:block;min-width:150px;min-height:44px;margin:22px auto;padding:9px 16px;border:1px solid #98b8d7;border-radius:11px;color:#fff;background:var(--primary);cursor:pointer;font:inherit;font-weight:750}.load-more:disabled{opacity:.5;cursor:not-allowed}.empty{margin-top:24px;padding:18px;border:1px dashed #b7cbe0;border-radius:14px;color:var(--muted);background:#fff}.back{display:inline-flex;min-height:44px;align-items:center;margin-bottom:14px;color:var(--strong);font-weight:700;text-decoration:none}.photo-detail{display:grid;grid-template-columns:minmax(0,2fr) minmax(240px,1fr);gap:28px;align-items:start}.photo-stage{display:grid;min-height:360px;place-items:center;overflow:hidden;border:1px solid #c9d9e8;border-radius:18px;background:#0b1d30;box-shadow:0 20px 50px #0b1d3040}.photo-stage img{display:block;width:100%;height:auto;max-height:76vh;object-fit:contain}.placeholder{padding:80px;color:#c7d9eb;font-weight:800}.photo-meta{padding:10px 0}.photo-meta>p{color:var(--muted)}.note{max-width:42ch;margin-top:22px}@media(max-width:780px){main{padding:24px 18px 40px}.photo-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.photo-detail{grid-template-columns:1fr}.photo-stage{min-height:240px}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:.01ms!important}}
-    """
+    static let style = #"""
+    .gallery-toolbar { margin-bottom: var(--space-6); }
 
-    static let script = #"""
-    (() => { 'use strict'; const grid = document.getElementById('photo-grid'); const more = document.getElementById('photo-load-more'); const status = document.getElementById('photo-status'); const empty = document.getElementById('photo-empty'); let offset = grid?.children.length || 0; let loading = false; const esc = value => String(value || '').slice(0, 512); const card = item => { const id = String(item.id || ''); const link = document.createElement('a'); link.className = 'photo-card'; link.href = `/photo/${encodeURIComponent(id)}`; link.setAttribute('aria-label', `查看照片 ${esc(item.title)}`); const art = document.createElement('span'); art.className = 'photo-art'; if (item.artworkAvailable === true) { const image = document.createElement('img'); image.alt = ''; image.loading = 'lazy'; image.decoding = 'async'; image.src = `/api/v1/images/${encodeURIComponent(id)}/poster`; art.append(image); } else art.textContent = 'PHOTO'; const mark = document.createElement('span'); mark.className = 'mlink'; mark.textContent = 'Mlink'; art.append(mark); const copy = document.createElement('span'); copy.className = 'photo-copy'; const title = document.createElement('strong'); title.textContent = esc(item.title); copy.append(title); const year = document.createElement('small'); year.textContent = Number.isInteger(item.year) ? String(item.year) : '已索引'; copy.append(year); link.append(art, copy); return link; }; more?.addEventListener('click', async () => { if (loading) return; loading = true; more.disabled = true; const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000); status.textContent = '正在载入更多照片…'; try { const response = await fetch(`/api/v1/photos?offset=${offset}&limit=24`, { credentials: 'same-origin', headers: { Accept: 'application/json' }, signal: controller.signal }); if (response.status === 401) { location.assign('/login'); return; } if (!response.ok) throw new Error(); const data = await response.json(); const items = Array.isArray(data.items) ? data.items : []; const fragment = document.createDocumentFragment(); for (const item of items) fragment.append(card(item)); grid.append(fragment); offset += items.length; more.hidden = !data.hasMore; empty.hidden = Number(data.totalItemCount) > 0; status.textContent = `共 ${Math.max(0, Number(data.totalItemCount) || 0)} 张照片`; } catch { status.textContent = '照片载入失败，请重试。'; } finally { clearTimeout(timer); loading = false; more.disabled = false; } }); })();
+    /* A photo wall is not a poster grid: tiles vary in width so the eye reads a
+       composition rather than a spreadsheet, while every tile keeps one aspect
+       ratio so nothing reflows as images decode. */
+    .gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: var(--space-3);
+    }
+    .photo-card { position: relative; grid-column: span 3; display: block; min-width: 0; color: inherit; }
+    .photo-card:nth-child(5n + 2) { grid-column: span 4; }
+    .photo-card:nth-child(7n + 4) { grid-column: span 2; }
+    .photo-art { transition: transform var(--duration-slow) var(--ease-out), box-shadow var(--duration-slow) var(--ease-out); }
+    .photo-card:hover .photo-art { transform: translateY(-3px); box-shadow: var(--shadow-3); }
+    .photo-caption {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      padding: var(--space-7) var(--space-3) var(--space-2);
+      background: var(--media-scrim);
+      pointer-events: none;
+    }
+    .photo-caption strong {
+      display: block;
+      overflow: hidden;
+      color: var(--text-on-media);
+      font-size: var(--type-footnote-size);
+      font-weight: var(--weight-semibold);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* 只有真的有第二栏内容时才排两列。`auto-fit` 在这里不行——它按可用宽度决定
+       列数，而这里的条件是"有没有东西可放"。没有 `.photo-meta` 时舞台独占整行。 */
+    .photo-detail {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      align-items: start;
+      gap: var(--space-8);
+    }
+    .photo-detail:has(.photo-meta) { grid-template-columns: minmax(0, 1.9fr) minmax(260px, 0.8fr); }
+    @media (max-width: 899px) {
+      .photo-detail:has(.photo-meta) { grid-template-columns: minmax(0, 1fr); }
+    }
+    .photo-meta-list { display: grid; gap: var(--space-3); }
+    .photo-meta-row {
+      display: grid;
+      grid-template-columns: 64px minmax(0, 1fr);
+      gap: var(--space-3);
+      font-size: var(--type-callout-size);
+    }
+    .photo-meta-row dt { color: var(--text-tertiary); font-size: var(--type-subhead-size); }
+    .photo-meta-row dd { margin: 0; overflow-wrap: anywhere; }
+    .photo-meta-note { padding-top: var(--space-4); border-top: var(--hairline) solid var(--divider); margin-top: var(--space-4); }
+    /* The stage stays dark in both themes: a photograph reads truest against a
+       neutral dark ground, and a light frame tints the perceived image. */
+    .photo-stage {
+      display: grid;
+      min-height: min(60vw, 600px);
+      place-items: center;
+      overflow: hidden;
+      border: var(--hairline) solid var(--border);
+      border-radius: var(--radius-lg);
+      background: linear-gradient(150deg, #1b2330, #0b1018);
+    }
+    .photo-stage img { width: 100%; height: auto; max-height: min(76vh, 820px); object-fit: contain; }
+    .photo-placeholder { display: grid; padding: var(--space-12); place-items: center; color: rgba(255, 255, 255, 0.5); }
+    .photo-meta { display: grid; gap: var(--space-3); }
+
+    @media (max-width: 1023px) {
+      .photo-card,
+      .photo-card:nth-child(5n + 2),
+      .photo-card:nth-child(7n + 4) { grid-column: span 4; }
+      .photo-detail { grid-template-columns: minmax(0, 1fr); }
+    }
+    @media (max-width: 719px) {
+      .photo-card,
+      .photo-card:nth-child(n) { grid-column: span 6; }
+      .gallery-grid { gap: var(--space-2); }
+      .photo-stage { min-height: 240px; }
+    }
     """#
 
-    private static func escape(_ value: String) -> String { value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;").replacingOccurrences(of: "'", with: "&#39;") }
+    static let script = #"""
+    (() => { 'use strict';
+      const grid = document.getElementById('photo-grid');
+      const more = document.getElementById('photo-load-more');
+      const moreWrap = more?.parentElement;
+      const status = document.getElementById('photo-status');
+      const empty = document.getElementById('photo-empty');
+      const refresh = document.getElementById('photo-refresh');
+      var offset = grid?.children.length || 0; var loading = false;
+      const esc = value => String(value || '').slice(0, 512);
+      const artworkPaletteToken = value => { let hash = 2166136261; const text = String(value || ''); for (let index = 0; index < text.length; index += 1) { hash ^= text.charCodeAt(index); hash = Math.imul(hash, 16777619) >>> 0; } return `poster-${hash % 10}`; };
+      const card = item => {
+        const id = String(item.id || '');
+        const link = document.createElement('a');
+        link.className = 'photo-card'; link.href = `/photo/${encodeURIComponent(id)}`;
+        link.dataset.artworkPalette = artworkPaletteToken(id);
+        link.setAttribute('aria-label', `查看照片 ${esc(item.title)}`);
+        const art = document.createElement('span'); art.className = 'ui-poster ui-poster-wide photo-art';
+        if (item.artworkAvailable === true) { const image = document.createElement('img'); image.alt = ''; image.loading = 'lazy'; image.decoding = 'async'; image.dataset.ready = 'true'; art.append(image); image.src = `/api/v1/images/${encodeURIComponent(id)}/poster?size=320`; }
+        else { const fallback = document.createElement('span'); fallback.className = 'ui-poster-fallback'; fallback.textContent = esc(item.title); art.append(fallback); }
+        const sourceLabel = ({emby:'Emby',jellyfin:'Jellyfin',plex:'Plex',mlink:'Mlink'})[item.remoteSourceKind]; if (sourceLabel) { const corner = document.createElement('span'); corner.className = 'ui-poster-corner'; const mark = document.createElement('span'); mark.className = 'ui-media-badge'; mark.textContent = sourceLabel; corner.append(mark); art.append(corner); }
+        const caption = document.createElement('span'); caption.className = 'photo-caption';
+        const title = document.createElement('strong'); title.textContent = esc(item.title); caption.append(title);
+        link.append(art, caption); return link;
+      };
+      refresh?.addEventListener('click', () => location.reload());
+      more?.addEventListener('click', async () => {
+        if (loading) return; loading = true; more.disabled = true; more.dataset.busy = 'true';
+        const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 10000);
+        if (status) status.textContent = ' · 载入中…';
+        try {
+          const response = await fetch(`/api/v1/photos?offset=${offset}&limit=24`, { credentials: 'same-origin', headers: { Accept: 'application/json' }, signal: controller.signal });
+          if (response.status === 401) { location.assign('/login'); return; }
+          if (!response.ok) throw new Error();
+          const data = await response.json();
+          const items = Array.isArray(data.items) ? data.items : [];
+          const fragment = document.createDocumentFragment();
+          for (const item of items) fragment.append(card(item));
+          grid.append(fragment); offset += items.length;
+          if (moreWrap) moreWrap.hidden = !data.hasMore;
+          empty.hidden = Number(data.totalItemCount) > 0;
+          if (status) status.textContent = ` · ${Math.max(0, Number(data.totalItemCount) || 0)} 张`;
+        } catch { if (status) status.textContent = ' · 载入失败'; if (window.medialibToast) window.medialibToast('照片载入失败，请重试。', { tone: 'error' }); }
+        finally { clearTimeout(timer); loading = false; more.disabled = false; delete more.dataset.busy; }
+      });
+    })();
+    """#
 }

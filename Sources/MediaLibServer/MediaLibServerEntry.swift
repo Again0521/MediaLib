@@ -35,15 +35,51 @@ struct MediaLibServer {
                 url: dataDirectories.database,
                 backupDirectory: dataDirectories.databaseBackups
             )
-            let catalog = ServerLibraryCatalog(database: database)
+            // 保险库解锁状态由这台机器上的桌面 App 发布到同一个应用支持目录里，
+            // 服务端只读它，而且每次请求都重新读一次：App 一上锁（或者会话过期），
+            // 下一个请求就回到锁定。这里不做缓存——保险库的可见性不值得为几微秒
+            // 冒"读到的是旧状态"的险。
+            let vaultUnlockStore = VaultUnlockSessionStore(directory: dataDirectories.root)
+            // 首页推荐名单同样由桌面 App 发布到这个目录，服务端只读、每次请求重读。
+            // 它每天会换一份，缓存省不下什么，却会让网页比 App 慢一整天。
+            let homeRecommendationStore = HomeRecommendationSnapshotStore(directory: dataDirectories.root)
+            // 探测结果与上游读取器都只此一份：网页问轨道、导出内嵌字幕、决定要不要
+            // 重封装、去 Emby 取字幕——这几件事必须看到同一份事实，否则同一部片子
+            // 会在不同入口得到不同的答案。
+            let mediaTrackCatalog = ServerMediaTrackCatalog()
+            let remoteAssetFetcher = ServerRemoteAssetFetcher()
+            let catalog = ServerLibraryCatalog(
+                database: database,
+                vaultUnlockProvider: { vaultUnlockStore.isUnlocked() },
+                homeRecommendationProvider: { homeRecommendationStore.current() },
+                trackCatalog: mediaTrackCatalog,
+                remoteAssetFetcher: remoteAssetFetcher
+            )
             let administrationCatalog = ServerAdministrationCatalog(database: database)
             let authentication = try ServerAuthenticationService(database: database)
             let inspector = FFprobeMediaInspector()
+            // 首屏海报会同时抵达多条 320px 缩略图请求，冷启动时它们全要 decode +
+            // JPEG 编码。上游取图有 8 个槽位，派生这一侧按可用核数取值（封顶 8），
+            // 免得八路取回来的图排在四路解码后面；轻量服务仍只保留一路，以不牺牲
+            // 媒体分发为前提压低本机瞬时 CPU 与磁盘占用。
+            let isLightweightServer = ProcessInfo.processInfo.environment["MEDIALIB_SERVER_LIGHTWEIGHT"] == "1"
+            let artworkThumbnailer = ServerArtworkThumbnailer(
+                cacheDirectory: dataDirectories.root.appendingPathComponent(
+                    "web-artwork-thumbnails",
+                    isDirectory: true
+                ),
+                maximumConcurrentGenerations: isLightweightServer
+                    ? 1
+                    : max(4, ProcessInfo.processInfo.activeProcessorCount / 2)
+            )
             let server = try LocalLoopbackHTTPServer(
                 configuration: configuration,
+                remoteSourceGroupsProvider: { try catalog.remoteSourceGroups(for: $0) },
                 librarySnapshotProvider: { try catalog.snapshot(for: $0) },
                 libraryBrowseProvider: { try catalog.browse($0, for: $1) },
                 libraryCategoriesProvider: { try catalog.categories(for: $0) },
+                homeRecommendationsProvider: { try catalog.homeRecommendations(for: $0) },
+                libraryFacetsProvider: { try catalog.facets(type: $0, group: $1, for: $2) },
                 mediaDetailProvider: { try catalog.publicDetail(id: $0, for: $1) },
                 seriesDetailProvider: { try catalog.seriesDetail(id: $0, for: $1) },
                 seriesEpisodesProvider: { try catalog.seriesEpisodes(id: $0, season: $1, offset: $2, limit: $3, for: $4) },
@@ -51,20 +87,35 @@ struct MediaLibServer {
                 personDetailProvider: { try catalog.personDetail(id: $0, offset: $1, limit: $2, for: $3) },
                 collectionsProvider: { try catalog.collections(offset: $0, limit: $1, for: $2) },
                 collectionDetailProvider: { try catalog.collectionDetail(id: $0, offset: $1, limit: $2, for: $3) },
+                smartCollectionsProvider: { try catalog.smartCollections(offset: $0, limit: $1, for: $2) },
+                smartCollectionDetailProvider: { try catalog.smartCollectionDetail(id: $0, offset: $1, limit: $2, for: $3) },
+                musicPlaylistsProvider: { try catalog.musicPlaylists(offset: $0, limit: $1, for: $2) },
+                musicPlaylistDetailProvider: { try catalog.musicPlaylistDetail(id: $0, offset: $1, limit: $2, for: $3) },
+                musicItemsProvider: { try catalog.musicItems(for: $0) },
                 queueProvider: { try catalog.queue(for: $0) },
                 queueMutationProvider: { try catalog.mutateQueue(request: $0, for: $1) },
                 mediaPlaybackStateUpdater: { try catalog.updatePlaybackState(id: $0, request: $1, for: $2) },
                 mediaPreferenceUpdater: { try catalog.updatePreference(id: $0, preference: $1, for: $2) },
                 mediaAssetProvider: { try catalog.publicAsset(id: $0, for: $1, requiring: $2) },
                 webVTTSubtitleTracksProvider: { try catalog.webVTTSubtitleTracks(id: $0, for: $1) },
-                webVTTSubtitleAssetProvider: { try catalog.publicWebVTTSubtitleAsset(id: $0, trackID: $1, for: $2) },
+                subtitleTrackProvider: { try catalog.subtitleTrack(id: $0, trackID: $1, for: $2) },
+                playbackTracksProvider: { try catalog.playbackTracks(id: $0, for: $1) },
+                audioRemuxProvider: {
+                    try catalog.audioRemuxStream(id: $0, audioTrackID: $1, startSeconds: $2, for: $3)
+                },
+                remuxStartProvider: { try catalog.remuxStartSeconds(id: $0, at: $1, for: $2) },
                 artworkAssetProvider: { try catalog.publicArtwork(id: $0, kind: $1, for: $2) },
+                detailImageProvider: { try catalog.detailImageAsset(itemID: $0, kind: $1, index: $2, for: $3) },
+                vaultAccessProvider: { try catalog.vaultAccess(for: $0) },
+                artworkThumbnailer: artworkThumbnailer,
+                remoteAssetFetcher: remoteAssetFetcher,
+                mediaTrackCatalog: mediaTrackCatalog,
                 playbackInfoProvider: { itemID, principal in
                     guard let asset = try catalog.publicAsset(
                         id: itemID,
                         for: principal,
                         requiring: ServerPermission.playMedia
-                    ) else { return nil }
+                    ), asset.remoteURL == nil else { return nil }
                     return try inspector.inspect(asset: asset)
                 },
                 currentUserProfileProvider: { try authentication.currentUserProfile(for: $0) },
@@ -167,6 +218,10 @@ enum ServerCommandOutput {
     告警聚合、应用内 TLS 与远程部署尚未完成；如需远程访问，只能由本机 HTTPS 反向代理
     显式配置 MEDIALIB_SERVER_PUBLIC_ORIGIN 与 MEDIALIB_SERVER_TRUSTED_PROXIES 后转发到回环服务，
     不会接受局域网或公网监听地址。
+
+    远程媒体始终经本服务同源代理。MEDIALIB_SERVER_LAN_DIRECT_PLAY 默认关闭，只解除
+    「已验证局域网直连」的配置层门禁；Emby/Jellyfin/Plex 的播放地址携带账号级长期令牌，
+    不满足单媒体短时票据要求，因此仍会走代理。管理员可用 /api/v1/admin/lan-readiness 自检。
     """
 
     static func write<T: Encodable>(_ value: T) throws {
@@ -194,6 +249,9 @@ struct ServerLaunchConfiguration: Sendable {
     let serverName: String
     let publicOrigin: URL?
     let trustedProxyAddresses: Set<String>
+    /// 可选的"已验证局域网直连"策略开关，默认关闭。开启只是解除配置层门禁，
+    /// 逐请求的网段与上游凭据作用域仍要各自通过，见 `ServerRemoteAccessPolicy`。
+    let lanDirectPlayEnabled: Bool
 
     static func load(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> Self {
         let host = environment["MEDIALIB_SERVER_HOST"]?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -240,6 +298,20 @@ struct ServerLaunchConfiguration: Sendable {
         else {
             throw ServerConfigurationError.invalidTrustedProxyConfiguration
         }
+
+        let lanDirectPlayValue = environment["MEDIALIB_SERVER_LAN_DIRECT_PLAY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let lanDirectPlayEnabled: Bool
+        switch lanDirectPlayValue.lowercased() {
+        case "", "0", "false", "no": lanDirectPlayEnabled = false
+        case "1", "true", "yes": lanDirectPlayEnabled = true
+        default: throw ServerConfigurationError.invalidLanDirectPlayConfiguration
+        }
+        // 直连必须建立在可信传输边界之上；没有 HTTPS 公开 Origin 与可信反代时
+        // 开这个开关只会制造"以为已经生效"的错觉，因此直接拒绝启动。
+        guard !lanDirectPlayEnabled || (publicOrigin != nil && !trustedProxyAddresses.isEmpty) else {
+            throw ServerConfigurationError.invalidLanDirectPlayConfiguration
+        }
         return Self(
             host: normalizedHost,
             port: port,
@@ -247,7 +319,8 @@ struct ServerLaunchConfiguration: Sendable {
             serverID: serverID?.isEmpty == false ? serverID! : "medialib-development",
             serverName: serverName?.isEmpty == false ? serverName! : "MediaLIB Server",
             publicOrigin: publicOrigin,
-            trustedProxyAddresses: trustedProxyAddresses
+            trustedProxyAddresses: trustedProxyAddresses,
+            lanDirectPlayEnabled: lanDirectPlayEnabled
         )
     }
 
@@ -266,6 +339,7 @@ enum ServerConfigurationError: LocalizedError, Equatable {
     case nonLoopbackHost(String)
     case invalidPublicOrigin(String)
     case invalidTrustedProxyConfiguration
+    case invalidLanDirectPlayConfiguration
     case runtimeNotInstalled(host: String, port: Int)
 
     var errorDescription: String? {
@@ -278,6 +352,8 @@ enum ServerConfigurationError: LocalizedError, Equatable {
             return "MEDIALIB_SERVER_PUBLIC_ORIGIN 必须是无路径的 HTTPS 地址：\(origin)。"
         case .invalidTrustedProxyConfiguration:
             return "MEDIALIB_SERVER_TRUSTED_PROXIES 必须是 IPv4 地址列表，并且只能与 HTTPS 公开 Origin 一起使用。"
+        case .invalidLanDirectPlayConfiguration:
+            return "MEDIALIB_SERVER_LAN_DIRECT_PLAY 只接受 0/1，并且必须同时配置 HTTPS 公开 Origin 与可信反向代理。"
         case let .runtimeNotInstalled(host, port):
             return "MediaLibServer 未选择运行命令，尚未监听 \(host):\(port)。使用 --health、--describe、--serve 或 --help。"
         }

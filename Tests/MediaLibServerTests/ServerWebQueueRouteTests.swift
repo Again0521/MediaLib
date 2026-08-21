@@ -76,8 +76,8 @@ final class ServerWebQueueRouteTests: XCTestCase {
             authenticationProvider: { head in head.contains("Authorization: Bearer viewer") ? self.viewer : nil }
         )
         let html = String(data: router.response(for: request("/queue")).body, encoding: .utf8) ?? ""
-        XCTAssertTrue(html.contains("href=\"/assets/queue.css\""))
-        XCTAssertTrue(html.contains("src=\"/assets/queue.js\""))
+        XCTAssertTrue(html.contains("href=\"/assets/queue.css?v="))
+        XCTAssertTrue(html.contains("src=\"/assets/queue.js?v="))
         let script = String(data: router.response(for: "GET /assets/queue.js HTTP/1.1\r\nHost: localhost\r\n\r\n").body, encoding: .utf8) ?? ""
         XCTAssertTrue(script.contains("textContent"))
         XCTAssertTrue(script.contains("credentials: 'same-origin'"))
@@ -86,6 +86,17 @@ final class ServerWebQueueRouteTests: XCTestCase {
         XCTAssertFalse(script.contains("localStorage"))
         XCTAssertFalse(script.contains("eval("))
         XCTAssertEqual(router.response(for: "GET /assets/queue.css HTTP/1.1\r\nHost: localhost\r\n\r\n").statusCode, 200)
+    }
+
+    func testQueueScriptRoutesSeriesToDirectPlayback() {
+        let router = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            queueProvider: { _ in ServerQueueResponse(repeatMode: "sequential", shuffleEnabled: false, currentPosition: 0, items: []) },
+            authenticationProvider: { head in head.contains("Authorization: Bearer viewer") ? self.viewer : nil }
+        )
+        let script = String(data: router.response(for: "GET /assets/queue.js HTTP/1.1\r\nHost: localhost\r\n\r\n").body, encoding: .utf8) ?? ""
+        XCTAssertTrue(script.contains("item.isSeries === true ? `/series/${encodeURIComponent(text(item.id))}/play`"))
+        XCTAssertFalse(script.contains("item.isSeries === true ? '/series/' : '/item/'"))
     }
 
     private var viewer: ServerRequestPrincipal {

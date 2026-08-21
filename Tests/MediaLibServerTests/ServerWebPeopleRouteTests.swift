@@ -27,15 +27,15 @@ final class ServerWebPeopleRouteTests: XCTestCase {
         let router = makeRouter()
         let directory = String(data: router.response(for: request("/people")).body, encoding: .utf8) ?? ""
         XCTAssertTrue(directory.contains("人物 &lt;script&gt;bad()&lt;/script&gt;"))
-        XCTAssertTrue(directory.contains("href=\"/assets/people.css\""))
-        XCTAssertTrue(directory.contains("src=\"/assets/people.js\""))
+        XCTAssertTrue(directory.contains("href=\"/assets/people.css?v="))
+        XCTAssertTrue(directory.contains("src=\"/assets/people.js?v="))
         XCTAssertFalse(directory.contains("profileURL"))
         XCTAssertFalse(directory.contains("<script>bad()</script>"))
 
         let page = String(data: router.response(for: request("/people/person%20id%2B1")).body, encoding: .utf8) ?? ""
         XCTAssertTrue(page.contains("简介 &lt;/style&gt;&lt;script&gt;bad()&lt;/script&gt;"))
-        XCTAssertTrue(page.contains("href=\"/series/series%20id%2B1\""))
-        XCTAssertTrue(page.contains("src=\"/api/v1/images/series%20id%2B1/poster\""))
+        XCTAssertTrue(page.contains("href=\"/series/series%20id%2B1/play\""), "人物作品中的剧集海报必须直接进入播放页")
+        XCTAssertTrue(page.contains("src=\"/api/v1/images/series%20id%2B1/poster?size=320\""))
         XCTAssertEqual(router.response(for: request("/people/person%2Fescape")).statusCode, 404)
         XCTAssertEqual(router.response(for: request("/people/unknown")).statusCode, 404)
     }
@@ -84,7 +84,7 @@ final class ServerWebPeopleRouteTests: XCTestCase {
         let js = String(data: router.response(for: "GET /assets/people.js HTTP/1.1\r\nHost: localhost\r\n\r\n").body, encoding: .utf8) ?? ""
         XCTAssertEqual(css.statusCode, 200)
         XCTAssertEqual(router.response(for: "GET /assets/people.js HTTP/1.1\r\nHost: localhost\r\n\r\n").statusCode, 200)
-        XCTAssertTrue(ServerWebPeoplePage.style.contains("prefers-reduced-motion"))
+        XCTAssertTrue(ServerWebBaseStyle.css.contains("prefers-reduced-motion: reduce"), "减少动效策略集中在 base.css")
         XCTAssertTrue(js.contains("textContent"))
         XCTAssertTrue(js.contains("createDocumentFragment"))
         XCTAssertTrue(js.contains("credentials: 'same-origin'"))

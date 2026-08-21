@@ -36,24 +36,14 @@ struct PrivacyLockView: View {
                 )
                 .ignoresSafeArea()
             )
-            .overlay(alignment: .topLeading) {
-                VaultKeyboardCaptureView(onKeyDown: handleKeyDown)
-                    .frame(width: 1, height: 1)
-                    .opacity(0.01)
-                    .accessibilityHidden(true)
-            }
         }
         .contentShape(Rectangle())
-        .onTapGesture {
-            VaultKeyboardFocusRelay.refocus()
-        }
+        .modifier(VaultKeyboardMonitor(onKeyDown: handleKeyDown))
         .onAppear {
             resetEntry(clearSetup: !appState.privacyPINConfigured)
-            VaultKeyboardFocusRelay.refocus()
         }
         .onChange(of: appState.privacyPINConfigured) { configured in
             resetEntry(clearSetup: !configured)
-            VaultKeyboardFocusRelay.refocus()
         }
     }
 
@@ -141,8 +131,8 @@ struct PrivacyLockView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
-        .animation(reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.76), value: dotCount)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: entry.count)
+        .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.fast, value: dotCount)
+        .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: entry.count)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("密码输入")
         .accessibilityValue("已输入 \(entry.count) 位")
@@ -158,9 +148,14 @@ struct PrivacyLockView: View {
         .buttonStyle(VaultPrimaryButtonStyle())
     }
 
-    private func handleKeyDown(_ event: NSEvent) {
-        let keyCode = event.keyCode
-        switch keyCode {
+    /// 返回值表示这一键是否被口令输入消费掉了。
+    ///
+    /// 没消费的键必须原样放回去：⌘Q、⌘W、⌘H 这些仍然要能用，锁屏不是一个把整个
+    /// 应用的键盘吞掉的地方。
+    private func handleKeyDown(_ event: NSEvent) -> Bool {
+        // 带 Command 的一律放行——它们是应用级快捷键，不是口令。
+        guard !event.modifierFlags.contains(.command) else { return false }
+        switch event.keyCode {
         case 36, 76:
             handleReturn()
         case 51, 117:
@@ -168,9 +163,10 @@ struct PrivacyLockView: View {
         case 53:
             resetEntry(clearSetup: false)
         default:
-            guard let digit = event.charactersIgnoringModifiers?.first, digit.isNumber else { return }
+            guard let digit = event.charactersIgnoringModifiers?.first, digit.isNumber else { return false }
             appendDigit(String(digit))
         }
+        return true
     }
 
     private func appendDigit(_ digit: String) {
@@ -266,46 +262,37 @@ struct PrivacyLockView: View {
     }
 }
 
-private enum VaultKeyboardFocusRelay {
-    weak static var current: VaultKeyboardCaptureNSView?
+/// 保险库口令的键盘输入。
+///
+/// 这里从前是一个 1×1、不透明度 0.01 的 `NSView` 去抢 first responder，再用
+/// `keyDown` 收键，并在点击、出现、状态变化时反复 `makeFirstResponder` 把焦点抢
+/// 回来。它收不到键。
+///
+/// 同一个根因在这个产品里已经出现过一次——视频播放器的快捷键当初也是这么写的。
+/// 一个没有尺寸、不在正常响应链上的视图能不能拿到 first responder，取决于窗口有
+/// 没有成为 key、SwiftUI 之后有没有把焦点移走，这两件事都不在这段代码的掌控里；
+/// 而 `makeFirstResponder` 失败时不抛错、不返回可见信号，于是表现就是"键盘没反应"
+/// 且毫无线索。
+///
+/// 改成窗口级的本地事件监听：谁持有 first responder 都不影响收键，也不再需要那
+/// 一串把焦点抢回来的调用。
+private struct VaultKeyboardMonitor: ViewModifier {
+    let onKeyDown: (NSEvent) -> Bool
 
-    static func refocus() {
-        DispatchQueue.main.async {
-            current?.window?.makeFirstResponder(current)
-        }
-    }
-}
+    @State private var monitor: Any?
 
-private struct VaultKeyboardCaptureView: NSViewRepresentable {
-    var onKeyDown: (NSEvent) -> Void
-
-    func makeNSView(context: Context) -> VaultKeyboardCaptureNSView {
-        let view = VaultKeyboardCaptureNSView()
-        view.onKeyDown = onKeyDown
-        VaultKeyboardFocusRelay.current = view
-        return view
-    }
-
-    func updateNSView(_ nsView: VaultKeyboardCaptureNSView, context: Context) {
-        nsView.onKeyDown = onKeyDown
-        VaultKeyboardFocusRelay.current = nsView
-        VaultKeyboardFocusRelay.refocus()
-    }
-}
-
-private final class VaultKeyboardCaptureNSView: NSView {
-    var onKeyDown: (NSEvent) -> Void = { _ in }
-
-    override var acceptsFirstResponder: Bool { true }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        VaultKeyboardFocusRelay.current = self
-        VaultKeyboardFocusRelay.refocus()
-    }
-
-    override func keyDown(with event: NSEvent) {
-        onKeyDown(event)
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                guard monitor == nil else { return }
+                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    onKeyDown(event) ? nil : event
+                }
+            }
+            .onDisappear {
+                if let monitor { NSEvent.removeMonitor(monitor) }
+                monitor = nil
+            }
     }
 }
 
@@ -331,6 +318,6 @@ private struct VaultPrimaryButtonStyle: ButtonStyle {
             .opacity(isEnabled ? (configuration.isPressed ? 0.82 : 1) : 0.42)
             .scaleEffect(!reduceMotion && configuration.isPressed ? 0.98 : 1)
             .offset(y: !reduceMotion && configuration.isPressed ? 1 : 0)
-            .animation(reduceMotion ? nil : AppMotion.fast, value: configuration.isPressed)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: configuration.isPressed)
     }
 }

@@ -4,43 +4,134 @@ import MediaLibServerProtocol
 /// 当前认证用户自己的账户页。个人资料由受权 API 读取，注销只撤销当前会话；网页从不
 /// 读取 Cookie、令牌或其它用户资料。
 enum ServerWebAccountPage {
-    static func render(serverName: String, csrfToken: String, showAdministration: Bool, categories: [ServerLibraryCategory] = []) -> String {
+    static func render(serverName: String, csrfToken: String, showAdministration: Bool, categories: [ServerLibraryCategory] = [], sidebarExtras: ServerWebSidebarExtras) -> String {
         let sidebar = ServerWebNavigation.render(
-            active: .account, showAdministration: showAdministration, note: .none, categories: categories
+            active: .account, showAdministration: showAdministration, note: .none, categories: categories,
+            extras: sidebarExtras
         )
-        let pageHeader = ServerWebPageHeader.render(
+        let content = """
+        \(ServerWebPageHeader.render(
             icon: .account,
-            eyebrow: "我的媒体",
-            title: "我的账户",
-            subtitle: "查看当前登录身份和已生效权限；Cookie、令牌与会话标识不会显示。"
-        )
-        return """
-        <!doctype html>
-        <html lang="zh-Hans">
-        <head>
-          <meta charset="utf-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <meta name="color-scheme" content="light">
-          <meta name="medialib-csrf-token" content="\(escape(csrfToken))">
-          <title>我的账户 · \(escape(serverName))</title>
-          <link rel="stylesheet" href="/assets/account.css">
-          <link rel="stylesheet" href="/assets/app-shell.css?v=68">
-          <script src="/assets/app-shell.js?v=68" defer></script>
-        </head>
-        <body>
-          <a class="skip" href="#main">跳到主要内容</a>
-          <div class="shell">\(sidebar)<main id="main" tabindex="-1">\(pageHeader)<section class="card" aria-labelledby="profile-title"><h2 id="profile-title">登录身份</h2><p id="profile-state" class="state" role="status" aria-live="polite">正在加载账户资料…</p><dl id="profile" class="meta" hidden><dt>显示名称</dt><dd id="display-name">—</dd><dt>用户名</dt><dd id="username">—</dd><dt>角色</dt><dd id="roles" class="pills">—</dd><dt>已生效权限</dt><dd id="permissions" class="pills">—</dd></dl></section><section class="card" aria-labelledby="password-title"><h2 id="password-title">修改密码</h2><p class="subtitle">验证当前密码后，所有已登录设备都会退出；请使用新密码重新登录。</p><form id="change-password"><label>当前密码<input id="current-password" type="password" autocomplete="current-password" maxlength="1024" required></label><label>新密码<input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label><label>确认新密码<input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label><button id="change-password-submit" class="password-submit" type="submit">修改密码并退出所有设备</button><p id="password-state" class="state" role="status" aria-live="polite"></p></form></section><section class="card" aria-labelledby="logout-title"><h2 id="logout-title">当前设备</h2><p class="subtitle">退出只会撤销当前浏览器会话；其它设备仍可在服务管理页按权限单独处理。</p><button id="logout" type="button">退出当前账户</button><p id="logout-state" class="state" role="status" aria-live="polite"></p></section></main></div>
-          <script src="/assets/account.js" defer></script>
-        </body>
-        </html>
+            eyebrow: "Account",
+            title: "设置",
+            subtitle: "你的账号，以及你能访问哪些内容。"
+        ))
+        <div class="account-stack">
+          <section class="ui-card" aria-labelledby="profile-title">
+            <div class="ui-card-head"><h2 class="ui-card-title" id="profile-title">登录身份</h2></div>
+            <p id="profile-state" class="ui-state-line account-state t-footnote t-tertiary" role="status" aria-live="polite">正在加载账户资料…</p>
+            <!-- 名字与用户名从两列定宽表格里搬出来，做成一张身份卡：这是这一页
+                 唯一一处"这是谁"的信息，读者第一眼要看的就是它，不该和"已生效
+                 权限"并列成 dl 里的第三行。首字母底板由脚本填，不占服务端渲染。 -->
+            <div id="profile" class="account-identity" hidden>
+              <span id="account-monogram" class="ui-icon-tile ui-icon-tile-lg ui-icon-tile-tint account-monogram" aria-hidden="true"></span>
+              <div class="account-identity-copy">
+                <strong id="display-name" class="t-title-3">—</strong>
+                <span id="username" class="t-callout t-tertiary">—</span>
+              </div>
+              <dl class="account-meta">
+                <dt>角色</dt><dd id="roles" class="account-pills">—</dd>
+                <dt>已生效权限</dt><dd id="permissions" class="account-pills">—</dd>
+              </dl>
+            </div>
+          </section>
+
+          <section class="ui-card" aria-labelledby="personal-data-title">
+            <div class="ui-card-head"><h2 class="ui-card-title" id="personal-data-title">我的数据</h2></div>
+            <p class="t-footnote t-tertiary">这些记录只属于当前账号，其他用户看不到，也不会覆盖桌面端的全局状态。</p>
+            <div class="account-personal-links">
+              \(ServerWebUI.linkButton("我的评分", href: "/ratings", variant: .secondary, icon: .star))
+              \(ServerWebUI.linkButton("播放历史", href: "/history", variant: .secondary, icon: .history))
+              \(ServerWebUI.linkButton("播放队列", href: "/queue", variant: .secondary, icon: .queue))
+            </div>
+          </section>
+
+          <section class="ui-card" aria-labelledby="appearance-title">
+            <div class="ui-card-head"><h2 class="ui-card-title" id="appearance-title">外观</h2></div>
+            <p class="t-footnote t-tertiary">选择只保存在本浏览器，不会同步到服务端，也不会写入任何账号数据。</p>
+            \(ServerWebUI.appearanceSwitcher())
+          </section>
+
+          <section class="ui-card" aria-labelledby="password-title">
+            <div class="ui-card-head"><h2 class="ui-card-title" id="password-title">修改密码</h2></div>
+            <p class="t-footnote t-tertiary">验证当前密码后，所有已登录设备都会退出；请使用新密码重新登录。</p>
+            <form id="change-password" class="account-form">
+              <div class="ui-field">
+                <label class="ui-label" for="current-password">当前密码</label>
+                <input class="ui-input" id="current-password" type="password" autocomplete="current-password" maxlength="1024" required>
+              </div>
+              <div class="ui-field">
+                <label class="ui-label ui-label-required" for="new-password">新密码</label>
+                <input class="ui-input" id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required aria-describedby="new-password-help">
+                <p class="ui-help" id="new-password-help">至少 12 个字符。</p>
+              </div>
+              <div class="ui-field">
+                <label class="ui-label ui-label-required" for="confirm-password">确认新密码</label>
+                <input class="ui-input" id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required>
+              </div>
+              \(ServerWebUI.button("修改密码并退出所有设备", variant: .primary, icon: .key, id: "change-password-submit", type: "submit"))
+              <p id="password-state" class="ui-state-line account-state t-footnote t-tertiary" role="status" aria-live="polite"></p>
+            </form>
+          </section>
+
+          <section class="ui-card" aria-labelledby="logout-title">
+            <div class="ui-card-head"><h2 class="ui-card-title" id="logout-title">当前设备</h2></div>
+            <p class="t-footnote t-tertiary">退出只会撤销当前浏览器会话；其它设备仍可在服务管理页按权限单独处理。</p>
+            <div class="account-actions">\(ServerWebUI.button("退出当前账户", variant: .destructive, icon: .logout, id: "logout"))</div>
+            <p id="logout-state" class="ui-state-line account-state t-footnote t-tertiary" role="status" aria-live="polite"></p>
+          </section>
+        </div>
         """
+        return ServerWebDocument.render(
+            title: "设置",
+            serverName: serverName,
+            csrfToken: csrfToken,
+            sidebar: sidebar,
+            content: content,
+            pageStylesheets: ["/assets/account.css"],
+            pageScripts: ["/assets/overlays.js", "/assets/account.js"],
+            tint: .admin
+        )
     }
 
     /// Cacheable account-page presentation. Identity and session data are fetched
     /// only through authenticated, non-cacheable endpoints.
-    static let style = """
-    :root{--ink:#172033;--muted:#5d6b82;--line:#dfe7f1;--canvas:#f4f7fb;--card:#fff;--blue:#174d82;--focus:#1570ef;--danger:#b42318}*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--canvas);font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}a{color:inherit}:focus-visible{outline:3px solid var(--focus);outline-offset:3px}.skip{position:fixed;z-index:2;top:8px;left:8px;padding:10px 14px;color:#fff;background:var(--blue);transform:translateY(-160%)}.skip:focus{transform:none}.shell{display:grid;grid-template-columns:232px minmax(0,1fr);min-height:100dvh}aside{padding:28px 18px;color:#eef7ff;background:linear-gradient(165deg,#183b68,#1e79cf 58%,#36bffa)}.brand{font-size:19px;font-weight:800}nav{display:grid;gap:8px;margin-top:38px}nav a{display:flex;align-items:center;min-height:44px;padding:10px 12px;border-radius:10px;text-decoration:none}nav a:hover,nav a.active{background:#ffffff2c}main{width:100%;max-width:960px;padding:clamp(22px,4vw,48px)}h1{margin:0;font-size:clamp(30px,5vw,48px);letter-spacing:-.04em}.subtitle{max-width:68ch;color:var(--muted)}.card{margin-top:26px;padding:22px;border:1px solid var(--line);border-radius:18px;background:var(--card);box-shadow:0 10px 28px #243a6210}.meta{display:grid;grid-template-columns:150px minmax(0,1fr);gap:12px;margin:18px 0 0}.meta dt{color:var(--muted)}.meta dd{margin:0;overflow-wrap:anywhere}.pills{display:flex;flex-wrap:wrap;gap:8px}.pill{display:inline-flex;min-height:28px;align-items:center;padding:3px 9px;border:1px solid #b9d7ef;border-radius:999px;color:#155b92;background:#f0f8ff;font-size:12px;font-weight:700}.state{min-height:24px;margin:16px 0 0;color:var(--muted)}.state.error{color:var(--danger)}form{display:grid;gap:13px;margin-top:18px;max-width:520px}label{display:grid;gap:6px;color:var(--muted);font-size:14px;font-weight:700}input{min-height:44px;padding:10px 11px;border:1px solid #b9c9dd;border-radius:10px;color:var(--ink);background:#fff;font:inherit}input:focus{border-color:var(--focus);outline:0;box-shadow:0 0 0 3px #1570ef22}button{min-height:44px;margin-top:22px;padding:10px 16px;border:1px solid #d49b96;border-radius:11px;color:#9d1b14;background:#fff;font:inherit;font-weight:700;cursor:pointer}button:hover{background:#fff4f2}button:disabled{opacity:.5;cursor:not-allowed}.password-submit{justify-self:start;margin-top:0;border-color:#b9c9dd;color:var(--blue)}.password-submit:hover{background:#f3f8fd}@media(max-width:720px){.shell{display:block}aside{padding:16px 18px}nav{display:flex;overflow:auto;margin-top:14px}nav a{flex:none}main{padding:24px 18px}.meta{grid-template-columns:1fr;gap:3px}.password-submit{width:100%}}@media(prefers-reduced-motion:reduce){*{transition-duration:.01ms!important}}
-    """
+    static let style = #"""
+    /* Settings is a reading-and-editing page, so it keeps a narrow measure rather
+       than stretching forms across the full content width. */
+    .account-stack { display: grid; max-width: 760px; gap: var(--space-5); }
+
+    .account-identity {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: center;
+      gap: var(--space-3) var(--space-4);
+    }
+    .account-identity-copy { display: grid; min-width: 0; gap: 2px; }
+    .account-monogram { font-size: var(--type-title2-size); font-weight: var(--weight-bold); }
+    /* 角色与权限跨满整行落在名字下面：它们是这个人的属性，不是他的名字的一部分。 */
+    .account-identity .account-meta { grid-column: 1 / -1; padding-top: var(--space-3); border-top: var(--hairline) solid var(--divider); }
+    .account-meta {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1fr);
+      gap: var(--space-3) var(--space-4);
+      font-size: var(--type-callout-size);
+    }
+    .account-meta dt { color: var(--text-tertiary); font-size: var(--type-subhead-size); }
+    .account-meta dd { margin: 0; overflow-wrap: anywhere; }
+    .account-pills { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+    .account-form { display: grid; gap: var(--space-4); max-width: 460px; }
+    .account-form .ui-btn { justify-self: start; }
+    .account-actions { display: flex; }
+    .account-personal-links { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+
+    @media (max-width: 719px) {
+      .account-meta { grid-template-columns: minmax(0, 1fr); gap: var(--space-1); }
+      .account-meta dt { margin-top: var(--space-2); }
+      .account-form .ui-btn, .account-actions .ui-btn { width: 100%; }
+    }
+    """#
 
     static let script = #"""
     (() => {
@@ -60,7 +151,7 @@ enum ServerWebAccountPage {
         if (!items.length) { target.textContent = empty; return; }
         items.forEach((value) => {
           const pill = document.createElement('span');
-          pill.className = 'pill';
+          pill.className = 'ui-chip';
           pill.textContent = value;
           target.append(pill);
         });
@@ -74,34 +165,37 @@ enum ServerWebAccountPage {
             response = await fetch('/api/v1/auth/me', { credentials: 'same-origin', headers: { Accept: 'application/json' }, signal: controller.signal });
           } finally { window.clearTimeout(timer); }
           if (response.status === 401) { window.location.assign('/login'); return; }
-          if (!response.ok) throw new Error('账户资料暂时不可用');
+          if (!response.ok) throw new Error('暂时读不到你的账号信息');
           const data = await response.json();
-          if (typeof data.username !== 'string' || typeof data.displayName !== 'string') throw new Error('账户资料格式无效');
+          if (typeof data.username !== 'string' || typeof data.displayName !== 'string') throw new Error('账号信息读取失败');
           byID('display-name').textContent = data.displayName;
           byID('username').textContent = `@${data.username}`;
+          // 首字母而不是头像：产品里没有头像这回事，一个占位人形只是噪声。
+          const initial = (data.displayName || data.username || '').trim().slice(0, 1).toUpperCase();
+          byID('account-monogram').textContent = initial;
           appendPills('roles', data.roleIDs, '未分配角色');
-          appendPills('permissions', data.permissionIDs, '当前没有额外权限');
+          appendPills('permissions', data.permissionIDs, '没有额外权限');
           profile.hidden = false;
-          profileState.textContent = '账户资料已更新。';
+          profileState.textContent = '已更新。';
         } catch (error) {
           profileState.classList.add('error');
-          profileState.textContent = error && error.message ? error.message : '无法读取账户资料。';
+          profileState.textContent = error && error.message ? error.message : '暂时读不到你的账号信息。';
         }
       }
       logoutButton.addEventListener('click', async () => {
-        if (!window.confirm('确定要退出当前账户吗？')) return;
+        if (!window.confirm('确定要退出登录吗？')) return;
         const token = document.querySelector('meta[name="medialib-csrf-token"]')?.getAttribute('content');
-        if (!token) { logoutState.classList.add('error'); logoutState.textContent = '页面安全令牌不可用，请刷新后重试。'; return; }
+        if (!token) { logoutState.classList.add('error'); logoutState.textContent = '请刷新页面后再试。'; return; }
         logoutButton.disabled = true;
         logoutState.classList.remove('error');
         logoutState.textContent = '正在退出…';
         try {
           const response = await fetch('/api/v1/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-MediaLIB-CSRF': token } });
           if (response.status === 401 || response.status === 204) { window.location.assign('/login'); return; }
-          throw new Error(response.status === 429 ? '操作过于频繁，请稍后重试。' : '暂时无法退出当前账户。');
+          throw new Error(response.status === 429 ? '操作太频繁了，等一会儿再试。' : '暂时退不出去。');
         } catch (error) {
           logoutState.classList.add('error');
-          logoutState.textContent = error && error.message ? error.message : '退出失败，请稍后重试。';
+          logoutState.textContent = error && error.message ? error.message : '没能退出，请稍后再试。';
           logoutButton.disabled = false;
         }
       });
@@ -114,14 +208,14 @@ enum ServerWebAccountPage {
         const newPassword = newField.value;
         if (newPassword.length < 12 || newPassword !== confirmField.value) {
           passwordState.classList.add('error');
-          passwordState.textContent = newPassword.length < 12 ? '新密码至少需要 12 个字符。' : '两次输入的新密码不一致。';
+          passwordState.textContent = newPassword.length < 12 ? '新密码至少要 12 个字符。' : '两次输入的新密码不一致。';
           return;
         }
         const token = document.querySelector('meta[name="medialib-csrf-token"]')?.getAttribute('content');
-        if (!token) { passwordState.classList.add('error'); passwordState.textContent = '页面安全令牌不可用，请刷新后重试。'; return; }
+        if (!token) { passwordState.classList.add('error'); passwordState.textContent = '请刷新页面后再试。'; return; }
         passwordSubmit.disabled = true;
         passwordState.classList.remove('error');
-        passwordState.textContent = '正在更新密码并撤销旧会话…';
+        passwordState.textContent = '正在更新密码…';
         try {
           const response = await fetch('/api/v1/auth/password', {
             method: 'POST', credentials: 'same-origin',
@@ -129,10 +223,10 @@ enum ServerWebAccountPage {
             body: JSON.stringify({ currentPassword, newPassword })
           });
           if (response.status === 401 || response.status === 204) { window.location.assign('/login'); return; }
-          throw new Error(response.status === 429 ? '操作过于频繁，请稍后重试。' : '无法修改密码，请检查当前密码后重试。');
+          throw new Error(response.status === 429 ? '操作太频繁了，等一会儿再试。' : '没能改密码。确认一下当前密码是否输对了。');
         } catch (error) {
           passwordState.classList.add('error');
-          passwordState.textContent = error && error.message ? error.message : '无法修改密码，请稍后重试。';
+          passwordState.textContent = error && error.message ? error.message : '没能改密码，请稍后再试。';
           passwordSubmit.disabled = false;
         } finally {
           currentField.value = '';
@@ -144,12 +238,4 @@ enum ServerWebAccountPage {
     })();
     """#
 
-    private static func escape(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&#39;")
-    }
 }

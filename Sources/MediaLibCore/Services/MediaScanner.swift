@@ -452,7 +452,14 @@ public final class MediaScanner {
                 loudnessTrackPeak: audioMetadata.loudnessTrackPeak,
                 loudnessAlbumPeak: audioMetadata.loudnessAlbumPeak,
                 metadataProvider: audioMetadata.hasEmbeddedMetadata ? "Embedded" : nil,
-                genre: audioMetadata.genre
+                genre: audioMetadata.genre,
+                // 扫描本来就已经打开过这个文件、读完了标签，判定歌词只多出最多两次
+                // 同目录 `fileExists`。把结果落库，列表就不必再为了一个角标去 stat
+                // 整个曲库——那在 NAS 上是几千次网络往返。
+                hasLyrics: MusicLyricsPresence.hasLyrics(
+                    embeddedLyrics: audioMetadata.lyrics,
+                    filePath: canonicalFileURL.path
+                )
             )
             try mediaRepository.deleteItems(filePath: canonicalFileURL.path, excludingID: id)
             try mediaRepository.upsert(item)

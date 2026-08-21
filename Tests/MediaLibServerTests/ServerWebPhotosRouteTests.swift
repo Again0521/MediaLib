@@ -22,8 +22,11 @@ final class ServerWebPhotosRouteTests: XCTestCase {
         XCTAssertTrue(gallery.contains("照片 &lt;script&gt;"))
         XCTAssertTrue(gallery.contains("href=\"/photo/photo%20id%2B1\""))
         XCTAssertTrue(gallery.contains("/api/v1/images/photo%20id%2B1/poster"))
-        XCTAssertTrue(gallery.contains("href=\"/assets/photos.css\""))
-        XCTAssertTrue(gallery.contains("src=\"/assets/photos.js\""))
+        XCTAssertTrue(gallery.contains("href=\"/assets/photos.css?v="))
+        XCTAssertTrue(gallery.contains("src=\"/assets/photos.js?v="))
+        XCTAssertTrue(gallery.contains("class=\"ui-control-bar gallery-toolbar\""))
+        XCTAssertTrue(gallery.contains("class=\"gallery-grid\""))
+        XCTAssertTrue(gallery.contains("data-artwork-palette=\"poster-"))
         XCTAssertFalse(gallery.contains("<script>"))
 
         let photo = String(data: router.response(for: request("/photo/photo%20id%2B1")).body, encoding: .utf8) ?? ""
@@ -60,10 +63,18 @@ final class ServerWebPhotosRouteTests: XCTestCase {
         let router = makeRouter()
         let js = String(data: router.response(for: "GET /assets/photos.js HTTP/1.1\r\nHost: localhost\r\n\r\n").body, encoding: .utf8) ?? ""
         XCTAssertEqual(router.response(for: "GET /assets/photos.css HTTP/1.1\r\nHost: localhost\r\n\r\n").statusCode, 200)
-        XCTAssertTrue(ServerWebPhotosPage.style.contains("prefers-reduced-motion"))
+        XCTAssertTrue(ServerWebBaseStyle.css.contains("prefers-reduced-motion: reduce"), "减少动效策略集中在 base.css")
+        XCTAssertTrue(ServerWebPhotosPage.style.contains("grid-template-columns: repeat(12, minmax(0, 1fr))"))
+        XCTAssertTrue(ServerWebPhotosPage.style.contains("var(--media-scrim)"))
+        XCTAssertTrue(ServerWebPhotosPage.style.contains(".photo-art"))
+        // 「加载更多」的包装是公共的 `.ui-load-more`；相册、合集、人物此前各带一份逐字相同的拷贝。
+        XCTAssertTrue(ServerWebPrimitives.css.contains(".ui-load-more {"))
+        XCTAssertFalse(ServerWebPhotosPage.style.contains(".gallery-more {"))
         XCTAssertTrue(js.contains("textContent"))
         XCTAssertTrue(js.contains("createDocumentFragment"))
+        XCTAssertTrue(js.contains("art.append(image); image.src"))
         XCTAssertTrue(js.contains("credentials: 'same-origin'"))
+        XCTAssertTrue(js.contains("photo-refresh"))
         XCTAssertFalse(js.contains("innerHTML"))
         XCTAssertFalse(js.contains("document.cookie"))
         XCTAssertFalse(js.contains("localStorage"))

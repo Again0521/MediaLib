@@ -104,6 +104,12 @@ struct EmbyDetailExtras {
     var tmdbID: String?
     var tmdbKind: String?
     var imdbID: String?
+    /// 媒体服务器自己给出的制作信息。TMDB 有值时以 TMDB 为准（它更完整、也已
+    /// 本地化），没有时用这里的——总好过详情页留一片空白。
+    var status: String?
+    var contentRating: String?
+    var countries: [String] = []
+    var productionCompanies: [String] = []
 }
 
 struct EmbyService {
@@ -355,57 +361,24 @@ struct EmbyService {
         return "\(base)/library/\(library.viewID)/type/\(encodedType)/name/\(encodedName)"
     }
 
+    // 解析规则已下沉到 `RemoteLibraryPathPolicy`，供服务端按同一口径分组；
+    // 这里保留同名转发，避免客户端调用点大面积改动。
     static func sourceRootPath(from librarySourcePath: String) -> String? {
-        guard isMediaServerSourcePath(librarySourcePath) else { return nil }
-        guard let range = librarySourcePath.range(of: "/library/", options: .caseInsensitive) else {
-            return librarySourcePath
-        }
-        return String(librarySourcePath[..<range.lowerBound])
+        RemoteLibraryPathPolicy.sourceRootPath(from: librarySourcePath)
     }
 
     static func libraryInfo(from sourcePath: String) -> (id: String, name: String?, collectionType: String?)? {
-        guard isMediaServerSourcePath(sourcePath),
-              let range = sourcePath.range(of: "/library/", options: .caseInsensitive) else { return nil }
-        let remainder = sourcePath[range.upperBound...]
-        let parts = remainder.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-        if parts.count == 1, !parts[0].isEmpty {
-            return (parts[0], nil, nil)
-        }
-        if !parts.isEmpty, !parts[0].isEmpty {
-            var name: String?
-            var collectionType: String?
-            var index = 1
-            while index + 1 < parts.count {
-                let key = parts[index]
-                let value = parts[index + 1]
-                if key == "name" {
-                    name = value.removingPercentEncoding ?? value
-                } else if key == "type" {
-                    collectionType = value.removingPercentEncoding ?? value
-                }
-                index += 2
-            }
-            if name != nil || collectionType != nil {
-                return (parts[0], name, collectionType)
-            }
-        }
-        guard parts.count >= 2, !parts[0].isEmpty, !parts[1].isEmpty else { return nil }
-        let name = parts[0].removingPercentEncoding ?? parts[0]
-        return (parts[1], name, nil)
+        RemoteLibraryPathPolicy.libraryInfo(from: sourcePath)
     }
 
     static func isMediaServerSourcePath(_ value: String?) -> Bool {
-        guard let value else { return false }
-        let lowercased = value.lowercased()
-        return lowercased.hasPrefix("emby://") || lowercased.hasPrefix("jellyfin://") || lowercased.hasPrefix("plex://") || lowercased.hasPrefix("mlink://")
+        RemoteLibraryPathPolicy.isMediaServerSourcePath(value)
     }
 
     /// 是否为「Emby 兼容」远程源（Emby 或 Jellyfin）——两者播放上报、转码取流走完全相同的 Emby API，
     /// 应当被同等对待；Plex 用另一套 API（由各自的 PlexService 分支处理），不包含在内。
     static func isEmbyCompatibleSourcePath(_ value: String?) -> Bool {
-        guard let value else { return false }
-        let lowercased = value.lowercased()
-        return lowercased.hasPrefix("emby://") || lowercased.hasPrefix("jellyfin://")
+        RemoteLibraryPathPolicy.isEmbyCompatibleSourcePath(value)
     }
 
     /// 按 `metadataProvider` 判断是否 Emby 兼容（Emby / Jellyfin）。转码取流走 Emby API 的判断用它更稳：
@@ -502,7 +475,18 @@ struct EmbyService {
         var queryItems = [
             URLQueryItem(name: "Recursive", value: "true"),
             URLQueryItem(name: "IncludeItemTypes", value: "Movie,Series,Episode,Audio"),
-            URLQueryItem(name: "Fields", value: "OriginalTitle,Overview,ProductionYear,RunTimeTicks,ParentId,SeriesId,SeriesName,IndexNumber,ParentIndexNumber,CommunityRating,UserData,ImageTags,BackdropImageTags,MediaSources,MediaStreams,Path,PremiereDate,ProviderIds,Genres"),
+            // 只要真正会被解码的字段。
+            //
+            // 这里从前还要 `MediaStreams`、`Path`、`PremiereDate` —— `EmbyItemDTO` 上
+            // **没有任何一个对应属性**，三份数据在 `Recursive=true` 的全库查询里被
+            // 服务端逐条算出来、序列化、传过来，再被 JSONDecoder 原样丢掉。其中
+            // `MediaStreams` 是这个 API 最贵的字段之一（每页 300 条都要解析媒体流），
+            // 而 `MediaSources` 里本来就带着一份嵌套的流信息——代码读的正是那一份。
+            // `Path` 还是服务端的本地文件路径，拿来毫无用处。
+            //
+            // `MediaSources` 保留：`Container` 与 `Id` 决定取流地址，去掉它要改播放
+            // 链路（并补一条按需回查的降级路径），那是另一件事。
+            URLQueryItem(name: "Fields", value: "OriginalTitle,Overview,ProductionYear,RunTimeTicks,ParentId,SeriesId,SeriesName,IndexNumber,ParentIndexNumber,CommunityRating,UserData,ImageTags,BackdropImageTags,MediaSources,ProviderIds,Genres"),
             URLQueryItem(name: "StartIndex", value: "\(startIndex)"),
             URLQueryItem(name: "Limit", value: "\(limit)"),
             URLQueryItem(name: "api_key", value: session.accessToken)
@@ -721,7 +705,7 @@ struct EmbyService {
         let dto = try await fetchItemDetail(
             session: session,
             itemID: itemID,
-            fields: "People,ProviderIds,Overview,Genres,BackdropImageTags"
+            fields: "People,ProviderIds,Overview,Genres,BackdropImageTags,Studios,ProductionLocations,OfficialRating,Status"
         )
 
         let people: [TMDBPerson] = (dto.People ?? []).prefix(28).compactMap { person in
@@ -773,7 +757,14 @@ struct EmbyService {
         let imdbID = dto.ProviderIds?["Imdb"] ?? dto.ProviderIds?["IMDB"]
         let tmdbKind = (dto.type.lowercased() == "movie") ? "movie" : "tv"
 
-        return EmbyDetailExtras(cast: cast, crew: crew, images: images, tmdbID: tmdbID, tmdbKind: tmdbKind, imdbID: imdbID)
+        return EmbyDetailExtras(
+            cast: cast, crew: crew, images: images,
+            tmdbID: tmdbID, tmdbKind: tmdbKind, imdbID: imdbID,
+            status: dto.Status?.nilIfEmpty,
+            contentRating: dto.OfficialRating?.nilIfEmpty,
+            countries: (dto.ProductionLocations ?? []).compactMap { $0.nilIfEmpty }.prefix(8).map { $0 },
+            productionCompanies: (dto.Studios ?? []).compactMap { $0.Name?.nilIfEmpty }.prefix(8).map { $0 }
+        )
     }
 
     private func personImageURL(personID: String?, tag: String?, session: EmbySession) -> URL? {
@@ -1072,6 +1063,12 @@ private struct EmbyItemDTO: Decodable {
     let People: [EmbyPersonDTO]?
     let ProviderIds: [String: String]?
     let BackdropImageTags: [String]?
+    /// 制作信息。详情页的「制作」一栏此前只可能来自 TMDB，于是没有配 TMDB key 的
+    /// Emby 库在网页上永远是空的——而这些字段服务器本来就有。
+    let Studios: [EmbyNamedValueDTO]?
+    let ProductionLocations: [String]?
+    let OfficialRating: String?
+    let Status: String?
 
     private enum CodingKeys: String, CodingKey {
         case Id
@@ -1097,7 +1094,16 @@ private struct EmbyItemDTO: Decodable {
         case People
         case ProviderIds
         case BackdropImageTags
+        case Studios
+        case ProductionLocations
+        case OfficialRating
+        case Status
     }
+}
+
+/// Emby/Jellyfin 用同一种 `{ Name, Id }` 结构表示制作公司、频道等具名实体。
+private struct EmbyNamedValueDTO: Decodable {
+    let Name: String?
 }
 
 private struct EmbyPersonDTO: Decodable {
@@ -1163,5 +1169,12 @@ private struct EmbyMediaStreamDTO: Decodable {
         case IsTextSubtitleStream
         case DeliveryUrl
         case DeliveryMethod
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

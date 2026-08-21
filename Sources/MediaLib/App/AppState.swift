@@ -696,6 +696,7 @@ final class AppState: ObservableObject {
     @Published private(set) var backdropRevision = 0
     private var heroBackdropWarmedIDs: Set<String> = []
     private var heroBackdropWarmupTask: Task<Void, Never>?
+    private var lyricsBackfillTask: Task<Void, Never>?
     @Published private(set) var videoCacheStorageSummary = VideoCacheStorageSummary(entryCount: 0, totalBytes: 0, byteLimit: nil)
     @Published private(set) var videoOfflineSubscriptionWiFiAvailable = false
     // 播放歌名含「アゲイン」的歌曲时触发一次轻量樱花动效，仅限本次启动首次播放。
@@ -738,6 +739,31 @@ final class AppState: ObservableObject {
     let logger: LoggingService?   // internal：供 AppState+Lastfm 等领域 extension 跨文件访问
     private let externalPlayerService = ExternalPlayerService()
     private let privacyLockService = PrivacyLockService()
+    /// 把"保险库在这台机器上解锁着"这一个事实发布给服务进程。
+    ///
+    /// 网页由另一个进程提供，它读不到这里的内存状态——这正是"App 里已解锁、网页
+    /// 上还是锁屏"的全部原因。发布的内容只有两个时间戳，口令始终留在
+    /// `PrivacyLockService` 里。目录取应用支持根，与服务端的 `ServerDataDirectories.root`
+    /// 解析到同一个位置。
+    private var vaultUnlockSessionStore: VaultUnlockSessionStore?
+    /// 解锁期间的续期定时器。会话本身会过期，所以 App 意外退出后网页最多在一个
+    /// 有效期之后自己回到锁定，而不是永远敞着。
+    private var vaultUnlockRefreshTask: Task<Void, Never>?
+    /// 把首页那几条**推荐**栏目的名单发布给服务进程。
+    ///
+    /// 网页首页从前对同一批内容自己又推导了一遍（数据库按加入时间／评分各取一页，
+    /// 「剧集推荐」就是"所有剧集"），于是同一个资料库在 App 和网页上给出两份不同的
+    /// 片单，而且那份重算还要多跑两次全库排序查询。发布的内容只有**排好序的条目 ID**：
+    /// 服务端拿到 ID 之后仍然要走它自己那套逐用户授权把条目查出来，客户端给的是
+    /// 顺序，不是可见性。
+    private var homeRecommendationStore: HomeRecommendationSnapshotStore?
+    /// 上一次发布的内容摘要。首页看板每次重算都会调用发布，但名单通常一整天都不变，
+    /// 没必要为此反复写盘。
+    private var publishedHomeRecommendationDigest: String?
+    /// 上一次发布的时刻。名单本身**会过期**（这是它在 App 崩溃后不至于永远陈旧的
+    /// 兜底），所以即使内容一字未变，也要在过期之前续写一次——否则一台开着不动的
+    /// 机器会在一天之后悄悄让网页失去这份名单。
+    private var publishedHomeRecommendationsAt: Date?
     private let remoteCredentialStore = RemoteCredentialStore()
     private let embyService = EmbyService()
     private let plexService = PlexService()
@@ -906,6 +932,8 @@ final class AppState: ObservableObject {
             let logger = LoggingService(logDirectory: directories.logs)
             let database = try DatabaseManager(url: directories.database, backupDirectory: directories.databaseBackups)
             self.directories = directories
+            self.vaultUnlockSessionStore = VaultUnlockSessionStore(directory: directories.applicationSupport)
+            self.homeRecommendationStore = HomeRecommendationSnapshotStore(directory: directories.applicationSupport)
             self.logger = logger
             self.database = database
             self.sourceRepository = SourceRepository(database: database)
@@ -1089,6 +1117,7 @@ final class AppState: ObservableObject {
     }
 
     deinit {
+        vaultUnlockRefreshTask?.cancel()
         version122MaintenanceTask?.cancel()
         libraryReloadTask?.cancel()
         backgroundTaskPersistence.cancel()
@@ -2877,6 +2906,39 @@ final class AppState: ObservableObject {
 
     func reload() {
         scheduleLibraryReload(reason: "reload")
+    }
+
+    /// 给还没有判定过歌词的曲目补上判定。
+    ///
+    /// schema 29 把 `has_lyrics` 建了出来，但迁移只填 0——在启动路径上遍历整个曲库
+    /// 做文件探测会把一次升级变成一次几分钟的卡死。真实值一部分由扫描写入，剩下的
+    /// 老数据由这里在后台慢慢补齐，每批有上限，不和用户抢盘。
+    ///
+    /// 判定完成前，这些曲目在「有歌词」筛选里是"没有"。这是可解释的过渡状态，
+    /// 好过让整个音乐库在升级后卡住不动。
+    func backfillMusicLyricsPresence(batchLimit: Int = 400) {
+        guard let mediaRepository else { return }
+        lyricsBackfillTask?.cancel()
+        lyricsBackfillTask = Task { [weak self] in
+            let updates = await BlockingIOExecutor.run { () -> [String: Bool] in
+                guard let pending = try? mediaRepository.fetchMusicNeedingLyricsProbe(limit: batchLimit),
+                      !pending.isEmpty
+                else { return [:] }
+                var results: [String: Bool] = [:]
+                for track in pending {
+                    guard let filePath = track.filePath else { continue }
+                    // 内嵌歌词在扫描时就判定过了；这里补的是外挂文件这一路。
+                    if MusicLyricsPresence.sidecarExists(filePath: filePath) {
+                        results[track.id] = true
+                    }
+                }
+                return results
+            }
+            guard !Task.isCancelled, !updates.isEmpty else { return }
+            try? mediaRepository.updateLyricsPresence(updates)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { self?.reload() }
+        }
     }
 
     private func reloadMediaItemsDuringScan(runID: UUID) {
@@ -4673,6 +4735,11 @@ final class AppState: ObservableObject {
             mlinkItems = mlinkItems.map(preservingLocalTraceForDisabledEmbySync)
         }
         try mediaRepository.replaceRemoteItems(sourcePathPrefix: source.path, with: mlinkItems)
+        // 这里**刻意**没有 Emby/Plex 那两行 `prepareBackfill` 与封面预热：Mlink 的
+        // 目录是一份只读卡片投影，条目既不带上游图片地址也不带文件路径（见
+        // `MlinkLibrarySynchronizer.localItem`），详情与封面都留在那台服务器自己的
+        // 网页上。补一次 backfill 只会排队去取一批永远取不到的详情。
+        // 与之配套的是 `detailExtrasAPI(for: .mlink) == nil`。
     }
 
     private func preservingLocalTraceForDisabledEmbySync(_ incoming: MediaItem) -> MediaItem {
@@ -4731,36 +4798,81 @@ final class AppState: ObservableObject {
             totalCount: totalCount
         )
 
+        // 每落盘一次要重写整份进度文件（读 → 解码 → 插入 → 排序 → 编码 → 原子写），
+        // 所以绝不能每张封面落一次：三千张就是 O(N²) 的字节量，约 1.3GB 磁盘写外加
+        // 三千次对不断变长数组的排序，而且全部 `await` 在取图循环里。改成按批次落盘。
+        // 中断时丢掉的最多是最后一批的"已完成"标记，代价只是下次重跑那几张——它们
+        // 已经在磁盘缓存里，重跑就是一次命中。
+        let progressPersistBatchSize = 32
         let task = Task { [weak self] in
             guard let self else { return }
             var completed = completedURLStrings
             var failed = 0
-            for url in remainingURLs {
-                guard !Task.isCancelled else { return }
-                let succeeded = await ArtworkImageCache.prewarmRemoteImage(
-                    url: url,
-                    targetSize: ArtworkImageCache.posterGridTargetSize
-                )
-                if succeeded {
-                    completed.insert(url.absoluteString)
+            var unpersistedCompletions = 0
+
+            // 串行预热是这条链路上最贵的一处：`ArtworkRemoteImageStore` 有 4 个取图
+            // 许可，而这个循环一次只喂一张，有效并发是 1。三千张海报 × 一次 RTT
+            // 就是几分钟的纯等待。同一仓库里 1.2.2 那条重建路径早就是分块并发了。
+            await withTaskGroup(of: (url: String, succeeded: Bool).self) { group in
+                var iterator = remainingURLs.makeIterator()
+                let parallelism = min(4, remainingURLs.count)
+
+                func enqueueNext() {
+                    guard let url = iterator.next() else { return }
+                    group.addTask(priority: .utility) {
+                        guard !Task.isCancelled else { return (url.absoluteString, false) }
+                        let succeeded = await ArtworkImageCache.prewarmRemoteImage(
+                            url: url,
+                            targetSize: ArtworkImageCache.posterGridTargetSize
+                        )
+                        return (url.absoluteString, succeeded)
+                    }
+                }
+
+                for _ in 0..<parallelism { enqueueNext() }
+
+                while let result = await group.next() {
+                    if Task.isCancelled {
+                        group.cancelAll()
+                        break
+                    }
+                    if result.succeeded {
+                        completed.insert(result.url)
+                        unpersistedCompletions += 1
+                        if unpersistedCompletions >= progressPersistBatchSize {
+                            unpersistedCompletions = 0
+                            await self.persistArtworkWarmupProgress(
+                                sourceID: source.id,
+                                completedURLs: completed,
+                                totalCount: totalCount
+                            )
+                        }
+                    } else {
+                        failed += 1
+                    }
+                    let processed = completed.count + failed
+                    if processed == totalCount || processed % 6 == 0 {
+                        self.updateBackgroundTask(
+                            id: taskID,
+                            progress: Double(processed) / Double(max(totalCount, 1)),
+                            detail: failed > 0
+                                ? "已缓存 \(completed.count)/\(totalCount) 张封面，\(failed) 张稍后重试"
+                                : "已缓存 \(completed.count)/\(totalCount) 张封面"
+                        )
+                    }
+                    enqueueNext()
+                }
+            }
+            // 被取消时也要把这一批记下来，否则下次从上一次落盘点重来。
+            guard !Task.isCancelled else {
+                if unpersistedCompletions > 0 {
                     await self.persistArtworkWarmupProgress(
                         sourceID: source.id,
                         completedURLs: completed,
                         totalCount: totalCount
                     )
-                } else {
-                    failed += 1
                 }
-                let processed = completed.count + failed
-                if processed == totalCount || processed % 6 == 0 {
-                    self.updateBackgroundTask(
-                        id: taskID,
-                        progress: Double(processed) / Double(max(totalCount, 1)),
-                        detail: failed > 0
-                            ? "已缓存 \(completed.count)/\(totalCount) 张封面，\(failed) 张稍后重试"
-                            : "已缓存 \(completed.count)/\(totalCount) 张封面"
-                    )
-                }
+                return
             }
             self.embyArtworkWarmupTasks[source.id] = nil
             if failed == 0 {
@@ -5400,6 +5512,31 @@ final class AppState: ObservableObject {
     }
 
     /// 统一加载详情页扩展数据：先由服务器给出角色与艺术图，再由 TMDB 补充人物身份和推荐。
+    /// 哪一套接口能给这个来源取详情扩展（演员、剧照、制作信息）。
+    ///
+    /// 分派按来源种类穷举，不写成"是不是 Plex"。仓库里每一处
+    /// `if plex { plexService } else { embyService }` 都有同一个缺口：**Mlink 也会
+    /// 落进 Emby 分支**。Mlink 是本产品自己的服务端，说的是 Mlink 契约，那个请求
+    /// 只会失败，然后在日志里留下一条「Mlink 详情扩展加载失败」——读者看到的是
+    /// 详情栏永远空着。没有可用通道时就返回 nil，而不是拿另一个厂商的接口碰运气。
+    enum RemoteDetailExtrasAPI: Equatable {
+        /// Emby 与 Jellyfin 共用同一套 `/Items/<id>` 接口。
+        case embyCompatible
+        case plex
+    }
+
+    nonisolated static func detailExtrasAPI(for kind: MediaSourceKind) -> RemoteDetailExtrasAPI? {
+        switch kind {
+        case .emby, .jellyfin: return .embyCompatible
+        case .plex: return .plex
+        // Mlink 的目录是一份只读卡片投影：不带文件路径，也不带上游图片地址
+        // （见 `MlinkLibrarySynchronizer.localItem`），详情资料留在那台服务器
+        // 自己的网页上。
+        case .mlink: return nil
+        case .local, .smb, .ftp, .url: return nil
+        }
+    }
+
     private func detailEnrichment(for item: MediaItem, forceRefresh: Bool) async -> TMDBEnrichment? {
         let language = settings.tmdbLanguage.isEmpty ? "zh-CN" : settings.tmdbLanguage
         let apiKey = settings.tmdbAPIKey
@@ -5424,14 +5561,24 @@ final class AppState: ObservableObject {
 
             let extras: EmbyDetailExtras
             do {
-                if source.sourceKind == .plex {
+                // 按来源种类分派，不是"是不是 Plex"。
+                //
+                // 这里原本是 `if plex { plexService } else { embyService }`，于是
+                // **Mlink 也走了 Emby 的 `/Items/<id>` 接口**——Mlink 是本产品自己的
+                // 服务端，说的是 Mlink 契约，那个请求只会失败，然后在日志里留下一条
+                // 「Mlink 详情扩展加载失败」，读者看到的是详情栏永远空着。仓库里
+                // 每一处 `if plex … else emby` 的分叉都有同一个缺口。
+                switch Self.detailExtrasAPI(for: source.sourceKind) {
+                case .plex:
                     extras = try await self.withValidPlexSession(for: source) { session in
                         try await self.plexService.fetchExtras(session: session, itemID: externalID)
                     }
-                } else {
+                case .embyCompatible:
                     extras = try await self.withValidEmbySession(for: source) { session in
                         try await self.embyService.fetchExtras(session: session, itemID: externalID)
                     }
+                case nil:
+                    return nil
                 }
             } catch {
                 self.logger?.log("\(source.sourceKind.displayName) 详情扩展加载失败：\(error.localizedDescription)", level: .warning)
@@ -5460,7 +5607,7 @@ final class AppState: ObservableObject {
         return value
     }
 
-    private static func mergedDetailEnrichment(
+    nonisolated static func mergedDetailEnrichment(
         server: EmbyDetailExtras,
         tmdb: TMDBEnrichment?,
         provider: String
@@ -5521,15 +5668,21 @@ final class AppState: ObservableObject {
             imdbID: server.imdbID ?? tmdb?.imdbID,
             tmdbKind: server.tmdbKind ?? tmdb?.tmdbKind,
             tmdbID: server.tmdbID ?? tmdb?.tmdbID,
-            status: tmdb?.status,
+            // 制作信息以 TMDB 为准（更完整、且已按语言本地化），TMDB 没有时用
+            // 媒体服务器自己给的。此前这几项**只**认 TMDB：一个没有配 TMDB key
+            // 的 Emby 库，详情页的「制作」一栏永远空着，而这些字段服务器一直
+            // 都在返回。
+            status: tmdb?.status ?? server.status,
             firstAirDate: tmdb?.firstAirDate,
             endDate: tmdb?.endDate,
             seasonCount: tmdb?.seasonCount,
             episodeCount: tmdb?.episodeCount,
-            contentRating: tmdb?.contentRating,
+            contentRating: tmdb?.contentRating ?? server.contentRating,
             originalLanguage: tmdb?.originalLanguage,
-            countries: tmdb?.countries ?? [],
-            productionCompanies: tmdb?.productionCompanies ?? [],
+            countries: tmdb?.countries.isEmpty == false ? (tmdb?.countries ?? []) : server.countries,
+            productionCompanies: tmdb?.productionCompanies.isEmpty == false
+                ? (tmdb?.productionCompanies ?? [])
+                : server.productionCompanies,
             networks: tmdb?.networks ?? []
         )
         return merged.isEmpty ? nil : merged
@@ -5898,6 +6051,9 @@ final class AppState: ObservableObject {
               source.remoteTraceSyncMode == .bidirectional,
               let externalID = report.item.externalID else { return }
 
+        // Mlink 的播放与进度上报由它自己的网页会话完成（`updateMlinkWatched` 走
+        // MlinkAPIClient），桌面端不该把它的进度塞进 Emby 接口。
+        guard source.sourceKind != .mlink else { return }
         if source.sourceKind == .plex {
             embyPlaybackSyncTasks[report.item.id]?.cancel()
             embyPlaybackSyncTasks[report.item.id] = Task { [weak self] in
@@ -5974,7 +6130,9 @@ final class AppState: ObservableObject {
         guard let source = embySource(for: item),
               source.remoteTraceSyncMode == .bidirectional,
               let externalID = item.externalID else { return }
-        if source.sourceKind == .plex {
+        // Mlink 走 `updateMlinkPreference`（调用方在更上层就分流了）；这里再兜一道，
+        // 免得日后新增一个入口时又把它送进 Emby 接口。
+        if source.sourceKind == .plex || source.sourceKind == .mlink {
             return
         }
         try await withValidEmbySession(for: source) { session in
@@ -5986,6 +6144,8 @@ final class AppState: ObservableObject {
         guard let source = embySource(for: item),
               source.remoteTraceSyncMode == .bidirectional,
               let externalID = item.externalID else { return }
+        // 同上：Mlink 有自己的 `updateMlinkWatched`。
+        guard source.sourceKind != .mlink else { return }
         if source.sourceKind == .plex {
             try await withValidPlexSession(for: source) { session in
                 try await plexService.setPlayed(session: session, itemID: externalID, played: played)
@@ -9540,6 +9700,7 @@ final class AppState: ObservableObject {
         settings.privacyPINEnabled = true
         settingsStore.save(settings)
         privacyLockState.configurePINAndUnlock()
+        publishVaultUnlockSession()
         return true
     }
 
@@ -9550,6 +9711,7 @@ final class AppState: ObservableObject {
         settings.privacyPINEnabled = true
         await settingsStore.saveAsync(settings)
         privacyLockState.configurePINAndUnlock()
+        publishVaultUnlockSession()
         return true
     }
 
@@ -9560,6 +9722,7 @@ final class AppState: ObservableObject {
                 privacyLockState.setUnlocked(unlocked)
                 if unlocked {
                     privacyLockState.setPINConfigured(true)
+                    publishVaultUnlockSession()
                 }
                 if !unlocked {
                     alert = AppAlert(title: "无法解锁", message: "Touch ID 未完成验证。")
@@ -9572,8 +9735,64 @@ final class AppState: ObservableObject {
 
     func lockPrivacy() {
         privacyLockState.lock()
+        clearVaultUnlockSession()
         clearDetailNavigation()
         stopPlaybackIfPrivate()
+    }
+
+    /// 发布并开始续期一次解锁会话。写失败只影响网页侧的可见性，绝不能让 App 的
+    /// 解锁本身失败——所以这里不抛错、不弹窗。
+    private func publishVaultUnlockSession() {
+        guard let vaultUnlockSessionStore else { return }
+        vaultUnlockSessionStore.publish()
+        vaultUnlockRefreshTask?.cancel()
+        vaultUnlockRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(VaultUnlockSessionStore.refreshInterval * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                guard let self, self.privacyUnlocked else { return }
+                self.vaultUnlockSessionStore?.publish()
+            }
+        }
+    }
+
+    /// 把首页推荐名单发布给服务进程（网页首页的同名栏目按它来排）。
+    ///
+    /// 只发布**顺序**：保险库条目在这里先剔一道（服务端还会再剔一道），除此之外
+    /// 名单里没有标题、路径、封面，也没有任何痕迹——谁看到哪儿、谁收藏了什么，
+    /// 网页那一侧读的永远是它自己的逐用户表。
+    ///
+    /// 写盘失败只影响网页的取材（它会回落到服务端自己的推导），所以这里不抛错、
+    /// 不弹窗，也不阻塞首页那一帧。
+    func publishHomeRecommendations(_ sections: [(section: HomeRecommendationSection, items: [MediaItem])]) {
+        guard let homeRecommendationStore else { return }
+        let entries: [HomeRecommendationSnapshot.Entry] = sections.compactMap { section in
+            let ids = section.items
+                .filter { $0.type != .privateCollection && !isPrivateItem($0) }
+                .map(\.id)
+            guard !ids.isEmpty else { return nil }
+            return .init(section: section.section, itemIDs: ids)
+        }
+        guard !entries.isEmpty else { return }
+        let digest = entries
+            .map { "\($0.sectionID):\($0.itemIDs.joined(separator: ","))" }
+            .joined(separator: "|")
+        let now = Date()
+        let isStale = publishedHomeRecommendationsAt
+            .map { now.timeIntervalSince($0) >= HomeRecommendationSnapshotStore.lifetime / 3 } ?? true
+        guard digest != publishedHomeRecommendationDigest || isStale else { return }
+        publishedHomeRecommendationDigest = digest
+        publishedHomeRecommendationsAt = now
+        Task.detached(priority: .utility) {
+            homeRecommendationStore.publish(entries: entries)
+        }
+    }
+
+    /// 上锁、移除口令、退出——任何一条路径都要立刻收回网页侧的可见性。
+    func clearVaultUnlockSession() {
+        vaultUnlockRefreshTask?.cancel()
+        vaultUnlockRefreshTask = nil
+        vaultUnlockSessionStore?.clear()
     }
 
     func removePrivacyPIN() {
@@ -9585,6 +9804,7 @@ final class AppState: ObservableObject {
         settings.privacyPINEnabled = false
         settingsStore.save(settings)
         privacyLockState.clearPINConfiguration()
+        clearVaultUnlockSession()
         clearDetailNavigation()
         stopPlaybackIfPrivate()
     }
@@ -9598,6 +9818,7 @@ final class AppState: ObservableObject {
         settings.privacyPINEnabled = false
         await settingsStore.saveAsync(settings)
         privacyLockState.clearPINConfiguration()
+        clearVaultUnlockSession()
         clearDetailNavigation()
         stopPlaybackIfPrivate()
     }

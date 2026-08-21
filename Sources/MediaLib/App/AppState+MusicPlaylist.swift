@@ -54,46 +54,14 @@ extension AppState {
     }
 
     /// 按规则实时求值：从全部音乐里筛选 → 排序 → 截断数量。曲目随库状态自动更新。
+    ///
+    /// 规则本身住在 `MusicSmartPlaylistPolicy`（MediaLibCore），服务端用同一份——
+    /// 从前它只在这里，网页端因此完全给不出智能歌单。这里只负责喂候选集和缓存。
     func musicTracks(inSmart playlist: MusicSmartPlaylist) -> [MediaItem] {
         if let cached = cachedMusicSmartTracksByPlaylistID[playlist.id] {
             return cached
         }
-        var tracks = musicTracks
-
-        switch playlist.filter {
-        case .any:
-            break
-        case .favorites:
-            tracks = tracks.filter(\.favorite)
-        case .recentlyPlayed:
-            tracks = tracks.filter { $0.lastPlayedAt != nil }
-        case .neverPlayed:
-            tracks = tracks.filter { ($0.playCount ?? 0) == 0 }
-        }
-
-        if playlist.recency != .anytime {
-            let cutoff = Date().addingTimeInterval(-Double(playlist.recency.rawValue) * 86_400)
-            tracks = tracks.filter { $0.createdAt >= cutoff }
-        }
-
-        switch playlist.sort {
-        case .dateAddedDesc:
-            tracks.sort { $0.createdAt > $1.createdAt }
-        case .playCountDesc:
-            tracks.sort { ($0.playCount ?? 0) > ($1.playCount ?? 0) }
-        case .lastPlayedDesc:
-            tracks.sort { ($0.lastPlayedAt ?? .distantPast) > ($1.lastPlayedAt ?? .distantPast) }
-        case .titleAsc:
-            tracks.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-        case .artistAsc:
-            tracks.sort { ($0.artist ?? "").localizedCaseInsensitiveCompare($1.artist ?? "") == .orderedAscending }
-        case .yearDesc:
-            tracks.sort { ($0.year ?? 0) > ($1.year ?? 0) }
-        }
-
-        if playlist.limit != .unlimited {
-            tracks = Array(tracks.prefix(playlist.limit.rawValue))
-        }
+        let tracks = MusicSmartPlaylistPolicy.tracks(in: playlist, from: musicTracks)
         cachedMusicSmartTracksByPlaylistID[playlist.id] = tracks
         return tracks
     }

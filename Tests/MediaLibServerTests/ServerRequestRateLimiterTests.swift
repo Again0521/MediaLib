@@ -100,6 +100,77 @@ final class ServerRequestRateLimiterTests: XCTestCase {
         XCTAssertFalse(headers.contains("192.0.2.11"))
     }
 
+    func testAuthenticatedReadsDoNotConsumeUnauthenticatedBudget() {
+        var custom = policies(capacity: 100, refillPerSecond: 1)
+        custom[.unauthenticated] = ServerRateLimitPolicy(capacity: 1, refillPerSecond: 0.01)
+        let router = LocalHTTPRouter(
+            serverID: "server",
+            serverName: "Server",
+            authenticationProvider: { _ in .testAdministrator() },
+            rateLimiter: ServerRequestRateLimiter(policies: custom, salt: "authenticated-read-test")
+        )
+        let request = "GET /api/v1/library/summary HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+        XCTAssertEqual(router.response(for: request).statusCode, 200)
+        XCTAssertEqual(router.response(for: request).statusCode, 200)
+    }
+
+    func testUnauthenticatedReadsRemainRateLimitedAfterAuthenticationFails() {
+        var custom = policies(capacity: 100, refillPerSecond: 1)
+        custom[.unauthenticated] = ServerRateLimitPolicy(capacity: 1, refillPerSecond: 0.01)
+        let router = LocalHTTPRouter(
+            serverID: "server",
+            serverName: "Server",
+            rateLimiter: ServerRequestRateLimiter(policies: custom, salt: "unauthenticated-read-test")
+        )
+        let request = "GET /api/v1/library/summary HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+        XCTAssertEqual(router.response(for: request).statusCode, 401)
+        XCTAssertEqual(router.response(for: request).statusCode, 429)
+    }
+
+    func testArtworkUsesDedicatedBudgetInsteadOfPageAPIReadBudget() {
+        var custom = policies(capacity: 100, refillPerSecond: 1)
+        custom[.apiRead] = ServerRateLimitPolicy(capacity: 1, refillPerSecond: 0.01)
+        custom[.artworkRead] = ServerRateLimitPolicy(capacity: 2, refillPerSecond: 0.01)
+        let router = LocalHTTPRouter(
+            serverID: "server",
+            serverName: "Server",
+            authenticationProvider: { _ in .testAdministrator() },
+            rateLimiter: ServerRequestRateLimiter(policies: custom, salt: "artwork-read-test")
+        )
+        let pageRequest = "GET /api/v1/library/summary HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        let artworkRequest = "GET /api/v1/images/missing/poster?size=160 HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+        XCTAssertEqual(router.response(for: pageRequest).statusCode, 200)
+        XCTAssertEqual(router.response(for: artworkRequest).statusCode, 404)
+        XCTAssertEqual(router.response(for: artworkRequest).statusCode, 404)
+        XCTAssertEqual(router.response(for: artworkRequest).statusCode, 429)
+    }
+
+    func testStaticAssetsDoNotConsumePublicProbeBudget() {
+        var custom = policies(capacity: 100, refillPerSecond: 1)
+        custom[.publicProbe] = ServerRateLimitPolicy(capacity: 1, refillPerSecond: 0.01)
+        let router = LocalHTTPRouter(
+            serverID: "server",
+            serverName: "Server",
+            rateLimiter: ServerRequestRateLimiter(policies: custom, salt: "static-asset-test")
+        )
+
+        XCTAssertEqual(router.response(
+            for: "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            clientAddressKey: "192.0.2.10"
+        ).statusCode, 200)
+        XCTAssertEqual(router.response(
+            for: "GET /assets/app-shell.css HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            clientAddressKey: "192.0.2.10"
+        ).statusCode, 200)
+        XCTAssertEqual(router.response(
+            for: "GET /assets/music.css HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            clientAddressKey: "192.0.2.10"
+        ).statusCode, 200)
+    }
+
     func testLoginIdentityLimitCannotBeBypassedByChangingClientAddress() throws {
         var custom = policies(capacity: 100, refillPerSecond: 1)
         custom[.loginIdentity] = ServerRateLimitPolicy(capacity: 1, refillPerSecond: 0.01)

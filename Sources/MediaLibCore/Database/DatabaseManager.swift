@@ -4,7 +4,7 @@ import SQLite3
 // 内部所有可变状态（db 句柄）只通过私有串行 queue 访问，线程安全由队列约束保证，
 // 编译器无法静态验证这一点，因此显式标注 @unchecked Sendable（而非让调用处到处 @Sendable 警告）。
 public final class DatabaseManager: @unchecked Sendable {
-    public static let currentSchemaVersion = 27
+    public static let currentSchemaVersion = 29
 
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
@@ -442,6 +442,20 @@ public final class DatabaseManager: @unchecked Sendable {
                 try execute("PRAGMA user_version = 27")
             }
             version = 27
+        }
+        if version < 28 {
+            try transaction {
+                try migrateToVersion28()
+                try execute("PRAGMA user_version = 28")
+            }
+            version = 28
+        }
+        if version < 29 {
+            try transaction {
+                try migrateToVersion29()
+                try execute("PRAGMA user_version = 29")
+            }
+            version = 29
         }
         guard version == Self.currentSchemaVersion else {
             throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
@@ -1421,6 +1435,34 @@ public final class DatabaseManager: @unchecked Sendable {
         )
         """)
         try execute("CREATE INDEX IF NOT EXISTS index_server_user_queue_position ON server_user_queue_items(user_id, position)")
+    }
+
+    /// 网页端排序从 4 个键扩到 9 个、并新增按题材筛选，只需要索引：没有新表也没有新列。
+    /// 形态照抄 v25 为服务端分页加的三个复合索引——同一段 WHERE 前缀加上排序列。
+    /// `(source_path, genre)` 让题材的 DISTINCT 能直接走索引，而不必扫全表。
+    private func migrateToVersion28() throws {
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_source_genre ON media_items(source_path, genre)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_server_top_level_created ON media_items(source_path, type, parent_id, created_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_server_top_level_runtime ON media_items(source_path, type, parent_id, runtime DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_server_top_level_rating ON media_items(source_path, type, parent_id, rating DESC)")
+    }
+
+    /// 歌词存在性落库。
+    ///
+    /// 判定本身很便宜（内嵌标签扫描时已经读到，外挂文件两次 `fileExists`），贵的
+    /// 是"每次列表刷新都对整个曲库重算一遍"——在 NAS 上那是几千次网络 stat。
+    /// 存下来之后，客户端的筛选和网页端的筛选读的是同一个值。
+    ///
+    /// 既有行一律先落到 0：真实值由扫描或后台回补写入，而不是在迁移里遍历整个
+    /// 曲库去碰盘——迁移跑在启动路径上，那会把一次升级变成一次几分钟的卡死。
+    private func migrateToVersion29() throws {
+        try addColumnIfMissing(
+            table: "media_items",
+            column: "has_lyrics",
+            definition: "has_lyrics INTEGER NOT NULL DEFAULT 0"
+        )
+        // 只有音乐会被判定，所以索引也只对音乐有意义。
+        try execute("CREATE INDEX IF NOT EXISTS index_media_items_music_lyrics ON media_items(type, has_lyrics)")
     }
 
     private func validateBackup(at backupURL: URL) throws {

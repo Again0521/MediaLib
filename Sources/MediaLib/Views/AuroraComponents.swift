@@ -2080,7 +2080,7 @@ struct AuroraHeroCarousel: View {
                 }
             }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.55), value: cur)
+        .animation(reduceMotion ? AppMotion.reducedContent : AppMotion.carousel, value: cur)
         // 触控板双指滑动切换（横向为主才拦截，纵向滚动穿透）。
         .background(BannerSwipeCatcher { direction in step(direction, count: slides.count) })
         // 鼠标左右拖动切换（鼠标无双指）。
@@ -2096,7 +2096,7 @@ struct AuroraHeroCarousel: View {
         )
         // hover：放大一档 + 指针手型 + 显示左右切换箭头。
         .scaleEffect(isHovering && !reduceMotion ? 1.006 : 1)
-        .animation(.easeOut(duration: 0.2), value: isHovering)
+        .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: isHovering)
         .overlay(alignment: .center) {
             if slides.count > 1 {
                 HStack {
@@ -2106,7 +2106,7 @@ struct AuroraHeroCarousel: View {
                 }
                 .padding(.horizontal, 12)
                 .opacity(isHovering ? 1 : 0)
-                .animation(.easeOut(duration: 0.2), value: isHovering)
+                .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: isHovering)
                 .allowsHitTesting(isHovering)
             }
         }
@@ -2119,7 +2119,7 @@ struct AuroraHeroCarousel: View {
                             .frame(width: dot == cur ? 18 : 7, height: 7)
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.4)) { index = dot }
+                                withAnimation(reduceMotion ? AppMotion.reducedContent : AppMotion.carousel) { index = dot }
                             }
                             .accessibilityLabel(Text(verbatim: "\(dot + 1)"))
                     }
@@ -2148,7 +2148,7 @@ struct AuroraHeroCarousel: View {
     private func step(_ delta: Int, count: Int) {
         guard count > 1 else { return }
         let current = ((index % count) + count) % count
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.5)) {
+        withAnimation(reduceMotion ? AppMotion.reducedContent : AppMotion.carousel) {
             index = ((current + delta) % count + count) % count
         }
     }
@@ -2206,11 +2206,13 @@ struct AuroraHeroCarousel: View {
 
 /// 轮播箭头按压反馈：仅绘制层缩放/降透明，不改外层布局尺寸。
 private struct CarouselArrowButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.9 : 1)
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.94 : 1)
             .opacity(configuration.isPressed ? 0.82 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: configuration.isPressed)
     }
 }
 

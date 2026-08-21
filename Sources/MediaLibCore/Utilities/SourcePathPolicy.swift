@@ -19,7 +19,7 @@ public enum SourcePathPolicy {
         return excludedPaths.contains { isSourcePath(sourcePath, inside: $0) }
     }
 
-    static func normalizedSourceRoot(_ sourceRoot: String) -> String {
+    public static func normalizedSourceRoot(_ sourceRoot: String) -> String {
         var normalized = sourceRoot
         while normalized.count > 1,
               normalized.hasSuffix("/"),
@@ -27,6 +27,14 @@ public enum SourcePathPolicy {
             normalized.removeLast()
         }
         return normalized
+    }
+
+    /// 归一化后的比较键：scheme 与主机名转小写、去掉尾斜杠。路径段大小写保留。
+    ///
+    /// 归属判定与分组必须共用它，否则 `EMBY://Host/x` 与 `emby://host/x/` 会被
+    /// 当成两台不同的服务器——同一台 Emby 会在侧栏裂成几个同名分组。
+    public static func canonicalKey(for path: String) -> String {
+        comparisonKey(for: normalizedSourceRoot(path))
     }
 
     private static func comparisonKey(for path: String) -> String {

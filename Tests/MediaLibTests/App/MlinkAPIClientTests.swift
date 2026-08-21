@@ -92,7 +92,7 @@ final class MlinkAPIClientTests: XCTestCase {
             XCTAssertEqual(Set(components.queryItems ?? []), Set([
                 URLQueryItem(name: "offset", value: "0"),
                 URLQueryItem(name: "limit", value: "100"),
-                URLQueryItem(name: "sort", value: "updatedDescending"),
+                URLQueryItem(name: "sort", value: "recentlyUpdated"),
                 URLQueryItem(name: "type", value: "movie")
             ]))
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(token)")

@@ -123,6 +123,39 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         XCTAssertNil(try authentication.principal(forAccessToken: accessToken))
     }
 
+    func testCookieRefreshRotatesPersistedBrowserSessionWithoutExposingTokens() throws {
+        let login = try requestBody([
+            "username": "alice",
+            "password": "correct horse battery staple",
+            "deviceName": "Web Browser",
+            "platform": "Web",
+            "delivery": "cookie"
+        ])
+        let loginResponse = router.response(
+            for: "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            body: login
+        )
+        let loginHeaders = String(data: loginResponse.serializedHeaders(), encoding: .utf8) ?? ""
+        let refreshToken = try XCTUnwrap(cookieValue(
+            named: ServerAuthenticationService.refreshCookieName,
+            in: loginHeaders
+        ))
+
+        let refresh = router.response(
+            for: "POST /api/v1/auth/refresh HTTP/1.1\r\nHost: localhost\r\nCookie: MediaLIBRefresh=\(refreshToken)\r\n\r\n"
+        )
+        let refreshHeaders = String(data: refresh.serializedHeaders(), encoding: .utf8) ?? ""
+        let refreshBody = String(data: refresh.body, encoding: .utf8) ?? ""
+
+        XCTAssertEqual(refresh.statusCode, 200)
+        XCTAssertTrue(refreshHeaders.contains("Set-Cookie: MediaLIBAccess="))
+        XCTAssertTrue(refreshHeaders.contains("Set-Cookie: MediaLIBRefresh="))
+        XCTAssertTrue(refreshHeaders.contains("HttpOnly; Secure; SameSite=Strict"))
+        XCTAssertFalse(refreshBody.contains("MediaLIBAccess"))
+        XCTAssertFalse(refreshBody.contains("MediaLIBRefresh"))
+        XCTAssertFalse(refreshBody.contains(refreshToken))
+    }
+
     func testWrongPasswordAndMalformedJSONUseSafeStatuses() throws {
         let wrong = try requestBody([
             "username": "alice", "password": "wrong-password-value",
@@ -211,10 +244,11 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         XCTAssertNil(profileObject["deviceID"])
         XCTAssertFalse(String(data: profile.body, encoding: .utf8)?.contains(tokens.accessToken) ?? true)
         XCTAssertEqual(page.statusCode, 200)
-        XCTAssertTrue(html.contains("src=\"/assets/account.js\""))
-        XCTAssertTrue(html.contains("href=\"/assets/account.css\""))
+        XCTAssertTrue(html.contains("src=\"/assets/account.js?v="))
+        XCTAssertTrue(html.contains("href=\"/assets/account.css?v="))
         XCTAssertFalse(html.contains("<style>"))
-        XCTAssertTrue(html.contains("我的账户"))
+        XCTAssertTrue(html.contains("设置"))
+        XCTAssertTrue(html.contains("id=\"logout\""))
         XCTAssertTrue(html.contains("content=\"test-csrf-token\""))
         XCTAssertEqual(asset.statusCode, 200)
         XCTAssertTrue(script.contains("/api/v1/auth/me"))
@@ -234,9 +268,9 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         let stylesheetText = String(data: stylesheet.body, encoding: .utf8) ?? ""
         XCTAssertEqual(stylesheet.statusCode, 200)
         XCTAssertTrue(stylesheetHeaders.contains("Content-Type: text/css; charset=utf-8"))
-        XCTAssertTrue(stylesheetHeaders.contains("Cache-Control: private, max-age=300"))
+        XCTAssertTrue(stylesheetHeaders.contains("Cache-Control: private, max-age=31536000, immutable"))
         XCTAssertFalse(stylesheetHeaders.contains("Cache-Control: no-store"))
-        XCTAssertTrue(stylesheetText.contains(".password-submit"))
+        XCTAssertTrue(stylesheetText.contains(".account-form"))
         XCTAssertFalse(stylesheetText.contains("alice"))
         XCTAssertFalse(stylesheetText.contains(tokens.accessToken))
     }

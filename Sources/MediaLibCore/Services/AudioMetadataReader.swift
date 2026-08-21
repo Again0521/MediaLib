@@ -115,6 +115,14 @@ public final class AudioMetadataReader {
     public init() {}
 
     public func metadata(for url: URL, artworkDirectory: URL? = nil, mediaID: String? = nil) async -> AudioMetadata {
+        // AVFoundation may spend seconds probing an empty local file while the
+        // scanner is also doing other I/O. An empty file cannot contain a valid
+        // media atom or embedded tag, so fail closed before creating AVURLAsset.
+        if url.isFileURL,
+           let fileSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           fileSize == 0 {
+            return AudioMetadata()
+        }
         let asset = AVURLAsset(
             url: url,
             options: url.isFileURL ? [AVURLAssetPreferPreciseDurationAndTimingKey: true] : nil

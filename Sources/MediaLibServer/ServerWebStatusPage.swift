@@ -3,28 +3,161 @@ import MediaLibServerProtocol
 
 /// 面向已认证用户的服务状态页；保留 `/health` 作为机器可读探针，避免把运维探针混作网页。
 enum ServerWebStatusPage {
-    static func render(serverName: String, csrfToken: String, showAdministration: Bool = false, categories: [ServerLibraryCategory] = []) -> String {
+    static func render(serverName: String, csrfToken: String, showAdministration: Bool = false, categories: [ServerLibraryCategory] = [], sidebarExtras: ServerWebSidebarExtras) -> String {
         let sidebar = ServerWebNavigation.render(
-            active: .status, showAdministration: showAdministration, note: .none, categories: categories
+            active: .status, showAdministration: showAdministration, note: .none, categories: categories,
+            extras: sidebarExtras
         )
-        let pageHeader = ServerWebPageHeader.render(
+        let content = """
+        \(ServerWebPageHeader.render(
             icon: .status,
-            eyebrow: "仪表盘",
-            title: "服务状态",
-            subtitle: "\(serverName) 的受认证状态视图；机器探针仍使用独立的 /health。"
+            eyebrow: "Dashboard",
+            title: "仪表盘",
+            subtitle: "看看服务器现在运行得怎么样。",
+            actions: ServerWebUI.button("刷新", variant: .secondary, icon: .refresh, id: "refresh")
+        ))
+        <div class="status-grid">
+          <section class="ui-card status-runtime" aria-labelledby="runtime-heading">
+            <div class="ui-card-head">
+              <h2 class="ui-card-title" id="runtime-heading">服务运行监测</h2>
+              <span class="ui-status ui-status-idle" id="state-title">正在检查…</span>
+            </div>
+            <p class="t-footnote t-tertiary">网页端通过同源的只读健康探针确认服务进程状态，不公开网络地址或内部路径。</p>
+            <div class="status-probe" id="probe-visual" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+          </section>
+
+          <section class="ui-card" aria-labelledby="identity-heading">
+            <div class="ui-card-head">
+              <h2 class="ui-card-title" id="identity-heading">服务器信息</h2>
+              <span class="ui-tag">已认证</span>
+            </div>
+            <dl class="status-meta">
+              <dt>服务器名称</dt><dd id="server-name">—</dd>
+              <dt>服务器 ID</dt><dd id="server-id">—</dd>
+              <dt>协议版本</dt><dd id="protocol-version">—</dd>
+            </dl>
+          </section>
+
+          <section class="ui-card" aria-labelledby="boundary-heading">
+            <div class="ui-card-head">
+              <h2 class="ui-card-title" id="boundary-heading">访问边界</h2>
+              <span class="ui-tag">受保护</span>
+            </div>
+            <p class="t-footnote t-tertiary">所有网页请求均受认证、授权、CSRF、限速和同源安全策略保护。</p>
+            <div class="ui-spacer"></div>
+            <a class="ui-section-more" href="/sources" data-native-navigation="true">查看媒体源\(ServerWebIcon.chevronRight.html(size: .xs))</a>
+          </section>
+        </div>
+
+        <section class="ui-section" aria-labelledby="policy-heading">
+          \(ServerWebUI.sectionHeader("在网页上能做什么"))
+          <div class="status-policy">
+            \(policyItem(.library, "浏览和搜索", "你有权限看的内容，都能在这里找到"))
+            \(policyItem(.play, "直接播放", "影片和音乐就在这个页面里播"))
+            \(policyItem(.settings, "添加和整理", "添加媒体源、整理资料库，回到 Mac 上的 App"))
+            \(policyItem(.shield, "隐私", "密码和连接信息不会出现在网页上"))
+          </div>
+        </section>
+        """
+        return ServerWebDocument.render(
+            title: "仪表盘",
+            serverName: serverName,
+            csrfToken: csrfToken,
+            sidebar: sidebar,
+            content: content,
+            pageStylesheets: ["/assets/status.css"],
+            pageScripts: ["/assets/overlays.js", "/assets/status.js"],
+            tint: .admin
         )
-        return """
-        <!doctype html>
-        <html lang="zh-Hans"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><meta name="medialib-csrf-token" content="\(escape(csrfToken))"><title>服务状态 · \(escape(serverName))</title>
-        <link rel="stylesheet" href="/assets/status.css"><link rel="stylesheet" href="/assets/app-shell.css?v=68"><script src="/assets/app-shell.js?v=68" defer></script></head>
-        <body><a class="skip" href="#main">跳到主要内容</a><div class="shell">\(sidebar)<main id="main" tabindex="-1">\(pageHeader)<section class="card" aria-labelledby="state-title"><div class="state"><span class="dot" aria-hidden="true"></span><span id="state-title">正在检查服务…</span></div><dl class="meta"><dt>服务器名称</dt><dd id="server-name">—</dd><dt>服务器 ID</dt><dd id="server-id">—</dd><dt>协议版本</dt><dd id="protocol-version">—</dd></dl><button id="refresh" type="button">刷新状态</button></section></main></div><script src="/assets/status.js" defer></script></body></html>
+    }
+
+    private static func policyItem(_ icon: ServerWebIcon, _ title: String, _ detail: String) -> String {
+        """
+        <div class="status-policy-item">
+          <span class="status-policy-icon" aria-hidden="true">\(icon.html(size: .sm))</span>
+          <div><strong>\(ServerWebHTML.escape(title))</strong><small>\(ServerWebHTML.escape(detail))</small></div>
+        </div>
         """
     }
 
     /// Fixed status-page UI only; live probe results stay in the protected runtime response.
-    static let style = """
-    :root{--ink:#172033;--muted:#5d6b82;--line:#dfe7f1;--canvas:#f4f7fb;--card:#fff;--focus:#1570ef}*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--canvas);font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}a{color:inherit}:focus-visible{outline:3px solid var(--focus);outline-offset:3px}.skip{position:fixed;top:8px;left:8px;padding:10px;color:#fff;background:#174d82;transform:translateY(-160%)}.skip:focus{transform:none}.shell{display:grid;grid-template-columns:232px minmax(0,1fr);min-height:100dvh}aside{padding:28px 18px;color:#eef7ff;background:linear-gradient(165deg,#183b68,#1e79cf 58%,#36bffa)}.brand{display:flex;gap:10px;align-items:center;font-size:19px;font-weight:800}.brand-mark{display:grid;place-items:center;width:34px;height:34px;border-radius:10px;color:#176cb5;background:#fff}nav{display:grid;gap:8px;margin-top:38px}nav a{display:flex;align-items:center;min-height:44px;padding:10px 12px;border-radius:10px;text-decoration:none}nav a:hover,nav a.active{background:#ffffff2c}main{max-width:920px;padding:clamp(22px,4vw,48px)}h1{margin:0;font-size:clamp(30px,5vw,48px);letter-spacing:-.04em}.subtitle{color:var(--muted)}.card{margin-top:26px;padding:22px;border:1px solid var(--line);border-radius:18px;background:var(--card);box-shadow:0 10px 28px #243a6210}.state{display:flex;gap:10px;align-items:center;font-weight:800}.dot{width:12px;height:12px;border-radius:50%;background:#087a55}.meta{display:grid;grid-template-columns:150px 1fr;gap:12px;margin-top:20px}.meta dt{color:var(--muted)}.meta dd{margin:0;overflow-wrap:anywhere}button{min-height:44px;margin-top:22px;padding:10px 16px;border:1px solid #b9c9dd;border-radius:11px;color:#174d82;background:#fff;font:inherit;font-weight:700;cursor:pointer}button:disabled{opacity:.5}@media(max-width:720px){.shell{display:block}aside{padding:16px 18px}nav{display:flex;overflow:auto;margin-top:14px}nav a{flex:none}main{padding:24px 18px}.meta{grid-template-columns:1fr;gap:3px}}@media(prefers-reduced-motion:reduce){*{transition-duration:.01ms!important}}
-    """
+    static let style = #"""
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: var(--space-5);
+    }
+    .status-grid .ui-card { min-height: 190px; }
+    .status-runtime { grid-column: span 1; }
+
+    /* A quiet activity trace rather than a decorative chart: five bars that read
+       as "the probe is running" without implying data the page does not have. */
+    .status-probe {
+      display: flex;
+      align-items: flex-end;
+      gap: 5px;
+      height: 34px;
+      margin-top: auto;
+    }
+    .status-probe span {
+      flex: 1;
+      border-radius: var(--radius-pill);
+      background: var(--accent-subtle);
+    }
+    .status-probe span:nth-child(1) { height: 40%; }
+    .status-probe span:nth-child(2) { height: 68%; }
+    .status-probe span:nth-child(3) { height: 100%; background: var(--accent); }
+    .status-probe span:nth-child(4) { height: 56%; }
+    .status-probe span:nth-child(5) { height: 78%; }
+
+    .status-meta {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr);
+      gap: var(--space-2) var(--space-4);
+      font-size: var(--type-subhead-size);
+    }
+    .status-meta dt { color: var(--text-tertiary); }
+    .status-meta dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: var(--type-footnote-size);
+    }
+
+    .status-policy {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: var(--space-3);
+    }
+    .status-policy-item {
+      display: flex;
+      align-items: flex-start;
+      gap: var(--space-3);
+      padding: var(--space-4);
+      border: var(--hairline) solid var(--border);
+      border-radius: var(--radius-md);
+      background: var(--surface);
+    }
+    .status-policy-icon {
+      display: grid;
+      width: 30px;
+      height: 30px;
+      flex: none;
+      place-items: center;
+      border-radius: var(--radius-xs);
+      color: var(--accent-text);
+      background: var(--accent-subtle);
+    }
+    .status-policy-item strong { display: block; font-size: var(--type-callout-size); font-weight: var(--weight-semibold); }
+    .status-policy-item small {
+      display: block;
+      margin-top: 2px;
+      color: var(--text-tertiary);
+      font-size: var(--type-footnote-size);
+      line-height: 1.5;
+    }
+    """#
 
     static let script = #"""
     (() => {
@@ -32,35 +165,39 @@ enum ServerWebStatusPage {
       const byID = (id) => document.getElementById(id);
       const refresh = byID('refresh');
       const state = byID('state-title');
+      if (!refresh || !state) return;
+
+      // Status is never carried by colour alone: the class swaps the dot colour,
+      // the text says the same thing in words.
+      function setState(tone, message) {
+        state.className = 'ui-status ui-status-' + tone;
+        state.textContent = message;
+      }
+
       async function load() {
         refresh.disabled = true;
-        state.textContent = '正在检查服务…';
+        refresh.dataset.busy = 'true';
+        setState('idle', '正在检查服务…');
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 10000);
           let response;
           try { response = await fetch('/health', { credentials:'same-origin', headers:{Accept:'application/json'}, signal:controller.signal }); }
           finally { clearTimeout(timer); }
-          if (!response.ok) throw new Error('服务探针不可用');
+          if (!response.ok) throw new Error('暂时读不到状态');
           const data = await response.json();
           byID('server-name').textContent = typeof data.serverName === 'string' ? data.serverName : '未知';
           byID('server-id').textContent = typeof data.serverID === 'string' ? data.serverID : '未知';
           byID('protocol-version').textContent = typeof data.apiVersion === 'string' ? data.apiVersion : '未知';
-          state.textContent = '服务运行正常';
-        } catch (_) { state.textContent = '暂时无法读取服务状态'; }
-        finally { refresh.disabled = false; }
+          setState('ok', '服务运行正常');
+        } catch (_) {
+          setState('error', '暂时无法读取服务状态');
+          if (window.medialibToast) window.medialibToast('无法读取服务状态，请稍后重试。', { tone: 'error' });
+        }
+        finally { refresh.disabled = false; delete refresh.dataset.busy; }
       }
       refresh.addEventListener('click', load);
       load();
     })();
     """#
-
-    private static func escape(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-            .replacingOccurrences(of: "'", with: "&#39;")
-    }
 }

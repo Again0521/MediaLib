@@ -50,13 +50,13 @@ final class GlobalSearchAndFilterAuditTests: XCTestCase {
         let results = try db.query(
             "SELECT title FROM search_test WHERE title LIKE ?",
             bindings: [.text(dangerousQuery)]
-        ) { try $0.string(0) }
+        ) { $0.string(0) }
 
         XCTAssertEqual(results.count, 1)
         XCTAssertEqual(results.first, "Robert); DROP TABLE search_test;--", "带占位符的参数绑定必须 100% 抵御 SQL 注入")
 
         // 验证表依然完好无损存在
-        let tableCount = try db.query("SELECT count(*) FROM search_test") { try $0.int(0) }.first ?? 0
+        let tableCount = try db.query("SELECT count(*) FROM search_test") { $0.int(0) }.first ?? 0
         XCTAssertEqual(tableCount, 6, "表结构绝不可因特殊字符查询被破坏或删除")
     }
 
@@ -72,7 +72,7 @@ final class GlobalSearchAndFilterAuditTests: XCTestCase {
         let results = try db.query(
             "SELECT title FROM search_test_long WHERE title LIKE ?",
             bindings: [.text(superLongKeyword)]
-        ) { try $0.string(0) }
+        ) { $0.string(0) }
         let elapsed = CFAbsoluteTimeGetCurrent() - start
 
         XCTAssertTrue(results.isEmpty)

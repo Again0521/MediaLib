@@ -46,6 +46,62 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
     public var createdAt: Date
     public var updatedAt: Date
     public var lastPlayedAt: Date?
+    /// 这首曲目有没有歌词——内嵌标签或同目录外挂文件，判定见 `MusicLyricsPresence`。
+    /// 扫描时落库，两端读同一个值；非音乐条目恒为 `false`。
+    public var hasLyrics: Bool
+
+    /// 缺键即取默认值，而不是整条载荷解不出来。
+    ///
+    /// 合成的解码器要求每个非可选属性都在载荷里出现，于是每加一个新字段，所有
+    /// 早先写出的载荷就都解不动了——`has_lyrics` 落库那次正是这样被一条用例拦
+    /// 下的。这里逐键 `decodeIfPresent`，新增字段对旧载荷从此是兼容的。
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try values.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        self.type = try values.decodeIfPresent(MediaType.self, forKey: .type) ?? .other
+        let decodedTitle = try values.decodeIfPresent(String.self, forKey: .title) ?? ""
+        self.title = decodedTitle.isEmpty ? "未命名媒体" : decodedTitle
+        self.originalTitle = try values.decodeIfPresent(String.self, forKey: .originalTitle)
+        self.artist = try values.decodeIfPresent(String.self, forKey: .artist)
+        self.album = try values.decodeIfPresent(String.self, forKey: .album)
+        self.trackNumber = try values.decodeIfPresent(Int.self, forKey: .trackNumber)
+        self.year = try values.decodeIfPresent(Int.self, forKey: .year)
+        self.overview = try values.decodeIfPresent(String.self, forKey: .overview)
+        self.genre = try values.decodeIfPresent(String.self, forKey: .genre)
+        self.posterPath = try values.decodeIfPresent(String.self, forKey: .posterPath)
+        self.backdropPath = try values.decodeIfPresent(String.self, forKey: .backdropPath)
+        self.rating = try values.decodeIfPresent(Double.self, forKey: .rating)
+        self.userRating = try values.decodeIfPresent(Double.self, forKey: .userRating)
+        self.runtime = try values.decodeIfPresent(Int.self, forKey: .runtime)
+        self.sourcePath = try values.decodeIfPresent(String.self, forKey: .sourcePath)
+        self.parentID = try values.decodeIfPresent(String.self, forKey: .parentID)
+        self.seasonNumber = try values.decodeIfPresent(Int.self, forKey: .seasonNumber)
+        self.episodeNumber = try values.decodeIfPresent(Int.self, forKey: .episodeNumber)
+        self.filePath = try values.decodeIfPresent(String.self, forKey: .filePath)
+        self.fileSize = try values.decodeIfPresent(Int64.self, forKey: .fileSize)
+        self.videoCodec = try values.decodeIfPresent(String.self, forKey: .videoCodec)
+        self.audioCodec = try values.decodeIfPresent(String.self, forKey: .audioCodec)
+        self.resolution = try values.decodeIfPresent(String.self, forKey: .resolution)
+        self.videoBitrate = try values.decodeIfPresent(Int64.self, forKey: .videoBitrate)
+        self.duration = try values.decodeIfPresent(Double.self, forKey: .duration)
+        self.loudnessTrackGainDB = try values.decodeIfPresent(Double.self, forKey: .loudnessTrackGainDB)
+        self.loudnessAlbumGainDB = try values.decodeIfPresent(Double.self, forKey: .loudnessAlbumGainDB)
+        self.loudnessTrackPeak = try values.decodeIfPresent(Double.self, forKey: .loudnessTrackPeak)
+        self.loudnessAlbumPeak = try values.decodeIfPresent(Double.self, forKey: .loudnessAlbumPeak)
+        self.playCount = try values.decodeIfPresent(Int.self, forKey: .playCount)
+        self.externalID = try values.decodeIfPresent(String.self, forKey: .externalID)
+        self.metadataProvider = try values.decodeIfPresent(String.self, forKey: .metadataProvider)
+        self.collectionTitle = try values.decodeIfPresent(String.self, forKey: .collectionTitle)
+        self.lastPlayedAt = try values.decodeIfPresent(Date.self, forKey: .lastPlayedAt)
+        self.playPosition = try values.decodeIfPresent(Double.self, forKey: .playPosition) ?? 0
+        self.playProgress = try values.decodeIfPresent(Double.self, forKey: .playProgress) ?? 0
+        self.watched = try values.decodeIfPresent(Bool.self, forKey: .watched) ?? false
+        self.favorite = try values.decodeIfPresent(Bool.self, forKey: .favorite) ?? false
+        self.watchlist = try values.decodeIfPresent(Bool.self, forKey: .watchlist) ?? false
+        self.hasLyrics = try values.decodeIfPresent(Bool.self, forKey: .hasLyrics) ?? false
+        self.createdAt = try values.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+        self.updatedAt = try values.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+    }
 
     public init(
         id: String,
@@ -89,7 +145,8 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         lastPlayedAt: Date? = nil,
-        genre: String? = nil
+        genre: String? = nil,
+        hasLyrics: Bool = false
     ) {
         self.id = id
         self.type = type
@@ -133,6 +190,7 @@ public struct MediaItem: Identifiable, Codable, Hashable, Sendable {
         self.updatedAt = updatedAt
         self.lastPlayedAt = lastPlayedAt
         self.genre = genre
+        self.hasLyrics = hasLyrics
     }
 
     public var displayYear: String {

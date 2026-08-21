@@ -147,10 +147,14 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
         )
     }
 
+    /// 可授权的资料库，**包含保险库**。
+    ///
+    /// 保险库此前在这三处（列表、创建、修改）被一律过滤掉，于是它既不能被授权，
+    /// 也不能被撤销——一个管理不了的资源。它的保护不来自"不出现在列表里"：网页
+    /// 侧要同时满足逐库授权与"这台 Mac 上的 App 正解锁着"两个条件，缺一不可。
     func libraries() throws -> ServerManagedLibrariesResponse? {
         guard let sourceRepository else { return nil }
         let allLibraries = try sourceRepository.fetchAll()
-            .filter { $0.mediaType != .privateCollection }
             .sorted {
                 let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
                 return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
@@ -166,7 +170,7 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
     }
 
     /// 创建只能得到普通成员角色；提升至管理员或修改角色仍需专门的权限管理流程。
-    /// 所选资料库被限制为非保险库来源，并统一授予 view/play、拒绝下载与编辑权限。
+    /// 所选资料库必须是真实存在的来源（含保险库），并统一授予 view/play、拒绝下载与编辑权限。
     func createMember(
         username: String,
         displayName: String,
@@ -186,11 +190,7 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
         guard let sourceRepository, let passwordHasher else {
             throw ServerAdministrationCatalogError.unavailable
         }
-        let permittedLibraryIDs = Set(
-            try sourceRepository.fetchAll()
-                .filter { $0.mediaType != .privateCollection }
-                .map(\.id)
-        )
+        let permittedLibraryIDs = Set(try sourceRepository.fetchAll().map(\.id))
         guard Set(libraryIDs).isSubset(of: permittedLibraryIDs) else {
             throw ServerIdentityRepositoryError.invalidIdentifier
         }
@@ -245,11 +245,7 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
               Set(libraryIDs).count == libraryIDs.count,
               libraryIDs.allSatisfy(Self.isSafeIdentifier)
         else { throw ServerIdentityRepositoryError.invalidIdentifier }
-        let permittedLibraryIDs = Set(
-            try sourceRepository.fetchAll()
-                .filter { $0.mediaType != .privateCollection }
-                .map(\.id)
-        )
+        let permittedLibraryIDs = Set(try sourceRepository.fetchAll().map(\.id))
         guard Set(libraryIDs).isSubset(of: permittedLibraryIDs) else {
             throw ServerIdentityRepositoryError.invalidIdentifier
         }

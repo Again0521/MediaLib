@@ -94,6 +94,7 @@ final class ZoomScrollView: NSScrollView {}
 /// 整图未就绪前先用缩略图占位，避免黑屏。
 struct ZoomablePhoto: View {
     @EnvironmentObject private var systemPhotoLibrary: SystemPhotoLibraryStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let entry: MediaImageViewerEntry
     @State private var fullImage: NSImage?
 
@@ -137,7 +138,7 @@ struct ZoomablePhoto: View {
                 targetSize: targetSize
             )
             guard !Task.isCancelled, target.id == entry.id else { return }
-            withAnimation(.easeOut(duration: 0.18)) { fullImage = image }
+            withAnimation(reduceMotion ? AppMotion.reducedContent : AppMotion.contentCrossfade) { fullImage = image }
             return
         }
         if let cached = MediaImageFullResolutionCache.shared.cachedImage(for: target) {
@@ -147,7 +148,7 @@ struct ZoomablePhoto: View {
         fullImage = nil
         let image = await MediaImageFullResolutionCache.shared.image(for: target)
         guard !Task.isCancelled, target.id == entry.id else { return }
-        withAnimation(.easeOut(duration: 0.18)) { fullImage = image }
+        withAnimation(reduceMotion ? AppMotion.reducedContent : AppMotion.contentCrossfade) { fullImage = image }
     }
 }
 

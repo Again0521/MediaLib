@@ -115,6 +115,41 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(response(path: "/api/v1/admin/libraries", token: "administrator").statusCode, 200)
     }
 
+    /// 局域网就绪度属于服务管理面，未认证与非管理员都拿不到部署形态。
+    func testLanReadinessRouteRequiresServerManagementAndLeaksNoDeploymentDetail() throws {
+        XCTAssertEqual(response(path: "/api/v1/admin/lan-readiness", token: nil).statusCode, 401)
+        XCTAssertEqual(response(path: "/api/v1/admin/lan-readiness", token: "member").statusCode, 403)
+        XCTAssertEqual(response(path: "/api/v1/admin/lan-readiness", token: "session-manager").statusCode, 403)
+
+        let granted = response(path: "/api/v1/admin/lan-readiness", token: "server-manager")
+        XCTAssertEqual(granted.statusCode, 200)
+        let json = try XCTUnwrap(String(data: granted.body, encoding: .utf8))
+        // 默认部署仍是纯回环：未就绪，且直连被配置层挡在门外。
+        XCTAssertTrue(json.contains("\"isReadyForLanAccess\":false"))
+        XCTAssertTrue(json.contains("\"lanDirectPlayBlockedBy\":\"lanDirectPlayDisabled\""))
+        XCTAssertTrue(json.contains("\"supportedUpstreamsIssueScopedTickets\":false"))
+        XCTAssertFalse(json.contains("127.0.0.1"))
+        XCTAssertFalse(json.contains("8098"))
+    }
+
+    /// 播放遥测同样属于服务管理面，且只能是聚合数据。
+    func testPlaybackTelemetryRouteRequiresServerManagementAndStaysAggregate() throws {
+        XCTAssertEqual(response(path: "/api/v1/admin/playback-telemetry", token: nil).statusCode, 401)
+        XCTAssertEqual(response(path: "/api/v1/admin/playback-telemetry", token: "member").statusCode, 403)
+        XCTAssertEqual(
+            response(path: "/api/v1/admin/playback-telemetry", token: "session-manager").statusCode, 403
+        )
+
+        let granted = response(path: "/api/v1/admin/playback-telemetry", token: "server-manager")
+        XCTAssertEqual(granted.statusCode, 200)
+        let json = try XCTUnwrap(String(data: granted.body, encoding: .utf8))
+        XCTAssertTrue(json.contains("\"rangeSizeBuckets\""))
+        XCTAssertTrue(json.contains("\"peakConcurrentBufferedBytes\""))
+        for forbidden in ["browser-fixture", "/private/", "api_key", "Bearer", "session-", "user-"] {
+            XCTAssertFalse(json.contains(forbidden), "播放遥测不得出现 \(forbidden)")
+        }
+    }
+
     func testAdministrationResponsesAreBoundedAndContainNoCredentialOrPathFields() throws {
         let usersResponse = response(path: "/api/v1/admin/users", token: "administrator")
         let sessionsResponse = response(path: "/api/v1/admin/sessions", token: "administrator")
@@ -180,8 +215,8 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(asset.statusCode, 200)
         XCTAssertTrue(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"))
         XCTAssertFalse(html.contains("<script>alert(1)</script>"))
-        XCTAssertTrue(html.contains("src=\"/assets/admin.js\""))
-        XCTAssertTrue(html.contains("href=\"/assets/admin.css\""))
+        XCTAssertTrue(html.contains("src=\"/assets/admin.js?v="))
+        XCTAssertTrue(html.contains("href=\"/assets/admin.css?v="))
         XCTAssertFalse(html.contains("<style>"))
         XCTAssertTrue(html.contains("id=\"create-member\""))
         XCTAssertTrue(script.contains("textContent"))
@@ -202,9 +237,9 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertTrue(script.contains("JSON.stringify({ username, displayName, password, libraryIDs })"))
         XCTAssertTrue(script.contains("passwordField.value = ''"))
         XCTAssertEqual(stylesheet.statusCode, 200)
-        XCTAssertTrue(stylesheetHeaders.contains("Cache-Control: private, max-age=300"))
+        XCTAssertTrue(stylesheetHeaders.contains("Cache-Control: private, max-age=31536000, immutable"))
         XCTAssertFalse(stylesheetHeaders.contains("Cache-Control: no-store"))
-        XCTAssertTrue(style.contains(".create-form"))
+        XCTAssertTrue(style.contains(".admin-form"))
         XCTAssertTrue(style.contains(".library-options"))
         XCTAssertFalse(style.contains("administrator"))
         XCTAssertFalse(style.contains("test-csrf-token"))
@@ -227,8 +262,8 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(page.statusCode, 200)
         XCTAssertEqual(denied.statusCode, 403)
         XCTAssertEqual(asset.statusCode, 200)
-        XCTAssertTrue(html.contains("src=\"/assets/sources.js\""))
-        XCTAssertTrue(html.contains("href=\"/assets/sources.css\""))
+        XCTAssertTrue(html.contains("src=\"/assets/sources.js?v="))
+        XCTAssertTrue(html.contains("href=\"/assets/sources.css?v="))
         XCTAssertFalse(html.contains("<style>"))
         XCTAssertTrue(script.contains("textContent"))
         XCTAssertTrue(script.contains("replaceChildren"))
@@ -238,7 +273,7 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertFalse(script.contains("document.cookie"))
         XCTAssertFalse(script.contains("localStorage"))
         XCTAssertEqual(stylesheet.statusCode, 200)
-        XCTAssertTrue(stylesheetHeaders.contains("Cache-Control: private, max-age=300"))
+        XCTAssertTrue(stylesheetHeaders.contains("Cache-Control: private, max-age=31536000, immutable"))
         XCTAssertFalse(stylesheetHeaders.contains("Cache-Control: no-store"))
         XCTAssertTrue(style.contains(".rows"))
         XCTAssertFalse(style.contains("server-manager"))
@@ -313,6 +348,37 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         let events = try repository.securityEvents(limit: 10)
         XCTAssertTrue(events.contains { $0.action == "user.disabled" && $0.targetUserID == "user-bob" })
         XCTAssertTrue(events.contains { $0.action == "user.enabled" && $0.targetUserID == "user-bob" })
+    }
+
+    /// 保险库可以被授权，也就可以被撤销。
+    ///
+    /// 这三处（可授权列表、创建用户、修改授权）此前一律把 `privateCollection`
+    /// 过滤掉，于是保险库是一个**管理不了**的资源：界面上画不出那一行，接口也
+    /// 拒绝那个 id。它的保护从来不来自"不出现在列表里"——网页侧要同时满足逐库
+    /// 授权与"这台 Mac 上的 App 正解锁着"，缺一不可。
+    func testVaultLibraryCanBeListedAndGrantedLikeAnyOtherSource() throws {
+        try SourceRepository(database: database).save(MediaSource(
+            id: "source-vault", name: "保险库", path: "/private/Media/Vault",
+            mediaType: .privateCollection
+        ))
+        router = makeRouter()
+
+        let libraries = response(path: "/api/v1/admin/libraries", token: "administrator")
+        XCTAssertEqual(libraries.statusCode, 200)
+        let listed = String(data: libraries.body, encoding: .utf8) ?? ""
+        XCTAssertTrue(listed.contains("source-vault"), "保险库必须出现在可授权资料库里")
+
+        let request = Data(#"{"username":"vault-member","displayName":"Vault Member","password":"a long unique password","libraryIDs":["source-vault"]}"#.utf8)
+        let created = router.response(
+            for: mutationRequest("/api/v1/admin/users", token: "administrator", bodyLength: request.count),
+            body: request
+        )
+        XCTAssertEqual(created.statusCode, 204)
+
+        let user = try XCTUnwrap(try repository.users().first(where: { $0.username == "vault-member" }))
+        let grants = try repository.libraryGrants(userID: user.id)
+        XCTAssertEqual(grants.map(\.libraryID), ["source-vault"])
+        XCTAssertTrue(grants.first?.canView ?? false)
     }
 
     func testMemberCreationRequiresExplicitLibraryPermissionAndUsesStrictBody() throws {

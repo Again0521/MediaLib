@@ -160,7 +160,9 @@ struct PosterGridList<Leading: View>: View {
 
     private let interItemSpacing: CGFloat = 20
     private let rowSpacing: CGFloat = 30
-    private let prewarmRowsAhead = 5
+    /// 预热只覆盖紧接着的两行。更远的内容交给滚动后新出现的锚点继续预热，
+    /// 不让不可见海报抢走首屏缩略图的解码通道。
+    private let prewarmRowsAhead = 2
 
     var body: some View {
         GeometryReader { proxy in
@@ -171,6 +173,7 @@ struct PosterGridList<Leading: View>: View {
                 count: max(columns, 1)
             )
             let cacheSize = ArtworkImageCache.posterGridTargetSize
+            let posterRevision = appState.posterRevision
 
             ScrollViewReader { scrollProxy in
                 ScrollView {
@@ -191,6 +194,7 @@ struct PosterGridList<Leading: View>: View {
                                     appState: appState,
                                     item: item,
                                     cacheTargetSize: cacheSize,
+                                    posterRevision: posterRevision,
                                     showsDeletePlaybackHistory: showsDeletePlaybackHistory,
                                     selectionEnabled: selectionEnabled,
                                     detailSourceDestinationID: detailSourceDestinationID,
@@ -389,6 +393,8 @@ struct PosterCardView: View {
     @Environment(\.suppressPointerHoverDuringScroll) private var suppressHoverDuringScroll
     let item: MediaItem
     var cacheTargetSize: CGSize? = nil
+    /// 父级只在封面策略实际变更时更新这个值，避免每张本地海报订阅整个 AppState。
+    var posterRevision: Int = 0
     var showsDeletePlaybackHistory: Bool = false
     var selectionEnabled: Bool = false
     var detailSourceDestinationID: String
@@ -418,6 +424,7 @@ struct PosterCardView: View {
                         title: item.cardTitle,
                         mediaType: item.type,
                         cacheTargetSize: cacheTargetSize,
+                        artworkRevision: posterRevision,
                         contentMode: .fill
                     )
                 }
@@ -728,6 +735,8 @@ struct PosterImage: View {
     let mediaType: MediaType?
     let cacheTargetSize: CGSize?
     let contentMode: ContentMode
+    /// 文件路径不变但封面策略被显式刷新时，用此值重新启动异步读取；海报墙由父级按值传入。
+    let artworkRevision: Int
     /// `.fit` 模式下留白的底色（非正方形封面缩放后四周填充色）。默认浅面板色；音乐封面传 .white。
     let fitBackground: Color
 
@@ -736,6 +745,7 @@ struct PosterImage: View {
         title: String,
         mediaType: MediaType? = nil,
         cacheTargetSize: CGSize? = nil,
+        artworkRevision: Int = 0,
         contentMode: ContentMode = .fill,
         fitBackground: Color = AppColors.cleanPanelFill
     ) {
@@ -743,6 +753,7 @@ struct PosterImage: View {
         self.title = title
         self.mediaType = mediaType
         self.cacheTargetSize = cacheTargetSize
+        self.artworkRevision = artworkRevision
         self.contentMode = contentMode
         self.fitBackground = fitBackground
     }
@@ -771,7 +782,7 @@ struct PosterImage: View {
         if let remoteURL = remoteURL {
             RemotePosterImage(url: remoteURL, title: title, targetSize: targetSize, contentMode: contentMode, fitBackground: fitBackground, placeholder: AnyView(placeholder))
         } else {
-            LocalPosterImage(path: path, title: title, targetSize: targetSize, contentMode: contentMode, fitBackground: fitBackground, placeholder: AnyView(placeholder))
+            LocalPosterImage(path: path, title: title, targetSize: targetSize, artworkRevision: artworkRevision, contentMode: contentMode, fitBackground: fitBackground, placeholder: AnyView(placeholder))
         }
     }
 
@@ -905,10 +916,10 @@ private struct MusicDefaultArtworkView: View {
 }
 
 private struct LocalPosterImage: View {
-    @EnvironmentObject private var appState: AppState
     let path: String?
     let title: String
     let targetSize: CGSize
+    let artworkRevision: Int
     let contentMode: ContentMode
     var fitBackground: Color = AppColors.cleanPanelFill
     let placeholder: AnyView
@@ -970,7 +981,7 @@ private struct LocalPosterImage: View {
     }
 
     private var cacheKey: String {
-        "\(path ?? "nil")-\(appState.posterRevision)-\(targetIdentity)"
+        "\(path ?? "nil")-\(artworkRevision)-\(targetIdentity)"
     }
 
     private var targetIdentity: String {

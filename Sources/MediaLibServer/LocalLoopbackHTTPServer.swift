@@ -30,6 +30,7 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
 
     init(
         configuration: ServerLaunchConfiguration,
+        remoteSourceGroupsProvider: @escaping (ServerRequestPrincipal) throws -> [ServerRemoteSourceGroup] = { _ in [] },
         librarySnapshotProvider: @escaping (ServerRequestPrincipal) throws -> ServerLibrarySnapshot = { _ in
             ServerLibrarySnapshot(
                 summary: ServerLibrarySummary(totalItemCount: 0, countsByType: [:]),
@@ -42,6 +43,12 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         libraryCategoriesProvider: @escaping (ServerRequestPrincipal) throws -> ServerLibraryCategoriesResponse = { _ in
             ServerLibraryCategoriesResponse(categories: [])
         },
+        // 首页推荐名单由客户端算好发布，服务端只按请求者的授权把它查出来。
+        // 默认空 = 没有客户端（测试、纯服务端部署），首页回落到服务端自己的推导。
+        homeRecommendationsProvider: @escaping (ServerRequestPrincipal) throws -> ServerHomeRecommendations = { _ in .empty },
+        libraryFacetsProvider: @escaping (String?, ServerLibraryMediaGroup?, ServerRequestPrincipal) throws -> ServerLibraryFacetsResponse = { _, _, _ in
+            ServerLibraryFacetsResponse(genres: [], availableSorts: [])
+        },
         mediaDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerMediaItemDetail? = { _, _ in nil },
         seriesDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerSeriesDetail? = { _, _ in nil },
         seriesEpisodesProvider: @escaping (String, ServerSeriesSeasonSelector, Int, Int, ServerRequestPrincipal) throws -> ServerSeriesEpisodesPage? = { _, _, _, _, _ in nil },
@@ -49,14 +56,33 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         personDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerPersonDetail? = { _, _, _, _ in nil },
         collectionsProvider: @escaping (Int, Int, ServerRequestPrincipal) throws -> ServerCollectionsPage = { offset, limit, _ in ServerCollectionsPage(totalItemCount: 0, offset: offset, limit: limit, items: []) },
         collectionDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerCollectionDetail? = { _, _, _, _ in nil },
+        // 每个新 provider 都给一个"返回空"的默认值：现有的二十多个测试文件不必为了
+        // 编译而各加一行。
+        smartCollectionsProvider: @escaping (Int, Int, ServerRequestPrincipal) throws -> ServerSmartCollectionsPage = { offset, limit, _ in ServerSmartCollectionsPage(totalItemCount: 0, offset: offset, limit: limit, items: []) },
+        smartCollectionDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerSmartCollectionDetail? = { _, _, _, _ in nil },
+        musicPlaylistsProvider: @escaping (Int, Int, ServerRequestPrincipal) throws -> ServerMusicPlaylistsPage = { offset, limit, _ in ServerMusicPlaylistsPage(totalItemCount: 0, offset: offset, limit: limit, items: []) },
+        musicPlaylistDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerMusicPlaylistDetail? = { _, _, _, _ in nil },
+        musicItemsProvider: @escaping (ServerRequestPrincipal) throws -> [ServerLibraryItem] = { _ in [] },
         queueProvider: @escaping (ServerRequestPrincipal) throws -> ServerQueueResponse = { _ in ServerQueueResponse(repeatMode: "sequential", shuffleEnabled: false, currentPosition: 0, items: []) },
         queueMutationProvider: @escaping (ServerQueueMutationRequest, ServerRequestPrincipal) throws -> ServerQueueResponse? = { _, _ in nil },
         mediaPlaybackStateUpdater: @escaping (String, ServerPlaybackStateUpdateRequest, ServerRequestPrincipal) throws -> ServerMediaUserState? = { _, _, _ in nil },
         mediaPreferenceUpdater: @escaping (String, ServerUserMediaPreferenceUpdate, ServerRequestPrincipal) throws -> ServerMediaUserPreference? = { _, _, _ in nil },
         mediaAssetProvider: @escaping (String, ServerRequestPrincipal, ServerPermission) throws -> ServerMediaAsset? = { _, _, _ in nil },
         webVTTSubtitleTracksProvider: @escaping (String, ServerRequestPrincipal) throws -> [ServerWebVTTSubtitleTrack]? = { _, _ in nil },
-        webVTTSubtitleAssetProvider: @escaping (String, Int, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
+        subtitleTrackProvider: @escaping (String, Int, ServerRequestPrincipal) throws -> ServerSubtitleTrackReference? = { _, _, _ in nil },
+        playbackTracksProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerWebPlaybackTrackSet? = { _, _ in nil },
+        audioRemuxProvider: @escaping (String, Int, Double, ServerRequestPrincipal) throws -> ServerAudioRemuxStream? = { _, _, _, _ in nil },
+        remuxStartProvider: @escaping (String, Double, ServerRequestPrincipal) throws -> Double? = { _, _, _ in nil },
         artworkAssetProvider: @escaping (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
+        detailImageProvider: @escaping (String, ServerDetailImageKind, Int, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _, _ in nil },
+        /// 保险库对这个账号的可见性。默认 `.locked`——没有显式接线的调用方拿不到
+        /// 保险库内容，这是这一整条链路的"失败即锁定"起点。
+        vaultAccessProvider: @escaping (ServerRequestPrincipal) throws -> ServerLibraryCatalog.VaultAccess = { _ in .locked },
+        artworkThumbnailer: ServerArtworkThumbnailer = ServerArtworkThumbnailer(),
+        remoteAssetFetcher: ServerRemoteAssetFetcher = ServerRemoteAssetFetcher(),
+        /// 内嵌字幕导出与音轨探测共用的 ffprobe 结果缓存。把同一个实例也交给
+        /// `ServerLibraryCatalog`，一次探测两处都算数。
+        mediaTrackCatalog: ServerMediaTrackCatalog = ServerMediaTrackCatalog(),
         playbackInfoProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerMediaPlaybackInfo? = { _, _ in nil },
         currentUserProfileProvider: @escaping (ServerRequestPrincipal) throws -> ServerCurrentUserProfile? = { _ in nil },
         administrationCatalog: ServerAdministrationCatalog? = nil,
@@ -79,9 +105,17 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         self.router = LocalHTTPRouter(
             serverID: configuration.serverID,
             serverName: configuration.serverName,
+            remoteAccessPolicy: ServerRemoteAccessPolicy(
+                publicOrigin: configuration.publicOrigin,
+                trustedProxyAddresses: configuration.trustedProxyAddresses,
+                lanDirectPlayEnabled: configuration.lanDirectPlayEnabled
+            ),
+            remoteSourceGroupsProvider: remoteSourceGroupsProvider,
             librarySnapshotProvider: librarySnapshotProvider,
             libraryBrowseProvider: libraryBrowseProvider,
             libraryCategoriesProvider: libraryCategoriesProvider,
+            homeRecommendationsProvider: homeRecommendationsProvider,
+            libraryFacetsProvider: libraryFacetsProvider,
             mediaDetailProvider: mediaDetailProvider,
             seriesDetailProvider: seriesDetailProvider,
             seriesEpisodesProvider: seriesEpisodesProvider,
@@ -89,14 +123,27 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             personDetailProvider: personDetailProvider,
             collectionsProvider: collectionsProvider,
             collectionDetailProvider: collectionDetailProvider,
+            smartCollectionsProvider: smartCollectionsProvider,
+            smartCollectionDetailProvider: smartCollectionDetailProvider,
+            musicPlaylistsProvider: musicPlaylistsProvider,
+            musicPlaylistDetailProvider: musicPlaylistDetailProvider,
+            musicItemsProvider: musicItemsProvider,
             queueProvider: queueProvider,
             queueMutationProvider: queueMutationProvider,
             mediaPlaybackStateUpdater: mediaPlaybackStateUpdater,
             mediaPreferenceUpdater: mediaPreferenceUpdater,
             mediaAssetProvider: mediaAssetProvider,
             webVTTSubtitleTracksProvider: webVTTSubtitleTracksProvider,
-            webVTTSubtitleAssetProvider: webVTTSubtitleAssetProvider,
+            subtitleTrackProvider: subtitleTrackProvider,
+            playbackTracksProvider: playbackTracksProvider,
+            audioRemuxProvider: audioRemuxProvider,
+            remuxStartProvider: remuxStartProvider,
             artworkAssetProvider: artworkAssetProvider,
+            detailImageProvider: detailImageProvider,
+            vaultAccessProvider: vaultAccessProvider,
+            artworkThumbnailer: artworkThumbnailer,
+            remoteAssetFetcher: remoteAssetFetcher,
+            mediaTrackCatalog: mediaTrackCatalog,
             playbackInfoProvider: playbackInfoProvider,
             currentUserProfileProvider: currentUserProfileProvider,
             administrationCatalog: administrationCatalog,
@@ -216,22 +263,25 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
                 write(response: response, to: client)
                 return
             }
+            let response = router.response(
+                for: request.head,
+                body: request.body,
+                clientAddressKey: requestSecurityPolicy.effectiveClientAddressKey(
+                    for: request.head,
+                    connectedAddressKey: clientAddressKey
+                )
+            )
             let keepAlive = requestIndex + 1 < Self.maximumRequestsPerConnection &&
                 ProcessInfo.processInfo.systemUptime <= connectionDeadline &&
                 Self.supportsPersistentConnection(request.head)
-            write(
-                response: router.response(
-                    for: request.head,
-                    body: request.body,
-                    clientAddressKey: requestSecurityPolicy.effectiveClientAddressKey(
-                        for: request.head,
-                        connectedAddressKey: clientAddressKey
-                    )
-                ),
+            // 实际是否复用由写出方决定：长度未知的响应（重封装流）只能以关闭连接
+            // 结束，这里不能再回去等下一个请求——那会让连接一直挂到超时。
+            let reused = write(
+                response: response,
                 to: client,
                 keepAlive: keepAlive
             )
-            if !keepAlive { return }
+            if !reused { return }
         }
     }
 
@@ -288,8 +338,22 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
     private func configureTimeouts(for client: Int32) -> Bool {
         var timeout = timeval(tv_sec: Int(Self.requestDeadline), tv_usec: 0)
         let timeoutSize = socklen_t(MemoryLayout<timeval>.size)
+        // 往一条**对端已经关掉**的 socket 上 `send()` 会触发 SIGPIPE，而它的默认
+        // 处置是终止进程——整台服务器跟着一个离开的浏览器一起死。
+        //
+        // 这不是理论风险：读者拖动进度条、换音轨、关掉标签页，浏览器都会中止
+        // 正在传输的媒体响应。此前它一直藏着，是因为直放的每个 Range 都很短、
+        // 客户端多半读完才走；实时重封装流会一直写到片尾，中止发生在它写的正中间，
+        // 于是每一次跳转都是一次必然的进程终止（真实验收里一次就复现）。
+        //
+        // `SO_NOSIGPIPE` 让写失败表现为 `EPIPE` 返回值，正是写出路径已经在处理的
+        // 那种失败。它是逐 socket 的，比全局忽略信号更精确。
+        var noSignalPipe: Int32 = 1
         return setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, timeoutSize) == 0 &&
-            setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, timeoutSize) == 0
+            setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, timeoutSize) == 0 &&
+            setsockopt(
+                client, SOL_SOCKET, SO_NOSIGPIPE, &noSignalPipe, socklen_t(MemoryLayout<Int32>.size)
+            ) == 0
     }
 
     private static func declaredContentLength(in head: String) -> Int? {
@@ -337,34 +401,102 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         return String(cString: buffer)
     }
 
-    private func write(response: LocalHTTPResponse, to client: Int32, keepAlive: Bool = false) {
-        write(data: response.serializedHeaders(keepAlive: keepAlive), to: client)
+    /// - Returns: 这条连接写完之后是否还能复用。
+    @discardableResult
+    private func write(response: LocalHTTPResponse, to client: Int32, keepAlive: Bool = false) -> Bool {
+        // 没有 `Content-Length` 的响应无法在同一条连接上界定边界，所以它一定
+        // 关连接，不管调用方本来打算不打算复用。
+        let effectiveKeepAlive = keepAlive && response.declaredContentLength >= 0
+        // A client that has already gone away must not trigger an upstream NAS
+        // read just because the router prepared a lazy remote Range payload.
+        guard write(data: response.serializedHeaders(keepAlive: effectiveKeepAlive), to: client) else { return false }
         switch response.payload {
         case let .data(body):
             write(data: body, to: client)
         case let .fileRange(range):
             write(fileRange: range, to: client)
+        case let .remoteRange(range):
+            write(remoteRange: range, to: client)
+        case let .remuxStream(stream):
+            stream.stream { [weak self] chunk in
+                guard let self else { return false }
+                return self.write(data: chunk, to: client)
+            }
         }
+        return effectiveKeepAlive
     }
 
-    private func write(data: Data, to client: Int32) {
-        var remaining = data
-        while !remaining.isEmpty {
-            let count = remaining.withUnsafeBytes { bytes in
-                send(client, bytes.baseAddress, bytes.count, 0)
+    @discardableResult
+    private func write(data: Data, to client: Int32) -> Bool {
+        // Never peel bytes from the front of `Data`: each partial socket write
+        // can otherwise trigger another slice/copy of a large remote Range
+        // response. Keep one immutable buffer and advance only an integer
+        // cursor, which matters for browser seeks that arrive as many partial
+        // writes in quick succession.
+        var offset = 0
+        guard !data.isEmpty else { return true }
+        return data.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return false }
+            while offset < bytes.count {
+                let count = send(
+                    client,
+                    baseAddress.advanced(by: offset),
+                    bytes.count - offset,
+                    0
+                )
+                guard count > 0 else { return false }
+                offset += Int(count)
             }
-            guard count > 0 else { return }
-            remaining.removeFirst(Int(count))
+            return true
         }
     }
 
     private func write(fileRange: LocalHTTPFileRange, to client: Int32) {
-        try? streamFileRange(fileRange) { [weak self] chunk in
+        // 本地/网络挂载直放也要计量：NAS 挂载卷的分块读取一样会成为首帧瓶颈，
+        // 只量远程上游会让"慢在磁盘还是慢在上游"这个问题无从回答。
+        let telemetry = ServerPlaybackTelemetry.shared
+        let startedAt = Date()
+        var delivered: Int64 = 0
+        var disconnected = false
+        telemetry.rangeBegan()
+        defer { telemetry.rangeEnded() }
+        var readFailed = false
+        do {
+            try streamFileRange(fileRange) { [weak self] chunk in
+                guard let self else { return false }
+                telemetry.acquiredBuffer(chunk.count)
+                defer { telemetry.releasedBuffer(chunk.count) }
+                guard self.write(data: chunk, to: client) else {
+                    disconnected = true
+                    return false
+                }
+                delivered += Int64(chunk.count)
+                return true
+            }
+        } catch {
+            readFailed = true
+        }
+        let outcome: ServerRangeOutcome
+        if readFailed { outcome = .transportFailed }
+        else if disconnected { outcome = .clientDisconnected }
+        else { outcome = delivered == fileRange.length ? .completed : .transportFailed }
+        telemetry.recordRange(
+            source: .localFile,
+            requestedByteLength: fileRange.length,
+            deliveredByteLength: delivered,
+            outcome: outcome,
+            upstreamTimeToFirstByte: nil,
+            totalDuration: Date().timeIntervalSince(startedAt)
+        )
+    }
+
+    private func write(remoteRange: LocalHTTPRemoteRange, to client: Int32) {
+        _ = remoteRange.stream { [weak self] chunk in
             guard let self else { return false }
-            self.write(data: chunk, to: client)
-            return true
+            return self.write(data: chunk, to: client)
         }
     }
+
 }
 
 private struct LocalHTTPRequest {
@@ -485,12 +617,77 @@ private enum LocalHTTPRequestReceiveResult {
     case rejected(HTTPRequestSecurityPolicy.Rejection)
 }
 
+private enum ArtworkRequest {
+    case original
+    case thumbnail(Int)
+}
+
 struct LocalHTTPRouter {
+    /// One entry per browser-facing stylesheet or script.
+    ///
+    /// This replaces thirty-five near-identical `if path == …` branches.  A table
+    /// makes it obvious at a glance what the browser can fetch, and adding a
+    /// design-system layer no longer means appending another branch to a chain
+    /// that had already grown past a hundred lines.
+    ///
+    /// Contents are produced lazily so a request for one asset does not build the
+    /// strings for the other thirty-four.
+    struct StaticWebAsset {
+        enum Kind { case stylesheet, javascript }
+        let kind: Kind
+        let contents: () -> String
+    }
+
+    static let staticWebAssets: [String: StaticWebAsset] = [
+        // Design system: loaded by every page, in cascade-layer order.
+        "/assets/tokens.css": .init(kind: .stylesheet) { ServerWebDesignTokens.css },
+        "/assets/base.css": .init(kind: .stylesheet) { ServerWebBaseStyle.css },
+        "/assets/primitives.css": .init(kind: .stylesheet) { ServerWebPrimitives.css },
+        "/assets/app-shell.css": .init(kind: .stylesheet) { ServerWebShellStyle.css },
+        "/assets/appearance.js": .init(kind: .javascript) { ServerWebAppearanceScript.script },
+        "/assets/app-shell.js": .init(kind: .javascript) { ServerWebShellScript.script },
+        "/assets/overlays.js": .init(kind: .javascript) { ServerWebOverlayScript.script },
+
+        // Per-page layout.
+        "/assets/home.css": .init(kind: .stylesheet) { ServerWebHomePage.style },
+        "/assets/home.js": .init(kind: .javascript) { ServerWebHomePage.script },
+        "/assets/library.css": .init(kind: .stylesheet) { ServerWebLibraryPage.style },
+        "/assets/library.js": .init(kind: .javascript) { ServerWebLibraryPage.script },
+        "/assets/music.css": .init(kind: .stylesheet) { ServerWebMusicPage.style },
+        "/assets/music.js": .init(kind: .javascript) { ServerWebMusicPage.script },
+        "/assets/player.css": .init(kind: .stylesheet) { ServerWebMediaDetailPage.style },
+        "/assets/player.js": .init(kind: .javascript) { ServerWebMediaDetailPage.script },
+        "/assets/people.css": .init(kind: .stylesheet) { ServerWebPeoplePage.style },
+        "/assets/people.js": .init(kind: .javascript) { ServerWebPeoplePage.script },
+        "/assets/collections.css": .init(kind: .stylesheet) { ServerWebCollectionsPage.style },
+        "/assets/collections.js": .init(kind: .javascript) { ServerWebCollectionsPage.script },
+        "/assets/photos.css": .init(kind: .stylesheet) { ServerWebPhotosPage.style },
+        "/assets/photos.js": .init(kind: .javascript) { ServerWebPhotosPage.script },
+        "/assets/queue.css": .init(kind: .stylesheet) { ServerWebQueuePage.style },
+        "/assets/queue.js": .init(kind: .javascript) { ServerWebQueuePage.script },
+        "/assets/status.css": .init(kind: .stylesheet) { ServerWebStatusPage.style },
+        "/assets/status.js": .init(kind: .javascript) { ServerWebStatusPage.script },
+        "/assets/sources.css": .init(kind: .stylesheet) { ServerWebSourcesPage.style },
+        "/assets/sources.js": .init(kind: .javascript) { ServerWebSourcesPage.script },
+        "/assets/admin.css": .init(kind: .stylesheet) { ServerWebAdministrationPage.style },
+        "/assets/admin.js": .init(kind: .javascript) { ServerWebAdministrationPage.script },
+        "/assets/account.css": .init(kind: .stylesheet) { ServerWebAccountPage.style },
+        "/assets/account.js": .init(kind: .javascript) { ServerWebAccountPage.script },
+        "/assets/vault.css": .init(kind: .stylesheet) { ServerWebVaultPage.style },
+        "/assets/login.css": .init(kind: .stylesheet) { ServerWebLoginPage.style },
+        "/assets/login.js": .init(kind: .javascript) { ServerWebLoginPage.script }
+    ]
+
     private let serverID: String
     private let serverName: String
+    private let remoteAccessPolicy: ServerRemoteAccessPolicy
+    private let remoteSourceGroupsProvider: (ServerRequestPrincipal) throws -> [ServerRemoteSourceGroup]
+    private let playbackTelemetry: ServerPlaybackTelemetry
     private let librarySnapshotProvider: (ServerRequestPrincipal) throws -> ServerLibrarySnapshot
     private let libraryBrowseProvider: (ServerLibraryQuery, ServerRequestPrincipal) throws -> ServerLibraryItemsPage
     private let libraryCategoriesProvider: (ServerRequestPrincipal) throws -> ServerLibraryCategoriesResponse
+    private let homeRecommendationsProvider: (ServerRequestPrincipal) throws -> ServerHomeRecommendations
+    private let libraryFacetsProvider: (String?, ServerLibraryMediaGroup?, ServerRequestPrincipal) throws -> ServerLibraryFacetsResponse
     private let mediaDetailProvider: (String, ServerRequestPrincipal) throws -> ServerMediaItemDetail?
     private let seriesDetailProvider: (String, ServerRequestPrincipal) throws -> ServerSeriesDetail?
     private let seriesEpisodesProvider: (String, ServerSeriesSeasonSelector, Int, Int, ServerRequestPrincipal) throws -> ServerSeriesEpisodesPage?
@@ -498,14 +695,27 @@ struct LocalHTTPRouter {
     private let personDetailProvider: (String, Int, Int, ServerRequestPrincipal) throws -> ServerPersonDetail?
     private let collectionsProvider: (Int, Int, ServerRequestPrincipal) throws -> ServerCollectionsPage
     private let collectionDetailProvider: (String, Int, Int, ServerRequestPrincipal) throws -> ServerCollectionDetail?
+    private let smartCollectionsProvider: (Int, Int, ServerRequestPrincipal) throws -> ServerSmartCollectionsPage
+    private let smartCollectionDetailProvider: (String, Int, Int, ServerRequestPrincipal) throws -> ServerSmartCollectionDetail?
+    private let musicPlaylistsProvider: (Int, Int, ServerRequestPrincipal) throws -> ServerMusicPlaylistsPage
+    private let musicPlaylistDetailProvider: (String, Int, Int, ServerRequestPrincipal) throws -> ServerMusicPlaylistDetail?
+    private let musicItemsProvider: (ServerRequestPrincipal) throws -> [ServerLibraryItem]
     private let queueProvider: (ServerRequestPrincipal) throws -> ServerQueueResponse
     private let queueMutationProvider: (ServerQueueMutationRequest, ServerRequestPrincipal) throws -> ServerQueueResponse?
     private let mediaPlaybackStateUpdater: (String, ServerPlaybackStateUpdateRequest, ServerRequestPrincipal) throws -> ServerMediaUserState?
     private let mediaPreferenceUpdater: (String, ServerUserMediaPreferenceUpdate, ServerRequestPrincipal) throws -> ServerMediaUserPreference?
     private let mediaAssetProvider: (String, ServerRequestPrincipal, ServerPermission) throws -> ServerMediaAsset?
     private let webVTTSubtitleTracksProvider: (String, ServerRequestPrincipal) throws -> [ServerWebVTTSubtitleTrack]?
-    private let webVTTSubtitleAssetProvider: (String, Int, ServerRequestPrincipal) throws -> ServerMediaAsset?
+    private let subtitleTrackProvider: (String, Int, ServerRequestPrincipal) throws -> ServerSubtitleTrackReference?
+    private let playbackTracksProvider: (String, ServerRequestPrincipal) throws -> ServerWebPlaybackTrackSet?
+    private let audioRemuxProvider: (String, Int, Double, ServerRequestPrincipal) throws -> ServerAudioRemuxStream?
+    private let remuxStartProvider: (String, Double, ServerRequestPrincipal) throws -> Double?
     private let artworkAssetProvider: (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset?
+    private let detailImageProvider: (String, ServerDetailImageKind, Int, ServerRequestPrincipal) throws -> ServerMediaAsset?
+    private let vaultAccessProvider: (ServerRequestPrincipal) throws -> ServerLibraryCatalog.VaultAccess
+    private let artworkThumbnailer: ServerArtworkThumbnailer
+    private let remoteAssetFetcher: ServerRemoteAssetFetcher
+    private let mediaTrackCatalog: ServerMediaTrackCatalog
     private let playbackInfoProvider: (String, ServerRequestPrincipal) throws -> ServerMediaPlaybackInfo?
     private let currentUserProfileProvider: (ServerRequestPrincipal) throws -> ServerCurrentUserProfile?
     private let administrationCatalog: ServerAdministrationCatalog?
@@ -517,6 +727,9 @@ struct LocalHTTPRouter {
     init(
         serverID: String,
         serverName: String,
+        remoteAccessPolicy: ServerRemoteAccessPolicy = .loopbackOnly,
+        remoteSourceGroupsProvider: @escaping (ServerRequestPrincipal) throws -> [ServerRemoteSourceGroup] = { _ in [] },
+        playbackTelemetry: ServerPlaybackTelemetry = .shared,
         librarySnapshotProvider: @escaping (ServerRequestPrincipal) throws -> ServerLibrarySnapshot = { _ in
             ServerLibrarySnapshot(
                 summary: ServerLibrarySummary(totalItemCount: 0, countsByType: [:]),
@@ -529,6 +742,12 @@ struct LocalHTTPRouter {
         libraryCategoriesProvider: @escaping (ServerRequestPrincipal) throws -> ServerLibraryCategoriesResponse = { _ in
             ServerLibraryCategoriesResponse(categories: [])
         },
+        // 首页推荐名单由客户端算好发布，服务端只按请求者的授权把它查出来。
+        // 默认空 = 没有客户端（测试、纯服务端部署），首页回落到服务端自己的推导。
+        homeRecommendationsProvider: @escaping (ServerRequestPrincipal) throws -> ServerHomeRecommendations = { _ in .empty },
+        libraryFacetsProvider: @escaping (String?, ServerLibraryMediaGroup?, ServerRequestPrincipal) throws -> ServerLibraryFacetsResponse = { _, _, _ in
+            ServerLibraryFacetsResponse(genres: [], availableSorts: [])
+        },
         mediaDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerMediaItemDetail? = { _, _ in nil },
         seriesDetailProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerSeriesDetail? = { _, _ in nil },
         seriesEpisodesProvider: @escaping (String, ServerSeriesSeasonSelector, Int, Int, ServerRequestPrincipal) throws -> ServerSeriesEpisodesPage? = { _, _, _, _, _ in nil },
@@ -536,14 +755,31 @@ struct LocalHTTPRouter {
         personDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerPersonDetail? = { _, _, _, _ in nil },
         collectionsProvider: @escaping (Int, Int, ServerRequestPrincipal) throws -> ServerCollectionsPage = { offset, limit, _ in ServerCollectionsPage(totalItemCount: 0, offset: offset, limit: limit, items: []) },
         collectionDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerCollectionDetail? = { _, _, _, _ in nil },
+        // 每个新 provider 都给一个"返回空"的默认值：现有的二十多个测试文件不必为了
+        // 编译而各加一行。
+        smartCollectionsProvider: @escaping (Int, Int, ServerRequestPrincipal) throws -> ServerSmartCollectionsPage = { offset, limit, _ in ServerSmartCollectionsPage(totalItemCount: 0, offset: offset, limit: limit, items: []) },
+        smartCollectionDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerSmartCollectionDetail? = { _, _, _, _ in nil },
+        musicPlaylistsProvider: @escaping (Int, Int, ServerRequestPrincipal) throws -> ServerMusicPlaylistsPage = { offset, limit, _ in ServerMusicPlaylistsPage(totalItemCount: 0, offset: offset, limit: limit, items: []) },
+        musicPlaylistDetailProvider: @escaping (String, Int, Int, ServerRequestPrincipal) throws -> ServerMusicPlaylistDetail? = { _, _, _, _ in nil },
+        musicItemsProvider: @escaping (ServerRequestPrincipal) throws -> [ServerLibraryItem] = { _ in [] },
         queueProvider: @escaping (ServerRequestPrincipal) throws -> ServerQueueResponse = { _ in ServerQueueResponse(repeatMode: "sequential", shuffleEnabled: false, currentPosition: 0, items: []) },
         queueMutationProvider: @escaping (ServerQueueMutationRequest, ServerRequestPrincipal) throws -> ServerQueueResponse? = { _, _ in nil },
         mediaPlaybackStateUpdater: @escaping (String, ServerPlaybackStateUpdateRequest, ServerRequestPrincipal) throws -> ServerMediaUserState? = { _, _, _ in nil },
         mediaPreferenceUpdater: @escaping (String, ServerUserMediaPreferenceUpdate, ServerRequestPrincipal) throws -> ServerMediaUserPreference? = { _, _, _ in nil },
         mediaAssetProvider: @escaping (String, ServerRequestPrincipal, ServerPermission) throws -> ServerMediaAsset? = { _, _, _ in nil },
         webVTTSubtitleTracksProvider: @escaping (String, ServerRequestPrincipal) throws -> [ServerWebVTTSubtitleTrack]? = { _, _ in nil },
-        webVTTSubtitleAssetProvider: @escaping (String, Int, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
+        subtitleTrackProvider: @escaping (String, Int, ServerRequestPrincipal) throws -> ServerSubtitleTrackReference? = { _, _, _ in nil },
+        playbackTracksProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerWebPlaybackTrackSet? = { _, _ in nil },
+        audioRemuxProvider: @escaping (String, Int, Double, ServerRequestPrincipal) throws -> ServerAudioRemuxStream? = { _, _, _, _ in nil },
+        remuxStartProvider: @escaping (String, Double, ServerRequestPrincipal) throws -> Double? = { _, _, _ in nil },
         artworkAssetProvider: @escaping (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
+        detailImageProvider: @escaping (String, ServerDetailImageKind, Int, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _, _ in nil },
+        /// 保险库对这个账号的可见性。默认 `.locked`——没有显式接线的调用方拿不到
+        /// 保险库内容，这是这一整条链路的"失败即锁定"起点。
+        vaultAccessProvider: @escaping (ServerRequestPrincipal) throws -> ServerLibraryCatalog.VaultAccess = { _ in .locked },
+        artworkThumbnailer: ServerArtworkThumbnailer = ServerArtworkThumbnailer(),
+        remoteAssetFetcher: ServerRemoteAssetFetcher = ServerRemoteAssetFetcher(),
+        mediaTrackCatalog: ServerMediaTrackCatalog = ServerMediaTrackCatalog(),
         playbackInfoProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerMediaPlaybackInfo? = { _, _ in nil },
         currentUserProfileProvider: @escaping (ServerRequestPrincipal) throws -> ServerCurrentUserProfile? = { _ in nil },
         administrationCatalog: ServerAdministrationCatalog? = nil,
@@ -554,24 +790,42 @@ struct LocalHTTPRouter {
     ) {
         self.serverID = serverID
         self.serverName = serverName
+        self.remoteAccessPolicy = remoteAccessPolicy
+        self.remoteSourceGroupsProvider = remoteSourceGroupsProvider
+        self.playbackTelemetry = playbackTelemetry
         self.librarySnapshotProvider = librarySnapshotProvider
         self.libraryBrowseProvider = libraryBrowseProvider
         self.libraryCategoriesProvider = libraryCategoriesProvider
+        self.homeRecommendationsProvider = homeRecommendationsProvider
+        self.libraryFacetsProvider = libraryFacetsProvider
         self.mediaDetailProvider = mediaDetailProvider
         self.seriesDetailProvider = seriesDetailProvider
         self.seriesEpisodesProvider = seriesEpisodesProvider
         self.peopleProvider = peopleProvider
         self.personDetailProvider = personDetailProvider
         self.collectionsProvider = collectionsProvider
+        self.smartCollectionsProvider = smartCollectionsProvider
+        self.smartCollectionDetailProvider = smartCollectionDetailProvider
+        self.musicPlaylistsProvider = musicPlaylistsProvider
+        self.musicPlaylistDetailProvider = musicPlaylistDetailProvider
         self.collectionDetailProvider = collectionDetailProvider
+        self.musicItemsProvider = musicItemsProvider
         self.queueProvider = queueProvider
         self.queueMutationProvider = queueMutationProvider
         self.mediaPlaybackStateUpdater = mediaPlaybackStateUpdater
         self.mediaPreferenceUpdater = mediaPreferenceUpdater
         self.mediaAssetProvider = mediaAssetProvider
         self.webVTTSubtitleTracksProvider = webVTTSubtitleTracksProvider
-        self.webVTTSubtitleAssetProvider = webVTTSubtitleAssetProvider
+        self.subtitleTrackProvider = subtitleTrackProvider
+        self.playbackTracksProvider = playbackTracksProvider
+        self.audioRemuxProvider = audioRemuxProvider
+        self.remuxStartProvider = remuxStartProvider
         self.artworkAssetProvider = artworkAssetProvider
+        self.detailImageProvider = detailImageProvider
+        self.vaultAccessProvider = vaultAccessProvider
+        self.artworkThumbnailer = artworkThumbnailer
+        self.remoteAssetFetcher = remoteAssetFetcher
+        self.mediaTrackCatalog = mediaTrackCatalog
         self.playbackInfoProvider = playbackInfoProvider
         self.currentUserProfileProvider = currentUserProfileProvider
         self.administrationCatalog = administrationCatalog
@@ -607,169 +861,52 @@ struct LocalHTTPRouter {
                 scope: .publicProbe, identityComponents: [clientAddressKey]
             ) { return limited }
             return .html(
-                body: Data(ServerWebLoginPage.render(serverName: serverName, csrfToken: csrfToken).utf8),
+                body: Data(ServerWebLoginPage.render(
+                    serverName: serverName,
+                    csrfToken: csrfToken,
+                    returnState: loginReturnState(from: target)
+                ).utf8),
                 omitBody: isHeadRequest
             )
         }
-        if (method == "GET" || isHeadRequest), path == "/assets/login.js" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .javascript(body: Data(ServerWebLoginPage.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/login.css" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .stylesheet(body: Data(ServerWebLoginPage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/app-shell.css" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .stylesheet(body: Data(ServerWebShellStyle.css.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/app-shell.js" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .javascript(body: Data(ServerWebShellScript.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/library.css" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .stylesheet(body: Data(ServerWebLibraryPage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/home.css" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .stylesheet(body: Data(ServerWebHomePage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/account.css" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .stylesheet(body: Data(ServerWebAccountPage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/status.css" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .stylesheet(body: Data(ServerWebStatusPage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/sources.css" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .stylesheet(body: Data(ServerWebSourcesPage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/admin.css" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .stylesheet(body: Data(ServerWebAdministrationPage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/player.css" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .stylesheet(body: Data(ServerWebMediaDetailPage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/series.css" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .stylesheet(body: Data(ServerWebSeriesPage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/people.css" {
-            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
-            return .stylesheet(body: Data(ServerWebPeoplePage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/collections.css" {
-            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
-            return .stylesheet(body: Data(ServerWebCollectionsPage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/photos.css" {
-            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
-            return .stylesheet(body: Data(ServerWebPhotosPage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/queue.css" {
-            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
-            return .stylesheet(body: Data(ServerWebQueuePage.style.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/admin.js" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .javascript(body: Data(ServerWebAdministrationPage.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/sources.js" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .javascript(body: Data(ServerWebSourcesPage.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/status.js" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .javascript(body: Data(ServerWebStatusPage.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/account.js" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .javascript(body: Data(ServerWebAccountPage.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/player.js" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .javascript(body: Data(ServerWebMediaDetailPage.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/series.js" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .javascript(body: Data(ServerWebSeriesPage.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/people.js" {
-            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
-            return .javascript(body: Data(ServerWebPeoplePage.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/collections.js" {
-            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
-            return .javascript(body: Data(ServerWebCollectionsPage.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/photos.js" {
-            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
-            return .javascript(body: Data(ServerWebPhotosPage.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/queue.js" {
-            if let limited = limitedResponse(scope: .publicProbe, identityComponents: [clientAddressKey]) { return limited }
-            return .javascript(body: Data(ServerWebQueuePage.script.utf8), omitBody: isHeadRequest)
-        }
-        if (method == "GET" || isHeadRequest), path == "/assets/library.js" {
-            if let limited = limitedResponse(
-                scope: .publicProbe, identityComponents: [clientAddressKey]
-            ) { return limited }
-            return .javascript(body: Data(ServerWebLibraryPage.script.utf8), omitBody: isHeadRequest)
+        if method == "GET" || isHeadRequest {
+            if path == "/assets/reference-system-page.html" {
+                guard let document = ServerWebReferenceDocument.data() else { return .notFound() }
+                return .html(body: document, omitBody: isHeadRequest)
+            }
+            if let asset = LocalHTTPRouter.staticWebAssets[path] {
+                switch asset.kind {
+                case .stylesheet:
+                    return .stylesheet(body: Data(asset.contents().utf8), omitBody: isHeadRequest)
+                case .javascript:
+                    return .javascript(body: Data(asset.contents().utf8), omitBody: isHeadRequest)
+                }
+            }
         }
         if method == "POST", path == "/api/v1/auth/login" {
             return loginResponse(requestHead: requestHead, body: body, clientAddressKey: clientAddressKey)
         }
+        if method == "POST", path == "/login" {
+            return webFormLoginResponse(
+                requestHead: requestHead,
+                target: target,
+                body: body,
+                clientAddressKey: clientAddressKey
+            )
+        }
         if method == "POST", path == "/api/v1/auth/refresh" {
             return refreshResponse(requestHead: requestHead, body: body, clientAddressKey: clientAddressKey)
         }
-        if let limited = limitedResponse(
-            scope: .unauthenticated,
-            identityComponents: [clientAddressKey]
-        ) { return limited }
         guard let principal = try? authenticationProvider(requestHead) else {
+            if let limited = limitedResponse(
+                scope: .unauthenticated,
+                identityComponents: [clientAddressKey]
+            ) { return limited }
             if (method == "GET" || isHeadRequest), path == "/" || path == "/index.html" {
                 return .seeOther(location: "/login", omitBody: isHeadRequest)
+            }
+            if (method == "GET" || isHeadRequest), acceptsHTMLNavigation(requestHead) {
+                return .seeOther(location: loginLocation(for: target), omitBody: isHeadRequest)
             }
             return .unauthorized()
         }
@@ -868,13 +1005,46 @@ struct LocalHTTPRouter {
             guard let snapshot = try? librarySnapshotProvider(principal) else {
                 return .serviceUnavailable()
             }
+            // 推荐栏目（banner、剧集推荐、最近添加剧集、高分精选、音乐推荐、照片墙）
+            // 的**顺序**来自客户端首页：同一个资料库不该在 App 和网页上给出两份不同
+            // 的片单，也不该为此把同一套排序在两个进程里各算一遍。条目仍由服务端按
+            // 这个账号的授权查出，痕迹仍是这个账号自己的。
+            let recommendations = (try? homeRecommendationsProvider(principal)) ?? .empty
+            // 客户端名单缺席时的回落（App 没运行、名单过期、纯服务端部署）。
+            //
+            // 「最近添加」和「高分精选」要的是**排序**，而首页快照只有一种顺序，
+            // 所以这两条各要一次有界查询；取不到就让那一栏不出现，而不是整页 503。
+            // `includesRemoteSources` 与首页快照同口径：首页看板是本地 + 远程，
+            // 而一级分类页仍然只有本地。少了它，同一个首页上"继续观看"里有 Emby
+            // 的剧、"最近添加"里却一部都没有。
+            //
+            // 名单在时这两次查询根本不发出去——那正是"避免重复计算"的那一半。
+            let recentlyAdded = recommendations.recentSeries.isEmpty
+                ? (try? libraryBrowseProvider(
+                    ServerLibraryQuery(
+                        limit: 12, sort: .dateAdded, mediaGroup: .video, includesRemoteSources: true
+                    ), principal
+                ))?.items ?? []
+                : recommendations.recentSeries
+            let highRated = recommendations.highRated.isEmpty
+                ? (try? libraryBrowseProvider(
+                    ServerLibraryQuery(
+                        limit: 12, sort: .score, mediaGroup: .video, includesRemoteSources: true
+                    ), principal
+                ))?.items ?? []
+                : recommendations.highRated
             return .html(
                 body: Data(
                     ServerWebHomePage.render(
                         serverName: serverName,
                         snapshot: snapshot,
                         csrfToken: csrfToken,
-                        showAdministration: principal.canManageServer
+                        showAdministration: principal.canManageServer,
+                        recentlyAdded: recentlyAdded,
+                        highRated: highRated,
+                        recommendations: recommendations,
+                        categories: (try? libraryCategoriesProvider(principal))?.categories ?? [],
+                        sidebarExtras: sidebarExtras(for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -890,7 +1060,7 @@ struct LocalHTTPRouter {
                     ServerWebAdministrationPage.render(
                         serverName: serverName,
                         csrfToken: csrfToken,
-                        categories: categories
+                        categories: categories, sidebarExtras: sidebarExtras(for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -906,7 +1076,7 @@ struct LocalHTTPRouter {
                     ServerWebSourcesPage.render(
                         serverName: serverName,
                         csrfToken: csrfToken,
-                        categories: categories
+                        categories: categories, sidebarExtras: sidebarExtras(for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -923,7 +1093,7 @@ struct LocalHTTPRouter {
                         serverName: serverName,
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
-                        categories: categories
+                        categories: categories, sidebarExtras: sidebarExtras(for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -939,12 +1109,101 @@ struct LocalHTTPRouter {
                         serverName: serverName,
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
-                        categories: categories
+                        categories: categories, sidebarExtras: sidebarExtras(for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
             )
-        case "/library":
+        case "/vault":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            // Every other authenticated page gates on `.viewMedia`; the vault
+            // lock screen was the one that did not, so a principal without media
+            // access could reach it.
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
+            // 解锁状态由这台机器上的 App 发布，授权是逐库的——两者都成立时保险库
+            // 就是一个普通的资料库页面，与电影、剧集共用同一套渲染、筛选和授权。
+            // 取不到状态时按锁定处理：失败即锁定。
+            let vaultAccess = (try? vaultAccessProvider(principal)) ?? .locked
+            switch vaultAccess {
+            case .unlocked:
+                return .html(
+                    body: Data(
+                        ServerWebLibraryPage.render(
+                            serverName: serverName,
+                            csrfToken: csrfToken,
+                            showAdministration: principal.canManageServer,
+                            page: .vault,
+                            categories: categories, sidebarExtras: sidebarExtras(for: principal),
+                            scope: ServerWebLibraryPage.Scope(vaultTitle: "保险库"),
+                            // 题材下拉刻意不给：`libraryFacets` 算的是**公开**来源的
+                            // 题材，挂在保险库页面上就是一个选中即空网格的控件。
+                            // 保险库的题材要单独统计，那是另一件事，不是这一页的默认。
+                            facets: ServerLibraryFacetsResponse(genres: [], availableSorts: [])
+                        ).utf8
+                    ),
+                    omitBody: isHeadRequest
+                )
+            case .locked, .notGranted:
+                return .html(
+                    body: Data(
+                        ServerWebVaultPage.render(
+                            serverName: serverName,
+                            showAdministration: principal.canManageServer,
+                            reason: vaultAccess == .notGranted ? .notGranted : .locked,
+                            categories: categories, sidebarExtras: sidebarExtras(for: principal)
+                        ).utf8
+                    ),
+                    omitBody: isHeadRequest
+                )
+            }
+        // Browsing is always scoped.  There is no "everything" list: a grid that
+        // mixed every episode, track and photo together was nobody's destination,
+        // and it was where `返回` used to strand people.  Each browse destination
+        // names its scope in its own path — a category id, or the reserved
+        // `video` group.
+        // 远程来源浏览页。作用域 ID 是来源路径的不透明哈希，解析只在**已授权**
+        // 集合内做匹配，因此未知或越权的 ID 落到 404 而不是一个未加作用域的页面。
+        case let remotePath where remotePath.hasPrefix("/remote/"):
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            let rawScope = String(remotePath.dropFirst("/remote/".count))
+            guard !rawScope.isEmpty, !rawScope.contains("/"),
+                  rawScope.count <= 64,
+                  rawScope.allSatisfy({ $0.isHexDigit })
+            else { return .notFound() }
+            let groups = (try? remoteSourceGroupsProvider(principal)) ?? []
+            let matched: (id: String, title: String)? = groups.compactMap { group -> (String, String)? in
+                if group.id == rawScope { return (group.id, group.title) }
+                if let library = group.libraries.first(where: { $0.id == rawScope }) {
+                    return (library.id, "\(group.title) · \(library.title)")
+                }
+                return nil
+            }.first
+            guard let matched else { return .notFound() }
+            let remoteCategories = (try? libraryCategoriesProvider(principal))?.categories ?? []
+            return .html(
+                body: Data(
+                    ServerWebLibraryPage.render(
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer,
+                        categories: remoteCategories,
+                        sidebarExtras: sidebarExtras(for: principal, activeRemoteScopeID: matched.id),
+                        selectedCategoryID: nil,
+                        scope: ServerWebLibraryPage.Scope(
+                            remoteScopeID: matched.id, title: matched.title
+                        ),
+                        facets: ServerLibraryFacetsResponse(genres: [], availableSorts: [])
+                    ).utf8
+                ),
+                omitBody: isHeadRequest
+            )
+        case let categoryPath where categoryPath.hasPrefix("/category/"):
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
@@ -952,10 +1211,10 @@ struct LocalHTTPRouter {
             guard let categories = try? libraryCategoriesProvider(principal) else {
                 return .serviceUnavailable()
             }
-            let selectedCategoryID = selectedLibraryCategoryID(
-                from: target,
+            guard let scope = ServerWebLibraryPage.Scope(
+                path: categoryPath,
                 allowedCategories: categories.categories
-            )
+            ) else { return .notFound() }
             return .html(
                 body: Data(
                     ServerWebLibraryPage.render(
@@ -963,24 +1222,64 @@ struct LocalHTTPRouter {
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
                         categories: categories.categories,
-                        selectedCategoryID: selectedCategoryID
+                        sidebarExtras: sidebarExtras(for: principal),
+                        selectedCategoryID: scope.categoryID,
+                        scope: scope,
+                        facets: libraryFacets(
+                            type: scope.categoryID,
+                            group: scope.categoryID == nil ? .video : nil,
+                            for: principal
+                        )
                     ).utf8
                 ),
                 omitBody: isHeadRequest
             )
+        case "/music/songs", "/music/albums", "/music/artists", "/music/playlists", "/music/recent":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            do {
+                let page: ServerWebMusicPage.Page = switch path {
+                case "/music/albums": .albums
+                case "/music/artists": .artists
+                case "/music/playlists": .playlists
+                case "/music/recent": .recent
+                default: .songs
+                }
+                let tracks = try musicItemsProvider(principal)
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
+                let playlists = (try? musicPlaylistsProvider(0, 100, principal))?.items ?? []
+                return .html(
+                    body: Data(ServerWebMusicPage.render(
+                        page: page,
+                        serverName: serverName,
+                        csrfToken: csrfToken,
+                        showAdministration: principal.canManageServer,
+                        categories: categories, sidebarExtras: sidebarExtras(for: principal),
+                        tracks: tracks,
+                        playlists: playlists
+                    ).utf8),
+                    omitBody: isHeadRequest
+                )
+            } catch { return .serviceUnavailable() }
         case "/people":
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
             do {
-                let page = try peopleProvider(nil, 0, 24, principal)
+                // 人物页的搜索框现在是一个真表单（`GET /people?q=`）。不解析这个键的话，
+                // 脚本没到时按回车看起来就像什么都没发生。
+                let searchText = boundedQueryText(from: target, key: "q", maximumLength: 128)
+                let page = try peopleProvider(searchText, 0, 24, principal)
                 let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
                 return .html(
                     body: Data(ServerWebPeoplePage.directory(
                         serverName: serverName, page: page, csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
-                        categories: categories
+                        query: searchText ?? "",
+                        categories: categories, sidebarExtras: sidebarExtras(for: principal)
                     ).utf8),
                     omitBody: isHeadRequest
                 )
@@ -997,10 +1296,61 @@ struct LocalHTTPRouter {
                     body: Data(ServerWebCollectionsPage.directory(
                         serverName: serverName, page: page, csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
-                        categories: categories
+                        categories: categories, sidebarExtras: sidebarExtras(for: principal)
                     ).utf8),
                     omitBody: isHeadRequest
                 )
+            } catch { return .serviceUnavailable() }
+        case let smartCollectionPath where smartCollectionPath.hasPrefix("/smart-collections/"):
+            if let limited = limitedResponse(scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let id = decodedPathIdentifier(smartCollectionPath, prefix: "/smart-collections/") else { return .notFound() }
+            do {
+                guard let detail = try smartCollectionDetailProvider(id, 0, 100, principal) else { return .notFound() }
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
+                var extras = sidebarExtras(for: principal)
+                // 当前正在看的那一条要在侧栏里标出来。
+                extras = ServerWebSidebarExtras(
+                    smartCollections: extras.smartCollections, smartPlaylists: extras.smartPlaylists,
+                    activeCollectionID: id
+                )
+                return .html(body: Data(ServerWebCollectionsPage.smartDetail(
+                    serverName: serverName, detail: detail, csrfToken: csrfToken,
+                    showAdministration: principal.canManageServer, categories: categories, sidebarExtras: extras,
+                    back: ServerWebBackNavigation.target(
+                        requestHead: requestHead, fallback: .init(label: "返回首页", href: "/")
+                    )
+                ).utf8), omitBody: isHeadRequest)
+            } catch { return .serviceUnavailable() }
+        case let playlistPath where playlistPath.hasPrefix("/music/playlists/"):
+            if let limited = limitedResponse(scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let id = decodedPathIdentifier(playlistPath, prefix: "/music/playlists/") else { return .notFound() }
+            do {
+                guard let detail = try musicPlaylistDetailProvider(id, 0, 100, principal) else { return .notFound() }
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
+                var extras = sidebarExtras(for: principal)
+                extras = ServerWebSidebarExtras(
+                    smartCollections: extras.smartCollections, smartPlaylists: extras.smartPlaylists,
+                    activePlaylistID: detail.isSmart ? id : nil
+                )
+                return .html(body: Data(ServerWebMusicPage.playlistDetail(
+                    serverName: serverName, detail: detail, csrfToken: csrfToken,
+                    showAdministration: principal.canManageServer, categories: categories, sidebarExtras: extras,
+                    back: ServerWebBackNavigation.target(
+                        requestHead: requestHead, fallback: .init(label: "返回歌单", href: "/music/playlists")
+                    )
+                ).utf8), omitBody: isHeadRequest)
+            } catch { return .serviceUnavailable() }
+        case "/albums":
+            // 客户端「相册 · 全部」是照片与录像合在一起。网页从前只有一个纯照片
+            // 页，录像得绕到「其他视频」分类里去找。
+            if let limited = limitedResponse(scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            do {
+                let page = try libraryBrowseProvider(ServerLibraryQuery(offset: 0, limit: 24, mediaGroup: .album), principal)
+                let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
+                return .html(body: Data(ServerWebPhotosPage.gallery(serverName: serverName, page: page, csrfToken: csrfToken, showAdministration: principal.canManageServer, categories: categories, sidebarExtras: sidebarExtras(for: principal), scope: .album).utf8), omitBody: isHeadRequest)
             } catch { return .serviceUnavailable() }
         case "/photos":
             if let limited = limitedResponse(scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey) { return limited }
@@ -1008,7 +1358,7 @@ struct LocalHTTPRouter {
             do {
                 let page = try libraryBrowseProvider(ServerLibraryQuery(type: "photo", offset: 0, limit: 24), principal)
                 let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
-                return .html(body: Data(ServerWebPhotosPage.gallery(serverName: serverName, page: page, csrfToken: csrfToken, showAdministration: principal.canManageServer, categories: categories).utf8), omitBody: isHeadRequest)
+                return .html(body: Data(ServerWebPhotosPage.gallery(serverName: serverName, page: page, csrfToken: csrfToken, showAdministration: principal.canManageServer, categories: categories, sidebarExtras: sidebarExtras(for: principal)).utf8), omitBody: isHeadRequest)
             } catch { return .serviceUnavailable() }
         case "/search":
             if let limited = limitedResponse(
@@ -1025,7 +1375,12 @@ struct LocalHTTPRouter {
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
                         page: .search,
-                        categories: categories.categories
+                        categories: categories.categories,
+                        sidebarExtras: sidebarExtras(for: principal),
+                        // 服务端渲染搜索框的初值，于是刷新结果页、分享链接、
+                        // 以及脚本未到达时都保留着关键词。
+                        searchQuery: boundedQueryText(from: target, key: "q", maximumLength: 128) ?? "",
+                        facets: libraryFacets(type: nil, group: nil, for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -1036,7 +1391,7 @@ struct LocalHTTPRouter {
             guard let queue = try? queueProvider(principal) else { return .serviceUnavailable() }
             let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
             return .html(
-                body: Data(ServerWebQueuePage.render(serverName: serverName, queue: queue, csrfToken: csrfToken, showAdministration: principal.canManageServer, categories: categories).utf8),
+                body: Data(ServerWebQueuePage.render(serverName: serverName, queue: queue, csrfToken: csrfToken, showAdministration: principal.canManageServer, categories: categories, sidebarExtras: sidebarExtras(for: principal)).utf8),
                 omitBody: isHeadRequest
             )
         case "/watching":
@@ -1054,7 +1409,9 @@ struct LocalHTTPRouter {
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
                         page: .continuing,
-                        categories: categories.categories
+                        categories: categories.categories,
+                        sidebarExtras: sidebarExtras(for: principal),
+                        facets: libraryFacets(type: nil, group: nil, for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -1074,7 +1431,9 @@ struct LocalHTTPRouter {
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
                         page: .history,
-                        categories: categories.categories
+                        categories: categories.categories,
+                        sidebarExtras: sidebarExtras(for: principal),
+                        facets: libraryFacets(type: nil, group: nil, for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -1094,7 +1453,9 @@ struct LocalHTTPRouter {
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
                         page: .favorites,
-                        categories: categories.categories
+                        categories: categories.categories,
+                        sidebarExtras: sidebarExtras(for: principal),
+                        facets: libraryFacets(type: nil, group: nil, for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -1114,7 +1475,9 @@ struct LocalHTTPRouter {
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
                         page: .watchlist,
-                        categories: categories.categories
+                        categories: categories.categories,
+                        sidebarExtras: sidebarExtras(for: principal),
+                        facets: libraryFacets(type: nil, group: nil, for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -1134,7 +1497,9 @@ struct LocalHTTPRouter {
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
                         page: .watched,
-                        categories: categories.categories
+                        categories: categories.categories,
+                        sidebarExtras: sidebarExtras(for: principal),
+                        facets: libraryFacets(type: nil, group: nil, for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -1154,7 +1519,9 @@ struct LocalHTTPRouter {
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
                         page: .ratings,
-                        categories: categories.categories
+                        categories: categories.categories,
+                        sidebarExtras: sidebarExtras(for: principal),
+                        facets: libraryFacets(type: nil, group: nil, for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -1174,7 +1541,9 @@ struct LocalHTTPRouter {
                         csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
                         page: .unwatched,
-                        categories: categories.categories
+                        categories: categories.categories,
+                        sidebarExtras: sidebarExtras(for: principal),
+                        facets: libraryFacets(type: nil, group: nil, for: principal)
                     ).utf8
                 ),
                 omitBody: isHeadRequest
@@ -1196,7 +1565,11 @@ struct LocalHTTPRouter {
                             detail: detail,
                             csrfToken: csrfToken,
                             showAdministration: principal.canManageServer,
-                            categories: categories
+                            categories: categories, sidebarExtras: sidebarExtras(for: principal),
+                            back: ServerWebBackNavigation.target(
+                                requestHead: requestHead,
+                                fallback: .init(label: "返回首页", href: "/")
+                            )
                         ).utf8
                     ),
                     omitBody: isHeadRequest
@@ -1204,28 +1577,67 @@ struct LocalHTTPRouter {
             } catch {
                 return .serviceUnavailable()
             }
-        case let seriesPagePath where seriesPagePath.hasPrefix("/series/"):
+        case let videoPlayerPath where videoPlayerPath.hasPrefix("/play/"):
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
-            guard let seriesID = decodedPathIdentifier(seriesPagePath, prefix: "/series/") else {
+            guard let itemID = decodedPathIdentifier(videoPlayerPath, prefix: "/play/") else {
                 return .notFound()
             }
             do {
-                guard let detail = try seriesDetailProvider(seriesID, principal) else { return .notFound() }
+                guard let detail = try mediaDetailProvider(itemID, principal) else { return .notFound() }
+                // Both media kinds resolve to the same detail shell, which is the
+                // single source of truth for layout modes, selection state and
+                // client-style metadata.  Video keeps `#play` in the URL and
+                // auto-starts the embedded player; music hands playback to the
+                // persistent bottom dock.  (These were previously two branches
+                // constructing byte-identical pages.)
                 let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
+                let page = ServerWebMediaDetailPage.render(
+                    serverName: serverName,
+                    detail: detail,
+                    csrfToken: csrfToken,
+                    showAdministration: principal.canManageServer,
+                    categories: categories, sidebarExtras: sidebarExtras(for: principal),
+                    back: ServerWebBackNavigation.target(
+                        requestHead: requestHead,
+                        fallback: .init(label: "返回首页", href: "/")
+                    )
+                )
                 return .html(
-                    body: Data(
-                        ServerWebSeriesPage.render(
-                            serverName: serverName,
-                            detail: detail,
-                            csrfToken: csrfToken,
-                            showAdministration: principal.canManageServer,
-                            categories: categories
-                        ).utf8
-                    ),
+                    body: Data(page.utf8),
                     omitBody: isHeadRequest
                 )
+            } catch {
+                return .serviceUnavailable()
+            }
+        case let seriesPlayPath where seriesPlayPath.hasPrefix("/series/") && seriesPlayPath.hasSuffix("/play"):
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let seriesID = decodedSeriesPlayIdentifier(seriesPlayPath) else { return .notFound() }
+            do {
+                // A poster is an intent to watch, not an intermediate selection
+                // screen. Resolve only through the existing authorised series
+                // providers and redirect to an actual episode detail/player.
+                guard let detail = try seriesDetailProvider(seriesID, principal) else { return .notFound() }
+                var fallback: ServerSeriesEpisode?
+                let selectors = detail.seasons.isEmpty
+                    ? [.unspecified]
+                    : detail.seasons.map { $0.seasonNumber.map(ServerSeriesSeasonSelector.numbered) ?? .unspecified }
+                for selector in selectors {
+                    guard let page = try seriesEpisodesProvider(seriesID, selector, 0, 100, principal) else { continue }
+                    if let resumable = page.items.first(where: {
+                        guard let state = $0.userState else { return false }
+                        return state.progress > 0 && !state.isWatched
+                    }) {
+                        guard let episodeID = ServerWebURL.pathSegment(resumable.id) else { return .notFound() }
+                        return .seeOther(location: "/item/\(episodeID)#play", omitBody: isHeadRequest)
+                    }
+                    fallback = fallback ?? page.items.first
+                }
+                guard let episode = fallback, let episodeID = ServerWebURL.pathSegment(episode.id) else { return .notFound() }
+                return .seeOther(location: "/item/\(episodeID)#play", omitBody: isHeadRequest)
             } catch {
                 return .serviceUnavailable()
             }
@@ -1243,7 +1655,10 @@ struct LocalHTTPRouter {
                     body: Data(ServerWebPeoplePage.detail(
                         serverName: serverName, detail: detail, csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
-                        categories: categories
+                        categories: categories, sidebarExtras: sidebarExtras(for: principal),
+                        back: ServerWebBackNavigation.target(
+                            requestHead: requestHead, fallback: .init(label: "返回人物", href: "/people")
+                        )
                     ).utf8),
                     omitBody: isHeadRequest
                 )
@@ -1262,7 +1677,10 @@ struct LocalHTTPRouter {
                     body: Data(ServerWebCollectionsPage.detail(
                         serverName: serverName, detail: detail, csrfToken: csrfToken,
                         showAdministration: principal.canManageServer,
-                        categories: categories
+                        categories: categories, sidebarExtras: sidebarExtras(for: principal),
+                        back: ServerWebBackNavigation.target(
+                            requestHead: requestHead, fallback: .init(label: "返回合集", href: "/collections")
+                        )
                     ).utf8),
                     omitBody: isHeadRequest
                 )
@@ -1273,7 +1691,14 @@ struct LocalHTTPRouter {
             do {
                 guard let detail = try mediaDetailProvider(itemID, principal), detail.type == "photo" else { return .notFound() }
                 let categories = (try? libraryCategoriesProvider(principal))?.categories ?? []
-                return .html(body: Data(ServerWebPhotosPage.detail(serverName: serverName, item: detail, csrfToken: csrfToken, showAdministration: principal.canManageServer, categories: categories).utf8), omitBody: isHeadRequest)
+                return .html(body: Data(ServerWebPhotosPage.detail(
+                    serverName: serverName, item: detail, csrfToken: csrfToken,
+                    showAdministration: principal.canManageServer, categories: categories,
+                    sidebarExtras: sidebarExtras(for: principal),
+                    back: ServerWebBackNavigation.target(
+                        requestHead: requestHead, fallback: .init(label: "返回照片", href: "/photos")
+                    )
+                ).utf8), omitBody: isHeadRequest)
             } catch { return .serviceUnavailable() }
         case "/api/v1/library/summary":
             if let limited = limitedResponse(
@@ -1300,6 +1725,24 @@ struct LocalHTTPRouter {
             guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
             do {
                 guard let encoded = ServerCommandOutput.jsonData(try libraryCategoriesProvider(principal)) else {
+                    return .serviceUnavailable()
+                }
+                body = encoded
+            } catch {
+                return .serviceUnavailable()
+            }
+        case "/api/v1/library/facets":
+            // 网页用它决定该给出哪些排序键和哪些题材。没有这个端点，筛选栏只能
+            // 渲染一串固定选项，其中一部分在当前资料库里永远匹配不到内容。
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
+            guard let scope = libraryFacetsScope(from: target) else { return .badRequest() }
+            do {
+                guard let encoded = ServerCommandOutput.jsonData(
+                    try libraryFacetsProvider(scope.type, scope.group, principal)
+                ) else {
                     return .serviceUnavailable()
                 }
                 body = encoded
@@ -1411,18 +1854,150 @@ struct LocalHTTPRouter {
                 else { return .notFound() }
                 body = encoded
             } catch { return .serviceUnavailable() }
-        case let imagePath where imagePath.hasPrefix("/api/v1/images/"):
+        case "/api/v1/smart-collections":
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
+            guard let query = pagingQuery(from: target, path: "/api/v1/smart-collections") else { return .badRequest() }
+            do {
+                guard let encoded = ServerCommandOutput.jsonData(try smartCollectionsProvider(query.offset, query.limit, principal)) else {
+                    return .serviceUnavailable()
+                }
+                body = encoded
+            } catch { return .serviceUnavailable() }
+        case let smartItemsPath where smartItemsPath.hasPrefix("/api/v1/smart-collections/"):
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let request = identifiedPagingQuery(
+                from: target, prefix: "/api/v1/smart-collections/", identifierNamespace: "smart-collections"
+            ) else { return .badRequest() }
+            do {
+                guard let detail = try smartCollectionDetailProvider(request.id, request.offset, request.limit, principal),
+                      let encoded = ServerCommandOutput.jsonData(detail.items)
+                else { return .notFound() }
+                body = encoded
+            } catch { return .serviceUnavailable() }
+        case "/api/v1/music/playlists":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let query = pagingQuery(from: target, path: "/api/v1/music/playlists") else { return .badRequest() }
+            do {
+                guard let encoded = ServerCommandOutput.jsonData(try musicPlaylistsProvider(query.offset, query.limit, principal)) else {
+                    return .serviceUnavailable()
+                }
+                body = encoded
+            } catch { return .serviceUnavailable() }
+        case let playlistItemsPath where playlistItemsPath.hasPrefix("/api/v1/music/playlists/"):
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let request = identifiedPagingQuery(
+                from: target, prefix: "/api/v1/music/playlists/", identifierNamespace: "playlists"
+            ) else { return .badRequest() }
+            do {
+                guard let detail = try musicPlaylistDetailProvider(request.id, request.offset, request.limit, principal),
+                      let encoded = ServerCommandOutput.jsonData(detail.items)
+                else { return .notFound() }
+                body = encoded
+            } catch { return .serviceUnavailable() }
+        case let imagePath where imagePath.hasPrefix("/api/v1/images/"):
+            if let limited = limitedResponse(
+                scope: .artworkRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
             let remainder = imagePath.dropFirst("/api/v1/images/".count)
             let segments = remainder.split(separator: "/", omittingEmptySubsequences: false)
-            guard segments.count == 2,
-                  let kind = ServerArtworkKind(rawValue: String(segments[1])),
-                  let itemID = decodedPathIdentifier("/image/\(segments[0])", prefix: "/image/")
-            else { return .notFound() }
-            guard let asset = try? artworkAssetProvider(itemID, kind, principal) else { return .notFound() }
-            return .fullFile(asset: asset, omitBody: isHeadRequest, cacheControl: "private, max-age=300")
+            guard let artworkRequest = artworkRequest(from: target) else { return .badRequest() }
+            let asset: ServerMediaAsset?
+            switch segments.count {
+            case 2:
+                guard let kind = ServerArtworkKind(rawValue: String(segments[1])),
+                      let itemID = decodedPathIdentifier("/image/\(segments[0])", prefix: "/image/")
+                else { return .notFound() }
+                asset = try? artworkAssetProvider(itemID, kind, principal)
+            case 3:
+                // 详情页的剧照、推荐海报与人物头像。序号是浏览器拿到的全部信息：
+                // 上游地址在服务端解析，浏览器从不直接联系元数据提供方。
+                guard let kind = ServerDetailImageKind(rawValue: String(segments[1])),
+                      let index = strictNonnegativeInteger(String(segments[2])), index < 64,
+                      let itemID = decodedPathIdentifier("/image/\(segments[0])", prefix: "/image/")
+                else { return .notFound() }
+                asset = try? detailImageProvider(itemID, kind, index, principal)
+            default:
+                return .notFound()
+            }
+            guard let asset else { return .notFound() }
+            // 派生结果都是磁盘文件，实体标签由「尺寸 + 修改时间」得到；`If-None-Match`
+            // 命中就退成一次 304，不再重传整张 JPEG，远程封面还顺带免掉一次上游取图。
+            let ifNoneMatch = httpHeader(named: "If-None-Match", in: requestHead)
+            func fileResponse(
+                _ served: ServerMediaAsset, cacheControl: String, omitBody: Bool
+            ) -> LocalHTTPResponse {
+                guard let entityTag = Self.fileEntityTag(for: served.fileURL) else {
+                    return .fullFile(asset: served, omitBody: omitBody, cacheControl: cacheControl)
+                }
+                if Self.entityTagMatches(entityTag, ifNoneMatch: ifNoneMatch) {
+                    return .notModified(entityTag: entityTag, cacheControl: cacheControl)
+                }
+                return .fullFile(
+                    asset: served, omitBody: omitBody, cacheControl: cacheControl, entityTag: entityTag
+                )
+            }
+            if let remoteURL = asset.remoteURL {
+                // 远程封面只经已授权条目的同源图片端点返回；原始 URL 与 token
+                // 从不进入 HTML。请求缩略图时，服务端先受限读取再生成私有 JPEG，
+                // 避免浏览器为海报墙反复下载并解码多 MB 原图。
+                // 上游身份剥掉了会轮换的 token 与尺寸参数，因此磁盘上已派生的缩略图
+                // 可以直接按路径命中——不必为了"找到它"而把原图重新下载一遍。
+                let upstreamIdentity = ServerRemoteArtworkURL.stableIdentity(for: remoteURL)
+                // 远程条目没有「原图」这一档。
+                //
+                // 不带 `?size=` 时它从前是把上游原图整份代理给浏览器：不落磁盘缓存、
+                // 只有五分钟的内存缓存，于是每看一次就回源一整张图。照片详情页正是
+                // 这一条路径。改为一律走最大的那个桶——1024 已经是本产品里"最大展示
+                // 尺寸"（详情页剧照灯箱用的就是它），而且它有磁盘缓存与实体标签。
+                let remoteMaximumPixel: Int
+                if case let .thumbnail(requestedMaximumPixel) = artworkRequest {
+                    remoteMaximumPixel = requestedMaximumPixel
+                } else {
+                    remoteMaximumPixel = ServerArtworkThumbnailer.supportedMaximumPixels.max() ?? 1_024
+                }
+                if let cached = artworkThumbnailer.cachedRemoteThumbnail(
+                    id: asset.id, upstreamIdentity: upstreamIdentity, maximumPixel: remoteMaximumPixel
+                ) {
+                    return fileResponse(cached, cacheControl: "private, max-age=86400", omitBody: isHeadRequest)
+                }
+                // 只向上游要真正需要的尺寸：同步阶段写下的地址固定是 maxWidth=700，
+                // 而海报墙要的多半是 320，等于每张卡都在下载四倍面积的图再丢掉。
+                let fetchURL = ServerRemoteArtworkURL.sized(remoteURL, maximumPixel: remoteMaximumPixel)
+                guard !isHeadRequest, let body = remoteAssetFetcher.artworkBytes(url: fetchURL) else {
+                    return isHeadRequest ? .notFound() : .serviceUnavailable()
+                }
+                // 上游字节**从不**原样转发：一律派生成本地 JPEG 再发出。
+                //
+                // 这既是性能上的选择（浏览器不必为海报墙反复解码多 MB 原图），也是
+                // 授权层敢于放宽"远程地址必须带图片扩展名"那条判断的前提——不能解码
+                // 成图片的字节到不了浏览器。派生失败即 503，不留降级通道。
+                guard let thumbnail = artworkThumbnailer.thumbnail(
+                    forRemoteData: body,
+                    id: asset.id,
+                    upstreamIdentity: upstreamIdentity,
+                    maximumPixel: remoteMaximumPixel
+                ) else { return .serviceUnavailable() }
+                return fileResponse(thumbnail, cacheControl: "private, max-age=86400", omitBody: false)
+            }
+            switch artworkRequest {
+            case .thumbnail(let requestedMaximumPixel):
+                guard let thumbnail = artworkThumbnailer.thumbnail(for: asset, maximumPixel: requestedMaximumPixel) else {
+                    return .notFound()
+                }
+                // 本地缩略图的实体标签跟着源文件的 mtime 走（文件名里就含它），
+                // 所以换封面立刻失配。有了复验，这里不必再靠五分钟的短过期兜底。
+                return fileResponse(thumbnail, cacheControl: "private, max-age=86400", omitBody: isHeadRequest)
+            case .original:
+                return fileResponse(asset, cacheControl: "private, max-age=300", omitBody: isHeadRequest)
+            }
         case "/api/v1/admin/users":
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
@@ -1483,6 +2058,28 @@ struct LocalHTTPRouter {
                 return .serviceUnavailable()
             }
             body = data
+        // 局域网开放就绪度只回答策略事实：没有地址、端口、代理 IP、上游 URL 或
+        // 媒体标题，未认证客户端也拿不到部署形态。
+        case "/api/v1/admin/lan-readiness":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+            guard let data = ServerCommandOutput.jsonData(remoteAccessPolicy.lanAccessReadiness()) else {
+                return .serviceUnavailable()
+            }
+            body = data
+        // 播放遥测只回答"代理整体表现如何"：计数、分桶与分位数。它不含媒体 ID、
+        // 标题、路径、上游 URL、token、用户、设备或客户端地址。
+        case "/api/v1/admin/playback-telemetry":
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+            guard let data = ServerCommandOutput.jsonData(playbackTelemetry.snapshot()) else {
+                return .serviceUnavailable()
+            }
+            body = data
         case "/api/v1/admin/libraries":
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
@@ -1515,11 +2112,46 @@ struct LocalHTTPRouter {
                 return .notFound()
             }
             return webVTTSubtitleTracksResponse(itemID: itemID, principal: principal, omitBody: isHeadRequest)
+        case let trackListPath where trackListPath.hasPrefix("/api/v1/playback/tracks/"):
+            if let limited = limitedResponse(
+                scope: .mediaProbe, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let itemID = decodedPathIdentifier(trackListPath, prefix: "/api/v1/playback/tracks/") else {
+                return .notFound()
+            }
+            guard let tracks = try? playbackTracksProvider(itemID, principal),
+                  let encoded = ServerCommandOutput.jsonData(tracks)
+            else { return .notFound() }
+            return .ok(body: encoded, omitBody: isHeadRequest)
+        case let keyframePath where keyframePath.hasPrefix("/api/v1/playback/keyframe/"):
+            if let limited = limitedResponse(
+                scope: .mediaProbe, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let itemID = decodedPathIdentifier(keyframePath, prefix: "/api/v1/playback/keyframe/"),
+                  let requested = keyframeQuery(from: target),
+                  let resolved = try? remuxStartProvider(itemID, requested, principal)
+            else { return .notFound() }
+            let encoded = Data("{\"startSeconds\":\(String(format: "%.3f", resolved))}".utf8)
+            return .ok(body: encoded, omitBody: isHeadRequest)
         case let subtitlePath where subtitlePath.hasPrefix("/api/v1/subtitles/"):
             if let limited = limitedResponse(
                 scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             return webVTTSubtitleResponse(path: subtitlePath, principal: principal, omitBody: isHeadRequest)
+        case let remuxPath where remuxPath.hasPrefix("/api/v1/transcode/"):
+            if let limited = limitedResponse(
+                scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard let itemID = decodedPathIdentifier(remuxPath, prefix: "/api/v1/transcode/"),
+                  let request = audioRemuxRequest(from: target)
+            else { return .notFound() }
+            return audioRemuxResponse(
+                itemID: itemID,
+                audioTrackID: request.audioTrackID,
+                startSeconds: request.startSeconds,
+                principal: principal,
+                omitBody: isHeadRequest
+            )
         case let streamPath where streamPath.hasPrefix("/api/v1/stream/"):
             if let limited = limitedResponse(
                 scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
@@ -1591,7 +2223,7 @@ struct LocalHTTPRouter {
                 guard keyValue.count == 2,
                       let key = decodeQueryComponent(String(keyValue[0])),
                       let value = decodeQueryComponent(String(keyValue[1])),
-                      ["q", "type", "offset", "limit", "sort", "state", "preference"].contains(key),
+                      ["q", "type", "group", "offset", "limit", "sort", "order", "genre", "state", "preference", "remoteScope", "vault"].contains(key),
                       values[key] == nil
                 else { return nil }
                 values[key] = value
@@ -1611,6 +2243,13 @@ struct LocalHTTPRouter {
                 return nil
             }
         }
+        let mediaGroup: ServerLibraryMediaGroup?
+        if let rawGroup = values["group"], !rawGroup.isEmpty {
+            guard type == nil, let parsed = ServerLibraryMediaGroup(rawValue: rawGroup) else { return nil }
+            mediaGroup = parsed
+        } else {
+            mediaGroup = nil
+        }
         let playbackFilter: ServerLibraryPlaybackFilter?
         if let rawState = values["state"], !rawState.isEmpty {
             guard let parsed = ServerLibraryPlaybackFilter(rawValue: rawState) else { return nil }
@@ -1625,18 +2264,279 @@ struct LocalHTTPRouter {
         } else {
             preferenceFilter = nil
         }
+        // 排序键与方向。旧的四个 `sort` 值（`updatedDescending` 等）永远被接受——
+        // 用户地址栏里已经存着它们——但它们各自只代表一个完整状态，所以与显式
+        // `order` 同时出现会被拒绝：同一个状态不能有两种拼法。
+        let rawSort = values["sort"] ?? ServerLibrarySort.recentlyUpdated.rawValue
+        let sort: ServerLibrarySort
+        let sortOrder: ServerLibrarySortOrder
+        if let legacy = ServerLibrarySort.legacy(rawSort) {
+            guard values["order"] == nil else { return nil }
+            (sort, sortOrder) = legacy
+        } else {
+            guard let parsedSort = ServerLibrarySort(rawValue: rawSort) else { return nil }
+            sort = parsedSort
+            if let rawOrder = values["order"] {
+                guard let parsedOrder = ServerLibrarySortOrder(rawValue: rawOrder) else { return nil }
+                sortOrder = parsedOrder
+            } else {
+                sortOrder = .primary
+            }
+        }
+        // 题材是自由文本（数据决定，不是固定枚举），所以它被裁剪而非白名单校验；
+        // 仓储层把它当作绑定参数并转义 LIKE 元字符。空值是错误而不是"无筛选"：
+        // 无筛选的写法是不带这个键。
+        let genre: String?
+        if let rawGenre = values["genre"] {
+            let trimmed = rawGenre.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed.count <= 64 else { return nil }
+            genre = trimmed
+        } else {
+            genre = nil
+        }
         guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "48"), (1...100).contains(limit),
-              let sort = ServerLibrarySort(rawValue: values["sort"] ?? ServerLibrarySort.updatedDescending.rawValue)
+              let limit = strictNonnegativeInteger(values["limit"] ?? "48"), (1...100).contains(limit)
         else { return nil }
+        // 远程作用域只接受不透明十六进制 ID；解析仍在已授权集合内匹配，
+        // 未知值得到空集合而不是一个未加作用域的结果。
+        // 保险库作用域只认一个字面量 `1`。它不是"再加一个筛选"，而是把浏览范围
+        // 整个换掉，所以它与远程作用域互斥——同时给出两个作用域是矛盾的请求，
+        // 拒绝比挑一个执行更安全。
+        let vaultScope: Bool
+        if let rawVault = values["vault"] {
+            guard rawVault == "1", values["remoteScope"] == nil else { return nil }
+            vaultScope = true
+        } else {
+            vaultScope = false
+        }
+        let remoteScopeID: String?
+        if let rawScope = values["remoteScope"], !rawScope.isEmpty {
+            guard rawScope.count <= 64, rawScope.allSatisfy(\.isHexDigit) else { return nil }
+            remoteScopeID = rawScope
+        } else {
+            remoteScopeID = nil
+        }
         return ServerLibraryQuery(
             searchText: searchText, type: type, offset: offset, limit: limit,
-            sort: sort, playbackFilter: playbackFilter, preferenceFilter: preferenceFilter
+            sort: sort, sortOrder: sortOrder, genre: genre,
+            playbackFilter: playbackFilter, preferenceFilter: preferenceFilter, mediaGroup: mediaGroup,
+            remoteScopeID: remoteScopeID,
+            vaultScope: vaultScope
         )
+    }
+
+    /// 从一个 HTML 页面路由的查询串里读一个受限文本键。
+    ///
+    /// 与 API 端点不同，页面路由对未知键宽容——用户会带着 utm 之类的参数落地，
+    /// 那时应该正常渲染而不是 400。但取出来的值仍然被裁剪并剔除控制字符。
+    private func boundedQueryText(from target: String, key: String, maximumLength: Int) -> String? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.count == 2, !pieces[1].isEmpty else { return nil }
+        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: true) {
+            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard keyValue.count == 2,
+                  decodeQueryComponent(String(keyValue[0])) == key,
+                  let value = decodeQueryComponent(String(keyValue[1]))
+            else { continue }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  !trimmed.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
+            else { return nil }
+            return String(trimmed.prefix(maximumLength))
+        }
+        return nil
+    }
+
+    /// 页面渲染时取筛选面。取不到就退回空集：筛选栏于是只给出永远成立的排序键，
+    /// 而不是让整页 503——一个少了题材下拉的页面仍然可用。
+    private func libraryFacets(
+        type: String?,
+        group: ServerLibraryMediaGroup?,
+        for principal: ServerRequestPrincipal
+    ) -> ServerLibraryFacetsResponse {
+        (try? libraryFacetsProvider(type, group, principal))
+            ?? ServerLibraryFacetsResponse(genres: [], availableSorts: [])
+    }
+
+    /// `/api/v1/library/facets` 的作用域。键白名单与 browse 同样严格——多一个未知键
+    /// 就是 400，而不是被忽略。
+    private func libraryFacetsScope(from target: String) -> (type: String?, group: ServerLibraryMediaGroup?)? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.first == "/api/v1/library/facets" else { return nil }
+        var values: [String: String] = [:]
+        if pieces.count == 2, !pieces[1].isEmpty {
+            for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
+                guard !pair.isEmpty else { return nil }
+                let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard keyValue.count == 2,
+                      let key = decodeQueryComponent(String(keyValue[0])),
+                      let value = decodeQueryComponent(String(keyValue[1])),
+                      ["type", "group"].contains(key),
+                      values[key] == nil
+                else { return nil }
+                values[key] = value
+            }
+        }
+        let type = values["type"].flatMap { $0.isEmpty ? nil : $0 }
+        if let type {
+            guard let mediaType = MediaType(rawValue: type), mediaType != .privateCollection, mediaType != .auto else {
+                return nil
+            }
+        }
+        let group: ServerLibraryMediaGroup?
+        if let rawGroup = values["group"], !rawGroup.isEmpty {
+            guard type == nil, let parsed = ServerLibraryMediaGroup(rawValue: rawGroup) else { return nil }
+            group = parsed
+        } else {
+            group = nil
+        }
+        return (type, group)
     }
 
     private func decodeQueryComponent(_ value: String) -> String? {
         value.replacingOccurrences(of: "+", with: " ").removingPercentEncoding
+    }
+
+    /// 图片接口只有显式的尺寸桶；它不接受未知键、重复键或空值，避免暴露任意图片
+    /// 处理能力，也让缓存键保持可预测。
+    /// 浏览器给失败的封面重试时挂上的序号。服务端只认识它、然后忽略它。
+    static let artworkRetryQueryKey = "_retry"
+
+    /// `/api/v1/transcode/<id>?audio=<序号>&start=<秒>` 的严格解析。
+    ///
+    /// 键白名单与封面端点同样严格：未知键、重复键、畸形百分号一律拒绝。`start` 只
+    /// 认整数秒——分片流本来就只能在关键帧起播，把小数交给 ffmpeg 只会让"同一个
+    /// 位置"变成一串互不相同的 URL，白白多起好几个进程。
+    private func audioRemuxRequest(from target: String) -> (audioTrackID: Int, startSeconds: Double)? {
+        guard let values = boundedQuery(from: target, allowedKeys: ["audio", "start"]) else { return nil }
+        var audioTrackID = 0
+        if let raw = values["audio"] {
+            guard let parsed = strictNonnegativeInteger(raw),
+                  parsed < ServerWebAudioTrackSet.maximumTrackCount
+            else { return nil }
+            audioTrackID = parsed
+        }
+        var startSeconds: Double = 0
+        if let raw = values["start"] {
+            guard let parsed = Self.boundedSeconds(raw) else { return nil }
+            startSeconds = parsed
+        }
+        return (audioTrackID, startSeconds)
+    }
+
+    /// `/api/v1/playback/keyframe/<id>?at=<秒>`。
+    private func keyframeQuery(from target: String) -> Double? {
+        guard let values = boundedQuery(from: target, allowedKeys: ["at"]),
+              let raw = values["at"]
+        else { return nil }
+        return Self.boundedSeconds(raw)
+    }
+
+    /// 键白名单式的查询串解析：未知键、重复键、畸形百分号一律拒绝。
+    private func boundedQuery(from target: String, allowedKeys: Set<String>) -> [String: String]? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.count <= 2 else { return nil }
+        guard pieces.count == 2 else { return [:] }
+        guard !pieces[1].isEmpty else { return nil }
+        var values: [String: String] = [:]
+        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
+            guard !pair.isEmpty else { return nil }
+            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard keyValue.count == 2,
+                  let key = decodeQueryComponent(String(keyValue[0])),
+                  let value = decodeQueryComponent(String(keyValue[1])),
+                  allowedKeys.contains(key),
+                  values[key] == nil
+            else { return nil }
+            values[key] = value
+        }
+        return values
+    }
+
+    /// 秒数：最多 5 位整数 + 最多 3 位小数，上限一天。小数是必需的——跳转落点要
+    /// 对齐到关键帧的真实时间戳，那不是整数。
+    private static func boundedSeconds(_ raw: String) -> Double? {
+        guard !raw.isEmpty, raw.utf8.count <= 9 else { return nil }
+        let parts = raw.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count <= 2,
+              let whole = parts.first, !whole.isEmpty, whole.count <= 5, whole.allSatisfy(\.isNumber)
+        else { return nil }
+        if parts.count == 2 {
+            let fraction = parts[1]
+            guard !fraction.isEmpty, fraction.count <= 3, fraction.allSatisfy(\.isNumber) else { return nil }
+        }
+        guard let value = Double(raw), value.isFinite, value >= 0, value < 86_400 else { return nil }
+        return value
+    }
+
+    private func artworkRequest(from target: String) -> ArtworkRequest? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.count <= 2 else { return nil }
+        guard pieces.count == 2 else { return .original }
+        guard !pieces[1].isEmpty else { return nil }
+
+        var values: [String: String] = [:]
+        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
+            guard !pair.isEmpty else { return nil }
+            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard keyValue.count == 2,
+                  let key = decodeQueryComponent(String(keyValue[0])),
+                  let value = decodeQueryComponent(String(keyValue[1])),
+                  key == "size" || key == Self.artworkRetryQueryKey,
+                  values[key] == nil,
+                  !value.isEmpty,
+                  value.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+                  value.utf8.count <= 4
+            else { return nil }
+            // 重试序号只是一个换 URL 的手段：浏览器不会为同一个地址再发一次请求，
+            // 而失败的封面必须能真正重取。它不参与任何解析，1–3 位数字之外一律拒绝。
+            if key == Self.artworkRetryQueryKey {
+                guard value.utf8.count <= 3 else { return nil }
+                // 记下来只为了让「同一个键出现两次」照旧被拒绝；读取时只认 `size`。
+                values[key] = value
+                continue
+            }
+            guard let maximumPixel = Int(value),
+                  ServerArtworkThumbnailer.supportedMaximumPixels.contains(maximumPixel)
+            else { return nil }
+            values[key] = value
+        }
+        // 只带重试序号、没有 `size` 时仍然是"原图"那一档，与不带查询串一致。
+        guard let value = values["size"] else { return .original }
+        guard let maximumPixel = Int(value) else { return nil }
+        return .thumbnail(maximumPixel)
+    }
+
+    /// 派生自「将要发出的那个文件」的实体标签。
+    ///
+    /// 用尺寸与修改时间，不读内容：缩略图的磁盘文件名本身已经是内容身份的摘要
+    /// （本地是 `路径|大小|mtime`，远程是与凭据无关的上游身份），所以这两项一变
+    /// 就一定是另一张图。为每次复验重新读一遍几十 KB 的 JPEG 去算哈希，代价正好
+    /// 落在这个机制想省掉的地方。
+    ///
+    /// 弱标签（`W/`）：Range 请求不按它做条件取字节，海报也从不走 Range。
+    private static func fileEntityTag(for url: URL) -> String? {
+        guard let values = try? url.resourceValues(
+            forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
+        ), values.isRegularFile == true, let size = values.fileSize else { return nil }
+        let modified = Int64((values.contentModificationDate ?? .distantPast).timeIntervalSince1970 * 1_000)
+        return "W/\"\(size)-\(modified)\""
+    }
+
+    /// `If-None-Match` 是否覆盖这个标签。`*` 按 RFC 9110 匹配任何现存表示。
+    private static func entityTagMatches(_ entityTag: String, ifNoneMatch header: String?) -> Bool {
+        guard let header else { return false }
+        let candidates = header.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespaces)
+        }
+        guard !candidates.isEmpty else { return false }
+        if candidates.contains("*") { return true }
+        // 弱比较：`W/"x"` 与 `"x"` 视为同一表示，这正是弱标签该有的语义。
+        func normalized(_ value: String) -> String {
+            value.hasPrefix("W/") ? String(value.dropFirst(2)) : value
+        }
+        let expected = normalized(entityTag)
+        return candidates.contains { normalized($0) == expected }
     }
 
     private func seriesEpisodeQuery(
@@ -1679,6 +2579,15 @@ struct LocalHTTPRouter {
               let limit = strictNonnegativeInteger(values["limit"] ?? "50"), (1...100).contains(limit)
         else { return nil }
         return (id, season, offset, limit)
+    }
+
+    private func decodedSeriesPlayIdentifier(_ path: String) -> String? {
+        let prefix = "/series/"
+        let suffix = "/play"
+        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
+        let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
+        guard !encodedID.isEmpty else { return nil }
+        return decodedPathIdentifier("/series/\(encodedID)", prefix: prefix)
     }
 
     /// 人物目录只接受固定搜索键和有界分页。搜索语句最终是 SQLite 绑定参数，且这里
@@ -1740,9 +2649,33 @@ struct LocalHTTPRouter {
 
     /// 合集仅接受分页参数。合集 ID 经过同一套路径段解码与控制字符检查，查询键
     /// 不能携带账号、资料库或任意排序字段，从路由边界阻断横向枚举。
+    /// 侧栏那两串由数据决定的条目。
+    ///
+    /// 智能集合与智能歌单必须在**每一个**页面上都出现，否则它们会在展开「视频」或
+    /// 「音乐」时忽隐忽现——比从不显示更让人困惑。取不到就给空，侧栏少两行，不会
+    /// 让页面渲染失败。
+    private func sidebarExtras(
+        for principal: ServerRequestPrincipal,
+        activeRemoteScopeID: String? = nil
+    ) -> ServerWebSidebarExtras {
+        ServerWebSidebarExtras(
+            smartCollections: (try? smartCollectionsProvider(0, 24, principal))?.items ?? [],
+            smartPlaylists: (try? musicPlaylistsProvider(0, 100, principal))?.items ?? [],
+            // 每台远程服务器一个分组；远程内容不并入一级分类，与客户端一致。
+            remoteSources: (try? remoteSourceGroupsProvider(principal)) ?? [],
+            // 分类响应在目录层有 15 秒缓存，因此这次取用与路由自己那次是同一份。
+            videoGroupItemCount: (try? libraryCategoriesProvider(principal))?.videoGroupItemCount ?? 0,
+            activeRemoteScopeID: activeRemoteScopeID
+        )
+    }
+
     private func collectionsQuery(from target: String) -> (offset: Int, limit: Int)? {
+        pagingQuery(from: target, path: "/api/v1/collections")
+    }
+
+    private func pagingQuery(from target: String, path expectedPath: String) -> (offset: Int, limit: Int)? {
         let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.first == "/api/v1/collections" else { return nil }
+        guard pieces.first.map(String.init) == expectedPath else { return nil }
         var values: [String: String] = [:]
         if pieces.count == 2, !pieces[1].isEmpty {
             for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
@@ -1764,14 +2697,25 @@ struct LocalHTTPRouter {
     }
 
     private func collectionItemsQuery(from target: String) -> (id: String, offset: Int, limit: Int)? {
+        identifiedPagingQuery(from: target, prefix: "/api/v1/collections/", identifierNamespace: "collections")
+    }
+
+    /// `/api/v1/<集合>/<id>/items?offset=&limit=` 的解析。
+    ///
+    /// 智能集合和歌单的 items 路由与合集逐字同形，所以共用这一份而不是各抄一遍：
+    /// 抄一遍就是多一处可以漏掉 `decodedPathIdentifier`、漏掉上界检查的地方。
+    private func identifiedPagingQuery(
+        from target: String,
+        prefix: String,
+        identifierNamespace: String
+    ) -> (id: String, offset: Int, limit: Int)? {
         let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
         guard pieces.count == 2 else { return nil }
         let path = String(pieces[0])
-        let prefix = "/api/v1/collections/"
         let suffix = "/items"
         guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
         let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
-        guard let id = decodedPathIdentifier("/collections/\(encodedID)", prefix: "/collections/") else { return nil }
+        guard let id = decodedPathIdentifier("/\(identifierNamespace)/\(encodedID)", prefix: "/\(identifierNamespace)/") else { return nil }
         var values: [String: String] = [:]
         for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
             let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
@@ -1813,34 +2757,6 @@ struct LocalHTTPRouter {
         return (offset, limit)
     }
 
-    /// Returns an active category only when the page query contains one unique,
-    /// well-formed value that is present in the current principal's authorized list.
-    private func selectedLibraryCategoryID(
-        from target: String,
-        allowedCategories: [ServerLibraryCategory]
-    ) -> String? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.first == "/library", pieces.count == 2 else { return nil }
-        var selected: String?
-        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
-            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard keyValue.count == 2,
-                  let key = decodeQueryComponent(String(keyValue[0])),
-                  let value = decodeQueryComponent(String(keyValue[1]))
-            else { return nil }
-            guard key == "type" else { continue }
-            guard selected == nil,
-                  value.utf8.count <= 512,
-                  !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
-            else { return nil }
-            selected = value
-        }
-        guard let selected,
-              allowedCategories.prefix(32).contains(where: { $0.id == selected })
-        else { return nil }
-        return selected
-    }
-
     private func strictNonnegativeInteger(_ value: String) -> Int? {
         guard !value.isEmpty, value.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
         return Int(value)
@@ -1856,6 +2772,18 @@ struct LocalHTTPRouter {
             // 与不存在的条目统一返回 404，避免 ID 或资料库权限被枚举。
             return .notFound()
         }
+        if let remoteURL = asset.remoteURL {
+            guard let sizedAsset = remoteAssetWithResolvedLength(asset, remoteURL: remoteURL) else {
+                return .serviceUnavailable()
+            }
+            return remoteStreamResponse(
+                asset: sizedAsset,
+                remoteURL: remoteURL,
+                rangeHeader: rangeHeader,
+                omitBody: omitBody
+            )
+        }
+
         guard asset.byteLength > 0 else { return .rangeNotSatisfiable(totalLength: asset.byteLength) }
 
         if let rangeHeader {
@@ -1879,8 +2807,20 @@ struct LocalHTTPRouter {
             // 下载与播放使用同一条目隐藏策略；无权时不能通过状态码差异枚举媒体。
             return .notFound()
         }
-        guard asset.byteLength > 0 else { return .rangeNotSatisfiable(totalLength: asset.byteLength) }
         let headers = ["Content-Disposition: attachment; filename=\"\(safeDownloadFileName(for: asset))\""]
+        if let remoteURL = asset.remoteURL {
+            guard let sizedAsset = remoteAssetWithResolvedLength(asset, remoteURL: remoteURL) else {
+                return .serviceUnavailable()
+            }
+            return remoteStreamResponse(
+                asset: sizedAsset,
+                remoteURL: remoteURL,
+                rangeHeader: rangeHeader,
+                omitBody: omitBody,
+                additionalHeaders: headers
+            )
+        }
+        guard asset.byteLength > 0 else { return .rangeNotSatisfiable(totalLength: asset.byteLength) }
         if let rangeHeader {
             guard let request = HTTPByteRangeRequest(headerValue: rangeHeader),
                   let range = request.resolve(totalLength: asset.byteLength)
@@ -1890,6 +2830,70 @@ struct LocalHTTPRouter {
             return .partialFile(asset: asset, range: range, omitBody: omitBody, additionalHeaders: headers)
         }
         return .fullFile(asset: asset, omitBody: omitBody, additionalHeaders: headers)
+    }
+
+    private func remoteAssetWithResolvedLength(_ asset: ServerMediaAsset, remoteURL: URL) -> ServerMediaAsset? {
+        if asset.byteLength > 0 { return asset }
+        guard let byteLength = remoteAssetFetcher.mediaByteLength(url: remoteURL), byteLength > 0 else { return nil }
+        return ServerMediaAsset(id: asset.id, remoteURL: remoteURL, byteLength: byteLength)
+    }
+
+    /// 对上游媒体始终做有界 Range 读取。未带 Range 的浏览器首请求也只取首个
+    /// 块并以 206 返回，随后浏览器会继续按需请求，避免服务进程把整部远程影片
+    /// 缓进内存或磁盘。
+    private func remoteStreamResponse(
+        asset: ServerMediaAsset,
+        remoteURL: URL,
+        rangeHeader: String?,
+        omitBody: Bool,
+        additionalHeaders: [String] = []
+    ) -> LocalHTTPResponse {
+        // 记录"这次为什么走代理"。远程条目在此处必然是代理；把原因显式记下来，
+        // 就不需要在事后从日志推断策略，也不会因为改了策略而无人察觉。
+        ServerPlaybackTelemetry.shared.recordTransportReason(
+            remoteAccessPolicy.transportDecisionReason(upstream: remoteURL)
+        )
+        let range: ResolvedHTTPByteRange
+        if let rangeHeader {
+            guard let request = HTTPByteRangeRequest(headerValue: rangeHeader),
+                  let resolved = request.resolve(totalLength: asset.byteLength)
+            else { return .rangeNotSatisfiable(totalLength: asset.byteLength) }
+            // HTMLMediaElement 通常以 `bytes=0-` 发起首个探测；远程代理不能为
+            // 该开放范围一次性缓冲整部影片。返回同一起点的有界 206 分段，让浏览器
+            // 继续按需请求即可，同时保持服务进程内存上限。
+            let length = min(resolved.length, Int64(ServerRemoteAssetFetcher.maximumMediaRangeByteLength))
+            range = ResolvedHTTPByteRange(
+                lowerBound: resolved.lowerBound,
+                upperBound: resolved.lowerBound + length - 1,
+                totalLength: asset.byteLength
+            )
+        } else {
+            let length = min(asset.byteLength, Int64(ServerRemoteAssetFetcher.maximumMediaRangeByteLength))
+            guard length > 0 else { return .rangeNotSatisfiable(totalLength: asset.byteLength) }
+            range = ResolvedHTTPByteRange(lowerBound: 0, upperBound: length - 1, totalLength: asset.byteLength)
+        }
+
+        return LocalHTTPResponse(
+            statusCode: 206,
+            reason: "Partial Content",
+            contentType: asset.contentType,
+            payload: omitBody
+                ? .data(Data())
+                : .remoteRange(
+                    LocalHTTPRemoteRange(
+                        fetcher: remoteAssetFetcher,
+                        url: remoteURL,
+                        offset: range.lowerBound,
+                        length: range.length
+                    )
+                ),
+            declaredContentLength: Int(range.length),
+            additionalHeaders: [
+                "Accept-Ranges: bytes",
+                "Content-Range: \(range.contentRangeHeader)",
+                "Cache-Control: no-store"
+            ] + additionalHeaders
+        )
     }
 
     private func safeDownloadFileName(for asset: ServerMediaAsset) -> String {
@@ -1935,13 +2939,91 @@ struct LocalHTTPRouter {
               !itemID.contains("\\"),
               let trackID = strictNonnegativeInteger(String(remainder[1])),
               trackID < ServerWebVTTSubtitleTrack.maximumTrackCount,
-              let asset = try? webVTTSubtitleAssetProvider(itemID, trackID, principal)
+              let track = try? subtitleTrackProvider(itemID, trackID, principal)
         else { return .notFound() }
-        return .file(
-            url: asset.fileURL,
-            byteLength: asset.byteLength,
+        switch track.source {
+        case let .sidecar(asset):
+            let pathExtension = asset.fileURL.pathExtension.lowercased()
+            // 已经是 VTT 的原样流式送出，保持"路由层不把文件复制进内存"的既有边界。
+            guard pathExtension != "vtt" else {
+                return .file(
+                    url: asset.fileURL,
+                    byteLength: asset.byteLength,
+                    contentType: "text/vtt; charset=utf-8",
+                    omitBody: omitBody
+                )
+            }
+            // SRT 与 ASS 必须落到内存再转：`<track>` 只认 WebVTT，把原文交出去
+            // 浏览器会静默丢掉整条轨道。转换要读完全文，而且中文资料库里的这两类
+            // 文件常常不是 UTF-8，顺带统一编码。体积由 8 MiB 上限兜住。
+            guard asset.byteLength <= Int64(ServerWebVTTSubtitleTrack.maximumByteLength),
+                  let raw = try? Data(contentsOf: asset.fileURL),
+                  let payload = ServerSubtitleSidecar.webVTTPayload(
+                    from: raw, pathExtension: pathExtension
+                  )
+            else { return .notFound() }
+            return Self.webVTTResponse(payload: payload, omitBody: omitBody)
+        case let .embedded(asset, streamIndex):
+            guard let payload = mediaTrackCatalog.embeddedSubtitleWebVTT(
+                for: asset, streamIndex: streamIndex
+            ) else { return .notFound() }
+            return Self.webVTTResponse(payload: payload, omitBody: omitBody)
+        case let .remote(remoteTrack):
+            guard !omitBody else {
+                // HEAD 不该为了报一个长度就去 Emby 拉一份字幕回来。
+                return Self.webVTTResponse(payload: Data(), omitBody: true)
+            }
+            guard let payload = ServerRemoteSubtitleCatalog.webVTT(
+                for: remoteTrack, fetcher: remoteAssetFetcher
+            ) else { return .notFound() }
+            return Self.webVTTResponse(payload: payload, omitBody: false)
+        }
+    }
+
+    private static func webVTTResponse(payload: Data, omitBody: Bool) -> LocalHTTPResponse {
+        LocalHTTPResponse(
+            statusCode: 200,
+            reason: "OK",
             contentType: "text/vtt; charset=utf-8",
-            omitBody: omitBody
+            payload: .data(omitBody ? Data() : payload),
+            declaredContentLength: payload.count,
+            additionalHeaders: ["Cache-Control: private, max-age=300"]
+        )
+    }
+
+    /// 重新封装音轨的播放流。
+    ///
+    /// 它**没有** `Content-Length`，也不接受 Range：字节是 ffmpeg 边转边给的，长度
+    /// 要等转完才知道。跳转由播放器改写 `start=` 重开一条流完成，页面上维持一条
+    /// 虚拟时间轴（见详情页脚本里的 `remuxTimeOffset`）。
+    private func audioRemuxResponse(
+        itemID: String,
+        audioTrackID: Int,
+        startSeconds: Double,
+        principal: ServerRequestPrincipal,
+        omitBody: Bool
+    ) -> LocalHTTPResponse {
+        guard let stream = try? audioRemuxProvider(itemID, audioTrackID, startSeconds, principal) else {
+            return .notFound()
+        }
+        guard !omitBody else {
+            // HEAD 不能起一个 ffmpeg。它只需要确认"这条通路存在"。
+            return LocalHTTPResponse(
+                statusCode: 200,
+                reason: "OK",
+                contentType: "video/mp4",
+                payload: .data(Data()),
+                declaredContentLength: 0,
+                additionalHeaders: ["Accept-Ranges: none"]
+            )
+        }
+        return LocalHTTPResponse(
+            statusCode: 200,
+            reason: "OK",
+            contentType: "video/mp4",
+            payload: .remuxStream(stream),
+            declaredContentLength: LocalHTTPResponse.unknownContentLength,
+            additionalHeaders: ["Accept-Ranges: none"]
         )
     }
 
@@ -2197,6 +3279,55 @@ struct LocalHTTPRouter {
         }
     }
 
+    /// 浏览器直接打开受保护页面时返回登录页，而 API、播放器字节流和脚本请求仍保持
+    /// 401，防止非 HTML 客户端把重定向误当成成功响应。
+    private func acceptsHTMLNavigation(_ requestHead: String) -> Bool {
+        guard let accept = httpHeader(named: "Accept", in: requestHead)?.lowercased() else {
+            return false
+        }
+        return accept.split(separator: ",").contains { item in
+            item.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("text/html")
+        }
+    }
+
+    /// The server, not browser JavaScript, derives the return target. It travels
+    /// as URL-safe Base64 rather than a percent-encoded path, because the public
+    /// HTTP policy intentionally rejects encoded slash and backslash sequences.
+    private func loginLocation(for target: String) -> String {
+        guard target.hasPrefix("/"), !target.hasPrefix("//"), target.utf8.count <= 2_048 else {
+            return "/login"
+        }
+        let state = Data(target.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return "/login?next=\(state)"
+    }
+
+    private func loginReturnState(from target: String) -> String? {
+        guard let components = URLComponents(string: "http://localhost\(target)"),
+              let values = components.queryItems?.filter({ $0.name == "next" }),
+              values.count == 1,
+              let value = values[0].value,
+              value.utf8.count <= 2_732,
+              value.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil
+        else { return nil }
+        return value
+    }
+
+    private func loginReturnPath(from target: String) -> String? {
+        guard let state = loginReturnState(from: target) else { return nil }
+        let padding = String(repeating: "=", count: (4 - state.count % 4) % 4)
+        let base64 = state.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/") + padding
+        guard let data = Data(base64Encoded: base64),
+              let value = String(data: data, encoding: .utf8),
+              value.hasPrefix("/"), !value.hasPrefix("//"), !value.contains("\\"),
+              value.utf8.count <= 2_048
+        else { return nil }
+        return value
+    }
+
     private func publicProbeResponse(path: String, omitBody: Bool) -> LocalHTTPResponse {
         let body: Data
         if path == "/health" {
@@ -2248,6 +3379,73 @@ struct LocalHTTPRouter {
             ) {
             case let .success(tokens):
                 return authenticationResponse(tokens: tokens, delivery: request.deliveryMode)
+            case .rejected:
+                return .unauthorized()
+            case let .temporarilyLocked(until):
+                return .tooManyRequests(retryAfter: max(Int(until.timeIntervalSinceNow.rounded(.up)), 1))
+            case .initialSetupRequired:
+                return .preconditionRequired()
+            }
+        } catch {
+            return .serviceUnavailable()
+        }
+    }
+
+    /// A browser can submit this constrained form even when JavaScript is
+    /// unavailable. It never places credentials in the URL; the return state is
+    /// server-generated Base64URL and is decoded only after successful login.
+    private func webFormLoginResponse(
+        requestHead: String,
+        target: String,
+        body: Data,
+        clientAddressKey: String
+    ) -> LocalHTTPResponse {
+        guard httpHeader(named: "Content-Type", in: requestHead)?.lowercased() == "application/x-www-form-urlencoded",
+              let form = String(data: body, encoding: .utf8),
+              let components = URLComponents(string: "http://localhost/?\(form.replacingOccurrences(of: "+", with: "%20"))"),
+              let items = components.queryItems,
+              Set(items.map(\.name)) == Set(["username", "password", "csrf"]),
+              items.count == 3,
+              let username = items.first(where: { $0.name == "username" })?.value,
+              let password = items.first(where: { $0.name == "password" })?.value,
+              let submittedCSRF = items.first(where: { $0.name == "csrf" })?.value,
+              submittedCSRF == csrfToken
+        else { return .badRequest() }
+        if let limited = limitedResponse(
+            scope: .loginClient,
+            identityComponents: [clientAddressKey]
+        ) { return limited }
+        let request = ServerLoginRequest(
+            username: username,
+            password: password,
+            deviceName: "Web Browser",
+            platform: "Web",
+            delivery: "cookie"
+        )
+        guard request.isValid else { return .badRequest() }
+        if let limited = limitedResponse(
+            scope: .loginIdentity,
+            identityComponents: [
+                "username",
+                ServerIdentityRepository.normalizeUsername(
+                    request.username.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            ]
+        ) { return limited }
+        guard let authenticationService else { return .serviceUnavailable() }
+        do {
+            switch try authenticationService.login(
+                username: request.username,
+                password: request.password,
+                deviceName: request.deviceName,
+                platform: request.platform
+            ) {
+            case let .success(tokens):
+                return .seeOther(
+                    location: loginReturnPath(from: target) ?? "/",
+                    omitBody: false,
+                    additionalHeaders: Self.authenticationCookieHeaders(tokens: tokens)
+                )
             case .rejected:
                 return .unauthorized()
             case let .temporarilyLocked(until):
@@ -2450,9 +3648,17 @@ struct LocalHTTPResponse {
     let declaredContentLength: Int
     let additionalHeaders: [String]
 
+    /// `declaredContentLength` 取这个值时不发 `Content-Length`：长度要等 ffmpeg
+    /// 转完才知道，而读者按下播放的那一刻就要开始收字节。响应因此只能以关闭连接
+    /// 结束，`write(response:)` 会强制 `Connection: close`。
+    static let unknownContentLength = -1
+
     var body: Data {
-        guard case let .data(body) = payload else { return Data() }
-        return body
+        switch payload {
+        case let .data(body): return body
+        case let .remoteRange(range): return range.materializedBody()
+        case .fileRange, .remuxStream: return Data()
+        }
     }
 
     static func ok(body: Data, omitBody: Bool) -> Self {
@@ -2484,7 +3690,7 @@ struct LocalHTTPResponse {
             contentType: "text/html; charset=utf-8",
             payload: .data(omitBody ? Data() : body),
             declaredContentLength: body.count,
-            additionalHeaders: []
+            additionalHeaders: ["Cache-Control: no-cache, no-store, must-revalidate"]
         )
     }
 
@@ -2495,7 +3701,11 @@ struct LocalHTTPResponse {
             contentType: "text/javascript; charset=utf-8",
             payload: .data(omitBody ? Data() : body),
             declaredContentLength: body.count,
-            additionalHeaders: ["Cache-Control: private, max-age=300"]
+            // Every HTML reference includes ServerWebAssets.version, so a new
+            // asset URL is issued whenever the bundle changes. Let the browser
+            // retain a matching static resource instead of revalidating the
+            // complete CSS/JS set on every authenticated navigation.
+            additionalHeaders: ["Cache-Control: private, max-age=31536000, immutable"]
         )
     }
 
@@ -2506,11 +3716,11 @@ struct LocalHTTPResponse {
             contentType: "text/css; charset=utf-8",
             payload: .data(omitBody ? Data() : body),
             declaredContentLength: body.count,
-            additionalHeaders: ["Cache-Control: private, max-age=300"]
+            additionalHeaders: ["Cache-Control: private, max-age=31536000, immutable"]
         )
     }
 
-    static func seeOther(location: String, omitBody: Bool) -> Self {
+    static func seeOther(location: String, omitBody: Bool, additionalHeaders: [String] = []) -> Self {
         let body = Data("See Other".utf8)
         return Self(
             statusCode: 303,
@@ -2518,7 +3728,7 @@ struct LocalHTTPResponse {
             contentType: "text/plain; charset=utf-8",
             payload: .data(omitBody ? Data() : body),
             declaredContentLength: body.count,
-            additionalHeaders: ["Location: \(location)"]
+            additionalHeaders: ["Location: \(location)"] + additionalHeaders
         )
     }
 
@@ -2526,6 +3736,7 @@ struct LocalHTTPResponse {
         asset: ServerMediaAsset,
         omitBody: Bool,
         cacheControl: String? = nil,
+        entityTag: String? = nil,
         additionalHeaders: [String] = []
     ) -> Self {
         Self(
@@ -2536,7 +3747,10 @@ struct LocalHTTPResponse {
                 ? .data(Data())
                 : .fileRange(LocalHTTPFileRange(url: asset.fileURL, offset: 0, length: asset.byteLength)),
             declaredContentLength: Int(asset.byteLength),
-            additionalHeaders: ["Accept-Ranges: bytes"] + (cacheControl.map { ["Cache-Control: \($0)"] } ?? []) + additionalHeaders
+            additionalHeaders: ["Accept-Ranges: bytes"]
+                + (cacheControl.map { ["Cache-Control: \($0)"] } ?? [])
+                + (entityTag.map { ["ETag: \($0)"] } ?? [])
+                + additionalHeaders
         )
     }
 
@@ -2620,6 +3834,24 @@ struct LocalHTTPResponse {
         return response
     }
 
+    /// 复验命中：内容没变，不重传字节。
+    ///
+    /// 海报墙此前无论如何都是一次带 body 的 200：服务端从不发 `ETag`／
+    /// `Last-Modified`，浏览器也就无从复验。`max-age` 一过、用户按一次刷新、或者
+    /// 缓存被挤掉，整墙海报就重新完整下载一遍——远程封面还要连带一次上游取图。
+    /// 304 让这些情况退化成一次几十字节的往返。
+    static func notModified(entityTag: String, cacheControl: String?) -> Self {
+        Self(
+            statusCode: 304,
+            reason: "Not Modified",
+            contentType: "application/octet-stream",
+            payload: .data(Data()),
+            declaredContentLength: 0,
+            additionalHeaders: ["ETag: \(entityTag)"]
+                + (cacheControl.map { ["Cache-Control: \($0)"] } ?? [])
+        )
+    }
+
     static func noContent(clearingAuthenticationCookies: Bool = false) -> Self {
         Self(
             statusCode: 204,
@@ -2638,6 +3870,7 @@ struct LocalHTTPResponse {
             "Content-Length: \(declaredContentLength)",
             "Connection: close"
         ]
+        if declaredContentLength < 0 { headers.remove(at: 2) }
         if !additionalHeaders.contains(where: { $0.hasPrefix("Cache-Control:") }) {
             headers.append("Cache-Control: no-store")
         }
@@ -2654,9 +3887,11 @@ struct LocalHTTPResponse {
         var headers = [
             "HTTP/1.1 \(statusCode) \(reason)",
             "Content-Type: \(contentType)",
-            "Content-Length: \(declaredContentLength)",
             keepAlive ? "Connection: keep-alive" : "Connection: close"
         ]
+        if declaredContentLength >= 0 {
+            headers.insert("Content-Length: \(declaredContentLength)", at: 2)
+        }
         if keepAlive {
             headers.append("Keep-Alive: timeout=10, max=64")
         }
@@ -2691,7 +3926,12 @@ struct LocalHTTPResponse {
         "Cross-Origin-Opener-Policy: same-origin",
         "Cross-Origin-Resource-Policy: same-origin",
         "Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()",
-        "Referrer-Policy: no-referrer",
+        // `no-referrer` 曾经让整套「从哪来回哪去」的服务端推导变成死代码：详情页
+        // 的返回目标是从 `Referer` 解析出来的，而浏览器一个字节都不会发，于是每
+        // 一页的返回都落到兜底的「返回首页」——不管读者是从搜索结果、合集还是
+        // 人物页点进来的。`same-origin` 只对同源请求带上完整地址，跨站请求仍然
+        // 一个字节都不发，泄露面没有变化。
+        "Referrer-Policy: same-origin",
         "X-Content-Type-Options: nosniff",
         "X-Frame-Options: DENY"
     ]
@@ -2705,12 +3945,39 @@ struct LocalHTTPResponse {
 enum LocalHTTPResponsePayload {
     case data(Data)
     case fileRange(LocalHTTPFileRange)
+    case remoteRange(LocalHTTPRemoteRange)
+    /// 长度未知的实时重封装流。它是唯一一种不带 `Content-Length` 的响应，
+    /// 因此也必须是连接上的最后一个响应（见 `LocalHTTPResponse.unknownContentLength`）。
+    case remuxStream(ServerAudioRemuxStream)
 }
 
 struct LocalHTTPFileRange {
     let url: URL
     let offset: Int64
     let length: Int64
+}
+
+/// The production write path streams this payload directly to the client. Its
+/// `materializedBody` helper exists only for the in-process router tests, whose
+/// response API intentionally exposes a `Data` body for assertions.
+struct LocalHTTPRemoteRange {
+    let fetcher: ServerRemoteAssetFetcher
+    let url: URL
+    let offset: Int64
+    let length: Int64
+
+    func stream(_ consume: @escaping (Data) -> Bool) -> Bool {
+        fetcher.streamMediaBytes(url: url, offset: offset, length: length, consume: consume)
+    }
+
+    func materializedBody() -> Data {
+        var body = Data()
+        guard stream({ chunk in
+            body.append(chunk)
+            return true
+        }) else { return Data() }
+        return body
+    }
 }
 
 /// 在固定内存上限内读取文件范围。该函数不创建完整媒体文件的 `Data`，是服务端

@@ -150,6 +150,20 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
         )
     }
 
+    func testAllowsOnlySameOriginFormPostAtWebLoginFallback() {
+        let form = "POST /login?next=L2l0ZW0vZXBpc29kZS0y HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 40\r\n\r\n"
+        XCTAssertNil(policy.validate(form, bodyLength: 40))
+
+        let noOrigin = "POST /login HTTP/1.1\r\nHost: localhost:8098\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 40\r\n\r\n"
+        XCTAssertNil(policy.validate(noOrigin, bodyLength: 40))
+
+        let foreignOrigin = "POST /login HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: https://attacker.example\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 40\r\n\r\n"
+        XCTAssertNil(policy.validate(foreignOrigin, bodyLength: 40))
+
+        let wrongPath = "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 40\r\n\r\n"
+        XCTAssertEqual(policy.validate(wrongPath, bodyLength: 40), .badRequest)
+    }
+
     func testAllowsOnlyCSRFProtectedPlaybackStateJSONAtTheDynamicItemRoute() {
         let request = "POST /api/v1/playback/state/movie-1 HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Type: application/json\r\nContent-Length: 64\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
         XCTAssertNil(policy.validate(request, bodyLength: 64))

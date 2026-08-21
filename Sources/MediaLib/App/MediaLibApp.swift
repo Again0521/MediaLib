@@ -5,6 +5,9 @@ final class MediaLibAppDelegate: NSObject, NSApplicationDelegate {
     private var windowObservers: [NSObjectProtocol] = []
     /// 双击文件/「打开方式」进入的媒体文件。SwiftUI 场景就绪前先缓存，就绪后由 App 拉取。
     var onOpenFiles: (([URL]) -> Void)?
+    /// AppState 由 SwiftUI 场景持有，正常退出时不会立刻释放；因此服务子进程
+    /// 不能只依赖控制器 deinit 清理，必须在 AppKit 的退出回调中显式终止。
+    var onApplicationWillTerminate: (() -> Void)?
     var pendingOpenFileURLs: [URL] = []
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -59,6 +62,11 @@ final class MediaLibAppDelegate: NSObject, NSApplicationDelegate {
         LiveTitleIconDebugTool.scheduleWindowCaptureIfRequested()
         WindowMaterialDiagnostics.scheduleIfRequested()
         VividIconGridDebugTool.runAndExitIfRequested()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        onApplicationWillTerminate?()
+        onApplicationWillTerminate = nil
     }
 
     static func makeTitlebarSeamless(_ window: NSWindow) {
@@ -123,6 +131,9 @@ struct MediaLibApp: App {
                     SystemMediaCommandCenter.shared.configure(appState: appState)
                     appDelegate.onOpenFiles = { [weak appState] urls in
                         appState?.playExternalFiles(urls)
+                    }
+                    appDelegate.onApplicationWillTerminate = { [weak appState] in
+                        appState?.stopServerModeForApplicationTermination()
                     }
                     if !appDelegate.pendingOpenFileURLs.isEmpty {
                         let pending = appDelegate.pendingOpenFileURLs

@@ -18,6 +18,22 @@ final class FFprobeMediaInspector {
     }
 
     func inspect(asset: ServerMediaAsset) throws -> ServerMediaPlaybackInfo {
+        let probed = try probe(asset: asset)
+        return ServerMediaPlaybackInfo(
+            itemID: asset.id,
+            durationSeconds: probed.durationSeconds,
+            container: probed.container,
+            bitrate: probed.bitrate,
+            streams: probed.streams.compactMap(Self.streamInfo)
+        )
+    }
+
+    /// 探测结果的完整形态。
+    ///
+    /// `inspect` 会把它压成协议 DTO 交给网页；轨道菜单与重封装决策需要 DTO 里
+    /// 没有的东西——轨道标题、默认/强制标记，以及"这是本类型里的第几条"（ffmpeg
+    /// 的 `-map 0:a:N` 用的是类型内序号，不是全局流序号）。
+    func probe(asset: ServerMediaAsset) throws -> ProbedMedia {
         guard let executableURL = executableURLProvider() else {
             throw FFprobeMediaInspectorError.unavailable
         }
@@ -31,13 +47,69 @@ final class FFprobeMediaInspector {
         } catch {
             throw FFprobeMediaInspectorError.invalidOutput
         }
-        return ServerMediaPlaybackInfo(
-            itemID: asset.id,
+        var ordinals: [String: Int] = [:]
+        let streams = document.streams.map { stream -> ProbedStream in
+            let ordinal = ordinals[stream.codecType, default: 0]
+            ordinals[stream.codecType] = ordinal + 1
+            let tags = stream.tags ?? [:]
+            func tag(_ names: [String]) -> String? {
+                for name in names {
+                    if let value = tags.first(where: { $0.key.lowercased() == name })?.value,
+                       !value.trimmingCharacters(in: .whitespaces).isEmpty {
+                        return String(value.trimmingCharacters(in: .whitespaces).prefix(120))
+                    }
+                }
+                return nil
+            }
+            return ProbedStream(
+                index: stream.index,
+                typeOrdinal: ordinal,
+                type: stream.codecType,
+                codec: stream.codecName?.lowercased(),
+                profile: stream.profile,
+                language: tag(["language"]),
+                title: tag(["title", "handler_name"]),
+                width: stream.width,
+                height: stream.height,
+                channels: stream.channels,
+                isDefault: stream.disposition?["default"] == 1,
+                isForced: stream.disposition?["forced"] == 1
+            )
+        }
+        return ProbedMedia(
             durationSeconds: Self.double(document.format?.duration),
             container: document.format?.formatName,
             bitrate: Self.integer(document.format?.bitRate),
-            streams: document.streams.compactMap(Self.streamInfo)
+            streams: streams
         )
+    }
+
+    struct ProbedStream: Equatable {
+        /// 容器里的全局流序号。
+        let index: Int
+        /// 本类型内的序号，`-map 0:a:<typeOrdinal>` 用的就是它。
+        let typeOrdinal: Int
+        let type: String
+        let codec: String?
+        let profile: String?
+        let language: String?
+        let title: String?
+        let width: Int?
+        let height: Int?
+        let channels: Int?
+        let isDefault: Bool
+        let isForced: Bool
+    }
+
+    struct ProbedMedia: Equatable {
+        let durationSeconds: Double?
+        let container: String?
+        let bitrate: Int?
+        let streams: [ProbedStream]
+
+        var video: [ProbedStream] { streams.filter { $0.type == "video" } }
+        var audio: [ProbedStream] { streams.filter { $0.type == "audio" } }
+        var subtitles: [ProbedStream] { streams.filter { $0.type == "subtitle" } }
     }
 
     static func arguments(for fileURL: URL) -> [String] {
@@ -46,18 +118,18 @@ final class FFprobeMediaInspector {
             "-print_format", "json",
             "-show_format",
             "-show_streams",
-            "-i", fileURL.absoluteString
+            "-i", ServerMediaToolchain.inputArgument(for: fileURL)
         ]
     }
 
-    private static func streamInfo(_ stream: FFprobeStream) -> ServerMediaStreamInfo? {
-        guard ["video", "audio", "subtitle"].contains(stream.codecType) else { return nil }
+    private static func streamInfo(_ stream: ProbedStream) -> ServerMediaStreamInfo? {
+        guard ["video", "audio", "subtitle"].contains(stream.type) else { return nil }
         return ServerMediaStreamInfo(
             id: stream.index,
-            type: stream.codecType,
-            codec: stream.codecName,
+            type: stream.type,
+            codec: stream.codec,
             profile: stream.profile,
-            language: stream.tags?["language"],
+            language: stream.language,
             width: stream.width,
             height: stream.height,
             channels: stream.channels
@@ -74,18 +146,10 @@ final class FFprobeMediaInspector {
         return Int(parsed)
     }
 
+    /// 查找顺序与 ffmpeg 完全一致，因此它落在 `ServerMediaToolchain` 里由两者共用：
+    /// "能探测"和"能重封装"必须来自同一份事实。
     private static func defaultExecutableURL() -> URL? {
-        let fileManager = FileManager.default
-        let candidates = [
-            Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("ffprobe"),
-            CommandLine.arguments.first.map {
-                URL(fileURLWithPath: $0).deletingLastPathComponent().appendingPathComponent("ffprobe")
-            },
-            URL(fileURLWithPath: "/opt/homebrew/bin/ffprobe"),
-            URL(fileURLWithPath: "/usr/local/bin/ffprobe"),
-            URL(fileURLWithPath: "/usr/bin/ffprobe")
-        ].compactMap { $0 }
-        return candidates.first(where: { fileManager.isExecutableFile(atPath: $0.path) })
+        ServerMediaToolchain.ffprobeURL()
     }
 
     private static func run(executableURL: URL, arguments: [String]) throws -> FFprobeProcessOutput {
@@ -182,11 +246,12 @@ private struct FFprobeStream: Decodable {
     let height: Int?
     let channels: Int?
     let tags: [String: String]?
+    let disposition: [String: Int]?
 
     enum CodingKeys: String, CodingKey {
         case index
         case codecType = "codec_type"
         case codecName = "codec_name"
-        case profile, width, height, channels, tags
+        case profile, width, height, channels, tags, disposition
     }
 }

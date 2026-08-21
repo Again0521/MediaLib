@@ -7,6 +7,31 @@ final class ServerLaunchConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.host, "127.0.0.1")
         XCTAssertNil(configuration.publicOrigin)
         XCTAssertTrue(configuration.trustedProxyAddresses.isEmpty)
+        XCTAssertFalse(configuration.lanDirectPlayEnabled)
+    }
+
+    /// 局域网直连必须建立在 HTTPS 公开 Origin 与可信反代之上。孤立地打开开关
+    /// 只会制造"以为已生效"的错觉，因此直接拒绝启动而不是静默忽略。
+    func testLanDirectPlayRequiresTrustedTransportBoundary() throws {
+        XCTAssertThrowsError(try ServerLaunchConfiguration.load(environment: [
+            "MEDIALIB_SERVER_LAN_DIRECT_PLAY": "1"
+        ])) { error in
+            XCTAssertEqual(error as? ServerConfigurationError, .invalidLanDirectPlayConfiguration)
+        }
+        XCTAssertThrowsError(try ServerLaunchConfiguration.load(environment: [
+            "MEDIALIB_SERVER_PUBLIC_ORIGIN": "https://media.example.test",
+            "MEDIALIB_SERVER_TRUSTED_PROXIES": "127.0.0.1",
+            "MEDIALIB_SERVER_LAN_DIRECT_PLAY": "maybe"
+        ])) { error in
+            XCTAssertEqual(error as? ServerConfigurationError, .invalidLanDirectPlayConfiguration)
+        }
+
+        let configuration = try ServerLaunchConfiguration.load(environment: [
+            "MEDIALIB_SERVER_PUBLIC_ORIGIN": "https://media.example.test",
+            "MEDIALIB_SERVER_TRUSTED_PROXIES": "127.0.0.1",
+            "MEDIALIB_SERVER_LAN_DIRECT_PLAY": "1"
+        ])
+        XCTAssertTrue(configuration.lanDirectPlayEnabled)
     }
 
     func testAcceptsExplicitHTTPSOriginAndIPv4Proxy() throws {

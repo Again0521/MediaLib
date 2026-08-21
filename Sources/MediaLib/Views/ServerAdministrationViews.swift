@@ -696,7 +696,7 @@ struct ServerUserManagementSheet: View {
                         title: "媒体库访问",
                         systemImage: "rectangle.stack.badge.person.crop",
                         subtitle: managed.roleID == ServerIdentityRepository.administratorRoleID
-                            ? "管理员可访问全部非保险库媒体源。"
+                            ? "管理员可访问全部媒体源；保险库还需要在这台 Mac 上解锁。"
                             : "未列出的媒体库默认拒绝访问。"
                     ) {
                         grantRows(for: managed)
@@ -951,7 +951,7 @@ private struct ServerUserEditorSheet: View {
                         title: "媒体库授权",
                         systemImage: "rectangle.stack.badge.person.crop",
                         subtitle: roleID == ServerIdentityRepository.administratorRoleID
-                            ? "管理员可访问全部非保险库媒体源。"
+                            ? "管理员可访问全部媒体源；保险库还需要在这台 Mac 上解锁。"
                             : "查看 → 播放 → 下载为递进权限；关闭查看会一并关闭后两项。"
                     ) {
                         VStack(spacing: 0) {
@@ -960,7 +960,7 @@ private struct ServerUserEditorSheet: View {
                                 if library.id != libraries.last?.id { Divider().padding(.leading, 34) }
                             }
                             if libraries.isEmpty {
-                                Text("当前没有可授权的非保险库媒体源")
+                                Text("当前没有可授权的媒体源")
                                     .font(.callout).foregroundStyle(.secondary)
                                     .frame(maxWidth: .infinity, minHeight: 48)
                             }

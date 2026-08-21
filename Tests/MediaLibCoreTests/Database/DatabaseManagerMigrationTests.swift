@@ -33,6 +33,65 @@ final class DatabaseManagerMigrationTests: XCTestCase {
         XCTAssertEqual(try second.schemaVersion(), DatabaseManager.currentSchemaVersion)
     }
 
+    /// 歌词存在性能写进去、能读回来，而且能从"有"改回"没有"。
+    ///
+    /// 这一列是加在一条 43 列、按位置绑定的 upsert 上的：少一个占位符、绑错一个
+    /// 位置，症状不是编译失败，而是从这条语句往后每一列都读到上一列的值。所以
+    /// 这里连同前后几列一起断言，位置错位会立刻暴露。
+    ///
+    /// 「改回没有」单独验一次：外挂歌词被删掉之后必须能落回 0，如果那条
+    /// ON CONFLICT 写成了 COALESCE，这个用例就会挂。
+    func testLyricsPresenceRoundTripsAndCanBeClearedAgain() throws {
+        let db = try DatabaseManager(url: dbURL)
+        let repository = MediaRepository(database: db)
+        let track = MediaItem(
+            id: "track-1",
+            type: .music,
+            title: "有歌词的曲目",
+            artist: "艺术家",
+            album: "专辑",
+            sourcePath: "/tmp/music",
+            filePath: "/tmp/music/track.mp3",
+            genre: "流行",
+            hasLyrics: true
+        )
+        try repository.upsert(track)
+
+        let stored = try XCTUnwrap(try repository.fetch(id: "track-1"))
+        XCTAssertTrue(stored.hasLyrics)
+        // 相邻列没有整体挪位。
+        XCTAssertEqual(stored.genre, "流行")
+        XCTAssertEqual(stored.title, "有歌词的曲目")
+        XCTAssertEqual(stored.artist, "艺术家")
+        XCTAssertEqual(stored.filePath, "/tmp/music/track.mp3")
+
+        var cleared = stored
+        cleared.hasLyrics = false
+        try repository.upsert(cleared)
+        XCTAssertEqual(try repository.fetch(id: "track-1")?.hasLyrics, false, "外挂歌词被删掉后必须能落回 false")
+    }
+
+    /// 老库升级后，这一列存在、既有行落到 0，且不需要重新扫描就能打开。
+    func testUpgradedDatabaseGainsLyricsColumnDefaultingToFalse() throws {
+        do {
+            let db = try DatabaseManager(url: dbURL)
+            let repository = MediaRepository(database: db)
+            try repository.upsert(MediaItem(
+                id: "legacy-track", type: .music, title: "升级前就存在的曲目",
+                sourcePath: "/tmp/music", filePath: "/tmp/music/legacy.mp3"
+            ))
+            // 退回 28，模拟一个还没有这一列认知的旧库。
+            try db.execute("PRAGMA user_version = 28")
+        }
+
+        let upgraded = try DatabaseManager(url: dbURL)
+        XCTAssertEqual(try upgraded.schemaVersion(), DatabaseManager.currentSchemaVersion)
+        let repository = MediaRepository(database: upgraded)
+        let legacy = try XCTUnwrap(try repository.fetch(id: "legacy-track"))
+        XCTAssertFalse(legacy.hasLyrics, "迁移只建列填 0，真实值由扫描或后台回补写入")
+        XCTAssertEqual(legacy.title, "升级前就存在的曲目")
+    }
+
     func testFreshDatabasePassesIntegrityCheck() throws {
         let db = try DatabaseManager(url: dbURL)
         XCTAssertNoThrow(try db.validateCurrentDatabase())

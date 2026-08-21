@@ -515,7 +515,7 @@ struct ContentView: View {
             }
             .allowsHitTesting(!appState.floatingNotices.isEmpty)
         }
-        .animation(.easeOut(duration: 0.4), value: appState.sakuraEasterEggActive)
+        .animation(reduceMotion ? AppMotion.reducedContent : AppMotion.standard, value: appState.sakuraEasterEggActive)
         .background {
             VideoPlayerWindowPresenter(item: videoPlayerBinding)
                 .frame(width: 0, height: 0)
@@ -743,11 +743,11 @@ struct ContentView: View {
         }
         .onChange(of: appState.themeRevision) { _ in
             themeSwitchTask?.cancel()
-            withAnimation(.easeOut(duration: 0.06)) { themeSwitching = true }
+            withAnimation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.themeCoverIn) { themeSwitching = true }
             themeSwitchTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 160_000_000)
                 guard !Task.isCancelled else { return }
-                withAnimation(.easeIn(duration: 0.10)) { themeSwitching = false }
+                withAnimation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.themeCoverOut) { themeSwitching = false }
             }
         }
         .onChange(of: columnVisibility) { _ in
@@ -3833,7 +3833,7 @@ struct AppUpdatePromptSheet: View {
             HStack(spacing: 10) {
                 updateMetaPill(
                     title: appState.localized("当前版本"),
-                    value: AppVersion.current,
+                    value: AppVersion.displayString,
                     systemImage: "macwindow"
                 )
                 updateMetaPill(

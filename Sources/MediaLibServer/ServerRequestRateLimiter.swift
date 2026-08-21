@@ -9,6 +9,7 @@ enum ServerRateLimitScope: String, CaseIterable, Sendable {
     case refreshCredential
     case unauthenticated
     case apiRead
+    case artworkRead
     case mediaProbe
     case mediaStream
     case authenticatedMutation
@@ -46,6 +47,10 @@ final class ServerRequestRateLimiter: @unchecked Sendable {
         .refreshCredential: .init(capacity: 8, refillPerSecond: 0.2),
         .unauthenticated: .init(capacity: 40, refillPerSecond: 1),
         .apiRead: .init(capacity: 180, refillPerSecond: 3),
+        // 海报墙会在一次导航中并行读取数十张已授权图片。它们与结构化
+        // API 读取分桶，避免正常切页耗尽页面/API 的交互预算，同时仍保留
+        // 有界的按主体与按客户端保护。
+        .artworkRead: .init(capacity: 120, refillPerSecond: 2),
         .mediaProbe: .init(capacity: 12, refillPerSecond: 0.1),
         .mediaStream: .init(capacity: 240, refillPerSecond: 4),
         .authenticatedMutation: .init(capacity: 30, refillPerSecond: 0.5)

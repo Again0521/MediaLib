@@ -147,15 +147,20 @@ struct HTTPRequestSecurityPolicy {
         if declaredBodyLength > 0 {
             guard declaredBodyLength <= 4_096 else { return .payloadTooLarge }
             guard method == "POST",
-                  Self.isJSONBodyPath(path),
                   let contentType = headers["content-type"]?.first?.lowercased(),
-                  contentType == "application/json" || contentType == "application/json; charset=utf-8"
+                  (Self.isJSONBodyPath(path) &&
+                    (contentType == "application/json" || contentType == "application/json; charset=utf-8")) ||
+                    (path == "/login" && contentType == "application/x-www-form-urlencoded")
             else {
                 return .badRequest
             }
         }
 
-        if headers["sec-fetch-site"]?.first?.lowercased() == "cross-site" {
+        // Some desktop automation and embedded browser shells label a local
+        // navigation form as cross-site. The only exception is /login, whose
+        // route requires the unguessable rendered CSRF field before it will
+        // inspect credentials; all other endpoints keep the early rejection.
+        if headers["sec-fetch-site"]?.first?.lowercased() == "cross-site", path != "/login" {
             return .forbidden
         }
         if Self.mutatingMethods.contains(method) {
@@ -164,6 +169,13 @@ struct HTTPRequestSecurityPolicy {
                 // 令牌在路由层认证。例外仅限两条客户端状态同步端点，绝不能成为
                 // 账户、登录或管理类网页写操作的 CSRF 旁路。
                 guard headers["cookie"] == nil, headers["origin"] == nil else { return .forbidden }
+            } else if path == "/login" {
+                // The no-JavaScript login fallback includes the server-issued CSRF
+                // field in its body; the router verifies it before credential use.
+                // The router accepts only a server-rendered one-time CSRF field
+                // before it inspects credentials. This is intentionally the
+                // narrow form-navigation exception: embedded browsers can emit
+                // an opaque Origin value even for a local, user-initiated submit.
             } else {
                 guard let token = headers["x-medialib-csrf"]?.first,
                       Self.constantTimeEqual(token, csrfToken),

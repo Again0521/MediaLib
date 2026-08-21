@@ -78,7 +78,7 @@ final class DatabaseConcurrencyAuditTests: XCTestCase {
                 do {
                     for _ in 0..<readsPerReader {
                         _ = try db.query("SELECT count(*) as cnt FROM audit_test_media") { row in
-                            try row.int(0)
+                            row.int(0)
                         }
                     }
                 } catch {
@@ -99,7 +99,7 @@ final class DatabaseConcurrencyAuditTests: XCTestCase {
         XCTAssertTrue(readErrors.isEmpty, "并发读操作期间抛出了异常: \(readErrors)")
 
         // 最终验证总记录数
-        let totalRecords = try db.query("SELECT count(*) FROM audit_test_media") { try $0.int(0) }.first ?? 0
+        let totalRecords = try db.query("SELECT count(*) FROM audit_test_media") { $0.int(0) }.first ?? 0
         XCTAssertEqual(totalRecords, totalWriters * writesPerWriter, "写入的总数据行数出现半写入或数据丢失")
     }
 
@@ -117,7 +117,7 @@ final class DatabaseConcurrencyAuditTests: XCTestCase {
         // 测量主调用线程连续发起 50 次单条读取的时长
         let start = CFAbsoluteTimeGetCurrent()
         for i in 0..<50 {
-            _ = try? db.query("SELECT val FROM latency_test WHERE id = ?", bindings: [.text("id-\(i)")]) { try $0.string(0) }
+            _ = try? db.query("SELECT val FROM latency_test WHERE id = ?", bindings: [.text("id-\(i)")]) { $0.string(0) }
         }
         let elapsed = CFAbsoluteTimeGetCurrent() - start
 

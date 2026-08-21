@@ -57,8 +57,8 @@ final class DatabaseTransactionAtomicityTests: XCTestCase {
         }
 
         // 验证回滚原子性：查询主表与明细表
-        let masterCount = try db.query("SELECT count(*) FROM tx_master") { try $0.int(0) }.first ?? 0
-        let detailCount = try db.query("SELECT count(*) FROM tx_detail") { try $0.int(0) }.first ?? 0
+        let masterCount = try db.query("SELECT count(*) FROM tx_master") { $0.int(0) }.first ?? 0
+        let detailCount = try db.query("SELECT count(*) FROM tx_detail") { $0.int(0) }.first ?? 0
 
         XCTAssertEqual(masterCount, 1, "事务中途失败后，步骤 1 写入的主表记录必须被完全回滚，严禁留下脏记录！")
         XCTAssertEqual(detailCount, 0, "事务中途失败后，步骤 2 写入的明细表记录同样必须彻底清除！")
@@ -76,7 +76,7 @@ final class DatabaseTransactionAtomicityTests: XCTestCase {
             }
         }
 
-        let finalVal = try db.query("SELECT val FROM tx_counter") { try $0.int(0) }.first ?? 0
+        let finalVal = try db.query("SELECT val FROM tx_counter") { $0.int(0) }.first ?? 0
         XCTAssertEqual(finalVal, 50, "连续 50 次事务执行必须精准更新计数，无丢包或重入死锁")
     }
 }

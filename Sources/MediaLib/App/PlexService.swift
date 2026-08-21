@@ -241,13 +241,21 @@ struct PlexService {
             legacyGUID: node.attributes["guid"]
         )
         let kind = node.plexType == "movie" ? "movie" : "tv"
+        // Plex 的制作信息在 `Country` 子节点和 `studio` / `contentRating` 属性上。
+        // 与 Emby 一侧同样的理由：没有 TMDB key 时，这是详情页「制作」一栏唯一
+        // 的资料来源。
+        let countries = node.children(named: "Country").compactMap { $0.attributes["tag"]?.nilIfEmpty }
         return EmbyDetailExtras(
             cast: Array(cast),
             crew: crew,
             images: images,
             tmdbID: providerIDs.tmdbID,
             tmdbKind: providerIDs.tmdbID == nil ? nil : kind,
-            imdbID: providerIDs.imdbID
+            imdbID: providerIDs.imdbID,
+            status: nil,
+            contentRating: node.attributes["contentRating"]?.nilIfEmpty,
+            countries: Array(countries.prefix(8)),
+            productionCompanies: [node.attributes["studio"]?.nilIfEmpty].compactMap { $0 }
         )
     }
 

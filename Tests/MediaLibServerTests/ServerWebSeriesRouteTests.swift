@@ -18,33 +18,6 @@ final class ServerWebSeriesRouteTests: XCTestCase {
         userPreference: ServerMediaUserPreference(isFavorite: true, isWatchlist: false, rating: 4.5)
     )
 
-    func testSeriesPageRequiresAuthenticationEscapesMetadataAndUsesExternalAssets() {
-        let unauthenticated = LocalHTTPRouter(
-            serverID: "server", serverName: "Server", seriesDetailProvider: { _, _ in self.detail }
-        )
-        XCTAssertEqual(unauthenticated.response(for: "GET /series/series%20id%2B1 HTTP/1.1\r\nHost: localhost\r\n\r\n").statusCode, 401)
-
-        let response = router().response(for: request("/series/series%20id%2B1"))
-        let html = String(data: response.body, encoding: .utf8) ?? ""
-        XCTAssertEqual(response.statusCode, 200)
-        XCTAssertTrue(html.contains("系列 &lt;script&gt;bad()&lt;/script&gt;"))
-        XCTAssertTrue(html.contains("简介 &lt;/style&gt;&lt;script&gt;bad()&lt;/script&gt;"))
-        XCTAssertFalse(html.contains("<script>bad()</script>"))
-        XCTAssertTrue(html.contains("href=\"/assets/series.css\""))
-        XCTAssertTrue(html.contains("src=\"/assets/series.js\""))
-        XCTAssertTrue(html.contains("href=\"/assets/app-shell.css?v=68\""))
-        XCTAssertTrue(html.contains("data-season-key=\"1\" open"))
-        XCTAssertTrue(html.contains("data-season-key=\"unspecified\""))
-        XCTAssertTrue(html.contains("src=\"/api/v1/images/series%20id%2B1/poster\""))
-        XCTAssertTrue(html.contains("id=\"toggle-favorite\""))
-        XCTAssertTrue(html.contains("id=\"user-rating\""))
-        XCTAssertFalse(html.localizedCaseInsensitiveContains("filePath"))
-        XCTAssertFalse(html.contains("/Volumes/"))
-        XCTAssertEqual(router().response(for: request("/series/unknown")).statusCode, 404)
-        XCTAssertEqual(router().response(for: request("/series/series%2Fescape")).statusCode, 404)
-        XCTAssertEqual(router().response(for: request("/series/series%20id%2B1/extra")).statusCode, 404)
-    }
-
     func testSeriesEpisodeAPIUsesStrictBoundedQueryAndCurrentPrincipal() throws {
         var received: (id: String, season: ServerSeriesSeasonSelector, offset: Int, limit: Int, userID: String)?
         let expected = ServerSeriesEpisodesPage(
@@ -89,32 +62,9 @@ final class ServerWebSeriesRouteTests: XCTestCase {
         }
     }
 
-    func testSeriesAssetsArePrivateCacheableAndScriptUsesSafeDOM() {
-        let router = router()
-        let cssResponse = router.response(for: "GET /assets/series.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        let jsResponse = router.response(for: "GET /assets/series.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        let cssHeaders = String(data: cssResponse.serializedHeaders(), encoding: .utf8) ?? ""
-        let script = String(data: jsResponse.body, encoding: .utf8) ?? ""
-        XCTAssertEqual(cssResponse.statusCode, 200)
-        XCTAssertTrue(cssHeaders.contains("Cache-Control: private, max-age=300"))
-        XCTAssertTrue(ServerWebSeriesPage.style.contains("@media (max-width:480px)"))
-        XCTAssertTrue(ServerWebSeriesPage.style.contains("prefers-reduced-motion"))
-        XCTAssertEqual(jsResponse.statusCode, 200)
-        XCTAssertTrue(script.contains("/api/v1/series/"))
-        XCTAssertTrue(script.contains("/api/v1/user-media/preferences/"))
-        XCTAssertTrue(script.contains("credentials: 'same-origin'"))
-        XCTAssertTrue(script.contains("X-MediaLIB-CSRF"))
-        XCTAssertTrue(script.contains("textContent"))
-        XCTAssertTrue(script.contains("createDocumentFragment"))
-        XCTAssertFalse(script.contains("innerHTML"))
-        XCTAssertFalse(script.contains("insertAdjacentHTML"))
-        XCTAssertFalse(script.contains("document.cookie"))
-        XCTAssertFalse(script.contains("localStorage"))
-        XCTAssertFalse(script.contains("eval("))
-        XCTAssertFalse(script.localizedCaseInsensitiveContains("filePath"))
-    }
-
-    func testSeriesCardRoutesToHierarchyInsteadOfNonPlayableItemPage() {
+    /// 海报是"我要看"，不是"我要先看一个目录页"。剧集页已删除：所有指向系列的
+    /// 链接都走 `/series/{id}/play`，由服务端解析到真正的一集。
+    func testSeriesCardRoutesStraightToPlaybackAndTheSeriesPageIsGone() {
         let snapshot = ServerLibrarySnapshot(
             summary: ServerLibrarySummary(totalItemCount: 1, countsByType: ["tvShow": 1]),
             items: ServerLibraryItemsResponse(totalItemCount: 1, items: [
@@ -130,9 +80,24 @@ final class ServerWebSeriesRouteTests: XCTestCase {
         )
         let home = String(data: router.response(for: request("/")).body, encoding: .utf8) ?? ""
         let libraryScript = String(data: router.response(for: "GET /assets/library.js HTTP/1.1\r\nHost: localhost\r\n\r\n").body, encoding: .utf8) ?? ""
-        XCTAssertTrue(home.contains("href=\"/series/series%20id%2B1\""))
+        XCTAssertTrue(home.contains("/series/series%20id%2B1/play"))
+        XCTAssertFalse(home.contains("\"/series/series%20id%2B1\""), "首页不得再链到已删除的剧集页")
         XCTAssertTrue(libraryScript.contains("item.isSeries === true"))
-        XCTAssertTrue(libraryScript.contains("'/series/'"))
+        XCTAssertTrue(libraryScript.contains("`/series/${encodeURIComponent(itemID)}/play`"))
+
+        let playRouter = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            seriesDetailProvider: { id, _ in id == self.detail.id ? self.detail : nil },
+            seriesEpisodesProvider: { _, _, _, _, _ in
+                ServerSeriesEpisodesPage(totalItemCount: 1, offset: 0, limit: 100, items: [
+                    ServerSeriesEpisode(id: "episode first", title: "第一集", seasonNumber: 1, episodeNumber: 1, runtimeSeconds: 1_200, artworkAvailable: true)
+                ])
+            },
+            authenticationProvider: { _ in .testAdministrator() }
+        )
+        let redirect = playRouter.response(for: request("/series/series%20id%2B1/play"))
+        XCTAssertEqual(redirect.statusCode, 303)
+        XCTAssertTrue(String(data: redirect.serializedHeaders(), encoding: .utf8)?.contains("Location: /item/episode%20first#play") == true)
     }
 
     private func router(

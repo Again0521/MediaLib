@@ -1,11 +1,42 @@
 import Foundation
 
 /// 服务端资料库的固定排序集合。调用方不能把 SQL 片段带入这个边界。
+///
+/// 与 macOS 客户端 `LibrarySortMode` 同词汇。方向由 `ServerLibraryDatabaseSortOrder`
+/// 单独表达，"正序"是该键的自然朝向（最近更新 = 由新到旧，标题 = A→Z），
+/// 自然朝向只在 `serverOrderBy` 里定义一次。
 public enum ServerLibraryDatabaseSort: Sendable {
-    case updatedDescending
-    case titleAscending
-    case yearDescending
-    case lastPlayedDescending
+    case recentlyUpdated
+    case dateAdded
+    case title
+    case year
+    case runtime
+    case progress
+    case score
+    case rating
+    case lastPlayed
+
+    /// 需要与当前用户绑定的 `server_user_media_state` 连接。
+    public var requiresUserState: Bool { self == .progress || self == .lastPlayed }
+
+    /// 需要与当前用户绑定的 `server_user_media_preferences` 连接。
+    /// `media_items.user_rating` 是桌面端全局评级，不是这个用户的。
+    public var requiresUserPreference: Bool { self == .rating }
+}
+
+/// 排序方向。
+public enum ServerLibraryDatabaseSortOrder: Sendable {
+    case primary
+    case reverse
+}
+
+/// 一个作用域内实际存在的筛选面。排序键按数据存在与否裁剪，
+/// 题材以数据库里原样的 `", "` 组合串返回，拆分留给上层。
+public struct ServerLibraryDatabaseFacets: Sendable {
+    public let genreValues: [String]
+    public let hasRuntime: Bool
+    public let hasProviderRating: Bool
+    public let hasUserRating: Bool
 }
 
 /// 服务器已认证用户自己的播放状态筛选。此枚举不接受数据库列或任意 SQL，
@@ -116,6 +147,28 @@ public struct ServerCollectionDatabaseDetail: Sendable {
     public let items: [MediaItem]
 }
 
+/// 歌单在数据库层的卡片。手动与智能共用，靠 `isSmart` 区分。
+public struct ServerPlaylistDatabaseCard: Sendable {
+    public let id: String
+    public let name: String
+    public let trackCount: Int
+    public let isSmart: Bool
+    public let ruleSummary: String?
+}
+
+public struct ServerPlaylistsDatabasePage: Sendable {
+    public let totalItemCount: Int
+    public let items: [ServerPlaylistDatabaseCard]
+}
+
+public struct ServerPlaylistDatabaseDetail: Sendable {
+    public let id: String
+    public let name: String
+    public let isSmart: Bool
+    public let totalItemCount: Int
+    public let items: [MediaItem]
+}
+
 public final class MediaRepository {
     private let database: DatabaseManager
 
@@ -131,8 +184,8 @@ public final class MediaRepository {
               rating, user_rating, runtime, source_path, parent_id, season_number, episode_number,
               file_path, file_size, video_codec, audio_codec, resolution, video_bitrate, duration,
               loudness_track_gain_db, loudness_album_gain_db, loudness_track_peak, loudness_album_peak,
-              play_count, play_position, play_progress, watched, favorite, watchlist, external_id, metadata_provider, collection_title, created_at, updated_at, last_played_at, genre
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              play_count, play_position, play_progress, watched, favorite, watchlist, external_id, metadata_provider, collection_title, created_at, updated_at, last_played_at, genre, has_lyrics
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               type = excluded.type,
               title = CASE
@@ -175,6 +228,9 @@ public final class MediaRepository {
               metadata_provider = COALESCE(excluded.metadata_provider, media_items.metadata_provider),
               collection_title = COALESCE(excluded.collection_title, media_items.collection_title),
               genre = COALESCE(excluded.genre, media_items.genre),
+              -- 歌词存在性是每次扫描重新判定的事实，不是"一旦有过就永远有"：
+              -- 外挂歌词被删掉之后，这里必须能从 1 落回 0，所以不套 COALESCE。
+              has_lyrics = excluded.has_lyrics,
               updated_at = excluded.updated_at
             """,
             bindings: bindings(for: item)
@@ -254,6 +310,41 @@ public final class MediaRepository {
         )
     }
 
+    /// 还没有判定过歌词的曲目——用于升级后的后台回补。
+    ///
+    /// 迁移只把列建出来并填 0，不在启动路径上遍历整个曲库做文件探测：那会把一次
+    /// 升级变成一次几分钟的卡死，NAS 上更久。真实值由这里挑出来、在后台补。
+    ///
+    /// 只挑本地文件：远端（Emby/Jellyfin/Plex）曲目的 `filePath` 是一个流地址，
+    /// 对它做 `fileExists` 永远是 false，白跑一趟。
+    public func fetchMusicNeedingLyricsProbe(limit: Int) throws -> [MediaItem] {
+        try database.query(
+            selectSQL + """
+             WHERE type = ? AND has_lyrics = 0 AND file_path IS NOT NULL AND file_path LIKE '/%'
+             ORDER BY updated_at DESC
+             LIMIT ?
+            """,
+            bindings: [.text(MediaType.music.rawValue), .int(Int64(max(limit, 0)))],
+            map: map(row:)
+        )
+    }
+
+    /// 只写歌词存在性，不碰这一行的其它任何字段。
+    ///
+    /// 回补跑在后台，期间用户可能正在编辑标签或重新扫描；走完整 upsert 会把内存里
+    /// 那份可能已经过时的快照整行写回去，覆盖掉别人刚写的东西。
+    public func updateLyricsPresence(_ presence: [String: Bool]) throws {
+        guard !presence.isEmpty else { return }
+        try database.transaction {
+            for (id, hasLyrics) in presence {
+                try database.execute(
+                    "UPDATE media_items SET has_lyrics = ? WHERE id = ?",
+                    bindings: [.bool(hasLyrics), .text(id)]
+                )
+            }
+        }
+    }
+
     public func fetch(id: String) throws -> MediaItem? {
         try database.query(
             selectSQL + " WHERE id = ? LIMIT 1",
@@ -272,9 +363,17 @@ public final class MediaRepository {
         offset: Int,
         limit: Int,
         sort: ServerLibraryDatabaseSort,
+        sortOrder: ServerLibraryDatabaseSortOrder = .primary,
+        genre: String? = nil,
         userID: String,
         playbackFilter: ServerLibraryUserStateFilter?,
-        preferenceFilter: ServerLibraryUserPreferenceFilter? = nil
+        preferenceFilter: ServerLibraryUserPreferenceFilter? = nil,
+        excludedTypes: Set<MediaType> = [],
+        excludesOnlineSourceItems: Bool = false,
+        /// 保险库页面**唯一**的例外。保险库的顶层条目自己就是 `privateCollection`
+        /// 类型的容器，其余每一处查询都必须继续把它们挡在外面——那条谓词是保险库
+        /// 对首页、分类、搜索的兜底屏障，与逐来源授权互为两道锁。
+        includesPrivateCollectionType: Bool = false
     ) throws -> ServerLibraryDatabasePage {
         guard !allowedSourcePaths.isEmpty else { return ServerLibraryDatabasePage(totalItemCount: 0, items: []) }
         let safeOffset = max(offset, 0)
@@ -293,17 +392,26 @@ public final class MediaRepository {
 
             var from = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
             var bindings: [SQLiteValue] = []
-            if let playbackFilter {
-                let join = playbackFilter == .unwatched ? " LEFT JOIN " : " INNER JOIN "
+            // 排序也可能需要这两张按用户分表的连接。两处的绑定用户都写在 ON 上：
+            // 移到 WHERE 会把 LEFT JOIN 静默退化成 INNER JOIN，于是"按进度排序"
+            // 会让所有没有播放记录的条目从页面上消失。两张表都是
+            // PRIMARY KEY(user_id, media_id)，所以加连接不会放大行数，COUNT(*) 仍然正确。
+            if playbackFilter != nil || sort.requiresUserState {
+                let join = (playbackFilter == nil || playbackFilter == .unwatched) ? " LEFT JOIN " : " INNER JOIN "
                 from += join + "server_user_media_state AS user_state ON user_state.media_id = item.id AND user_state.user_id = ?"
                 bindings.append(.text(userID))
             }
-            if preferenceFilter != nil {
-                from += " INNER JOIN server_user_media_preferences AS user_preference ON user_preference.media_id = item.id AND user_preference.user_id = ?"
+            if preferenceFilter != nil || sort.requiresUserPreference {
+                let join = preferenceFilter == nil ? " LEFT JOIN " : " INNER JOIN "
+                from += join + "server_user_media_preferences AS user_preference ON user_preference.media_id = item.id AND user_preference.user_id = ?"
                 bindings.append(.text(userID))
             }
-            var predicates = ["item.type != ?"]
-            bindings.append(.text(MediaType.privateCollection.rawValue))
+            var predicates: [String] = []
+            if !includesPrivateCollectionType {
+                predicates.append("item.type != ?")
+                bindings.append(.text(MediaType.privateCollection.rawValue))
+            }
+            if excludesOnlineSourceItems { predicates.append(Self.onlineSourceItemPredicate) }
             if let type {
                 predicates.append("item.type = ?")
                 bindings.append(.text(type.rawValue))
@@ -312,9 +420,20 @@ public final class MediaRepository {
                 predicates.append("item.type != ?")
                 bindings.append(.text(MediaType.episode.rawValue))
             }
+            for excludedType in excludedTypes.sorted(by: { $0.rawValue < $1.rawValue }) where excludedType != .privateCollection {
+                predicates.append("item.type != ?")
+                bindings.append(.text(excludedType.rawValue))
+            }
             if let ftsQuery {
                 predicates.append("item.rowid IN (SELECT rowid FROM media_items_fts WHERE media_items_fts MATCH ?)")
                 bindings.append(.text(ftsQuery))
+            }
+            if let genre, !genre.isEmpty {
+                // genre 是一列 ", " 分隔的文本。两端补上分隔符后做整词匹配，
+                // 否则"动作"会命中"动作捕捉"。转义交给 escapedLikeLiteral，
+                // 于是题材名里的 % _ \ 不会变成通配符。
+                predicates.append("item.genre IS NOT NULL AND (', ' || item.genre || ', ') LIKE ('%, ' || ? || ', %') ESCAPE '\\'")
+                bindings.append(.text(Self.escapedLikeLiteral(genre)))
             }
             if let playbackFilter {
                 switch playbackFilter {
@@ -346,10 +465,181 @@ public final class MediaRepository {
             pageBindings.append(.int(Int64(safeLimit)))
             pageBindings.append(.int(Int64(safeOffset)))
             let pageSQL = serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: from)
-                + whereClause + " ORDER BY " + Self.serverOrderBy(sort) + " LIMIT ? OFFSET ?"
+                + whereClause + " ORDER BY " + Self.serverOrderBy(sort, sortOrder) + " LIMIT ? OFFSET ?"
             let items = try database.query(pageSQL, bindings: pageBindings, map: map(row:))
             try database.execute("DELETE FROM server_library_allowed_source_paths")
             return ServerLibraryDatabasePage(totalItemCount: total, items: items)
+        }
+    }
+
+    /// 一个作用域内实际可用的筛选面。
+    ///
+    /// 网页需要知道该给出哪些排序键和哪些题材，而不是渲染一串永远匹配不到内容的
+    /// 选项。四条语句都是有界的：题材走 `DISTINCT`（返回的是不同的**组合串**，
+    /// 几十到几百行，不是每条目一行）并硬性 `LIMIT`；三个探针各自 `LIMIT 1`。
+    ///
+    /// "是否有评级"按传入的 `userID` 查偏好表——评级是每个用户自己的，
+    /// 不能因为别人评过分就给这个用户提供该排序。
+    public func fetchServerLibraryFacets(
+        allowedSourcePaths: Set<String>,
+        type: MediaType?,
+        topLevelOnly: Bool,
+        userID: String,
+        excludedTypes: Set<MediaType> = [],
+        excludesOnlineSourceItems: Bool = false,
+        maximumDistinctGenreRows: Int = 500
+    ) throws -> ServerLibraryDatabaseFacets {
+        guard !allowedSourcePaths.isEmpty else {
+            return ServerLibraryDatabaseFacets(genreValues: [], hasRuntime: false, hasProviderRating: false, hasUserRating: false)
+        }
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+
+            let from = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            var predicates = ["item.type != ?"]
+            var bindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
+            // 题材下拉必须和它要筛的那个网格用同一套排除，否则本地分类页会列出
+            // 只存在于远程条目的题材——选中即空网格。
+            if excludesOnlineSourceItems { predicates.append(Self.onlineSourceItemPredicate) }
+            if let type {
+                predicates.append("item.type = ?")
+                bindings.append(.text(type.rawValue))
+            } else if topLevelOnly {
+                predicates.append("item.parent_id IS NULL")
+                predicates.append("item.type != ?")
+                bindings.append(.text(MediaType.episode.rawValue))
+            }
+            for excludedType in excludedTypes.sorted(by: { $0.rawValue < $1.rawValue }) where excludedType != .privateCollection {
+                predicates.append("item.type != ?")
+                bindings.append(.text(excludedType.rawValue))
+            }
+            let whereClause = " WHERE " + predicates.joined(separator: " AND ")
+
+            let genreValues = try database.query(
+                "SELECT DISTINCT item.genre " + from + whereClause
+                    + " AND item.genre IS NOT NULL AND item.genre != '' ORDER BY item.genre LIMIT ?",
+                bindings: bindings + [.int(Int64(max(maximumDistinctGenreRows, 1)))]
+            ) { $0.string(0) }.compactMap { $0 }
+
+            func exists(_ extraPredicate: String, extraJoin: String = "", extraBindings: [SQLiteValue] = []) throws -> Bool {
+                let sql = "SELECT 1 " + from + extraJoin + whereClause + " AND " + extraPredicate + " LIMIT 1"
+                return try database.query(sql, bindings: extraBindings + bindings) { _ in true }.first ?? false
+            }
+
+            let hasRuntime = try exists("item.runtime IS NOT NULL AND item.runtime > 0")
+            let hasProviderRating = try exists("item.rating IS NOT NULL AND item.rating > 0")
+            let hasUserRating = try exists(
+                "user_preference.user_rating IS NOT NULL AND user_preference.user_rating > 0",
+                extraJoin: " INNER JOIN server_user_media_preferences AS user_preference ON user_preference.media_id = item.id AND user_preference.user_id = ?",
+                extraBindings: [.text(userID)]
+            )
+
+            return ServerLibraryDatabaseFacets(
+                genreValues: genreValues,
+                hasRuntime: hasRuntime,
+                hasProviderRating: hasProviderRating,
+                hasUserRating: hasUserRating
+            )
+        }
+    }
+
+    /// 供详情、播放探测和受保护资源端点按 ID 读取单条已授权媒体。
+    ///
+    /// 这些请求原先先 `fetchAll()` 再在 Swift 内存中过滤 ID；在大库中一次详情
+    /// 打开会重复扫描整张媒体表，网页侧看起来就像侧栏或播放器“卡住”。授权来源
+    /// 仍在 SQLite 临时表中完成，路径和未授权条目不会离开 Core 层。
+    public func fetchServerMediaItem(
+        id: String,
+        allowedSourcePaths: Set<String>,
+        /// 保险库的顶层条目自己就是 `privateCollection` 类型的容器。调用方只有在
+        /// 确认这个账号此刻真的能读保险库（已解锁 + 已授权）时才打开它；其余每
+        /// 一次读取都继续把这类行挡在外面，与逐来源授权互为两道锁。
+        includesPrivateCollectionType: Bool = false
+    ) throws -> MediaItem? {
+        guard !id.isEmpty, !allowedSourcePaths.isEmpty else { return nil }
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let typePredicate = includesPrivateCollectionType ? "" : " AND item.type != ?"
+            var bindings: [SQLiteValue] = [.text(id)]
+            if !includesPrivateCollectionType {
+                bindings.append(.text(MediaType.privateCollection.rawValue))
+            }
+            return try database.query(
+                serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: authorizedJoin)
+                    + " WHERE item.id = ?\(typePredicate) LIMIT 1",
+                bindings: bindings,
+                map: map(row:)
+            ).first
+        }
+    }
+
+    /// 按一组受保护媒体 ID 读取服务端队列所需的最小集合。
+    /// 调用方传入的 ID 只作为绑定参数；最多读取 100 项，避免队列端点被用作
+    /// 大规模任意查询入口。
+    public func fetchServerMediaItems(
+        ids: [String],
+        allowedSourcePaths: Set<String>
+    ) throws -> [MediaItem] {
+        let uniqueIDs = Array(Set(ids.filter { !$0.isEmpty })).prefix(100)
+        guard !uniqueIDs.isEmpty, !allowedSourcePaths.isEmpty else { return [] }
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let placeholders = Array(repeating: "?", count: uniqueIDs.count).joined(separator: ",")
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let bindings = uniqueIDs.map(SQLiteValue.text) + [.text(MediaType.privateCollection.rawValue)]
+            return try database.query(
+                serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: authorizedJoin)
+                    + " WHERE item.id IN (" + placeholders + ") AND item.type != ?",
+                bindings: bindings,
+                map: map(row:)
+            )
+        }
+    }
+
+    /// 音乐专题页的受权读取。它只扫描当前账号可见的音乐行，而不是先把
+    /// 整个资料库（含照片、剧集与视频）搬到 Swift 再过滤。音乐页仍可拿到
+    /// 完整的艺术家/专辑聚合输入，但不会因此阻塞详情或媒体字节流请求。
+    public func fetchServerMusicItems(
+        allowedSourcePaths: Set<String>,
+        excludesOnlineSourceItems: Bool = false
+    ) throws -> [MediaItem] {
+        guard !allowedSourcePaths.isEmpty else { return [] }
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            return try database.query(
+                serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: authorizedJoin)
+                    + " WHERE item.type = ?"
+                    + (excludesOnlineSourceItems ? " AND \(Self.onlineSourceItemPredicate)" : "")
+                    + " ORDER BY item.artist COLLATE NOCASE ASC, item.album COLLATE NOCASE ASC, item.track_number ASC, item.title COLLATE NOCASE ASC, item.id ASC",
+                bindings: [.text(MediaType.music.rawValue)],
+                map: map(row:)
+            )
+        }
+    }
+
+    /// 播放页只需要当前系列的相邻集。将这个范围限定在 SQL 里，避免在
+    /// 大资料库中为了“上一集/下一集”重新读取每一部影片和每一首歌。
+    public func fetchServerSeriesEpisodes(
+        allowedSourcePaths: Set<String>,
+        seriesID: String
+    ) throws -> [MediaItem] {
+        guard !allowedSourcePaths.isEmpty, !seriesID.isEmpty else { return [] }
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            return try database.query(
+                serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: authorizedJoin)
+                    + " WHERE item.parent_id = ? AND item.type = ? ORDER BY item.season_number IS NULL ASC, item.season_number ASC, item.episode_number IS NULL ASC, item.episode_number ASC, item.title COLLATE NOCASE ASC, item.id ASC",
+                bindings: [.text(seriesID), .text(MediaType.episode.rawValue)],
+                map: map(row:)
+            )
         }
     }
 
@@ -357,7 +647,8 @@ public final class MediaRepository {
     /// 使用完全相同的资料库边界；不同之处仅是 SQL 聚合分类并限制最近卡片数量。
     public func fetchServerLibraryHome(
         allowedSourcePaths: Set<String>,
-        cardLimit: Int = 60
+        cardLimit: Int = 60,
+        excludesOnlineSourceItems: Bool = false
     ) throws -> ServerLibraryDatabaseHome {
         guard !allowedSourcePaths.isEmpty else {
             return ServerLibraryDatabaseHome(totalItemCount: 0, countsByType: [:], items: [])
@@ -375,6 +666,7 @@ public final class MediaRepository {
 
             let from = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
             let visiblePredicate = " WHERE item.type != ?"
+                + (excludesOnlineSourceItems ? " AND \(Self.onlineSourceItemPredicate)" : "")
             let visibleBindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
             let countRows = try database.query(
                 "SELECT item.type, COUNT(*) " + from + visiblePredicate + " GROUP BY item.type",
@@ -627,8 +919,8 @@ public final class MediaRepository {
             ) { row in
                 ServerPersonDatabaseCredit(
                     media: self.map(row: row),
-                    category: row.string(42) ?? "cast",
-                    role: row.string(43)
+                    category: row.string(Self.mediaColumnCount) ?? "cast",
+                    role: row.string(Self.mediaColumnCount + 1)
                 )
             }
             return ServerPeopleDatabaseCreditsPage(totalItemCount: total, items: items)
@@ -722,6 +1014,148 @@ public final class MediaRepository {
                 map: map(row:)
             )
             return ServerCollectionDatabaseDetail(id: collection.0, name: collection.1, totalItemCount: total, items: items)
+        }
+    }
+
+    /// 手动歌单列表，只含请求者有权看到的曲目。
+    ///
+    /// 与 `fetchServerManualCollectionsPage` 同一套写法，包括那条最容易抄漏的：
+    /// 曲目数用 `COUNT(DISTINCT item.id)` 从**可见子集**重新数，而不是取歌单自己
+    /// 记的条数。否则一个"32 首"就能告诉别人这里面还有 30 首他看不到的东西。
+    /// 一首都看不到的歌单整个不出现。
+    public func fetchServerMusicPlaylistsPage(
+        allowedSourcePaths: Set<String>,
+        offset: Int,
+        limit: Int
+    ) throws -> ServerPlaylistsDatabasePage {
+        guard !allowedSourcePaths.isEmpty else {
+            return ServerPlaylistsDatabasePage(totalItemCount: 0, items: [])
+        }
+        let safeOffset = min(max(offset, 0), 1_000_000)
+        let safeLimit = min(max(limit, 1), 100)
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let visibleJoin = """
+            FROM music_playlists AS playlist
+            INNER JOIN music_playlist_items AS entry ON entry.playlist_id = playlist.id
+            INNER JOIN media_items AS item ON item.id = entry.media_id
+            INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            """
+            let predicate = " WHERE item.type = ?"
+            let bindings: [SQLiteValue] = [.text(MediaType.music.rawValue)]
+            let total = try database.query(
+                "SELECT COUNT(DISTINCT playlist.id) " + visibleJoin + predicate,
+                bindings: bindings
+            ) { $0.int(0) ?? 0 }.first ?? 0
+            let items = try database.query(
+                """
+                SELECT playlist.id, playlist.name, COUNT(DISTINCT item.id)
+                \(visibleJoin)
+                \(predicate)
+                GROUP BY playlist.id, playlist.name, playlist.updated_at
+                ORDER BY playlist.updated_at DESC, playlist.name COLLATE NOCASE ASC, playlist.id ASC
+                LIMIT ? OFFSET ?
+                """,
+                bindings: bindings + [.int(Int64(safeLimit)), .int(Int64(safeOffset))]
+            ) { row in
+                ServerPlaylistDatabaseCard(
+                    id: row.string(0) ?? "", name: row.string(1) ?? "",
+                    trackCount: row.int(2) ?? 0, isSmart: false, ruleSummary: nil
+                )
+            }.filter { !$0.id.isEmpty && !$0.name.isEmpty }
+            return ServerPlaylistsDatabasePage(totalItemCount: total, items: items)
+        }
+    }
+
+    /// 单个手动歌单的曲目，按歌单内顺序。
+    public func fetchServerMusicPlaylistDetail(
+        allowedSourcePaths: Set<String>,
+        playlistID: String,
+        offset: Int,
+        limit: Int
+    ) throws -> ServerPlaylistDatabaseDetail? {
+        guard !allowedSourcePaths.isEmpty, !playlistID.isEmpty else { return nil }
+        let safeOffset = min(max(offset, 0), 1_000_000)
+        let safeLimit = min(max(limit, 1), 100)
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let from = """
+            FROM music_playlist_items AS entry
+            INNER JOIN media_items AS item ON item.id = entry.media_id
+            INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            """
+            let predicate = " WHERE entry.playlist_id = ? AND item.type = ?"
+            let bindings: [SQLiteValue] = [.text(playlistID), .text(MediaType.music.rawValue)]
+            // 一首可见曲目都没有的歌单，对这个用户来说不存在——返回 nil 让路由 404，
+            // 而不是给一个空列表，那等于承认"确实有这么一个歌单"。
+            let found = try database.query(
+                """
+                SELECT playlist.id, playlist.name
+                FROM music_playlists AS playlist
+                WHERE playlist.id = ?
+                  AND EXISTS (SELECT 1 \(from) \(predicate))
+                LIMIT 1
+                """,
+                bindings: [.text(playlistID)] + bindings
+            ) { ($0.string(0) ?? "", $0.string(1) ?? "") }.first
+            guard let playlist = found, !playlist.0.isEmpty, !playlist.1.isEmpty else { return nil }
+            let total = try database.query("SELECT COUNT(*) " + from + predicate, bindings: bindings) {
+                $0.int(0) ?? 0
+            }.first ?? 0
+            let items = try database.query(
+                serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: from)
+                    + predicate
+                    + " ORDER BY entry.position ASC, item.id ASC LIMIT ? OFFSET ?",
+                bindings: bindings + [.int(Int64(safeLimit)), .int(Int64(safeOffset))],
+                map: map(row:)
+            )
+            return ServerPlaylistDatabaseDetail(
+                id: playlist.0, name: playlist.1, isSmart: false, totalItemCount: total, items: items
+            )
+        }
+    }
+
+    /// 请求者有权看到的全部音乐/视频条目，交给上层用规则求值。
+    ///
+    /// 智能集合与智能歌单是**规则**不是行，数据库里没有一张"成员表"可以 join。
+    /// 规则求值必须落在 Swift 侧，用客户端那份 `VideoSmartCollection.matches` /
+    /// `MusicSmartPlaylist` 逻辑——翻成 SQL 会得到第二套实现，漏一条规则就是静默
+    /// 算错，而且没有任何东西会报错。
+    ///
+    /// 授权在这里就收口：交出去的候选集已经过滤过媒体源与保险库，上层再怎么按规则
+    /// 筛，也不可能筛出它本来看不到的东西。
+    public func fetchServerAuthorizedCandidates(
+        allowedSourcePaths: Set<String>,
+        type: MediaType?
+    ) throws -> [MediaItem] {
+        guard !allowedSourcePaths.isEmpty else { return [] }
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let from = """
+            FROM media_items AS item
+            INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            """
+            var predicate = " WHERE item.type != ?"
+            var bindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
+            if let type {
+                predicate += " AND item.type = ?"
+                bindings.append(.text(type.rawValue))
+            } else {
+                // 智能集合是视频概念，音乐与照片不参与。
+                predicate += " AND item.type != ? AND item.type != ?"
+                bindings.append(.text(MediaType.music.rawValue))
+                bindings.append(.text(MediaType.photo.rawValue))
+            }
+            return try database.query(
+                serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: from)
+                    + predicate
+                    + " ORDER BY item.updated_at DESC, item.id ASC",
+                bindings: bindings,
+                map: map(row:)
+            )
         }
     }
 
@@ -1079,13 +1513,21 @@ public final class MediaRepository {
         )
     }
 
+    /// `selectSQL` / `serverSelectSQL` 里媒体列的数量。
+    ///
+    /// 只有这一处查询会在媒体列后面再接自己的列（`credit.category` / `credit.role`），
+    /// 而它必须按下标去取。写死 42 / 43 的那一版在给 `media_items` 加第 43 列时
+    /// 静默错位：`category` 读到了 `has_lyrics`，于是每个演员的角色都变成了兜底的
+    /// "cast"——编译照过，只有一条用例拦下了它。下标从这里推导，就不会再漏。
+    private static let mediaColumnCount: Int32 = 43
+
     private var selectSQL: String {
         """
         SELECT id, type, title, original_title, artist, album, track_number, year, overview, poster_path, backdrop_path,
                rating, user_rating, runtime, source_path, parent_id, season_number, episode_number,
                file_path, file_size, video_codec, audio_codec, resolution, video_bitrate, duration,
                loudness_track_gain_db, loudness_album_gain_db, loudness_track_peak, loudness_album_peak,
-               play_count, play_position, play_progress, watched, favorite, watchlist, external_id, metadata_provider, collection_title, created_at, updated_at, last_played_at, genre
+               play_count, play_position, play_progress, watched, favorite, watchlist, external_id, metadata_provider, collection_title, created_at, updated_at, last_played_at, genre, has_lyrics
         FROM media_items
         """
     }
@@ -1098,21 +1540,53 @@ public final class MediaRepository {
                item.rating, item.user_rating, item.runtime, item.source_path, item.parent_id, item.season_number, item.episode_number,
                item.file_path, item.file_size, item.video_codec, item.audio_codec, item.resolution, item.video_bitrate, item.duration,
                item.loudness_track_gain_db, item.loudness_album_gain_db, item.loudness_track_peak, item.loudness_album_peak,
-               item.play_count, item.play_position, item.play_progress, item.watched, item.favorite, item.watchlist, item.external_id, item.metadata_provider, item.collection_title, item.created_at, item.updated_at, item.last_played_at, item.genre
+               item.play_count, item.play_position, item.play_progress, item.watched, item.favorite, item.watchlist, item.external_id, item.metadata_provider, item.collection_title, item.created_at, item.updated_at, item.last_played_at, item.genre, item.has_lyrics
         FROM media_items
         """
     }
 
-    private static func serverOrderBy(_ sort: ServerLibraryDatabaseSort) -> String {
+    /// 排序键 + 方向 → 一段固定的 ORDER BY。
+    ///
+    /// 三条不变量：
+    /// * 每个分支都以 `title, id` 收尾，于是同键的条目有稳定顺序，翻页不会重复或漏项。
+    /// * 可空的键**两个方向都把 NULL 排在最后**——把"没有年份"的条目在倒序时顶到
+    ///   第一页，读起来像是排序坏了。
+    /// * `serverOrderBy` 是本文件里唯一定义"正序朝什么方向"的地方。
+    private static func serverOrderBy(
+        _ sort: ServerLibraryDatabaseSort,
+        _ order: ServerLibraryDatabaseSortOrder
+    ) -> String {
+        let tiebreak = "item.title COLLATE NOCASE ASC, item.id ASC"
+        let reversed = order == .reverse
+        func direction(_ primary: String) -> String {
+            guard reversed else { return primary }
+            return primary == "DESC" ? "ASC" : "DESC"
+        }
+        /// 可空列：先按"是否为空"升序把 NULL 推到末尾，再按值排。
+        func nullsLast(_ column: String, _ primary: String) -> String {
+            "CASE WHEN \(column) IS NULL THEN 1 ELSE 0 END ASC, \(column) \(direction(primary)), \(tiebreak)"
+        }
         switch sort {
-        case .updatedDescending:
-            return "item.updated_at DESC, item.title COLLATE NOCASE ASC, item.id ASC"
-        case .titleAscending:
-            return "item.title COLLATE NOCASE ASC, item.id ASC"
-        case .yearDescending:
-            return "CASE WHEN item.year IS NULL THEN 1 ELSE 0 END ASC, item.year DESC, item.title COLLATE NOCASE ASC, item.id ASC"
-        case .lastPlayedDescending:
-            return "user_state.last_played_at DESC, item.id ASC"
+        case .recentlyUpdated:
+            return "item.updated_at \(direction("DESC")), \(tiebreak)"
+        case .dateAdded:
+            return "item.created_at \(direction("DESC")), \(tiebreak)"
+        case .title:
+            return "item.title COLLATE NOCASE \(direction("ASC")), item.id ASC"
+        case .year:
+            return nullsLast("item.year", "DESC")
+        case .runtime:
+            return nullsLast("item.runtime", "DESC")
+        case .progress:
+            // 没有播放记录等同于进度 0，而不是"未知"：LEFT JOIN 的 NULL 在这里
+            // 有确定含义，所以它参与排序而不是被推到末尾。
+            return "COALESCE(user_state.play_progress, 0) \(direction("DESC")), \(tiebreak)"
+        case .score:
+            return nullsLast("item.rating", "DESC")
+        case .rating:
+            return nullsLast("user_preference.user_rating", "DESC")
+        case .lastPlayed:
+            return nullsLast("user_state.last_played_at", "DESC")
         }
     }
 
@@ -1174,7 +1648,8 @@ public final class MediaRepository {
             .optionalDate(item.createdAt),
             .optionalDate(item.updatedAt),
             .optionalDate(item.lastPlayedAt),
-            .optionalText(item.genre)
+            .optionalText(item.genre),
+            .bool(item.hasLyrics)
         ]
     }
 
@@ -1221,7 +1696,8 @@ public final class MediaRepository {
             createdAt: row.date(38) ?? Date(),
             updatedAt: row.date(39) ?? Date(),
             lastPlayedAt: row.date(40),
-            genre: row.string(41)
+            genre: row.string(41),
+            hasLyrics: row.bool(42)
         )
     }
 
@@ -1333,6 +1809,83 @@ public final class MediaRepository {
     private static func escapedLikeContainsPattern(for value: String) -> String {
         "%\(escapedLikeLiteral(value))%"
     }
+
+    /// 资料库里真实出现过的 distinct `source_path`。
+    ///
+    /// 服务端用它把"授权来源根"展开成具体路径，因此这里只读取列本身、不带任何
+    /// 授权判定——调用方负责归属与授权。基数是来源数量级（几十），由
+    /// `index_media_items_source_path` 服务。
+    public func distinctSourcePaths() throws -> [String] {
+        try database.query(
+            "SELECT DISTINCT source_path FROM media_items WHERE source_path IS NOT NULL AND source_path <> ''",
+            map: { $0.string(0) }
+        ).compactMap { $0 }
+    }
+
+    /// 按 `source_path` 统计已授权条目数，用于远程来源分组的行内计数。
+    ///
+    /// 与其它服务端查询一样排除保险库类型；不返回任何标题或路径以外的字段。
+    ///
+    /// - Parameter topLevelOnly: 是否只数**能在该作用域的浏览页上出现**的条目。
+    ///   侧栏徽标必须和点进去看到的条数是同一个数，而作用域浏览页走的是
+    ///   `fetchServerLibraryPage(topLevelOnly:)` 的 `parent_id IS NULL AND type != episode`。
+    ///   数全部行时，一个 1200 集的 Emby 剧集库徽标写 1200、点进去只有 30 部剧。
+    public func itemCountsBySourcePath(
+        allowedSourcePaths: Set<String>,
+        topLevelOnly: Bool = false
+    ) throws -> [String: Int] {
+        guard !allowedSourcePaths.isEmpty else { return [:] }
+        return try database.transaction {
+            try prepareServerAllowedSourcePaths(allowedSourcePaths)
+            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            var predicates = ["item.type != ?"]
+            var bindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
+            if topLevelOnly {
+                predicates.append("item.parent_id IS NULL")
+                predicates.append("item.type != ?")
+                bindings.append(.text(MediaType.episode.rawValue))
+            }
+            let rows = try database.query(
+                """
+                SELECT item.source_path, COUNT(*) FROM media_items AS item
+                INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+                WHERE \(predicates.joined(separator: " AND ")) GROUP BY item.source_path
+                """,
+                bindings: bindings,
+                map: { ($0.string(0), $0.int(1)) }
+            )
+            var counts: [String: Int] = [:]
+            for (path, count) in rows {
+                guard let path, let count else { continue }
+                counts[path] = count
+            }
+            return counts
+        }
+    }
+
+
+    /// 排除"无论 `source_path` 写成什么，都明显来自在线媒体服务器"的条目。
+    ///
+    /// 一级分类的归属主要靠来源路径，但路径并不总是可信：连接器自己的注释就写着
+    /// "有些条目（如仅带流地址 filePath 的远程视频）不一定填了 emby:// 的
+    /// sourcePath"。同时满足"元数据提供方是某个媒体服务器"和"文件是 http(s) 流"
+    /// 两个条件时，它一定不是本地文件——本地条目有真实的文件路径。
+    ///
+    /// 两个条件必须**同时**成立才排除：只看 provider 会误伤用它刮削元数据的本地
+    /// 条目；只看 http 会误伤用户自己添加的 URL 视频源（客户端把那些算本地）。
+    /// `COALESCE` 不是可有可无的：`metadata_provider` 为 NULL 时
+    /// `NULL IN (...)` 得 NULL，`NOT (NULL AND TRUE)` 仍是 NULL，于是整行被
+    /// WHERE 丢掉——那会连"provider 未填但文件是 URL"的本地条目一起误伤，
+    /// 与"两个条件必须同时成立"的本意正好相反。
+    static let onlineSourceItemPredicate = """
+        NOT (
+          COALESCE(item.metadata_provider, '') IN ('Emby', 'Jellyfin', 'Plex', 'Mlink')
+          AND (
+            COALESCE(item.file_path, '') LIKE 'http://%'
+            OR COALESCE(item.file_path, '') LIKE 'https://%'
+          )
+        )
+        """
 
     private func prepareServerAllowedSourcePaths(_ allowedSourcePaths: Set<String>) throws {
         try database.execute("CREATE TEMP TABLE IF NOT EXISTS server_library_allowed_source_paths (path TEXT PRIMARY KEY) WITHOUT ROWID")

@@ -1061,6 +1061,7 @@ private struct HomeModuleAddPanel: View {
 struct HomeView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.mainLayoutTransitionActive) private var layoutTransitionActive
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let onOpenHealthCenter: () -> Void
     let onOpenSources: () -> Void
     let onOpenTasks: () -> Void
@@ -2070,9 +2071,9 @@ struct HomeView: View {
             content()
                 .allowsHitTesting(false)
                 .opacity(isDragged ? 0.42 : 1)
-                .scaleEffect(isDragged ? 0.985 : 1, anchor: .center)
+                .scaleEffect(isDragged && !reduceMotion ? 0.985 : 1, anchor: .center)
                 .zIndex(isDragged ? 2 : 0)
-                .animation(.easeOut(duration: 0.16), value: isDragged)
+                .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: isDragged)
                 .overlay {
                     // 编辑时内容区被禁用以避免误播放；透明层只提供拖放与右键移除。
                     // 顺序在拖入目标模块时即时重排，因此无需额外的插入线提示。
@@ -3127,7 +3128,40 @@ struct HomeView: View {
             overviewBoardsKey = key
             HomeOverviewComputationCache.boards = boards
             HomeOverviewComputationCache.boardsKey = key
+            // 看板刚刚落定，网页首页的同名栏目就该跟着换成同一份名单。发布放在这里
+            // 而不是各个 `body` 求值里：这是本视图里唯一一处"推荐结果确定下来"的地方。
+            publishHomeRecommendationsForWeb()
         }
+    }
+
+    /// 把首页推荐栏目的名单交给服务进程，网页首页据此排出与这里逐条相同的片单。
+    ///
+    /// 取的正是本视图自己渲染用的那几个属性——不是为网页另算一份，否则两端又会
+    /// 分叉，而这次分叉还会藏在"看起来是共享的"这层壳后面。
+    ///
+    /// 「继续观看」「最近播放」「想看」「收藏」不在这里：那些是**痕迹**，网页每个
+    /// 账号有自己的一份（服务端的逐用户表），机主看到哪儿与网页读者无关。
+    private func publishHomeRecommendationsForWeb() {
+        // 让出一帧再算。
+        //
+        // 「音乐推荐」和照片墙主题是首页最重的两次同步计算（全曲库打分 + 贪心挑选）。
+        // 它们按快照键记忆化，可视模块渲染时本来就要算一次；但把它们和"看板刚落定、
+        // 整页正要重绘"挤进同一帧，就是白白给那一帧加一份账。
+        Task { @MainActor in
+            await Task.yield()
+            publishHomeRecommendationSections()
+        }
+    }
+
+    private func publishHomeRecommendationSections() {
+        appState.publishHomeRecommendations([
+            (.banner, overviewFeaturedItems),
+            (.seriesRecommendation, seriesRecommendationItems),
+            (.recentSeries, recentSeriesItems),
+            (.highRated, highRatedFeaturedItems),
+            (.musicRecommendation, musicRecommendationItems),
+            (.photoWall, photoWallItems)
+        ])
     }
 
     private func startHomeTimeRefreshLoop() {
@@ -4370,7 +4404,7 @@ struct EmptyLibraryView: View {
                 .rotationEffect(.degrees(iconShakeAngle), anchor: .center)
                 .scaleEffect(iconShakeStep == 0 || reduceMotion ? 1 : 1.012)
                 .opacity(0.94)
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.085), value: iconShakeStep)
+                .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: iconShakeStep)
 
             VStack(spacing: 18) {
 	            Text(appState.localized("媒体源待添加"))

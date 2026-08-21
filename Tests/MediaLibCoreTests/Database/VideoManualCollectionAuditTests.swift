@@ -36,7 +36,7 @@ final class VideoManualCollectionAuditTests: XCTestCase {
         let repo = VideoManualCollectionRepository(database: db)
 
         let initialTime = Date(timeIntervalSince1970: 1000000)
-        var col = VideoManualCollection(
+        let col = VideoManualCollection(
             id: "col-1",
             name: "科幻神作",
             itemIDs: ["mov-1", "mov-2", "mov-3", "mov-2", "mov-1", "mov-4"],

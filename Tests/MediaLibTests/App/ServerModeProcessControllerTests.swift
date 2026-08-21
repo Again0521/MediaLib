@@ -77,6 +77,26 @@ final class ServerModeProcessControllerTests: XCTestCase {
         XCTAssertTrue(message.contains("健康检查"))
     }
 
+    func testUnexpectedServerExitRestartsRequestedServerMode() async throws {
+        let executableURL = try makeCrashOnceThenLongRunningExecutable()
+        let controller = ServerModeProcessController(
+            executableURLProvider: { executableURL },
+            readinessChecker: { _ in true }
+        )
+
+        try controller.start(configuration: ServerModeConfiguration(serverID: "server-self-recover"))
+        // The first runtime reports ready then exits immediately. Wait past the
+        // one-second recovery delay so a green initial readiness race cannot
+        // masquerade as a successful self-restart.
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        for _ in 0..<80 where controller.status != .running {
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+
+        XCTAssertEqual(controller.status, .running)
+        controller.stop()
+    }
+
     private func waitForRunning(_ controller: ServerModeProcessController) async {
         for _ in 0..<30 where controller.status == .starting {
             try? await Task.sleep(nanoseconds: 20_000_000)
@@ -86,6 +106,15 @@ final class ServerModeProcessControllerTests: XCTestCase {
     private func makeLongRunningExecutable() throws -> URL {
         let executableURL = temporaryDirectory.appendingPathComponent("server-runtime.sh")
         let contents = "#!/bin/sh\nwhile true; do sleep 1; done\n"
+        try Data(contents.utf8).write(to: executableURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executableURL.path)
+        return executableURL
+    }
+
+    private func makeCrashOnceThenLongRunningExecutable() throws -> URL {
+        let markerURL = temporaryDirectory.appendingPathComponent("did-crash-once")
+        let executableURL = temporaryDirectory.appendingPathComponent("server-recovery-runtime.sh")
+        let contents = "#!/bin/sh\nif [ ! -f '\(markerURL.path)' ]; then touch '\(markerURL.path)'; exit 17; fi\nwhile true; do sleep 1; done\n"
         try Data(contents.utf8).write(to: executableURL)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executableURL.path)
         return executableURL

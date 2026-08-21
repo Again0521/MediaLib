@@ -23,13 +23,13 @@ final class ServerWebCollectionRouteTests: XCTestCase {
         let router = makeRouter()
         let directory = String(data: router.response(for: request("/collections")).body, encoding: .utf8) ?? ""
         XCTAssertTrue(directory.contains("合集 &lt;script&gt;bad()&lt;/script&gt;"))
-        XCTAssertTrue(directory.contains("href=\"/assets/collections.css\""))
-        XCTAssertTrue(directory.contains("src=\"/assets/collections.js\""))
+        XCTAssertTrue(directory.contains("href=\"/assets/collections.css?v="))
+        XCTAssertTrue(directory.contains("src=\"/assets/collections.js?v="))
         XCTAssertFalse(directory.contains("<script>bad()</script>"))
 
         let collection = String(data: router.response(for: request("/collections/collection%20id%2B1")).body, encoding: .utf8) ?? ""
-        XCTAssertTrue(collection.contains("href=\"/series/series%20id%2B1\""))
-        XCTAssertTrue(collection.contains("src=\"/api/v1/images/series%20id%2B1/poster\""))
+        XCTAssertTrue(collection.contains("href=\"/series/series%20id%2B1/play\""), "剧集海报必须直接解析至实际播放页，不经由旧选集详情页")
+        XCTAssertTrue(collection.contains("src=\"/api/v1/images/series%20id%2B1/poster?size=320\""))
         XCTAssertEqual(router.response(for: request("/collections/collection%2Fescape")).statusCode, 404)
         XCTAssertEqual(router.response(for: request("/collections/unknown")).statusCode, 404)
     }
@@ -69,7 +69,7 @@ final class ServerWebCollectionRouteTests: XCTestCase {
         let js = String(data: router.response(for: "GET /assets/collections.js HTTP/1.1\r\nHost: localhost\r\n\r\n").body, encoding: .utf8) ?? ""
         XCTAssertEqual(css.statusCode, 200)
         XCTAssertEqual(router.response(for: "GET /assets/collections.js HTTP/1.1\r\nHost: localhost\r\n\r\n").statusCode, 200)
-        XCTAssertTrue(ServerWebCollectionsPage.style.contains("prefers-reduced-motion"))
+        XCTAssertTrue(ServerWebBaseStyle.css.contains("prefers-reduced-motion: reduce"), "减少动效策略集中在 base.css")
         XCTAssertTrue(js.contains("textContent"))
         XCTAssertTrue(js.contains("createDocumentFragment"))
         XCTAssertTrue(js.contains("credentials: 'same-origin'"))

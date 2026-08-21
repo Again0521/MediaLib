@@ -141,7 +141,7 @@ struct HomeVividHeroCarousel: View {
                 }
             }
         }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.45), value: current)
+        .animation(reduceMotion ? AppMotion.reducedContent : AppMotion.carousel, value: current)
         .overlay(alignment: .bottomTrailing) {
             if slides.count > 1 {
                 HStack(spacing: 6) {
@@ -151,7 +151,7 @@ struct HomeVividHeroCarousel: View {
                             .frame(width: dot == current ? 19 : 6, height: 6)
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.35)) {
+                                withAnimation(reduceMotion ? AppMotion.reducedContent : AppMotion.carousel) {
                                     index = dot
                                 }
                             }
@@ -201,7 +201,7 @@ struct HomeVividHeroCarousel: View {
         guard now.timeIntervalSince(lastManualStepAt) > 0.48 else { return }
         lastManualStepAt = now
         let current = ((index % count) + count) % count
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.42)) {
+        withAnimation(reduceMotion ? AppMotion.reducedContent : AppMotion.carousel) {
             index = ((current + delta) % count + count) % count
         }
     }
@@ -211,7 +211,7 @@ struct HomeVividHeroCarousel: View {
         let target = min(max(current + delta, 0), count - 1)
         guard target != current else { return }
         lastManualStepAt = Date()
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.42)) {
+        withAnimation(reduceMotion ? AppMotion.reducedContent : AppMotion.carousel) {
             index = target
         }
     }
@@ -289,6 +289,7 @@ private struct HomeVividHorizontalScrollBridge: NSViewRepresentable {
 }
 
 private struct HomeVividSidePagerControls: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// 与外层内容共享同一个悬停状态：外层容器只覆盖组件自身的原始宽度，
     /// 而箭头靠负 padding 视觉上"探出"到组件与页面边距之间的空白——那块区域
     /// 在 SwiftUI 的命中测试意义上落在外层 `.onHover` 的框之外，鼠标一移过去
@@ -310,7 +311,7 @@ private struct HomeVividSidePagerControls: View {
             sideButton(direction: .next, enabled: canGoNext, action: onNext)
         }
         .opacity(visible ? 1 : 0)
-        .animation(.easeOut(duration: visible ? 0.16 : 0.28), value: visible)
+        .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: visible)
         .allowsHitTesting(visible)
         .onHover { hovering = $0 }
     }
@@ -450,6 +451,7 @@ private struct HomeVividSearchControl: View {
 
 private struct HomeVividPrimaryButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -471,7 +473,7 @@ private struct HomeVividPrimaryButtonStyle: ButtonStyle {
             }
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
             .opacity(isEnabled ? 1 : 0.5)
-            .animation(.easeOut(duration: 0.16), value: configuration.isPressed)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: configuration.isPressed)
     }
 }
 
@@ -565,7 +567,7 @@ struct HomeVividHero: View {
         .onTapGesture(perform: onSelect)
         .scaleEffect(hovering && !reduceMotion ? 1.008 : 1, anchor: .center)
         .shadow(color: Color.black.opacity(hovering ? 0.24 : 0.18), radius: hovering ? 32 : 24, y: hovering ? 12 : 8)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: hovering)
+        .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: hovering)
         .onHover { hovering = $0 }
         .task(id: colorPath) {
             palette = await AlbumPaletteCache.palette(for: colorPath)
@@ -633,6 +635,8 @@ struct HomeVividHero: View {
 }
 
 private struct HomeHeroPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 14, weight: .black))
@@ -641,11 +645,15 @@ private struct HomeHeroPrimaryButtonStyle: ButtonStyle {
             .frame(height: 44)
             .background(Color.white, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .shadow(color: Color.black.opacity(0.34), radius: 30, x: 0, y: 14)
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.98 : 1)
+            .opacity(configuration.isPressed ? 0.88 : 1)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: configuration.isPressed)
     }
 }
 
 private struct HomeHeroSecondaryButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 14, weight: .bold))
@@ -657,6 +665,8 @@ private struct HomeHeroSecondaryButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(.white.opacity(0.25), lineWidth: 1)
             }
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.98 : 1)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.immediate, value: configuration.isPressed)
     }
 }
 
@@ -722,7 +732,7 @@ private struct HomeVividStatCard: View {
         }
         .shadow(color: Color.black.opacity(hovering ? HomeVividTokens.hoverShadowOpacity : 0), radius: hovering ? HomeVividTokens.hoverShadowRadius : 0, y: hovering ? HomeVividTokens.hoverShadowY : 0)
         .offset(y: hovering && !reduceMotion ? -4 : 0)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.28), value: hovering)
+        .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: hovering)
         .onHover { hovering = $0 }
     }
 }
@@ -860,7 +870,7 @@ struct HomeVividPosterRow: View {
                             do { try await Task.sleep(nanoseconds: 4_800_000_000) } catch { return }
                             guard !Task.isCancelled, !hovering, !dragging, scenePhase == .active, displayItems.count > 1 else { continue }
                             autoScrollIndex = (autoScrollIndex + 1) % displayItems.count
-                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.55)) {
+                            withAnimation(reduceMotion ? AppMotion.reducedContent : AppMotion.carousel) {
                                 proxy.scrollTo(displayItems[autoScrollIndex].id, anchor: .leading)
                             }
                         }
@@ -882,7 +892,7 @@ struct HomeVividPosterRow: View {
         let target = min(max(autoScrollIndex + direction * pageStep, 0), displayItems.count - 1)
         guard target != autoScrollIndex else { return }
         autoScrollIndex = target
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.36)) {
+        withAnimation(reduceMotion ? AppMotion.reducedContent : AppMotion.carousel) {
             proxy.scrollTo(displayItems[target].id, anchor: .leading)
         }
     }
@@ -1034,7 +1044,7 @@ private struct HomeVividPosterCard: View {
         .buttonStyle(.plain)
         .offset(y: active && !reduceMotion ? -5 : 0)
         .shadow(color: Color.black.opacity(active ? HomeVividTokens.hoverShadowOpacity : 0), radius: active ? HomeVividTokens.hoverShadowRadius : 0, y: active ? HomeVividTokens.hoverShadowY : 0)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: active)
+        .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: active)
         .onHover { hovering = $0 }
         .onChange(of: suppressHoverDuringScroll) { if $0 { hovering = false } }
         .contextMenu {
@@ -1468,7 +1478,7 @@ private struct HomeVividInteractivePanelModifier: ViewModifier {
             }
             .shadow(color: Color.black.opacity(hovering ? HomeVividTokens.hoverShadowOpacity : 0), radius: hovering ? HomeVividTokens.hoverShadowRadius : 0, y: hovering ? HomeVividTokens.hoverShadowY : 0)
             .offset(y: hovering && !reduceMotion ? -4 : 0)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: hovering)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: hovering)
             .onHover { hovering = $0 }
     }
 }
@@ -1664,6 +1674,7 @@ private struct HomeVividTrackRow: View {
 private struct HomeVividPlaylistCard: View {
     let summary: HomePlaylistSummary
     @EnvironmentObject private var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
     var body: some View {
@@ -1692,7 +1703,7 @@ private struct HomeVividPlaylistCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .shadow(color: Color.black.opacity(hovering ? HomeVividTokens.hoverShadowOpacity : 0), radius: hovering ? HomeVividTokens.hoverShadowRadius : 0, y: hovering ? HomeVividTokens.hoverShadowY : 0)
         .offset(y: hovering ? -4 : 0)
-        .animation(.easeOut(duration: 0.24), value: hovering)
+        .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: hovering)
         .onHover { hovering = $0 }
         .contextMenu {
             Button {
@@ -1790,6 +1801,7 @@ private struct HomeVividPlaylistCard: View {
 
 private struct HomeVividRowHoverModifier: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
     let cornerRadius: CGFloat
@@ -1798,7 +1810,7 @@ private struct HomeVividRowHoverModifier: ViewModifier {
         content
             .background(hovering ? hoverFill : Color.clear, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
             .onHover { hovering = $0 }
-            .animation(.easeOut(duration: 0.16), value: hovering)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.listHover, value: hovering)
     }
 
     private var hoverFill: Color {
@@ -1818,7 +1830,7 @@ private struct HomeVividHoverLiftModifier: ViewModifier {
             .shadow(color: Color.black.opacity(hovering ? HomeVividTokens.hoverShadowOpacity : 0), radius: hovering ? HomeVividTokens.hoverShadowRadius : 0, y: hovering ? HomeVividTokens.hoverShadowY : 0)
             .offset(y: hovering && !reduceMotion ? -4 : 0)
             .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: hovering)
+            .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: hovering)
             .onHover { hovering = $0 }
     }
 }
@@ -1951,7 +1963,7 @@ struct HomeVividContinueListening: View {
                         do { try await Task.sleep(nanoseconds: 4_800_000_000) } catch { return }
                         guard !Task.isCancelled, !hovering, !dragging, scenePhase == .active, displayTracks.count > 1 else { continue }
                         autoScrollIndex = (autoScrollIndex + 1) % displayTracks.count
-                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.55)) {
+                        withAnimation(reduceMotion ? AppMotion.reducedContent : AppMotion.carousel) {
                             proxy.scrollTo(displayTracks[autoScrollIndex].id, anchor: .leading)
                         }
                     }
@@ -1965,7 +1977,7 @@ struct HomeVividContinueListening: View {
         let target = min(max(autoScrollIndex + direction * 3, 0), displayTracks.count - 1)
         guard target != autoScrollIndex else { return }
         autoScrollIndex = target
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.36)) {
+        withAnimation(reduceMotion ? AppMotion.reducedContent : AppMotion.carousel) {
             proxy.scrollTo(displayTracks[target].id, anchor: .leading)
         }
     }
@@ -1974,6 +1986,7 @@ struct HomeVividContinueListening: View {
 private struct HomeVividAlbumCard: View {
     let track: MediaItem
     @EnvironmentObject private var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
 
     var body: some View {
@@ -2013,7 +2026,7 @@ private struct HomeVividAlbumCard: View {
         }
         .frame(width: HomeVividTokens.albumSide, alignment: .leading)
         .offset(y: hovering ? -5 : 0)
-        .animation(.easeOut(duration: 0.24), value: hovering)
+        .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: hovering)
         .onHover { hovering = $0 }
         .contextMenu {
             Button { appState.play(track) } label: {
@@ -2199,6 +2212,7 @@ private struct HomeVividPhotoTile: View {
     let index: Int
     let width: CGFloat
     let height: CGFloat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let onOpen: () -> Void
     @EnvironmentObject private var appState: AppState
     @State private var hovering = false
@@ -2229,7 +2243,7 @@ private struct HomeVividPhotoTile: View {
         .shadow(color: Color.black.opacity(hovering ? HomeVividTokens.hoverShadowOpacity : 0), radius: hovering ? HomeVividTokens.hoverShadowRadius : 0, y: hovering ? HomeVividTokens.hoverShadowY : 0)
         .scaleEffect(hovering ? 1.018 : 1)
         .zIndex(hovering ? 1 : 0)
-        .animation(.easeOut(duration: 0.24), value: hovering)
+        .animation(reduceMotion ? AppMotion.reducedFeedback : AppMotion.hover, value: hovering)
         .onHover { hovering = $0 }
         .contextMenu {
             Button(action: onOpen) {

@@ -198,8 +198,10 @@ final class AudioEQProcessor {
     // MARK: - 挂载
 
     /// 为某个资源的音轨创建带本 EQ tap 的 AVAudioMix；无音轨或创建失败返回 nil。
-    func makeAudioMix(for asset: AVAsset) -> AVAudioMix? {
-        guard let track = asset.tracks(withMediaType: .audio).first else { return nil }
+    /// 使用异步加载 API，避免本地大音频文件在主线程同步查询轨道。
+    func makeAudioMix(for asset: AVAsset) async -> AVAudioMix? {
+        guard let tracks = try? await asset.loadTracks(withMediaType: .audio),
+              let track = tracks.first else { return nil }
 
         let unmanaged = Unmanaged.passRetained(self)
         var callbacks = MTAudioProcessingTapCallbacks(

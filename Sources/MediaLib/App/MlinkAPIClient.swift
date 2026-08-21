@@ -205,7 +205,7 @@ struct MlinkAPIClient: Sendable {
         type: String? = nil,
         offset: Int = 0,
         limit: Int = 100,
-        sort: ServerLibrarySort = .updatedDescending
+        sort: ServerLibrarySort = .recentlyUpdated
     ) async throws -> ServerLibraryItemsPage {
         guard (32...1_024).contains(accessToken.utf8.count),
               offset >= 0, offset <= 1_000_000,

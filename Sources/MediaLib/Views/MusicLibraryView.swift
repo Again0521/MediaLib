@@ -3,98 +3,6 @@ import MediaLibCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-private enum MusicLyricsPresenceCache {
-    private static var values: [String: Bool] = [:]
-    private static var accessTick: [String: Int] = [:]
-    private static var tickCounter = 0
-    private static var cacheRevision = 0
-    private static let maxValues = 4096
-    private static let lock = NSLock()
-
-    static var revision: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return cacheRevision
-    }
-
-    static func cachedHasLyrics(filePath: String?) -> Bool? {
-        guard let filePath else { return false }
-        let cacheKey = key(filePath: filePath)
-        lock.lock()
-        defer { lock.unlock() }
-        guard let cached = values[cacheKey] else { return nil }
-        markRecentlyUsed(cacheKey)
-        return cached
-    }
-
-    static func warmCache(filePaths: [String?]) async -> Bool {
-        let paths = Array(Set(filePaths.compactMap { $0 }))
-        let missing = missingEntries(for: paths)
-        guard !missing.isEmpty else { return false }
-
-        // 歌词文件探测是磁盘/NAS stat：走阻塞 I/O 专用队列，不占协作池。
-        let results = await BlockingIOExecutor.run {
-            missing.map { entry in
-                (cacheKey: entry.cacheKey, exists: lyricsExist(filePath: entry.path))
-            }
-        }
-
-        return store(results)
-    }
-
-    private static func missingEntries(for paths: [String]) -> [(path: String, cacheKey: String)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return paths
-            .map { (path: $0, cacheKey: key(filePath: $0)) }
-            .filter { values[$0.cacheKey] == nil }
-    }
-
-    private static func store(_ results: [(cacheKey: String, exists: Bool)]) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        var changed = false
-        for result in results where values[result.cacheKey] == nil {
-            values[result.cacheKey] = result.exists
-            markRecentlyUsed(result.cacheKey)
-            changed = true
-        }
-        if changed {
-            trimIfNeeded()
-            cacheRevision += 1
-        }
-        return changed
-    }
-
-    private static func key(filePath: String) -> String {
-        filePath
-    }
-
-    private static func markRecentlyUsed(_ cacheKey: String) {
-        tickCounter &+= 1
-        accessTick[cacheKey] = tickCounter
-    }
-
-    private static func trimIfNeeded() {
-        guard values.count > maxValues else { return }
-        while values.count > maxValues,
-              let oldestKey = accessTick.min(by: { $0.value < $1.value })?.key {
-            values.removeValue(forKey: oldestKey)
-            accessTick.removeValue(forKey: oldestKey)
-        }
-    }
-
-    private static func lyricsExist(filePath: String) -> Bool {
-        // 词法拼路径（NSString 无 I/O），只让 fileExists 这两次探测真正touching NAS。
-        let ns = filePath as NSString
-        let directory = ns.deletingLastPathComponent as NSString
-        let basename = (ns.lastPathComponent as NSString).deletingPathExtension
-        return ["lrc", "txt"].contains { ext in
-            FileManager.default.fileExists(atPath: directory.appendingPathComponent("\(basename).\(ext)"))
-        }
-    }
-}
-
 // 静态缓存字典只允许主线程访问：resolve 此前是 nonisolated async（跑在并发池上），
 // 与主线程 body 里的 snapshot(for:) 存在数据竞争。整个类型收敛到 MainActor，
 // 仅真正的快照构建仍在 detached 任务里进行。
@@ -345,7 +253,7 @@ private enum MusicLibrarySnapshotBuilder {
             case .all: return true
             case .favorites: return track.favorite
             case .withLyrics:
-                return MusicLyricsPresenceCache.cachedHasLyrics(filePath: track.filePath) ?? false
+                return track.hasLyrics
             case .unmatched:
                 return (track.artist?.isEmpty ?? true) || (track.album?.isEmpty ?? true) || track.metadataProvider == nil
             }
@@ -392,7 +300,7 @@ private enum MusicLibrarySnapshotBuilder {
                     : track.filePath.map { displayNameWithoutKnownExtension(($0 as NSString).lastPathComponent) },
                 artistText: musicDisplayArtist(track.artist),
                 albumText: musicDisplayAlbum(track.album),
-                hasLocalLyrics: MusicLyricsPresenceCache.cachedHasLyrics(filePath: track.filePath) ?? false,
+                hasLocalLyrics: track.hasLyrics,
                 durationText: durationText(track.duration)
             )
         }
@@ -413,7 +321,7 @@ private enum MusicLibrarySnapshotBuilder {
             case .withLyrics:
                 guard input.tracks.contains(where: { track in
                     trackMatchesAlbum(track, album: album) &&
-                    (MusicLyricsPresenceCache.cachedHasLyrics(filePath: track.filePath) ?? false)
+                    track.hasLyrics
                 }) else { return nil }
             case .unmatched:
                 guard input.tracks.contains(where: { track in
@@ -571,7 +479,6 @@ struct MusicLibraryView: View {
     @State private var isConfirmingPlaylistDeletion = false
     @State private var contentRefreshTask: Task<Void, Never>?
     @State private var searchRefreshTask: Task<Void, Never>?
-    @State private var lyricsRefreshTask: Task<Void, Never>?
     @State private var collectionReturnAnchorID: String?
     @State private var collectionAnchorRestoreTask: Task<Void, Never>?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -628,7 +535,6 @@ struct MusicLibraryView: View {
             guard let newSection = MusicLibrarySection.allCases.first(where: { $0.id == newSectionID }) else { return }
             logMusicPerf("sectionChange -> \(newSectionID)")
             searchRefreshTask?.cancel()
-            lyricsRefreshTask?.cancel()
             drilldown = nil
             loadViewState(for: newSection, reset: true)
             refreshVisibleContent(for: newSection, deferred: true)
@@ -691,7 +597,6 @@ struct MusicLibraryView: View {
         .onDisappear {
             contentRefreshTask?.cancel()
             searchRefreshTask?.cancel()
-            lyricsRefreshTask?.cancel()
         }
         .sheet(item: $metadataItem) { item in
             MetadataSearchView(item: item)
@@ -1118,7 +1023,7 @@ struct MusicLibraryView: View {
             projectionRevision: appState.musicProjectionRevision,
             // 歌词存在性只影响「有歌词」筛选；其它页面不应因为后台扫完歌词文件而整页快照失效、
             // 重新分组专辑/艺术家或重建上千行歌曲模型。
-            lyricsRevision: filterMode == .withLyrics ? MusicLyricsPresenceCache.revision : 0
+            lyricsRevision: 0
         )
     }
 
@@ -1141,8 +1046,6 @@ struct MusicLibraryView: View {
         let baseTracks = needsTrackInput ? appState.items(for: .music(targetSection), searchText: "") : []
         if filterMode == .withLyrics {
             scheduleLyricsPresenceRefresh(for: baseTracks, section: targetSection)
-        } else {
-            lyricsRefreshTask?.cancel()
         }
 
         let key = snapshotKey(for: targetSection)
@@ -1285,14 +1188,12 @@ struct MusicLibraryView: View {
         drilldown = .playlist(updated, appState.musicTracks(in: updated))
     }
 
+    /// 歌词存在性现在落在 `media_items.has_lyrics` 上，由扫描写入、由后台回补补齐
+    /// 老数据，而不再是每次进音乐页就对整个曲库做一遍文件探测——那在 NAS 上是几千
+    /// 次网络 stat，且结果退出即丢。
     private func scheduleLyricsPresenceRefresh(for tracks: [MediaItem], section targetSection: MusicLibrarySection) {
-        lyricsRefreshTask?.cancel()
-        let filePaths = tracks.map(\.filePath)
-        lyricsRefreshTask = Task { @MainActor in
-            let changed = await MusicLyricsPresenceCache.warmCache(filePaths: filePaths)
-            guard changed, !Task.isCancelled, section.id == targetSection.id else { return }
-            refreshVisibleContent(for: targetSection)
-        }
+        guard tracks.contains(where: { !$0.hasLyrics && $0.filePath != nil }) else { return }
+        appState.backfillMusicLyricsPresence()
     }
 
     private func stateKeyPrefix(for targetSection: MusicLibrarySection) -> String {

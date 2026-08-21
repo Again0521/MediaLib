@@ -30,6 +30,18 @@ enum AppVersion {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.5.5"
     }
 
+    /// 内部构建号用于区分同一营销版本下的增量安装包；它不参与远端发布版本比较。
+    static var build: String? {
+        guard let value = Bundle.main.infoDictionary?["CFBundleVersion"] as? String else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    static var displayString: String {
+        guard let build else { return current }
+        return "\(current)（build \(build)）"
+    }
+
     /// 从任意文本里提取版本号：抓出第一段「点分数字」，如 v1.1.1 / MediaLIB_V1.1.8 / 标题里的 1.1.11。
     /// 返回归一化后的字符串（去掉前导 v、保留原始数字段）。
     static func extractVersion(from text: String) -> String? {

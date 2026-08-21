@@ -868,11 +868,12 @@ final class MpvPlayerController: ObservableObject {
             playerItem.preferredForwardBufferDuration = 2
         }
         // 仅在启用且非纯平时挂 EQ；失败则保持原样（透传），不影响播放。
-        // 仅对本地文件挂 EQ：makeAudioMix 内部会同步访问 asset.tracks，远端资源在主线程同步取轨会阻塞 UI；
-        // EQ 主要面向本地高保真，远端/网络流跳过以规避主线程卡顿。
+        // 仅对本地文件挂 EQ；轨道查询异步完成后再安装音频混合，避免切歌时在主线程
+        // 同步取轨。EQ 主要面向本地高保真，远端/网络流跳过以规避网络盘卡顿。
         if applyEqualizer, musicEqualizerEnabled, isLocal, !isNetwork {
             let processor = AudioEQProcessor(gainsDB: musicEqualizerGains)
-            if let mix = processor.makeAudioMix(for: asset) {
+            Task { @MainActor [weak playerItem] in
+                guard let mix = await processor.makeAudioMix(for: asset), let playerItem else { return }
                 playerItem.audioMix = mix
             }
         }

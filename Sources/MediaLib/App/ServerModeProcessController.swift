@@ -23,6 +23,11 @@ final class ServerModeProcessController: ObservableObject {
     @Published private(set) var status: Status = .stopped
     private var process: Process?
     private var readinessTask: Task<Void, Never>?
+    private var restartTask: Task<Void, Never>?
+    /// `nil` only when the user (or application termination) explicitly stops
+    /// server mode. An unexpected child exit must not silently turn a running
+    /// Web server into an unreachable browser tab.
+    private var requestedConfiguration: ServerModeConfiguration?
     private let executableURLProvider: @MainActor () throws -> URL
     private let readinessChecker: (ServerModeConfiguration) async -> Bool
     private let readinessTimeout: TimeInterval
@@ -45,11 +50,15 @@ final class ServerModeProcessController: ObservableObject {
 
     deinit {
         readinessTask?.cancel()
+        restartTask?.cancel()
         process?.terminate()
     }
 
     func start(configuration: ServerModeConfiguration) throws {
         guard process == nil else { return }
+        restartTask?.cancel()
+        restartTask = nil
+        requestedConfiguration = configuration
         status = .starting
 
         do {
@@ -88,6 +97,7 @@ final class ServerModeProcessController: ObservableObject {
                         self.status = .stopped
                     } else {
                         self.status = .failed("服务进程意外退出（代码 \(code)）。")
+                        self.scheduleUnexpectedExitRecovery(after: 1)
                     }
                 }
             }
@@ -118,6 +128,7 @@ final class ServerModeProcessController: ObservableObject {
                 self.readinessTask = nil
             }
         } catch {
+            requestedConfiguration = nil
             status = .failed(error.localizedDescription)
             throw error
         }
@@ -126,6 +137,9 @@ final class ServerModeProcessController: ObservableObject {
     func stop() {
         readinessTask?.cancel()
         readinessTask = nil
+        restartTask?.cancel()
+        restartTask = nil
+        requestedConfiguration = nil
         guard let process else {
             status = .stopped
             return
@@ -140,6 +154,9 @@ final class ServerModeProcessController: ObservableObject {
     /// 恢复管理员凭据前使用：停止 App 管理的服务进程，并等待真实进程退出，
     /// 避免仅更新 UI 状态后仍有旧进程短暂持有数据库或认证状态。
     func stopAndWaitForExit(timeout: TimeInterval = 5) async -> Bool {
+        restartTask?.cancel()
+        restartTask = nil
+        requestedConfiguration = nil
         guard let process else {
             readinessTask?.cancel()
             readinessTask = nil
@@ -161,6 +178,28 @@ final class ServerModeProcessController: ObservableObject {
         }
         status = .stopped
         return true
+    }
+
+    private func scheduleUnexpectedExitRecovery(after delay: TimeInterval) {
+        guard restartTask == nil, let configuration = requestedConfiguration else { return }
+        restartTask = Task { [weak self] in
+            let nanoseconds = UInt64(max(delay, 0.1) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            guard !Task.isCancelled,
+                  let self,
+                  self.process == nil,
+                  self.requestedConfiguration == configuration
+            else { return }
+            self.restartTask = nil
+            do {
+                try self.start(configuration: configuration)
+            } catch {
+                // `start` already presents a localized, non-sensitive error.
+                // Keep the explicit requested configuration so the user can
+                // retry by toggling Server Mode instead of reviving a child
+                // after an application-initiated stop.
+            }
+        }
     }
 
     private static func defaultReadinessChecker(_ configuration: ServerModeConfiguration) async -> Bool {

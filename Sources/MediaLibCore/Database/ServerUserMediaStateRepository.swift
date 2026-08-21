@@ -69,6 +69,26 @@ public final class ServerUserMediaStateRepository: @unchecked Sendable {
         return Dictionary(uniqueKeysWithValues: rows.map { ($0.mediaID, $0) })
     }
 
+    /// 这个用户**自己**的全部播放状态行。理由与 `ServerUserMediaPreferenceRepository.fetchAll`
+    /// 相同：整页渲染的音乐库没有 100 项这个上界，而一个人播放过的曲目有。
+    public func fetchAll(userID: String, limit: Int = 5_000) throws -> [String: ServerUserMediaStateRecord] {
+        let userID = try validatedIdentifier(userID)
+        let safeLimit = min(max(limit, 1), 20_000)
+        let rows = try database.query(
+            """
+            SELECT user_id, media_id, play_position, play_progress, is_watched,
+                   play_count, last_played_at, updated_at
+            FROM server_user_media_state
+            WHERE user_id = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            bindings: [.text(userID), .int(Int64(safeLimit))],
+            map: Self.map(row:)
+        )
+        return Dictionary(rows.map { ($0.mediaID, $0) }) { first, _ in first }
+    }
+
     @discardableResult
     public func update(
         userID: String,

@@ -19,10 +19,15 @@ SERVER_NAME="MediaLibServer"
 DISPLAY_NAME="MediaLIB"
 BUNDLE_ID="com.local.MediaLib"
 VERSION="1.5.5"
-BUILD="82"
+BUILD="97"
 DIST_DIR="$ROOT_DIR/dist"
 ROOT_HASH="$(printf '%s' "$ROOT_DIR" | shasum -a 256 | awk '{print substr($1, 1, 12)}')"
-BUILD_ROOT="/private/tmp/MediaLib-package-$(id -u)-$ROOT_HASH"
+PACKAGE_INSTANCE="${MEDIALIB_PACKAGE_INSTANCE:-default}"
+if [[ ! "$PACKAGE_INSTANCE" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  echo "error: MEDIALIB_PACKAGE_INSTANCE may only contain letters, numbers, _ and -" >&2
+  exit 2
+fi
+BUILD_ROOT="/private/tmp/MediaLib-package-$(id -u)-$ROOT_HASH-$PACKAGE_INSTANCE"
 APP_BUNDLE="$BUILD_ROOT/$DISPLAY_NAME.app"
 APP_COPY="$DIST_DIR/$DISPLAY_NAME.app"
 LEGACY_APP_COPY="$DIST_DIR/$APP_NAME.app"
@@ -32,8 +37,12 @@ DMG_RW_PATH="$BUILD_ROOT/$APP_NAME-rw.dmg"
 DMG_MOUNT="$BUILD_ROOT/dmg-mount"
 DMG_BACKGROUND="$DMG_ROOT/.background/dmg-background.png"
 DMG_VOLUME_ICON="$DMG_ROOT/.VolumeIcon.icns"
-SWIFT_MODULE_CACHE="/private/tmp/MediaLib-package-module-cache-$(id -u)-$ROOT_HASH"
+SWIFT_MODULE_CACHE="/private/tmp/MediaLib-package-module-cache-$(id -u)-$ROOT_HASH-$PACKAGE_INSTANCE"
 SWIFT_BUILD_DIR="$BUILD_ROOT/swiftpm-build"
+SWIFTPM_CACHE_ROOT="/private/tmp/MediaLib-swiftpm-cache-$(id -u)-$ROOT_HASH-$PACKAGE_INSTANCE"
+SWIFTPM_CONFIG_ROOT="/private/tmp/MediaLib-swiftpm-config-$(id -u)-$ROOT_HASH-$PACKAGE_INSTANCE"
+SWIFTPM_SECURITY_ROOT="/private/tmp/MediaLib-swiftpm-security-$(id -u)-$ROOT_HASH-$PACKAGE_INSTANCE"
+PACKAGE_JOBS="${MEDIALIB_PACKAGE_JOBS:-2}"
 
 if [[ "${MEDIALIB_PACKAGE_DMG_PRINT_PATHS_ONLY:-0}" == "1" ]]; then
   printf 'SCRIPT_DIR=%s\n' "$SCRIPT_DIR"
@@ -57,16 +66,44 @@ strip_bundle_metadata() {
   find "$target" -exec xattr -ds com.apple.provenance {} + 2>/dev/null || true
 }
 
+# hdiutil is still required here to create a Finder-layout DMG on the current
+# supported macOS images. Recent macOS releases print a migration notice for
+# its create/convert subcommands; suppress only that exact notice and preserve
+# every other diagnostic (including real image creation failures).
+run_hdiutil() {
+  hdiutil "$@" 2> >(sed -E "/^hdiutil: WARNING: .* is deprecated\. Please use 'diskutil image /d" >&2)
+}
+
 if [[ -d "/Applications/Xcode.app/Contents/Developer" ]]; then
   export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 fi
-rm -rf "$SWIFT_MODULE_CACHE" "$BUILD_ROOT" "$APP_COPY" "$LEGACY_APP_COPY" "$DMG_PATH"
-mkdir -p "$SWIFT_MODULE_CACHE" "$SWIFT_BUILD_DIR"
+REUSE_EXISTING_RELEASE_BUILD="${MEDIALIB_PACKAGE_REUSE_BUILD:-0}"
+if [[ "$REUSE_EXISTING_RELEASE_BUILD" != "0" && "$REUSE_EXISTING_RELEASE_BUILD" != "1" ]]; then
+  echo "error: MEDIALIB_PACKAGE_REUSE_BUILD must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$REUSE_EXISTING_RELEASE_BUILD" == "0" ]]; then
+  rm -rf "$SWIFT_MODULE_CACHE" "$BUILD_ROOT"
+else
+  # 复用已成功的 release 二进制时，只清理本次 app/DMG 封装中间物；
+  # 保留 swiftpm-build，避免重跑数分钟的全模块优化编译。
+  rm -rf "$APP_BUNDLE" "$DMG_ROOT" "$DMG_RW_PATH" "$DMG_MOUNT"
+fi
+mkdir -p "$DIST_DIR"
+rm -rf "$APP_COPY" "$LEGACY_APP_COPY" "$DMG_PATH"
+mkdir -p "$SWIFT_MODULE_CACHE" "$SWIFT_BUILD_DIR" "$SWIFTPM_CACHE_ROOT" "$SWIFTPM_CONFIG_ROOT" "$SWIFTPM_SECURITY_ROOT"
 export CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE"
+export SWIFT_MODULECACHE_PATH="$SWIFT_MODULE_CACHE"
 
 swift_package_args=(
   --package-path "$ROOT_DIR"
   --scratch-path "$SWIFT_BUILD_DIR"
+  --cache-path "$SWIFTPM_CACHE_ROOT"
+  --config-path "$SWIFTPM_CONFIG_ROOT"
+  --security-path "$SWIFTPM_SECURITY_ROOT"
+  --manifest-cache local
+  --disable-dependency-cache
+  --jobs "$PACKAGE_JOBS"
   -c release
 )
 
@@ -79,11 +116,11 @@ swift "$ROOT_DIR/scripts/generate_icon.swift"
 # 内建的 codesign 步骤对含此类「detritus」的 bundle 会直接失败：
 #   "resource fork, Finder information, or similar detritus not allowed"
 # 因此在 swift build 之前，先把源码资源目录里的扩展属性清干净（每次都清，因为系统会反复挂回来）。
-find "$ROOT_DIR/Sources" -type d -name Resources -print0 2>/dev/null | while IFS= read -r -d '' res_dir; do
-  xattr -cr "$res_dir" 2>/dev/null || true
-done
-swift build "${swift_package_args[@]}" --product "$APP_NAME"
-swift build "${swift_package_args[@]}" --product "$SERVER_NAME"
+find "$ROOT_DIR/Sources" -type d -name Resources -exec xattr -cr {} + 2>/dev/null || true
+if [[ "$REUSE_EXISTING_RELEASE_BUILD" == "0" ]]; then
+  swift build "${swift_package_args[@]}" --product "$APP_NAME"
+  swift build "${swift_package_args[@]}" --product "$SERVER_NAME"
+fi
 SWIFT_PRODUCT_DIR="$(swift build "${swift_package_args[@]}" --show-bin-path)"
 SWIFT_PRODUCT_BINARY="$SWIFT_PRODUCT_DIR/$APP_NAME"
 SWIFT_SERVER_BINARY="$SWIFT_PRODUCT_DIR/$SERVER_NAME"
@@ -103,6 +140,11 @@ cp "$SWIFT_SERVER_BINARY" "$APP_BUNDLE/Contents/MacOS/$SERVER_NAME"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIcon.png" "$APP_BUNDLE/Contents/Resources/AppIcon.png"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIconDark.png" "$APP_BUNDLE/Contents/Resources/AppIconDark.png"
+# The web implementation takes the approved system-page document as its visual
+# source of truth.  Ship the original, self-contained design bundle so the
+# packaged server can generate fixed-viewport reference screenshots without
+# reaching outside the app bundle or depending on a developer checkout.
+cp "$ROOT_DIR/doc/MediaLIB 系统页面.html" "$APP_BUNDLE/Contents/Resources/MediaLIB 系统页面.html"
 
 bundle_libmpv_runtime() {
   local frameworks_dir="$APP_BUNDLE/Contents/Frameworks"
@@ -203,6 +245,10 @@ bundle_libmpv_runtime() {
       chmod u+w "$target_path"
     fi
 
+    # install_name_tool 改写前先移除来源二进制附带的旧签名；最终 bundle 会统一重签，
+    # 这样不会在打包过程中反复输出“修改将使签名失效”的误导性警告。
+    codesign --remove-signature "$target_path" >/dev/null 2>&1 || true
+
     local child_dep=""
     while IFS= read -r child_dep; do
       [[ "$child_dep" == /System/* || "$child_dep" == /usr/lib/* || "$child_dep" == @* ]] && continue
@@ -242,6 +288,7 @@ bundle_libmpv_runtime() {
     local ffmpeg_target="$APP_BUNDLE/Contents/MacOS/ffmpeg"
     cp -L "$ffmpeg_source" "$ffmpeg_target"
     chmod u+w,a+x "$ffmpeg_target"
+    codesign --remove-signature "$ffmpeg_target" >/dev/null 2>&1 || true
 
     local ffmpeg_dep=""
     while IFS= read -r ffmpeg_dep; do
@@ -265,6 +312,7 @@ bundle_libmpv_runtime() {
     local ffprobe_target="$APP_BUNDLE/Contents/MacOS/ffprobe"
     cp -L "$ffprobe_source" "$ffprobe_target"
     chmod u+w,a+x "$ffprobe_target"
+    codesign --remove-signature "$ffprobe_target" >/dev/null 2>&1 || true
 
     local ffprobe_dep=""
     while IFS= read -r ffprobe_dep; do
@@ -370,15 +418,14 @@ chmod +x "$APP_BUNDLE/Contents/MacOS/$SERVER_NAME"
 plutil -lint "$APP_BUNDLE/Contents/Info.plist"
 strip_bundle_metadata "$APP_BUNDLE"
 
-# 用稳定的本地自签名身份签名（让系统照片/通知等权限只需授权一次，跨重装保留）；
-# 取不到稳定身份时回退到临时(ad-hoc)签名，仍可运行但权限会每次重新弹窗。
-CODESIGN_IDENTITY="-"
-if STABLE_IDENTITY="$("$ROOT_DIR/scripts/ensure_local_signing_identity.sh" 2>/dev/null)" \
-   && [ -n "$STABLE_IDENTITY" ]; then
-  CODESIGN_IDENTITY="$STABLE_IDENTITY"
-  echo "codesign: 使用稳定本地身份「${CODESIGN_IDENTITY}」签名。"
+# 默认使用可离线严格验证的 ad-hoc 签名。自签名证书即使存在于钥匙串中，也可能
+# 不具备受信任链或在无交互构建环境中无法解析，不能成为发布流程的默认依赖。
+# 若已配置受信任的 Developer ID / Apple Development 身份，可显式传入其名称。
+CODESIGN_IDENTITY="${MEDIALIB_CODESIGN_IDENTITY:--}"
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+  echo "codesign: 使用可严格验证的 ad-hoc 签名。"
 else
-  echo "warning: 未能创建/获取稳定签名身份，回退到 ad-hoc 签名；系统照片与通知权限将每次启动重新弹窗。" >&2
+  echo "codesign: 使用显式配置的签名身份「${CODESIGN_IDENTITY}」。"
 fi
 codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE" >/dev/null
 codesign --verify --deep --strict "$APP_BUNDLE"
@@ -391,7 +438,7 @@ swift "$ROOT_DIR/scripts/generate_dmg_background.swift" "$DMG_BACKGROUND"
 strip_bundle_metadata "$DMG_ROOT"
 DMG_SIZE_MB=$(du -sm "$DMG_ROOT" | awk '{print $1}')
 DMG_SIZE_MB=$((DMG_SIZE_MB + 96))
-hdiutil create "$DMG_RW_PATH" -volname "$DISPLAY_NAME" -size "${DMG_SIZE_MB}m" -fs HFS+ -ov
+run_hdiutil create "$DMG_RW_PATH" -volname "$DISPLAY_NAME" -size "${DMG_SIZE_MB}m" -fs HFS+ -ov
 mkdir -p "$DMG_MOUNT"
 hdiutil attach "$DMG_RW_PATH" -mountpoint "$DMG_MOUNT" -nobrowse -quiet
 cleanup_dmg_mount() {
@@ -407,17 +454,13 @@ bless --folder "$DMG_MOUNT" --openfolder "$DMG_MOUNT" 2>/dev/null || true
 sync
 hdiutil detach "$DMG_MOUNT" -quiet
 trap - EXIT
-hdiutil convert "$DMG_RW_PATH" -format UDZO -imagekey zlib-level=9 -ov -o "$DMG_PATH"
+run_hdiutil convert "$DMG_RW_PATH" -format UDZO -imagekey zlib-level=9 -ov -o "$DMG_PATH"
 hdiutil verify "$DMG_PATH"
-if ditto --noextattr --noqtn "$APP_BUNDLE" "$APP_COPY"; then
-  strip_bundle_metadata "$APP_COPY"
-  if ! codesign --verify --deep --strict "$APP_COPY"; then
-    echo "warning: APP_COPY strict codesign verification was blocked by filesystem-managed extended attributes; verified source bundle at $APP_BUNDLE instead." >&2
-  fi
-else
-  echo "warning: APP_COPY refresh failed; verified DMG and source bundle remain available." >&2
-fi
+# The signed application is delivered only inside the verified DMG. A loose
+# .app copied to the workspace can acquire Finder metadata asynchronously,
+# which makes it unverifiable after the fact and creates a misleading second
+# distribution artifact. Keep dist deterministic and leave no stale copy.
+rm -rf "$APP_COPY" "$LEGACY_APP_COPY"
 
 echo "APP=$APP_BUNDLE"
-echo "APP_COPY=$APP_COPY"
 echo "DMG=$DMG_PATH"

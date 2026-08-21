@@ -19,17 +19,22 @@ extension AppColors {
 /// L1 重复表面：描边 + 极轻填充，无投影。
 private struct AppStandardSurfaceModifier: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     let cornerRadius: CGFloat
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         content
             .background {
-                shape.fill(AppColors.refCardBg.opacity(colorScheme == .dark ? 0.55 : 0.72))
+                shape.fill(AppColors.refCardBg.opacity(reduceTransparency ? 1 : (colorScheme == .dark ? 0.66 : 0.82)))
                     .overlay(shape.fill(Color.primary.opacity(0.04)))
             }
             .overlay {
-                shape.strokeBorder(AppColors.refCardBorder, lineWidth: AppGlassMetrics.Stroke.hairline)
+                shape.strokeBorder(
+                    colorSchemeContrast == .increased ? Color.primary.opacity(0.28) : AppColors.refCardBorder,
+                    lineWidth: colorSchemeContrast == .increased ? AppGlassMetrics.Stroke.surface : AppGlassMetrics.Stroke.hairline
+                )
             }
             .clipShape(shape)
     }
@@ -39,6 +44,8 @@ private struct AppStandardSurfaceModifier: ViewModifier {
 private struct AppCardSurfaceModifier: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.appUIStyle) private var style
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     let cornerRadius: CGFloat
 
     func body(content: Content) -> some View {
@@ -46,10 +53,13 @@ private struct AppCardSurfaceModifier: ViewModifier {
         let shadowOpacity = style.tokens.cardShadowOpacity
         return content
             .background {
-                shape.fill(AppColors.refCardBg)
+                shape.fill(reduceTransparency ? AppColors.elevatedSurface : AppColors.refCardBg)
             }
             .overlay {
-                shape.strokeBorder(AppColors.refCardBorder, lineWidth: AppGlassMetrics.Stroke.surface)
+                shape.strokeBorder(
+                    colorSchemeContrast == .increased ? Color.primary.opacity(0.30) : AppColors.refCardBorder,
+                    lineWidth: colorSchemeContrast == .increased ? AppGlassMetrics.Stroke.selected : AppGlassMetrics.Stroke.surface
+                )
             }
             .clipShape(shape)
             .shadow(

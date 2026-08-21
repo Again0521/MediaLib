@@ -66,6 +66,29 @@ public final class ServerUserMediaPreferenceRepository: @unchecked Sendable {
         return Dictionary(uniqueKeysWithValues: records.map { ($0.mediaID, $0) })
     }
 
+    /// 这个用户**自己**的全部偏好行。
+    ///
+    /// 按 ID 批量读取那条路径一次最多 100 项，音乐页却是整库一次渲染（几千行都可能）。
+    /// 分成几十次查询只是把同一个问题拆碎；而"这个用户标过的东西"本身就是有界的
+    /// ——它随这个人的操作增长，不随资料库增长。上限仍然要有一个，超出部分按
+    /// 最近更新截断。
+    public func fetchAll(userID: String, limit: Int = 5_000) throws -> [String: ServerUserMediaPreferenceRecord] {
+        let userID = try validatedIdentifier(userID)
+        let safeLimit = min(max(limit, 1), 20_000)
+        let records = try database.query(
+            """
+            SELECT user_id, media_id, is_favorite, is_watchlist, user_rating, updated_at
+            FROM server_user_media_preferences
+            WHERE user_id = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            bindings: [.text(userID), .int(Int64(safeLimit))],
+            map: Self.map(row:)
+        )
+        return Dictionary(records.map { ($0.mediaID, $0) }) { first, _ in first }
+    }
+
     @discardableResult
     public func update(
         userID: String,

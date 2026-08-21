@@ -45,14 +45,32 @@ final class ServerProtocolModelsTests: XCTestCase {
         let cardJSON = #"{"id":"movie-1","type":"movie","title":"影片","year":2026,"artworkAvailable":true}"#
         let detailJSON = #"{"id":"movie-1","type":"movie","title":"影片","genres":[],"artworkAvailable":true,"backdropAvailable":false,"canDirectPlay":true,"canTranscode":false}"#
 
-        XCTAssertEqual(
-            try JSONDecoder().decode(ServerLibraryItem.self, from: Data(cardJSON.utf8)).userPreference,
-            .empty
-        )
+        let card = try JSONDecoder().decode(ServerLibraryItem.self, from: Data(cardJSON.utf8))
+        XCTAssertEqual(card.userPreference, .empty)
+        XCTAssertFalse(card.isRemoteSource)
         XCTAssertEqual(
             try JSONDecoder().decode(ServerMediaItemDetail.self, from: Data(detailJSON.utf8)).userPreference,
             .empty
         )
+        XCTAssertEqual(
+            try JSONDecoder().decode(ServerMediaItemDetail.self, from: Data(detailJSON.utf8)).playbackModes,
+            [.directPlay]
+        )
+    }
+
+    func testRemoteSourceMarkerRoundTripsWithoutSourceDetails() throws {
+        let card = ServerLibraryItem(
+            id: "remote-movie", type: "movie", title: "远程影片", year: 2026,
+            artworkAvailable: true, isRemoteSource: true
+        )
+
+        let data = try JSONEncoder().encode(card)
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+
+        XCTAssertTrue(try JSONDecoder().decode(ServerLibraryItem.self, from: data).isRemoteSource)
+        XCTAssertTrue(text.contains("isRemoteSource"))
+        XCTAssertFalse(text.contains("sourcePath"))
+        XCTAssertFalse(text.contains("https://"))
     }
 
     func testPaginatedLibraryAndCategoriesRoundTripWithoutIdentityOrPaths() throws {
@@ -129,7 +147,8 @@ final class ServerProtocolModelsTests: XCTestCase {
             backdropAvailable: true,
             browserContentType: " video/mp4 ",
             canDirectPlay: true,
-            canTranscode: true
+            canTranscode: true,
+            playbackModes: [.directPlay, .directStream, .audioTranscode, .fullTranscode]
         )
         let data = try JSONEncoder().encode(detail)
         let text = String(data: data, encoding: .utf8)?.lowercased() ?? ""
@@ -137,6 +156,8 @@ final class ServerProtocolModelsTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(ServerMediaItemDetail.self, from: data), detail)
         XCTAssertEqual(detail.browserContentType, "video/mp4")
         XCTAssertTrue(String(data: data, encoding: .utf8)?.contains("browserContentType") ?? false)
+        XCTAssertTrue(String(data: data, encoding: .utf8)?.contains("playbackModes") ?? false)
+        XCTAssertFalse(text.contains("detailextras"))
         for forbiddenField in [
             "filepath", "sourcepath", "posterpath", "backdroppath", "externalid",
             "playposition", "playprogress", "userid", "deviceid", "sessionid", "token", "digest"

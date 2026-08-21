@@ -1291,10 +1291,23 @@ struct SettingsView: View {
         return store.requiresInitialPassword ? "需要首次设置" : "admin 已保护"
     }
 
+    /// 可授权的媒体源，**包含保险库**。
+    ///
+    /// 这里从前把 `.privateCollection` 过滤掉了，于是"给某个成员开放保险库"在界面
+    /// 上根本不存在——不是权限不足，是那一行压根画不出来。保险库仍然是一个需要
+    /// 明确勾选的授权，而且网页侧还要求这台机器上的 App 正解锁着，两个条件缺一
+    /// 不可；把它排除在授权列表之外并不能提供这层保护，只是让它无法被管理。
     private var serverLibraryOptions: [ServerLibraryOption] {
         appState.sources
-            .filter { $0.mediaType != .privateCollection }
-            .map { ServerLibraryOption(id: $0.id, name: $0.name, mediaType: $0.mediaType) }
+            .map {
+                ServerLibraryOption(
+                    id: $0.id,
+                    name: $0.mediaType == .privateCollection
+                        ? "\($0.name)（\(appState.settings.privacyVaultName)）"
+                        : $0.name,
+                    mediaType: $0.mediaType
+                )
+            }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
@@ -1323,7 +1336,7 @@ struct SettingsView: View {
             }
 
             SettingsRow(title: "软件更新", systemImage: "arrow.down.circle") {
-                Text("当前版本 \(AppVersion.current)")
+                Text("当前版本 \(AppVersion.displayString)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button {

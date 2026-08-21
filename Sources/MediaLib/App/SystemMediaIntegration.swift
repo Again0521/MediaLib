@@ -118,9 +118,12 @@ enum SystemNowPlayingCenter {
         let token = artworkLoadToken
         Task { @MainActor in
             // 读图放到后台，避免主线程卡顿。
-            let image = await Task.detached(priority: .utility) {
-                ArtworkImageCache.image(path: path, targetSize: CGSize(width: 600, height: 600))
+            let loaded = await Task.detached(priority: .utility) {
+                SendableNowPlayingArtworkImage(
+                    ArtworkImageCache.image(path: path, targetSize: CGSize(width: 600, height: 600))
+                )
             }.value
+            let image = loaded.image
             // 期间若已换歌/换封面，丢弃这次结果。
             guard token == artworkLoadToken, path == artworkCachePath, let image else { return }
             // requestHandler 可能在任意线程被调用；直接返回已读好的图，
@@ -144,5 +147,16 @@ enum SystemNowPlayingCenter {
         let center = MPNowPlayingInfoCenter.default()
         center.nowPlayingInfo = nil
         center.playbackState = .stopped
+    }
+}
+
+/// AppKit 的 `NSImage` 可安全地在后台完成文件解码后交还主线程，但其 SDK
+/// Sendable 标注只在 macOS 14 起可用。该封装保持部署目标 13 的编译安静，且
+/// 不允许在后台继续使用图片：取回后立即回到 `@MainActor` 创建系统媒体封面。
+private struct SendableNowPlayingArtworkImage: @unchecked Sendable {
+    let image: NSImage?
+
+    init(_ image: NSImage?) {
+        self.image = image
     }
 }

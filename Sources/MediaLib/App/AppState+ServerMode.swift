@@ -55,6 +55,15 @@ extension AppState {
         }
     }
 
+    /// 退出应用不改变用户的“下次启动时恢复服务模式”偏好，只释放本次启动
+    /// 创建的子进程，避免它继续占用端口并导致下一次启动失败。
+    func stopServerModeForApplicationTermination() {
+        // 保险库的解锁会话必须随 App 一起结束。它自己也会过期，但退出时收回是
+        // 确定的那条路径——否则关掉 App 之后，网页上的保险库还会开着一段时间。
+        clearVaultUnlockSession()
+        serverModeController.stop()
+    }
+
     /// 管理员忘记密码恢复的停机门槛。先持久化关闭自动启动，再等待服务子进程退出；
     /// 恢复完成后保持关闭，由管理员用新密码确认后手动重新开启。
     func prepareServerForCredentialRecovery() async -> Bool {
