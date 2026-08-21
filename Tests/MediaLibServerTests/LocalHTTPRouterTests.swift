@@ -1019,6 +1019,8 @@ final class LocalHTTPRouterTests: XCTestCase {
 
         XCTAssertEqual(page.statusCode, 200)
         XCTAssertEqual(asset.contentType, "text/javascript; charset=utf-8")
+        XCTAssertEqual(styleAsset.contentType, "text/css; charset=utf-8")
+        XCTAssertTrue(style.contains(".library-status"))
         XCTAssertTrue(html.contains("客厅 &lt;服务器&gt;"))
         XCTAssertTrue(html.contains("href=\"/assets/library.css?v="))
         XCTAssertLessThan(

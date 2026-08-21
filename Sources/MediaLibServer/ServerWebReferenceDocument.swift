@@ -6,19 +6,32 @@ import Foundation
 /// to the local server lets visual regression checks render the exact same
 /// source in a fixed browser viewport.
 enum ServerWebReferenceDocument {
+    private static let fileName = "MediaLIB 系统页面"
+
     static func data() -> Data? {
-        let fileName = "MediaLIB 系统页面"
         if let bundled = Bundle.main.url(forResource: fileName, withExtension: "html"),
            let data = try? Data(contentsOf: bundled) {
             return data
         }
 
         // SwiftPM tests and local debug builds do not have the final app bundle.
-        // This fallback is deliberately limited to the checked-in visual source;
-        // it never reads media paths or user data.
-        let checkout = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("doc", isDirectory: true)
-            .appendingPathComponent("\(fileName).html")
-        return try? Data(contentsOf: checkout)
+        // XCTest does not promise that its process starts in the package root, so
+        // derive the checked-in source from this file before trying the legacy
+        // working-directory lookup. Both locations are repository-owned only;
+        // neither can resolve media paths or user data.
+        let sourceCheckout = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let workingDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        for checkout in [sourceCheckout, workingDirectory] {
+            let document = checkout
+                .appendingPathComponent("doc", isDirectory: true)
+                .appendingPathComponent("\(fileName).html")
+            if let data = try? Data(contentsOf: document) {
+                return data
+            }
+        }
+        return nil
     }
 }
