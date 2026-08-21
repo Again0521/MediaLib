@@ -870,10 +870,6 @@ struct LocalHTTPRouter {
             )
         }
         if method == "GET" || isHeadRequest {
-            if path == "/assets/reference-system-page.html" {
-                guard let document = ServerWebReferenceDocument.data() else { return .notFound() }
-                return .html(body: document, omitBody: isHeadRequest)
-            }
             if let asset = LocalHTTPRouter.staticWebAssets[path] {
                 switch asset.kind {
                 case .stylesheet:

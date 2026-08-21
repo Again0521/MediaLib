@@ -299,19 +299,6 @@ final class LocalHTTPRouterTests: XCTestCase {
         }
     }
 
-    func testReferenceSystemPageIsAvailableForFixedViewportVisualRegression() {
-        let response = router.response(
-            for: "GET /assets/reference-system-page.html HTTP/1.1\r\nHost: localhost\r\n\r\n"
-        )
-        let document = String(data: response.body, encoding: .utf8) ?? ""
-
-        XCTAssertEqual(response.statusCode, 200)
-        XCTAssertEqual(response.contentType, "text/html; charset=utf-8")
-        XCTAssertTrue(document.contains("命运 / 奇异赝品"))
-        XCTAssertTrue(document.contains("max-width:1380px"))
-        XCTAssertTrue(document.contains("width:248px"))
-    }
-
     func testAuthenticatedPagesUseReferenceSidebarGeometryInsteadOfTheLegacyTheme() {
         let home = router.response(for: "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
         let songs = router.response(for: "GET /music/songs HTTP/1.1\r\nHost: localhost\r\n\r\n")

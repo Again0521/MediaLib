@@ -22,14 +22,13 @@ final class ServerRemoteArtworkThroughputTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    /// 一面 24 张的海报墙必须在"若干轮"而不是"十几轮"往返内取完。
+    /// 一面海报墙必须让多个不同上游封面同时在飞，而不是退化为少量串行槽位。
     func testPosterWallFetchesInBoundedRounds() throws {
         let fetcher = ServerRemoteAssetFetcher()
         let posterCount = 24
         let group = DispatchGroup()
         let lock = NSLock()
         var failures = 0
-        let startedAt = Date()
 
         for index in 0..<posterCount {
             group.enter()
@@ -45,17 +44,15 @@ final class ServerRemoteArtworkThroughputTests: XCTestCase {
         XCTAssertEqual(group.wait(timeout: .now() + 120), .success, "海报墙取图超时")
         XCTAssertEqual(failures, 0)
 
-        let elapsed = Date().timeIntervalSince(startedAt)
-        let rounds = elapsed / 0.06
         print(String(
-            format: "[artwork] %d 张封面耗时 %.3fs ≈ %.1f 轮往返，上游连接 %d",
-            posterCount, elapsed, rounds, upstream.acceptedConnectionCount
+            format: "[artwork] %d 张封面峰值并发 %d，上游连接 %d",
+            posterCount, upstream.peakConcurrentRequestCount, upstream.acceptedConnectionCount
         ))
-        // 并发为 N 时约需 24/N 轮。断言留足调度余量，但足以在并发被改回 2
-        // （需要约 12 轮）时失败。
-        XCTAssertLessThan(
-            rounds, 8,
-            "24 张封面不应退化成十几轮串行往返；实测 \(String(format: "%.1f", rounds)) 轮"
+        // 时间受共享 CI 的调度和 socket 建连影响，不是可靠的并发信号。直接观察
+        // 上游在延迟窗口内同时处理的请求：槽位若被改回 2，此值不可能达到 4。
+        XCTAssertGreaterThanOrEqual(
+            upstream.peakConcurrentRequestCount, 4,
+            "海报墙不应退化为少量串行上游请求"
         )
     }
 
@@ -98,11 +95,18 @@ private final class LoopbackArtworkUpstream: @unchecked Sendable {
     private let stateLock = NSLock()
     private var acceptedConnections = 0
     private var requestsByIndex: [Int: Int] = [:]
+    private var activeRequestCount = 0
+    private var peakRequestCount = 0
     private var isRunning = true
 
     var acceptedConnectionCount: Int {
         stateLock.lock(); defer { stateLock.unlock() }
         return acceptedConnections
+    }
+
+    var peakConcurrentRequestCount: Int {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return peakRequestCount
     }
 
     func requestCount(forIndex index: Int) -> Int {
@@ -167,15 +171,28 @@ private final class LoopbackArtworkUpstream: @unchecked Sendable {
         var noSignalPipe: Int32 = 1
         setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSignalPipe, socklen_t(MemoryLayout<Int32>.size))
         while let head = readRequestHead(client) {
-            if let index = Self.itemIndex(from: head) {
-                stateLock.lock(); requestsByIndex[index, default: 0] += 1; stateLock.unlock()
-            }
+            beginRequest(index: Self.itemIndex(from: head))
             Thread.sleep(forTimeInterval: latency)
+            endRequest()
             // 一个最小的合法 JPEG 头即可：被测的是排队与合并，不是解码。
             let body = Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data(repeating: 0x20, count: 4_096)
             let header = "HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: \(body.count)\r\nConnection: keep-alive\r\n\r\n"
             guard send(header: header, body: body, on: client) else { return }
         }
+    }
+
+    private func beginRequest(index: Int?) {
+        stateLock.lock()
+        if let index { requestsByIndex[index, default: 0] += 1 }
+        activeRequestCount += 1
+        peakRequestCount = max(peakRequestCount, activeRequestCount)
+        stateLock.unlock()
+    }
+
+    private func endRequest() {
+        stateLock.lock()
+        activeRequestCount -= 1
+        stateLock.unlock()
     }
 
     private static func itemIndex(from head: String) -> Int? {
