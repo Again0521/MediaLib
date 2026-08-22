@@ -97,6 +97,73 @@ final class ServerModeProcessControllerTests: XCTestCase {
         controller.stop()
     }
 
+    func testLANEnvironmentUsesDerivedHTTPSOriginAndNeverTrustsProxyHeaders() {
+        let configuration = ServerModeConfiguration(
+            serverID: "server-lan",
+            port: 8098,
+            networkAccessMode: .lanHTTPS,
+            lanAddress: "192.168.31.100",
+            publicOrigin: "https://proxy.example.test",
+            trustedProxyAddresses: ["127.0.0.1"]
+        )
+        let environment = ServerModeProcessController.processEnvironment(
+            configuration: configuration,
+            base: ["UNCHANGED": "yes", "MEDIALIB_SERVER_TRUSTED_PROXIES": "stale"]
+        )
+
+        XCTAssertEqual(environment["UNCHANGED"], "yes")
+        XCTAssertEqual(environment["MEDIALIB_SERVER_NETWORK_ACCESS_MODE"], "lan-https")
+        XCTAssertEqual(environment["MEDIALIB_SERVER_PUBLIC_ORIGIN"], "https://192.168.31.100:8098")
+        XCTAssertNil(environment["MEDIALIB_SERVER_TRUSTED_PROXIES"])
+    }
+
+    func testRealLANRuntimePassesPinnedCAHealthCheck() async throws {
+        guard let address = LANNetworkAddressResolver.preferredPrivateIPv4Address() else {
+            throw XCTSkip("当前测试机没有私有 IPv4 地址")
+        }
+        let executable = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(".build/debug/MediaLibServer")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            throw XCTSkip("MediaLibServer 测试运行时尚未构建")
+        }
+        let configuration = ServerModeConfiguration(
+            serverID: "server-live-lan",
+            port: 18_198,
+            networkAccessMode: .lanHTTPS,
+            lanAddress: address
+        )
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["--serve"]
+        var environment = ServerModeProcessController.processEnvironment(configuration: configuration)
+        environment["MEDIALIB_SERVER_DATA_DIR"] = temporaryDirectory.path
+        process.environment = environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        defer {
+            if process.isRunning { process.terminate() }
+            process.waitUntilExit()
+        }
+
+        let certificate = ServerModeCertificateSupport.certificateAuthorityURL(
+            applicationSupport: temporaryDirectory
+        )
+        var ready = false
+        for _ in 0..<80 where !ready && process.isRunning {
+            ready = await ServerModeProcessController.checkLANHTTPSReadiness(
+                configuration,
+                certificateAuthorityURL: certificate
+            )
+            if !ready { try? await Task.sleep(nanoseconds: 50_000_000) }
+        }
+        XCTAssertTrue(ready, "真实 LAN TLS 服务必须通过本机 CA 锚定健康检查")
+    }
+
     private func waitForRunning(_ controller: ServerModeProcessController) async {
         for _ in 0..<30 where controller.status == .starting {
             try? await Task.sleep(nanoseconds: 20_000_000)

@@ -94,9 +94,14 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         guard ["127.0.0.1", "localhost"].contains(configuration.host.lowercased()) else {
             throw ServerConfigurationError.nonLoopbackHost(configuration.host)
         }
+        var allowedHosts: Set<String> = ["127.0.0.1", "localhost"]
+        if configuration.networkAccessMode == .lanHTTPS,
+           let publicHost = configuration.publicOrigin?.host?.lowercased() {
+            allowedHosts.insert(publicHost)
+        }
         self.configuration = configuration
         self.requestSecurityPolicy = HTTPRequestSecurityPolicy(
-            allowedHosts: ["127.0.0.1", "localhost"],
+            allowedHosts: allowedHosts,
             allowedPort: configuration.port,
             csrfToken: csrfToken,
             trustedProxyAddresses: configuration.trustedProxyAddresses,
@@ -155,6 +160,9 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
     }
 
     func run() throws {
+        guard configuration.networkAccessMode == .loopbackOnly else {
+            throw ServerConfigurationError.lanHTTPSRuntimeUnavailable
+        }
         let listener = try makeListener()
         defer { _ = close(listener) }
 
@@ -249,27 +257,10 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
                 write(response: response(for: rejection), to: client)
                 return
             }
-            if let rejection = requestSecurityPolicy.validate(
-                request.head,
-                bodyLength: request.body.count,
-                clientAddressKey: clientAddressKey
-            ) {
-                let response: LocalHTTPResponse
-                switch rejection {
-                case .badRequest: response = .badRequest()
-                case .forbidden: response = .forbidden()
-                case .payloadTooLarge: response = .payloadTooLarge()
-                }
-                write(response: response, to: client)
-                return
-            }
-            let response = router.response(
+            let response = response(
                 for: request.head,
                 body: request.body,
-                clientAddressKey: requestSecurityPolicy.effectiveClientAddressKey(
-                    for: request.head,
-                    connectedAddressKey: clientAddressKey
-                )
+                clientAddressKey: clientAddressKey
             )
             let keepAlive = requestIndex + 1 < Self.maximumRequestsPerConnection &&
                 ProcessInfo.processInfo.systemUptime <= connectionDeadline &&
@@ -283,6 +274,33 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             )
             if !reused { return }
         }
+    }
+
+    /// Shared request boundary used by both the legacy loopback socket and the
+    /// maintained Hummingbird TLS listener. Keeping validation here prevents the
+    /// LAN transport from silently bypassing Host, Origin, CSRF or rate-limit keys.
+    func response(
+        for requestHead: String,
+        body: Data,
+        clientAddressKey: String,
+        isDirectTLS: Bool = false
+    ) -> LocalHTTPResponse {
+        if let rejection = requestSecurityPolicy.validate(
+            requestHead,
+            bodyLength: body.count,
+            clientAddressKey: clientAddressKey,
+            isDirectTLS: isDirectTLS
+        ) {
+            return response(for: rejection)
+        }
+        return router.response(
+            for: requestHead,
+            body: body,
+            clientAddressKey: requestSecurityPolicy.effectiveClientAddressKey(
+                for: requestHead,
+                connectedAddressKey: clientAddressKey
+            )
+        )
     }
 
     private func response(for rejection: HTTPRequestSecurityPolicy.Rejection) -> LocalHTTPResponse {

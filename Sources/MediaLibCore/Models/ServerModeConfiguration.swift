@@ -1,5 +1,14 @@
 import Foundation
 
+/// 服务端对浏览器开放的网络边界。
+///
+/// 默认值永远是回环；局域网模式必须由用户显式开启，并且只表示使用内建 HTTPS
+/// 运行时。它不是允许明文 HTTP，也不是把任意字符串直接交给 socket `bind`。
+public enum ServerNetworkAccessMode: String, Codable, CaseIterable, Equatable, Sendable {
+    case loopbackOnly = "loopback"
+    case lanHTTPS = "lan-https"
+}
+
 /// 桌面端服务模式的本地配置。
 ///
 /// 此配置刻意独立于 `AppSettings`：服务端未来会同时被桌面端、纯服务端
@@ -12,6 +21,10 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
     public var serverID: String
     public var serverName: String
     public var port: Int
+    public var networkAccessMode: ServerNetworkAccessMode
+    /// The current private IPv4 address selected by the desktop app for the
+    /// built-in LAN HTTPS listener. It is refreshed before every launch.
+    public var lanAddress: String?
     /// Optional public HTTPS origin when a local reverse proxy terminates TLS.
     /// Empty means the service is loopback-only and never trusts forwarded headers.
     public var publicOrigin: String?
@@ -27,6 +40,8 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         serverID: String = UUID().uuidString.lowercased(),
         serverName: String = ServerModeConfiguration.defaultServerName,
         port: Int = ServerModeConfiguration.defaultPort,
+        networkAccessMode: ServerNetworkAccessMode = .loopbackOnly,
+        lanAddress: String? = nil,
         publicOrigin: String? = nil,
         trustedProxyAddresses: [String] = [],
         isLightweightMode: Bool = false
@@ -35,6 +50,8 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         self.serverID = Self.normalizedServerID(serverID)
         self.serverName = Self.normalizedServerName(serverName)
         self.port = Self.normalizedPort(port)
+        self.networkAccessMode = networkAccessMode
+        self.lanAddress = Self.normalizedLANAddress(lanAddress)
         let normalizedOrigin = Self.normalizedPublicOrigin(publicOrigin)
         self.publicOrigin = normalizedOrigin
         self.trustedProxyAddresses = normalizedOrigin == nil
@@ -50,6 +67,47 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
     public var publicOriginURL: URL? {
         guard let publicOrigin else { return nil }
         return URL(string: publicOrigin)
+    }
+
+    public var lanHTTPSBaseURL: URL? {
+        guard networkAccessMode == .lanHTTPS, let lanAddress else { return nil }
+        return URL(string: "https://\(lanAddress):\(port)")
+    }
+
+    public var effectiveBaseURL: URL {
+        if let lanHTTPSBaseURL { return lanHTTPSBaseURL }
+        return publicOriginURL ?? loopbackBaseURL
+    }
+
+    public var effectivePublicOrigin: String? {
+        if networkAccessMode == .lanHTTPS { return lanHTTPSBaseURL?.absoluteString }
+        return publicOrigin
+    }
+
+    public var effectiveTrustedProxyAddresses: [String] {
+        networkAccessMode == .lanHTTPS ? [] : trustedProxyAddresses
+    }
+
+    public mutating func updateNetworkAccessMode(_ mode: ServerNetworkAccessMode) {
+        networkAccessMode = mode
+        if mode == .loopbackOnly { lanAddress = nil }
+    }
+
+    @discardableResult
+    public mutating func enableLANHTTPS(address: String) -> Bool {
+        guard let address = Self.normalizedLANAddress(address) else { return false }
+        networkAccessMode = .lanHTTPS
+        lanAddress = address
+        return true
+    }
+
+    public mutating func refreshLANAddress(_ address: String) -> Bool {
+        guard networkAccessMode == .lanHTTPS,
+              let address = Self.normalizedLANAddress(address)
+        else { return false }
+        let changed = lanAddress != address
+        lanAddress = address
+        return changed
     }
 
     public mutating func updateServerName(_ name: String) {
@@ -74,6 +132,8 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         case serverID
         case serverName
         case port
+        case networkAccessMode
+        case lanAddress
         case publicOrigin
         case trustedProxyAddresses
         case isLightweightMode
@@ -86,6 +146,11 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
             serverID: try container.decodeIfPresent(String.self, forKey: .serverID) ?? UUID().uuidString.lowercased(),
             serverName: try container.decodeIfPresent(String.self, forKey: .serverName) ?? Self.defaultServerName,
             port: try container.decodeIfPresent(Int.self, forKey: .port) ?? Self.defaultPort,
+            networkAccessMode: try container.decodeIfPresent(
+                ServerNetworkAccessMode.self,
+                forKey: .networkAccessMode
+            ) ?? .loopbackOnly,
+            lanAddress: try container.decodeIfPresent(String.self, forKey: .lanAddress),
             publicOrigin: try container.decodeIfPresent(String.self, forKey: .publicOrigin),
             trustedProxyAddresses: try container.decodeIfPresent([String].self, forKey: .trustedProxyAddresses) ?? [],
             isLightweightMode: try container.decodeIfPresent(Bool.self, forKey: .isLightweightMode) ?? false
@@ -125,6 +190,12 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         normalized.scheme = "https"
         normalized.path = ""
         return normalized.string
+    }
+
+    private static func normalizedLANAddress(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return LANIPv4AddressPolicy.isPrivate(trimmed) ? trimmed : nil
     }
 
     private static func normalizedTrustedProxyAddresses(_ values: [String]) -> [String] {

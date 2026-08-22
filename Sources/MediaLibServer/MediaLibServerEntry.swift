@@ -4,7 +4,7 @@ import MediaLibServerProtocol
 
 @main
 struct MediaLibServer {
-    static func main() throws {
+    static func main() async throws {
         let configuration = try ServerLaunchConfiguration.load()
         let arguments = Array(CommandLine.arguments.dropFirst())
 
@@ -123,8 +123,22 @@ struct MediaLibServer {
                 authenticationService: authentication,
                 authenticationProvider: { try authentication.principal(forRequestHead: $0) }
             )
-            print("MediaLibServer 正在监听 http://\(configuration.host):\(configuration.port)")
-            try server.run()
+            switch configuration.networkAccessMode {
+            case .loopbackOnly:
+                print("MediaLibServer 正在监听 http://\(configuration.host):\(configuration.port)")
+                try server.run()
+            case .lanHTTPS:
+                guard #available(macOS 14.0, *) else {
+                    throw ServerConfigurationError.lanHTTPSRequiresMacOS14
+                }
+                let lanServer = try LANHTTPSServer(
+                    configuration: configuration,
+                    dataDirectory: dataDirectories.root,
+                    requestHandler: server
+                )
+                print("MediaLibServer 正在监听 \(configuration.publicOrigin?.absoluteString ?? "https://0.0.0.0:\(configuration.port)")")
+                try await lanServer.run()
+            }
         case "--help", "-h":
             print(ServerCommandOutput.usage)
         default:
@@ -208,16 +222,16 @@ enum ServerCommandOutput {
     ]
 
     static let usage = """
-    MediaLibServer 回环预览服务
+    MediaLibServer 安全 Web 服务
       --health   输出不含敏感信息的服务器健康 JSON
       --describe 输出 Mlink 服务描述 JSON
-      --serve    仅在 127.0.0.1 上启动认证 Web/媒体预览服务
+      --serve    按 loopback 或 lan-https 模式启动认证 Web/媒体服务
 
     当前具备登录/刷新/注销、桌面多用户与逐资料库授权、安全审计、
     Web 列表/详情/浏览器原生播放、逐用户续播/已看、只读管理、播放探测、HTTP Range 与分级限速。限速参数压测、
-    告警聚合、应用内 TLS 与远程部署尚未完成；如需远程访问，只能由本机 HTTPS 反向代理
-    显式配置 MEDIALIB_SERVER_PUBLIC_ORIGIN 与 MEDIALIB_SERVER_TRUSTED_PROXIES 后转发到回环服务，
-    不会接受局域网或公网监听地址。
+    告警聚合与公网部署尚未完成。lan-https 需要 macOS 14+、私有 IPv4 HTTPS Origin，
+    使用内建 TLS 监听；loopback 也可由显式配置的本机 HTTPS 反向代理安全转发。
+    两种方式都不会开放明文局域网或公网监听。
 
     远程媒体始终经本服务同源代理。MEDIALIB_SERVER_LAN_DIRECT_PLAY 默认关闭，只解除
     「已验证局域网直连」的配置层门禁；Emby/Jellyfin/Plex 的播放地址携带账号级长期令牌，
@@ -245,6 +259,7 @@ enum ServerCommandOutput {
 struct ServerLaunchConfiguration: Sendable {
     let host: String
     let port: Int
+    let networkAccessMode: ServerNetworkAccessMode
     let serverID: String
     let serverName: String
     let publicOrigin: URL?
@@ -264,6 +279,18 @@ struct ServerLaunchConfiguration: Sendable {
         let port = portValue.flatMap(Int.init) ?? 8098
         guard (1...65_535).contains(port) else {
             throw ServerConfigurationError.invalidPort(portValue ?? "")
+        }
+
+        let networkAccessModeValue = environment["MEDIALIB_SERVER_NETWORK_ACCESS_MODE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let networkAccessMode: ServerNetworkAccessMode
+        switch networkAccessModeValue.lowercased() {
+        case "", ServerNetworkAccessMode.loopbackOnly.rawValue:
+            networkAccessMode = .loopbackOnly
+        case ServerNetworkAccessMode.lanHTTPS.rawValue:
+            networkAccessMode = .lanHTTPS
+        default:
+            throw ServerConfigurationError.invalidNetworkAccessMode(networkAccessModeValue)
         }
 
         let serverID = environment["MEDIALIB_SERVER_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -315,6 +342,7 @@ struct ServerLaunchConfiguration: Sendable {
         return Self(
             host: normalizedHost,
             port: port,
+            networkAccessMode: networkAccessMode,
             // App/容器必须注入持久化 ID；默认值只用于开发命令和本机健康探测。
             serverID: serverID?.isEmpty == false ? serverID! : "medialib-development",
             serverName: serverName?.isEmpty == false ? serverName! : "MediaLIB Server",
@@ -336,16 +364,21 @@ struct ServerLaunchConfiguration: Sendable {
 
 enum ServerConfigurationError: LocalizedError, Equatable {
     case invalidPort(String)
+    case invalidNetworkAccessMode(String)
     case nonLoopbackHost(String)
     case invalidPublicOrigin(String)
     case invalidTrustedProxyConfiguration
     case invalidLanDirectPlayConfiguration
+    case lanHTTPSRuntimeUnavailable
+    case lanHTTPSRequiresMacOS14
     case runtimeNotInstalled(host: String, port: Int)
 
     var errorDescription: String? {
         switch self {
         case let .invalidPort(value):
             return "MEDIALIB_SERVER_PORT 无效：\(value)。端口必须在 1 到 65535 之间。"
+        case let .invalidNetworkAccessMode(value):
+            return "MEDIALIB_SERVER_NETWORK_ACCESS_MODE 无效：\(value)。只接受 loopback 或 lan-https。"
         case let .nonLoopbackHost(host):
             return "当前安全门槛下服务端只允许监听本机回环地址，不能使用：\(host)。"
         case let .invalidPublicOrigin(origin):
@@ -354,6 +387,10 @@ enum ServerConfigurationError: LocalizedError, Equatable {
             return "MEDIALIB_SERVER_TRUSTED_PROXIES 必须是 IPv4 地址列表，并且只能与 HTTPS 公开 Origin 一起使用。"
         case .invalidLanDirectPlayConfiguration:
             return "MEDIALIB_SERVER_LAN_DIRECT_PLAY 只接受 0/1，并且必须同时配置 HTTPS 公开 Origin 与可信反向代理。"
+        case .lanHTTPSRuntimeUnavailable:
+            return "局域网 HTTPS 配置已保存，但当前运行时尚未接入 TLS 监听；服务已保持关闭，未退化为明文连接。"
+        case .lanHTTPSRequiresMacOS14:
+            return "内建局域网 HTTPS 服务需要 macOS 14 或更高版本。"
         case let .runtimeNotInstalled(host, port):
             return "MediaLibServer 未选择运行命令，尚未监听 \(host):\(port)。使用 --health、--describe、--serve 或 --help。"
         }

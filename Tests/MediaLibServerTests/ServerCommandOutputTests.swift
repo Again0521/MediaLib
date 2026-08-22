@@ -2,7 +2,7 @@ import XCTest
 @testable import MediaLibServer
 
 final class ServerCommandOutputTests: XCTestCase {
-    func testUsageDescribesCurrentAuthenticatedLoopbackBoundary() {
+    func testUsageDescribesCurrentAuthenticatedTransportBoundary() {
         XCTAssertTrue(ServerCommandOutput.usage.contains("登录/刷新/注销"))
         XCTAssertTrue(ServerCommandOutput.usage.contains("HTTP Range"))
         XCTAssertTrue(ServerCommandOutput.usage.contains("桌面多用户与逐资料库授权、安全审计"))
@@ -14,9 +14,10 @@ final class ServerCommandOutputTests: XCTestCase {
         XCTAssertTrue(ServerCommandOutput.capabilities.contains("per-user-playback-queue"))
         XCTAssertTrue(ServerCommandOutput.usage.contains("浏览器原生播放"))
         XCTAssertTrue(ServerCommandOutput.usage.contains("限速参数压测、"))
-        XCTAssertTrue(ServerCommandOutput.usage.contains("告警聚合、应用内 TLS"))
+        XCTAssertTrue(ServerCommandOutput.usage.contains("lan-https 需要 macOS 14+"))
+        XCTAssertTrue(ServerCommandOutput.usage.contains("内建 TLS 监听"))
         XCTAssertFalse(ServerCommandOutput.usage.contains("管理员恢复、TLS"))
-        XCTAssertTrue(ServerCommandOutput.usage.contains("不会接受局域网或公网监听地址"))
+        XCTAssertTrue(ServerCommandOutput.usage.contains("不会开放明文局域网或公网监听"))
         XCTAssertFalse(ServerCommandOutput.usage.contains("不提供用户、媒体、认证"))
         XCTAssertFalse(ServerCommandOutput.usage.contains("首次管理员设置、限速审计"))
         XCTAssertFalse(ServerCommandOutput.usage.contains("Phase 0"))

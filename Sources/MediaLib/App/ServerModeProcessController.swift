@@ -66,23 +66,10 @@ final class ServerModeProcessController: ObservableObject {
             let process = Process()
             process.executableURL = executableURL
             process.arguments = ["--serve"]
-            var environment = ProcessInfo.processInfo.environment
-            environment["MEDIALIB_SERVER_HOST"] = "127.0.0.1"
-            environment["MEDIALIB_SERVER_PORT"] = String(configuration.port)
-            environment["MEDIALIB_SERVER_ID"] = configuration.serverID
-            environment["MEDIALIB_SERVER_NAME"] = configuration.serverName
-            environment["MEDIALIB_SERVER_LIGHTWEIGHT"] = configuration.isLightweightMode ? "1" : "0"
-            if let publicOrigin = configuration.publicOrigin {
-                environment["MEDIALIB_SERVER_PUBLIC_ORIGIN"] = publicOrigin
-            } else {
-                environment.removeValue(forKey: "MEDIALIB_SERVER_PUBLIC_ORIGIN")
-            }
-            if configuration.trustedProxyAddresses.isEmpty {
-                environment.removeValue(forKey: "MEDIALIB_SERVER_TRUSTED_PROXIES")
-            } else {
-                environment["MEDIALIB_SERVER_TRUSTED_PROXIES"] = configuration.trustedProxyAddresses.joined(separator: ",")
-            }
-            process.environment = environment
+            process.environment = Self.processEnvironment(
+                configuration: configuration,
+                base: ProcessInfo.processInfo.environment
+            )
             process.qualityOfService = configuration.isLightweightMode ? .utility : .userInitiated
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
@@ -203,11 +190,58 @@ final class ServerModeProcessController: ObservableObject {
     }
 
     private static func defaultReadinessChecker(_ configuration: ServerModeConfiguration) async -> Bool {
+        if configuration.networkAccessMode == .lanHTTPS {
+            return await checkLANHTTPSReadiness(configuration)
+        }
         var request = URLRequest(url: configuration.loopbackBaseURL.appendingPathComponent("health"))
         request.httpMethod = "GET"
         request.timeoutInterval = 0.5
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         guard let (_, response) = try? await URLSession.shared.data(for: request),
+              let httpResponse = response as? HTTPURLResponse
+        else { return false }
+        return httpResponse.statusCode == 200
+    }
+
+    private static func checkLANHTTPSReadiness(_ configuration: ServerModeConfiguration) async -> Bool {
+        guard configuration.lanHTTPSBaseURL != nil,
+              let directories = try? FileAccessService.appDirectories()
+        else { return false }
+        let certificateURL = ServerModeCertificateSupport.certificateAuthorityURL(
+            applicationSupport: directories.applicationSupport
+        )
+        return await checkLANHTTPSReadiness(
+            configuration,
+            certificateAuthorityURL: certificateURL
+        )
+    }
+
+    static func checkLANHTTPSReadiness(
+        _ configuration: ServerModeConfiguration,
+        certificateAuthorityURL: URL
+    ) async -> Bool {
+        guard let baseURL = configuration.lanHTTPSBaseURL,
+              let host = baseURL.host
+        else { return false }
+        guard let delegate = try? ServerModePinnedTrustDelegate(
+            expectedHost: host,
+            certificateAuthorityURL: certificateAuthorityURL
+        ) else { return false }
+
+        let sessionConfiguration = URLSessionConfiguration.ephemeral
+        sessionConfiguration.timeoutIntervalForRequest = 0.75
+        sessionConfiguration.timeoutIntervalForResource = 1
+        let session = URLSession(
+            configuration: sessionConfiguration,
+            delegate: delegate,
+            delegateQueue: nil
+        )
+        defer { session.finishTasksAndInvalidate() }
+        var request = URLRequest(url: baseURL.appendingPathComponent("health"))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 0.75
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        guard let (_, response) = try? await session.data(for: request),
               let httpResponse = response as? HTTPURLResponse
         else { return false }
         return httpResponse.statusCode == 200
@@ -224,6 +258,30 @@ final class ServerModeProcessController: ObservableObject {
             return executable
         }
         throw ServerModeProcessError.runtimeNotFound
+    }
+
+    static func processEnvironment(
+        configuration: ServerModeConfiguration,
+        base: [String: String] = [:]
+    ) -> [String: String] {
+        var environment = base
+        environment["MEDIALIB_SERVER_HOST"] = "127.0.0.1"
+        environment["MEDIALIB_SERVER_PORT"] = String(configuration.port)
+        environment["MEDIALIB_SERVER_ID"] = configuration.serverID
+        environment["MEDIALIB_SERVER_NAME"] = configuration.serverName
+        environment["MEDIALIB_SERVER_NETWORK_ACCESS_MODE"] = configuration.networkAccessMode.rawValue
+        environment["MEDIALIB_SERVER_LIGHTWEIGHT"] = configuration.isLightweightMode ? "1" : "0"
+        if let publicOrigin = configuration.effectivePublicOrigin {
+            environment["MEDIALIB_SERVER_PUBLIC_ORIGIN"] = publicOrigin
+        } else {
+            environment.removeValue(forKey: "MEDIALIB_SERVER_PUBLIC_ORIGIN")
+        }
+        if configuration.effectiveTrustedProxyAddresses.isEmpty {
+            environment.removeValue(forKey: "MEDIALIB_SERVER_TRUSTED_PROXIES")
+        } else {
+            environment["MEDIALIB_SERVER_TRUSTED_PROXIES"] = configuration.effectiveTrustedProxyAddresses.joined(separator: ",")
+        }
+        return environment
     }
 }
 

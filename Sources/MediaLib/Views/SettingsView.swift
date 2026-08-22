@@ -1145,6 +1145,22 @@ struct SettingsView: View {
                 .toggleStyle(.switch)
             }
 
+            SettingsRow(title: "局域网访问", systemImage: "network") {
+                Toggle("局域网访问", isOn: Binding(get: {
+                    appState.serverModeConfiguration.networkAccessMode == .lanHTTPS
+                }, set: { enabled in
+                    appState.setServerLANAccessEnabled(enabled)
+                }))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .disabled(!isBuiltInLANHTTPSAvailable)
+                if !isBuiltInLANHTTPSAvailable {
+                    Text("需要 macOS 14 或更高版本")
+                        .font(.caption)
+                        .foregroundStyle(AppColors.warning)
+                }
+            }
+
             SettingsRow(title: "轻量服务模式", systemImage: "leaf") {
                 Toggle("轻量服务模式", isOn: Binding(get: {
                     appState.serverModeConfiguration.isLightweightMode
@@ -1157,8 +1173,14 @@ struct SettingsView: View {
             }
 
             SettingsRow(title: "当前状态", systemImage: "circle.fill") {
-                Text(appState.serverModeStatus.title)
+                Text(appState.serverModeStatusDisplayTitle)
                     .foregroundStyle(serverModeStatusColor)
+                if case .failed(let message) = appState.serverModeStatus {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
             }
 
             SettingsRow(title: "管理员账号", systemImage: "person.badge.key") {
@@ -1239,48 +1261,112 @@ struct SettingsView: View {
                     )
             }
 
-            SettingsRow(title: "本机地址", systemImage: "link") {
+            SettingsRow(
+                title: appState.serverModeConfiguration.networkAccessMode == .lanHTTPS
+                    ? "局域网地址"
+                    : "本机地址",
+                systemImage: "link"
+            ) {
                 Text(appState.serverModeEndpointDisplayText)
                     .font(.callout.monospaced())
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                 Button("打开 Web") {
-                    NSWorkspace.shared.open(
-                        appState.serverModeConfiguration.publicOriginURL ?? appState.serverModeConfiguration.loopbackBaseURL
-                    )
+                    NSWorkspace.shared.open(appState.serverModeConfiguration.effectiveBaseURL)
                 }
                 .settingsActionButton()
                 .disabled(
                     appState.serverModeStatus != .running ||
                         appState.serverAdministrationStore.requiresInitialPassword
                 )
-            }
-
-            SettingsRow(title: "公开 HTTPS 地址", systemImage: "lock.shield") {
-                TextField("https://media.example.com", text: $serverModePublicOriginDraft)
-                    .onSubmit {
-                        appState.updateServerModePublicOrigin(serverModePublicOriginDraft)
-                        serverModePublicOriginDraft = appState.serverModeConfiguration.publicOrigin ?? ""
-                    }
-                    .settingsTextInput(
-                        text: serverModePublicOriginDraft,
-                        maxWidth: SettingsControlMetrics.wideControlWidth
+                Button("复制地址") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        appState.serverModeEndpointDisplayText,
+                        forType: .string
                     )
+                }
+                .settingsActionButton()
             }
 
-            SettingsRow(title: "受信代理地址", systemImage: "arrow.triangle.branch") {
-                TextField("127.0.0.1", text: $serverModeTrustedProxiesDraft)
-                    .onSubmit {
-                        appState.updateServerModeTrustedProxyAddresses(serverModeTrustedProxiesDraft)
-                        serverModeTrustedProxiesDraft = appState.serverModeConfiguration.trustedProxyAddresses.joined(separator: ", ")
+            if appState.serverModeConfiguration.networkAccessMode == .lanHTTPS {
+                SettingsRow(title: "设备信任证书", systemImage: "checkmark.shield") {
+                    Text("其他设备首次访问前需要安装一次")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Button("导出证书…") {
+                        exportServerCertificateAuthority()
                     }
-                    .settingsTextInput(
-                        text: serverModeTrustedProxiesDraft,
-                        maxWidth: SettingsControlMetrics.wideControlWidth
-                    )
+                    .settingsActionButton(width: 116, prominent: true)
+                    .disabled(appState.serverModeStatus != .running)
+                }
+                SettingsDescription(
+                    text: "把导出的 MediaLIB-LAN-CA.cer 发送到同一局域网内的手机、平板或电脑并设为信任，然后使用上方 https 地址访问。证书只用于验证这台 MediaLIB 服务器，不包含管理员密码或媒体信息。"
+                )
+            } else {
+                SettingsRow(title: "公开 HTTPS 地址", systemImage: "lock.shield") {
+                    TextField("https://media.example.com", text: $serverModePublicOriginDraft)
+                        .onSubmit {
+                            appState.updateServerModePublicOrigin(serverModePublicOriginDraft)
+                            serverModePublicOriginDraft = appState.serverModeConfiguration.publicOrigin ?? ""
+                        }
+                        .settingsTextInput(
+                            text: serverModePublicOriginDraft,
+                            maxWidth: SettingsControlMetrics.wideControlWidth
+                        )
+                }
+
+                SettingsRow(title: "受信代理地址", systemImage: "arrow.triangle.branch") {
+                    TextField("127.0.0.1", text: $serverModeTrustedProxiesDraft)
+                        .onSubmit {
+                            appState.updateServerModeTrustedProxyAddresses(serverModeTrustedProxiesDraft)
+                            serverModeTrustedProxiesDraft = appState.serverModeConfiguration.trustedProxyAddresses.joined(separator: ", ")
+                        }
+                        .settingsTextInput(
+                            text: serverModeTrustedProxiesDraft,
+                            maxWidth: SettingsControlMetrics.wideControlWidth
+                        )
+                }
             }
 
-            SettingsDescription(text: "轻量服务模式会停止桌面端封面/横版图等非必要视觉预热，并将服务子进程设为 utility QoS；扫描、索引、认证和媒体分发不会被关闭。名称、端口或轻量策略在服务运行时会安全重启。默认仅监听 127.0.0.1，登录后可在本机 Web 查看资料库，并由浏览器通过受权 Range 媒体源原生解码；服务端不会启动网页转码。若填写公开 HTTPS 地址，必须由本机反向代理终止 TLS，并只填写代理的精确 IPv4 地址；服务不会直接接受明文远程连接。服务器身份会持久化保存。")
+            SettingsDescription(text: "轻量服务模式会停止桌面端封面/横版图等非必要视觉预热，并将服务子进程设为 utility QoS；扫描、索引、认证和媒体分发不会被关闭。名称、端口、局域网访问或轻量策略在服务运行时会安全重启。默认仅监听 127.0.0.1；开启局域网访问后会自动选取当前 Wi-Fi/有线私有 IPv4，并使用内建 HTTPS，绝不开放明文 HTTP。网页仍由浏览器通过受权 Range 媒体源原生解码，服务端不会启动网页转码。服务器身份与本机 CA 会持久化保存。")
+        }
+    }
+
+    private var isBuiltInLANHTTPSAvailable: Bool {
+        if #available(macOS 14.0, *) { return true }
+        return false
+    }
+
+    private func exportServerCertificateAuthority() {
+        guard let source = appState.serverModeCertificateAuthorityURL else {
+            appState.showFloatingNotice(
+                title: "证书尚未生成",
+                message: "请先启动局域网服务，待状态显示运行中后再导出。",
+                kind: .warning
+            )
+            return
+        }
+        let panel = NSSavePanel()
+        panel.title = "导出 MediaLIB 局域网信任证书"
+        panel.message = "把证书安装并信任到需要访问 MediaLIB 的每台局域网设备。"
+        panel.nameFieldStringValue = "MediaLIB-LAN-CA.cer"
+        panel.allowedContentTypes = [UTType(filenameExtension: "cer") ?? .data]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        do {
+            try ServerModeCertificateSupport.exportCertificate(from: source, to: destination)
+            appState.showFloatingNotice(
+                title: "证书已导出",
+                message: "请在每台访问设备上安装并设为信任，然后打开 \(appState.serverModeEndpointDisplayText)。",
+                kind: .success
+            )
+        } catch {
+            appState.showFloatingNotice(
+                title: "证书导出失败",
+                message: error.localizedDescription,
+                kind: .error
+            )
         }
     }
 

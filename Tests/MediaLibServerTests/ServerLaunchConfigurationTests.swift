@@ -5,9 +5,36 @@ final class ServerLaunchConfigurationTests: XCTestCase {
     func testDefaultsRemainLoopbackWithoutProxyConfiguration() throws {
         let configuration = try ServerLaunchConfiguration.load(environment: [:])
         XCTAssertEqual(configuration.host, "127.0.0.1")
+        XCTAssertEqual(configuration.networkAccessMode, .loopbackOnly)
         XCTAssertNil(configuration.publicOrigin)
         XCTAssertTrue(configuration.trustedProxyAddresses.isEmpty)
         XCTAssertFalse(configuration.lanDirectPlayEnabled)
+    }
+
+    func testParsesExplicitLanHTTPSModeAndRejectsUnknownModes() throws {
+        let lan = try ServerLaunchConfiguration.load(environment: [
+            "MEDIALIB_SERVER_NETWORK_ACCESS_MODE": "lan-https"
+        ])
+        XCTAssertEqual(lan.networkAccessMode, .lanHTTPS)
+
+        XCTAssertThrowsError(try ServerLaunchConfiguration.load(environment: [
+            "MEDIALIB_SERVER_NETWORK_ACCESS_MODE": "public-http"
+        ])) { error in
+            XCTAssertEqual(
+                error as? ServerConfigurationError,
+                .invalidNetworkAccessMode("public-http")
+            )
+        }
+    }
+
+    func testRawLoopbackRunFailsClosedForLanHTTPSMode() throws {
+        let lan = try ServerLaunchConfiguration.load(environment: [
+            "MEDIALIB_SERVER_NETWORK_ACCESS_MODE": "lan-https"
+        ])
+        let adapter = try LocalLoopbackHTTPServer(configuration: lan)
+        XCTAssertThrowsError(try adapter.run()) { error in
+            XCTAssertEqual(error as? ServerConfigurationError, .lanHTTPSRuntimeUnavailable)
+        }
     }
 
     /// 局域网直连必须建立在 HTTPS 公开 Origin 与可信反代之上。孤立地打开开关

@@ -20,6 +20,33 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
         XCTAssertNil(policy.validate("GET /health HTTP/1.1\r\nHost: localhost:8098\r\n\r\n"))
     }
 
+    func testDirectTLSAcceptsExactLANOriginWithoutTrustingForwardedHeaders() {
+        let lanPolicy = HTTPRequestSecurityPolicy(
+            allowedHosts: ["127.0.0.1", "localhost", "192.168.31.100"],
+            allowedPort: 8098,
+            csrfToken: "known-csrf-token",
+            publicOrigin: URL(string: "https://192.168.31.100:8098")!
+        )
+        let mutation = "POST /api/v1/playback/state/movie-1 HTTP/1.1\r\nHost: 192.168.31.100:8098\r\nOrigin: https://192.168.31.100:8098\r\nContent-Length: 0\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
+        XCTAssertNil(lanPolicy.validate(mutation, clientAddressKey: "192.168.31.20", isDirectTLS: true))
+        XCTAssertEqual(
+            lanPolicy.validate(
+                mutation.replacingOccurrences(of: "Origin: https://192.168.31.100:8098", with: "Origin: https://attacker.example"),
+                clientAddressKey: "192.168.31.20",
+                isDirectTLS: true
+            ),
+            .forbidden
+        )
+        XCTAssertEqual(
+            lanPolicy.validate(
+                "GET /health HTTP/1.1\r\nHost: 192.168.31.100:8098\r\nX-Forwarded-Proto: https\r\n\r\n",
+                clientAddressKey: "192.168.31.20",
+                isDirectTLS: true
+            ),
+            .forbidden
+        )
+    }
+
     func testRejectsDNSRebindingAndDuplicateHostHeaders() {
         XCTAssertEqual(
             policy.validate("GET /health HTTP/1.1\r\nHost: attacker.example\r\n\r\n"),

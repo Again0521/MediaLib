@@ -35,7 +35,8 @@ struct HTTPRequestSecurityPolicy {
     func validate(
         _ rawRequest: String,
         bodyLength: Int = 0,
-        clientAddressKey: String? = nil
+        clientAddressKey: String? = nil,
+        isDirectTLS: Bool = false
     ) -> Rejection? {
         guard let headerEnd = rawRequest.range(of: "\r\n\r\n") else { return .badRequest }
         guard rawRequest[headerEnd.upperBound...].isEmpty else { return .badRequest }
@@ -104,7 +105,7 @@ struct HTTPRequestSecurityPolicy {
         }
 
         guard let hostValues = headers["host"], hostValues.count == 1,
-              isAllowedHost(hostValues[0], allowPublicOrigin: isTrustedProxyRequest)
+              isAllowedHost(hostValues[0], allowPublicOrigin: isTrustedProxyRequest || isDirectTLS)
         else {
             return .forbidden
         }
@@ -179,7 +180,10 @@ struct HTTPRequestSecurityPolicy {
             } else {
                 guard let token = headers["x-medialib-csrf"]?.first,
                       Self.constantTimeEqual(token, csrfToken),
-                      originIsAllowed(headers["origin"]?.first, allowPublicOrigin: isTrustedProxyRequest)
+                      originIsAllowed(
+                        headers["origin"]?.first,
+                        allowPublicOrigin: isTrustedProxyRequest || isDirectTLS
+                      )
                 else {
                     return .forbidden
                 }

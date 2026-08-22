@@ -9,6 +9,7 @@ final class ServerModeConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.loopbackBaseURL.absoluteString, "http://127.0.0.1:8098")
         XCTAssertEqual(configuration.serverID, "server-a")
         XCTAssertFalse(configuration.isLightweightMode)
+        XCTAssertEqual(configuration.networkAccessMode, .loopbackOnly)
         XCTAssertNil(configuration.publicOrigin)
         XCTAssertTrue(configuration.trustedProxyAddresses.isEmpty)
     }
@@ -22,6 +23,48 @@ final class ServerModeConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.serverName, "客厅服务器")
         XCTAssertEqual(configuration.port, 8098)
         XCTAssertFalse(configuration.isLightweightMode)
+        XCTAssertEqual(configuration.networkAccessMode, .loopbackOnly)
+    }
+
+    func testNetworkAccessModeRoundTripsAndOldPayloadsRemainLoopback() throws {
+        let lan = ServerModeConfiguration(
+            serverID: "server-a",
+            networkAccessMode: .lanHTTPS,
+            lanAddress: "192.168.31.100"
+        )
+        let encoded = try JSONEncoder().encode(lan)
+        let decoded = try JSONDecoder().decode(ServerModeConfiguration.self, from: encoded)
+        XCTAssertEqual(decoded.networkAccessMode, .lanHTTPS)
+        XCTAssertEqual(decoded.lanAddress, "192.168.31.100")
+
+        let legacy = Data(
+            #"{"isEnabled":true,"serverID":"server-a","serverName":"Server","port":8098}"#.utf8
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(ServerModeConfiguration.self, from: legacy).networkAccessMode,
+            .loopbackOnly
+        )
+    }
+
+    func testLANHTTPSUsesPrivateAddressAndTracksPortChanges() {
+        var configuration = ServerModeConfiguration(
+            serverID: "server-a",
+            publicOrigin: "https://proxy.example.test",
+            trustedProxyAddresses: ["127.0.0.1"]
+        )
+        XCTAssertFalse(configuration.enableLANHTTPS(address: "8.8.8.8"))
+        XCTAssertTrue(configuration.enableLANHTTPS(address: "192.168.31.100"))
+        XCTAssertEqual(configuration.networkAccessMode, .lanHTTPS)
+        XCTAssertEqual(configuration.lanHTTPSBaseURL?.absoluteString, "https://192.168.31.100:8098")
+        XCTAssertEqual(configuration.effectivePublicOrigin, "https://192.168.31.100:8098")
+        XCTAssertTrue(configuration.effectiveTrustedProxyAddresses.isEmpty)
+
+        configuration.updatePort(9000)
+        XCTAssertEqual(configuration.effectiveBaseURL.absoluteString, "https://192.168.31.100:9000")
+        configuration.updateNetworkAccessMode(.loopbackOnly)
+        XCTAssertNil(configuration.lanAddress)
+        XCTAssertEqual(configuration.effectiveBaseURL.absoluteString, "https://proxy.example.test")
+        XCTAssertEqual(configuration.effectiveTrustedProxyAddresses, ["127.0.0.1"])
     }
 
     func testDecoderRestoresLightweightModeWhenExplicitlyEnabled() throws {

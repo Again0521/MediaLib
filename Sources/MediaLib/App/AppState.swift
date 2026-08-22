@@ -782,6 +782,7 @@ final class AppState: ObservableObject {
     private var videoOfflineSubscriptionExpirationTask: Task<Void, Never>?
     private var networkPathMonitor: NWPathMonitor?
     private let networkPathMonitorQueue = DispatchQueue(label: "MediaLIB.NetworkPathMonitor")
+    var serverLANReconciliationTask: Task<Void, Never>?
     private var keyframeStoryboardTasks: [UUID: Task<Void, Never>] = [:]
     private var playbackMarkerAnalysisTasks: [UUID: Task<Void, Never>] = [:]
     private var musicProjectionTask: Task<Void, Never>?
@@ -1123,6 +1124,7 @@ final class AppState: ObservableObject {
         backgroundTaskPersistence.cancel()
         detailEnrichmentTasks.values.forEach { $0.cancel() }
         networkPathMonitor?.cancel()
+        serverLANReconciliationTask?.cancel()
         if let appDidBecomeActiveObserver {
             NotificationCenter.default.removeObserver(appDidBecomeActiveObserver)
         }
@@ -7828,6 +7830,7 @@ final class AppState: ObservableObject {
             let wiFiAvailable = path.status == .satisfied && path.usesInterfaceType(.wifi)
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                self.scheduleServerLANReconciliation(reason: "网络地址变化")
                 let changed = self.videoOfflineSubscriptionWiFiAvailable != wiFiAvailable
                 self.videoOfflineSubscriptionWiFiAvailable = wiFiAvailable
                 guard changed else { return }

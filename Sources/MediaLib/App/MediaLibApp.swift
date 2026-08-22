@@ -152,6 +152,17 @@ struct MediaLibApp: App {
                 .onChange(of: appState.settings.theme) { _ in
                     appState.applyAppearance()
                 }
+                .onReceive(
+                    NSWorkspace.shared.notificationCenter
+                        .publisher(for: NSWorkspace.didWakeNotification)
+                        .receive(on: RunLoop.main)
+                ) { _ in
+                    appState.scheduleServerLANReconciliation(
+                        reason: "系统唤醒",
+                        forceRestart: true,
+                        delayNanoseconds: 1_000_000_000
+                    )
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)

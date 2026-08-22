@@ -6,8 +6,23 @@ extension AppState {
         serverModeController.status
     }
 
+    var serverModeStatusDisplayTitle: String {
+        if case .running = serverModeStatus,
+           serverModeConfiguration.networkAccessMode == .lanHTTPS {
+            return "局域网 HTTPS 运行中"
+        }
+        return serverModeStatus.title
+    }
+
     var serverModeEndpointDisplayText: String {
-        serverModeConfiguration.publicOrigin ?? serverModeConfiguration.loopbackBaseURL.absoluteString
+        serverModeConfiguration.effectiveBaseURL.absoluteString
+    }
+
+    var serverModeCertificateAuthorityURL: URL? {
+        guard let directories else { return nil }
+        return ServerModeCertificateSupport.certificateAuthorityURL(
+            applicationSupport: directories.applicationSupport
+        )
     }
 
     var isServerLightweightModeActive: Bool {
@@ -18,6 +33,7 @@ extension AppState {
     func restoreServerModeIfNeeded() {
         guard serverModeConfiguration.isEnabled else { return }
         do {
+            try refreshLANAddressBeforeLaunch()
             try serverModeController.start(configuration: serverModeConfiguration)
             applyServerLightweightPolicyIfNeeded()
         } catch {
@@ -34,6 +50,7 @@ extension AppState {
     func setServerModeEnabled(_ isEnabled: Bool) {
         if isEnabled {
             do {
+                try refreshLANAddressBeforeLaunch()
                 try serverModeController.start(configuration: serverModeConfiguration)
                 serverModeConfiguration.isEnabled = true
                 serverModeSettingsStore.save(serverModeConfiguration)
@@ -96,6 +113,106 @@ extension AppState {
         applyServerModeConfiguration(configuration)
     }
 
+    func setServerLANAccessEnabled(_ isEnabled: Bool) {
+        var configuration = serverModeConfiguration
+        if isEnabled {
+            guard let address = LANNetworkAddressResolver.preferredPrivateIPv4Address(),
+                  configuration.enableLANHTTPS(address: address)
+            else {
+                showFloatingNotice(
+                    title: "未找到局域网地址",
+                    message: "请先连接 Wi-Fi 或有线局域网，再开启局域网访问。VPN 与隔空投送地址不会被使用。",
+                    kind: .error
+                )
+                return
+            }
+        } else {
+            configuration.updateNetworkAccessMode(.loopbackOnly)
+        }
+        applyServerModeConfiguration(configuration)
+        showFloatingNotice(
+            title: isEnabled ? "局域网访问已启用" : "局域网访问已关闭",
+            message: isEnabled
+                ? "服务将通过 \(configuration.effectiveBaseURL.absoluteString) 提供 HTTPS；其他设备首次访问前需要信任 MediaLIB 证书。"
+                : "服务已恢复为仅本机回环访问。",
+            kind: .success
+        )
+    }
+
+    /// Keeps a running LAN service aligned with the address that is actually
+    /// assigned after DHCP changes, interface switches, or system wake. The
+    /// path monitor can publish several updates for one transition, so only the
+    /// newest delayed reconciliation is allowed to restart the child process.
+    func scheduleServerLANReconciliation(
+        reason: String,
+        forceRestart: Bool = false,
+        delayNanoseconds: UInt64 = 500_000_000
+    ) {
+        serverLANReconciliationTask?.cancel()
+        serverLANReconciliationTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+                try Task.checkCancellation()
+                await self?.reconcileServerLANEnvironment(
+                    reason: reason,
+                    forceRestart: forceRestart
+                )
+            } catch {
+                return
+            }
+        }
+    }
+
+    func reconcileServerLANEnvironment(
+        discoveredAddress: String? = LANNetworkAddressResolver.preferredPrivateIPv4Address(),
+        reason: String,
+        forceRestart: Bool = false
+    ) async {
+        guard serverModeConfiguration.isEnabled,
+              serverModeConfiguration.networkAccessMode == .lanHTTPS,
+              let discoveredAddress,
+              LANIPv4AddressPolicy.isPrivate(discoveredAddress)
+        else { return }
+
+        var configuration = serverModeConfiguration
+        let refreshedConfiguration = ServerLANReconciliationPolicy.refreshedConfiguration(
+            configuration,
+            discoveredAddress: discoveredAddress
+        )
+        let addressChanged = refreshedConfiguration != nil
+        if let refreshedConfiguration {
+            configuration = refreshedConfiguration
+            serverModeConfiguration = configuration
+            serverModeSettingsStore.save(configuration)
+        }
+
+        let shouldRecover = ServerLANReconciliationPolicy.shouldRestart(
+            status: serverModeController.status,
+            addressChanged: addressChanged,
+            forceRestart: forceRestart
+        )
+        guard shouldRecover else { return }
+
+        serverModeController.stop()
+        do {
+            try serverModeController.start(configuration: configuration)
+            showFloatingNotice(
+                title: addressChanged ? "局域网地址已更新" : "局域网服务已恢复",
+                message: "已因\(reason)重新启动 HTTPS 服务：\(configuration.effectiveBaseURL.absoluteString)",
+                kind: .success
+            )
+        } catch {
+            // Preserve the user's explicit enabled preference. A later network
+            // path update or wake will retry; one transient interface gap must
+            // not silently turn LAN access off.
+            showFloatingNotice(
+                title: "局域网服务恢复失败",
+                message: error.localizedDescription,
+                kind: .error
+            )
+        }
+    }
+
     func setServerLightweightModeEnabled(_ isEnabled: Bool) {
         guard serverModeConfiguration.isEnabled else {
             showFloatingNotice(
@@ -131,8 +248,60 @@ extension AppState {
         applyServerLightweightPolicyIfNeeded()
     }
 
+    private func refreshLANAddressBeforeLaunch() throws {
+        guard serverModeConfiguration.networkAccessMode == .lanHTTPS else { return }
+        guard let address = LANNetworkAddressResolver.preferredPrivateIPv4Address() else {
+            throw ServerModeLANConfigurationError.privateAddressUnavailable
+        }
+        var configuration = serverModeConfiguration
+        if configuration.refreshLANAddress(address) {
+            serverModeConfiguration = configuration
+            serverModeSettingsStore.save(configuration)
+        }
+    }
+
     private func applyServerLightweightPolicyIfNeeded() {
         guard isServerLightweightModeActive else { return }
         cancelNonessentialVisualWarmupsForServerMode()
+    }
+}
+
+enum ServerLANReconciliationPolicy {
+    static func refreshedConfiguration(
+        _ configuration: ServerModeConfiguration,
+        discoveredAddress: String?
+    ) -> ServerModeConfiguration? {
+        guard configuration.isEnabled,
+              configuration.networkAccessMode == .lanHTTPS,
+              let discoveredAddress,
+              LANIPv4AddressPolicy.isPrivate(discoveredAddress),
+              configuration.lanAddress != discoveredAddress
+        else { return nil }
+        var refreshed = configuration
+        guard refreshed.refreshLANAddress(discoveredAddress) else { return nil }
+        return refreshed
+    }
+
+    static func shouldRestart(
+        status: ServerModeProcessController.Status,
+        addressChanged: Bool,
+        forceRestart: Bool
+    ) -> Bool {
+        switch status {
+        case .stopped, .failed:
+            return true
+        case .starting:
+            return false
+        case .running:
+            return addressChanged || forceRestart
+        }
+    }
+}
+
+private enum ServerModeLANConfigurationError: LocalizedError {
+    case privateAddressUnavailable
+
+    var errorDescription: String? {
+        "未找到可用的 Wi-Fi 或有线局域网 IPv4 地址；服务保持关闭。"
     }
 }
