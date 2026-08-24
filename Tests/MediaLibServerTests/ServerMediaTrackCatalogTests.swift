@@ -33,6 +33,24 @@ final class ServerMediaTrackCatalogTests: XCTestCase {
         ))
     }
 
+    /// 真实流媒体 MKV 会把简中/繁中排在第 17、18 条。上限若仍是 16，菜单再好看也
+    /// 永远不可能让读者选到中文；32 仍是明确的安全边界，字幕内容也只在选中后转换。
+    func testSubtitleBoundIncludesHighLanguageCounts() {
+        XCTAssertGreaterThanOrEqual(ServerWebVTTSubtitleTrack.maximumTrackCount, 18)
+        XCTAssertLessThanOrEqual(ServerWebVTTSubtitleTrack.maximumTrackCount, 32)
+    }
+
+    /// Loki 这类 8 GiB Matroska 即使字幕本身只有几十 KiB，字幕包仍与视频包交错，
+    /// 导出时需要扫描整部容器。固定 45 秒会把正常轨道误判成失败。
+    func testEmbeddedSubtitleExtractionTimeoutScalesWithContainerSizeButStaysBounded() {
+        let gibibyte = Int64(1024 * 1024 * 1024)
+
+        XCTAssertEqual(ServerMediaTrackCatalog.embeddedSubtitleExtractionTimeout(byteLength: 0), 45)
+        XCTAssertGreaterThan(ServerMediaTrackCatalog.embeddedSubtitleExtractionTimeout(byteLength: 8 * gibibyte), 240)
+        XCTAssertEqual(ServerMediaTrackCatalog.embeddedSubtitleExtractionTimeout(byteLength: 100 * gibibyte), 300)
+        XCTAssertEqual(ServerMediaTrackCatalog.embeddedSubtitleExtractionTimeout(byteLength: -1), 45)
+    }
+
     /// AC-3 是 MKV 里最常见的音轨编码，没有任何浏览器解得了它。
     func testMarksUndecodableAudioCodecs() throws {
         let catalog = catalog(streams: """

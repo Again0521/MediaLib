@@ -149,6 +149,7 @@ enum ServerWebMediaDetailPage {
               <div id="player-stage" class="player-stage" tabindex="0" role="group" aria-label="\(escape(detail.title)) 播放器">
                 <div id="player-landing" class="player-landing">\(videoLandingVisual)</div>
                 <video id="player" hidden playsinline preload="metadata" aria-label="\(escape(detail.title)) 视频播放器"></video>
+                <div id="subtitle-overlay" class="player-subtitle-overlay" aria-hidden="true" hidden></div>
                 <p id="player-status" class="visually-hidden" role="status" aria-live="polite"></p>
                 <!-- 起播、缓冲、失败此前只有一条 sr-only 文本：画面上什么都不
                      显示，读者按下播放之后看到的是一个不动的黑框，分不清是在
@@ -173,8 +174,8 @@ enum ServerWebMediaDetailPage {
                       <div class="player-control-cluster player-volume-cluster player-hover-control" id="volume-cluster">
                         <button id="toggle-mute" class="ui-btn ui-btn-icon player-btn" type="button" aria-label="静音" aria-pressed="false" title="静音"><span id="volume-on-icon">\(ServerWebIcon.volumeOn.html(size: .md))</span><span id="volume-off-icon" hidden>\(ServerWebIcon.volumeOff.html(size: .md))</span></button>
                         <div class="player-hover-popover volume-popover" id="volume-popover">
-                          <output id="playback-volume-value" for="playback-volume">100%</output>
-                          <label class="volume-control" for="playback-volume"><span class="visually-hidden">音量</span><input id="playback-volume" class="ui-range ui-range-on-media" type="range" min="0" max="1" step="0.05" value="1" orient="vertical"></label>
+                          <div class="player-popover-heading"><span>音量</span><output id="playback-volume-value" for="playback-volume">100%</output></div>
+                          <label class="volume-control" for="playback-volume"><span class="visually-hidden">音量</span><input id="playback-volume" class="ui-range ui-range-on-media" type="range" min="0" max="1" step="0.05" value="1"></label>
                         </div>
                       </div>
                       <div class="player-control-cluster">
@@ -394,6 +395,35 @@ enum ServerWebMediaDetailPage {
       object-fit: contain;
       background: #05070b;
     }
+    /* WebKit 对运行时挂上的 <track> 支持并不稳定，尤其是 iOS 与 blob: WebVTT。
+       字幕因此由受限 WebVTT 解析器写进这个纯文本层；textContent 保证字幕内容
+       永远不会成为 HTML，位置也始终跟随视频舞台。 */
+    .player-subtitle-overlay {
+      position: absolute;
+      z-index: 3;
+      right: clamp(12px, 5vw, 72px);
+      bottom: clamp(42px, 9%, 86px);
+      left: clamp(12px, 5vw, 72px);
+      display: grid;
+      justify-items: center;
+      gap: 2px;
+      color: #fff;
+      font-size: clamp(16px, 2.15vw, 32px);
+      font-weight: var(--weight-semibold);
+      line-height: 1.35;
+      text-align: center;
+      text-shadow: 0 1px 2px #000, 0 2px 8px #000;
+      pointer-events: none;
+    }
+    .player-subtitle-line {
+      max-width: min(100%, 48em);
+      padding: 0.08em 0.34em;
+      border-radius: 0.22em;
+      background: rgba(0, 0, 0, 0.58);
+      white-space: pre-line;
+      overflow-wrap: anywhere;
+    }
+    .player-stage.controls-visible .player-subtitle-overlay { bottom: clamp(68px, 16%, 128px); }
     /* `.player-landing` 从前完全没有规则，而铺满的那条写的是
        `.player-landing-art img`——类名就在 <img> 自己身上，那个选择器匹配不到
        任何元素。结果画面前置图既没有铺满也没有压暗，按固有尺寸挤在舞台里。 */
@@ -481,6 +511,7 @@ enum ServerWebMediaDetailPage {
       color: var(--text-on-media);
       opacity: 0;
       transition: opacity var(--duration-base) var(--ease-out);
+      container-type: inline-size;
       /* 控件条不再只是一层压暗：底部这条带子现在真的把画面糊掉。
          纯遮罩在高频画面上（雪花、字幕、密集树叶）挡不住细节，图标和时间码会
          和画面的纹理绞在一起；磨砂之后底下只剩色块，前景才真正浮起来。
@@ -501,8 +532,8 @@ enum ServerWebMediaDetailPage {
     }
     .player-stage.controls-visible .player-overlay-controls,
     .player-overlay-controls:focus-within { opacity: 1; }
-    .player-control-row { display: flex; align-items: center; gap: var(--space-3); }
-    .player-control-group { display: flex; align-items: center; gap: var(--space-1); }
+    .player-control-row { display: flex; min-width: 0; align-items: center; gap: var(--space-3); }
+    .player-control-group { display: flex; min-width: 0; align-items: center; gap: var(--space-1); }
     .player-control-group-end { margin-left: auto; gap: var(--space-4); }
     /* 尾部从前是十个按钮排成一条平铺的队伍：音量、倍速、字幕、音轨、画中画、
        三个尺寸模式、全屏、更多——全都一样大、一样间距，要找哪个只能一个个认
@@ -571,6 +602,11 @@ enum ServerWebMediaDetailPage {
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
+    /* 时间码是控制栏里唯一可以在不损失操作能力的前提下退让的信息。按钮数量较多
+       或手机横向可用宽度不足时先收起时间码，进度条仍完整保留。媒体查询是旧版
+       WebKit 的回退，容器查询覆盖网页全屏和窄分栏。 */
+    @media (max-width: 559px) { .playback-time { display: none; } }
+    @container (max-width: 520px) { .playback-time { display: none; } }
     /* 音量与倍速都收进按钮上的悬浮层：控制栏本来就挤，一条常驻滑杆挤掉的是
        更常用的按钮。悬浮层用 `:hover`/`:focus-within` 双触发——只靠 hover 的话
        键盘用户永远打不开它。 */
@@ -614,18 +650,19 @@ enum ServerWebMediaDetailPage {
       .player-hover-popover { transition: none; }
     }
 
-    .volume-popover { width: 44px; }
-    .volume-control { display: flex; align-items: center; justify-content: center; }
-    /* 竖向滑杆：`writing-mode` 是现代写法，`appearance: slider-vertical` 是
-       旧 WebKit 的回退，两者都写才能在 Safari 与 Chromium 上都竖起来。 */
-    .volume-control input[type="range"] {
-      writing-mode: vertical-lr;
-      direction: rtl;
-      -webkit-appearance: slider-vertical;
-      width: 20px;
-      height: 96px;
-      --range-hit: 20px;
+    /* 音量、倍速和进度统一使用 primitives 层的横向 `.ui-range`。从前音量为了竖排
+       强行恢复 `slider-vertical` 的浏览器外观，Safari 和 Chromium 各画各的，正是
+       播放器里唯一一块仍像系统默认控件的地方。 */
+    .volume-popover { width: 168px; align-items: stretch; padding-inline: var(--space-3); }
+    .player-popover-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: var(--text-on-media-secondary);
+      font-size: var(--type-caption-size);
     }
+    .volume-control { display: block; width: 100%; }
+    .volume-control input[type="range"] { width: 100%; --range-hit: 20px; }
 
     .speed-button { min-width: 44px; font-variant-numeric: tabular-nums; }
     #playback-speed-value { font-size: var(--type-footnote-size); font-weight: var(--weight-semibold); }
@@ -678,6 +715,16 @@ enum ServerWebMediaDetailPage {
       -webkit-backdrop-filter: var(--glass-thick-blur);
       backdrop-filter: var(--glass-thick-blur);
       box-shadow: var(--shadow-4);
+      box-sizing: border-box;
+      /* JS 会把触发按钮到播放器/视口顶部的真实剩余空间写进来；这里的 dvh 是脚本
+         尚未运行或 ResizeObserver 不可用时的安全回退。面板自己滚，绝不把控制栏或
+         整页带着滚走。 */
+      max-height: var(--track-menu-max-height, min(420px, calc(100dvh - 112px)));
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+      -webkit-overflow-scrolling: touch;
       transform-origin: bottom right;
       /* 玻璃要"显形"，不是淡入：模糊半径与缩放一起动，面板才读作一层真实的
          材质到位，而不是一张突然出现的图片。 */
@@ -712,8 +759,8 @@ enum ServerWebMediaDetailPage {
       /* 轨道标签是"原声 · eng · AC3 · 1 声道（需转码）"这种长度，而末尾那几个字
          恰恰是最要紧的——它正是"这条轨为什么要转码"的答案。这里给的宽度按那条
          最长的真实标签定，超出的仍然省略号收尾。 */
-      min-width: 260px;
-      max-width: min(340px, 70vw);
+      min-width: min(260px, calc(100vw - 16px));
+      max-width: min(340px, calc(100vw - 16px));
       gap: 2px;
       padding: var(--space-2);
     }
@@ -739,8 +786,25 @@ enum ServerWebMediaDetailPage {
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    .player-track-panel .player-track-item::before {
+      content: "";
+      flex: 0 0 auto;
+      width: 10px;
+      height: 10px;
+      margin-right: var(--space-2);
+      border: var(--hairline) solid var(--text-on-media-secondary);
+      border-radius: 50%;
+      box-shadow: inset 0 0 0 3px transparent;
+    }
     .player-track-panel .player-track-item:hover { background: var(--overlay-on-media); }
+    .player-track-panel .player-track-item:focus-visible { outline: 2px solid var(--focus-ring-color); outline-offset: -2px; }
     .player-track-panel .player-track-item[aria-checked="true"] { font-weight: var(--weight-semibold); background: var(--overlay-on-media); }
+    .player-track-panel .player-track-item[aria-checked="true"]::before {
+      border-color: var(--text-on-media);
+      background: var(--text-on-media);
+      box-shadow: inset 0 0 0 3px var(--overlay-on-media-strong);
+    }
+    .player-track-panel .player-track-item:disabled { opacity: 0.5; cursor: not-allowed; }
     /* 分组小标题：外挂 / 内封 / 来源服务器。同一部片子这三处经常都有一条
        「简体中文」，不分组的话菜单里是几条看起来一模一样的选项。 */
     .player-track-group {
@@ -1293,15 +1357,23 @@ enum ServerWebMediaDetailPage {
     @media (max-width: 719px) {
       .synopsis { grid-template-columns: minmax(0, 1fr); }
       .synopsis .poster { max-width: 168px; }
-      .player-overlay-controls { padding: var(--space-6) var(--space-2) var(--space-2); }
-      .player-control-row { gap: var(--space-2); }
-      .player-control-group-end { gap: var(--space-2); }
+      .player-overlay-controls { padding: var(--space-6) var(--space-1) var(--space-2); }
+      .player-control-row { gap: var(--space-1); }
+      .player-control-group-end { gap: var(--space-1); }
       /* 手机上收掉的是整簇音量，而不是音量和倍速一起。
          音量归系统音量键管，iOS Safari 的原生播放器同样不画这条滑杆；倍速没有
          任何系统入口，收掉就等于没有了，所以它留下——它本来就只是一个很窄的
          下拉。 */
       .player-volume-cluster { display: none; }
       .playback-time { margin-left: var(--space-1); }
+      .player-shortcut-hint { display: none !important; }
+      .player-subtitle-overlay {
+        right: var(--space-3);
+        bottom: clamp(36px, 10%, 58px);
+        left: var(--space-3);
+        font-size: clamp(15px, 4.8vw, 22px);
+      }
+      .player-stage.controls-visible .player-subtitle-overlay { bottom: clamp(66px, 23%, 104px); }
     }
     """#
 
@@ -1364,21 +1436,34 @@ enum ServerWebMediaDetailPage {
       var resumeApplied = false;
       var playbackStartedReported = false;
       var lastProgressBucket = -1;
-      var playbackTracksLoaded = false;
+      var playbackTracksPromise = null;
       var playbackCompleted = false;
       // ---- 播放通路 ---------------------------------------------------------
-      // `direct` 是浏览器自己解容器的那条路；`remux` 是服务端只把音频转成 AAC、
-      // 画面原样搬进分片 MP4 的那条路。后者存在的理由：MKV 里常见的 AC-3 / DTS
-      // 没有任何浏览器能解码，直放得到的是**有画面没有声音**，而且不报错。
-      //
-      // 分片流是边转边发的，长度未知、不能 Range，所以跳转靠"改 start= 重开一条
-      // 流"完成。`remuxOffset` 就是那条流的起点在整部片子里的秒数——画面上那条
-      // 时间轴始终是整部片子的，不是这一条流的。
+      // `direct` 是浏览器自己解容器；`hls` 是服务端按浏览器能力重封装或转码后的
+      // 标准 HLS。HLS 会话有明确的媒体总时长与分段边界，不再把一个未知长度的
+      // 原始分片管道伪装成普通视频文件。
       var playbackMode = 'direct';
       var remuxOffset = 0;
       var remuxAudioTrack = 0;
+      var currentHLSSessionID = '';
       var playbackTracks = null;
-      const knownDurationSeconds = Number(document.body.dataset.durationSeconds || 0) || 0;
+      var playbackSourceRevision = 0;
+      var sourceTransitionPending = false;
+      var scrubState = 'idle';
+      var scrubTarget = NaN;
+      var lastAdvancingTime = 0;
+      var lastUserPauseAt = 0;
+      var overlayPinnedByTap = false;
+      var playbackHasPlayed = false;
+      var selectedSubtitleTrackID = null;
+      var activeSubtitleCues = [];
+      var activeSubtitleCueKey = '';
+      var subtitleLoadRevision = 0;
+      const failedSubtitleTrackIDs = new Set();
+      // 资料库扫描可能拿不到 MKV 时长；轨道接口会用同一次 ffprobe 探测补回。
+      // 这是可更新的页面事实，不能是 const，也不能只相信浏览器媒体元素——分片
+      // MP4 的 `duration` 按规范会是 Infinity。
+      var knownDurationSeconds = Number(document.body.dataset.durationSeconds || 0) || 0;
       var playerLayout = 'default';
       var activeEpisodeSeason = currentSeason;
       var episodeOffset = 0;
@@ -1419,11 +1504,40 @@ enum ServerWebMediaDetailPage {
         if (!active) { playerBusy.hidden = true; return; }
         bufferingTimer = window.setTimeout(() => { bufferingTimer = null; playerBusy.hidden = false; }, 320);
       };
+      // `<details>` 面板向上展开，而播放器卡片本身会裁切越界内容。只用一个固定
+      // `max-height` 无法同时照顾手机横屏、小窗口和网页全屏，因此每次展开/缩放都
+      // 按触发按钮到「视口顶部或播放器顶部（取更靠下者）」的实际距离重新预算。
+      const syncTrackMenuGeometry = () => {
+        document.querySelectorAll('.player-settings').forEach(menu => {
+          const panel = menu.querySelector('.player-settings-panel');
+          const trigger = menu.querySelector('summary');
+          if (!panel || !trigger) return;
+          const stageRect = playerStage?.getBoundingClientRect();
+          const triggerRect = trigger.getBoundingClientRect();
+          const stageTop = Math.max(8, stageRect?.top ?? 8);
+          const available = Math.max(96, Math.floor(triggerRect.top - stageTop - 8));
+          panel.style.setProperty('--track-menu-max-height', `${available}px`);
+          if (!menu.open) return;
+          // 面板不能只依赖 right:0：控制按钮在移动端会被压到舞台两侧，较宽的菜单
+          // 便会穿出视口。先恢复自然宽度，再把它钳在舞台与视口的交集内。
+          panel.style.removeProperty('left');
+          panel.style.removeProperty('right');
+          const panelRect = panel.getBoundingClientRect();
+          const boundaryLeft = Math.max(8, stageRect?.left ?? 8);
+          const boundaryRight = Math.min(window.innerWidth - 8, stageRect?.right ?? window.innerWidth - 8);
+          const desiredLeft = triggerRect.right - panelRect.width;
+          const left = Math.min(Math.max(desiredLeft, boundaryLeft), Math.max(boundaryLeft, boundaryRight - panelRect.width));
+          panel.style.left = `${Math.round(left - menu.getBoundingClientRect().left)}px`;
+          panel.style.right = 'auto';
+        });
+      };
+      // 保留旧名称，菜单构建点无需知道定位策略已经同时覆盖横向与纵向。
+      const syncTrackMenuHeights = syncTrackMenuGeometry;
       const showOverlayControls = (keepVisible = false) => {
         if (!playerStage || transportControls.hidden) return;
         playerStage.classList.add('controls-visible');
         if (overlayHideTimer !== null) window.clearTimeout(overlayHideTimer);
-        if (keepVisible || player.paused || document.fullscreenElement || document.body.classList.contains('is-web-fullscreen')) return;
+        if (keepVisible || overlayPinnedByTap || player.paused || document.fullscreenElement || document.body.classList.contains('is-web-fullscreen')) return;
         overlayHideTimer = window.setTimeout(() => {
           overlayHideTimer = null;
           if (!player.paused && !document.querySelector('.player-settings[open]')) playerStage.classList.remove('controls-visible');
@@ -1432,7 +1546,14 @@ enum ServerWebMediaDetailPage {
       const hideOverlayControls = () => {
         if (overlayHideTimer !== null) window.clearTimeout(overlayHideTimer);
         overlayHideTimer = null;
-        if (!player.paused && !document.querySelector('.player-settings[open]')) playerStage?.classList.remove('controls-visible');
+        if (!overlayPinnedByTap && !player.paused && !document.querySelector('.player-settings[open]')) playerStage?.classList.remove('controls-visible');
+      };
+      const setOverlayPinnedByTap = active => {
+        overlayPinnedByTap = active;
+        if (active) showOverlayControls(true);
+        else if (!player.paused && !document.querySelector('.player-settings[open]')) {
+          playerStage?.classList.remove('controls-visible');
+        }
       };
       const setBusy = (busy) => {
         isStarting = busy;
@@ -1567,13 +1688,9 @@ enum ServerWebMediaDetailPage {
       // 就会把读者刚选的那条顶掉。
       var subtitleChoiceLocked = false;
       function applyPreferredSubtitle() {
-        if (subtitleChoiceLocked || !player.textTracks) return;
-        const subtitles = Array.from(player.textTracks).filter(track => track.kind === 'subtitles');
+        if (subtitleChoiceLocked || !playbackHasPlayed) return;
+        const subtitles = (playbackTracks?.subtitles ?? []).filter(track => !failedSubtitleTrackIDs.has(track.id));
         if (subtitles.length === 0) return;
-        // 必须无条件归一，不能"已有 showing 就跳过"。浏览器会在插入 `<track>`
-        // 时自作主张地开字幕——实测 Chrome 把**每一条**轨都置成 showing（addtrack
-        // 事件里就已经是了），于是屏幕上同时叠着中英两份字幕。先全关，再至多开一条。
-        subtitles.forEach(track => { track.mode = 'disabled'; });
         const preferred = (window.navigator?.languages && window.navigator.languages.length
           ? Array.from(window.navigator.languages)
           : [window.navigator?.language || '']).filter(Boolean).map(tag => tag.toLowerCase());
@@ -1594,25 +1711,57 @@ enum ServerWebMediaDetailPage {
           if (!script && base === 'zh' && regionScript[region]) script = regionScript[region];
           return { full: parts.join('-'), base, script };
         };
+        const normalizedHint = value => String(value || '')
+          .normalize('NFKC').toLowerCase().replace(/[\s._/\\()[\]{}:;,+-]+/g, ' ').trim();
+        const keywordProfiles = {
+          zh: ['中文', '中字', '汉语', '漢語', 'chinese', 'chi', 'zho'],
+          en: ['english', '英文', '英语', '英語', 'eng'],
+          ja: ['日本語', '日语', '日語', '日文', 'japanese', 'jpn'],
+          ko: ['한국어', '韩语', '韓語', '朝鲜语', 'korean', 'kor'],
+          fr: ['français', 'french', '法语', '法語', 'fre', 'fra'],
+          de: ['deutsch', 'german', '德语', '德語', 'ger', 'deu'],
+          es: ['español', 'spanish', '西班牙语', '西班牙語', 'spa']
+        };
+        const scriptKeywords = {
+          hans: ['简体中文', '简体中字', '简体', '简中', '簡中', '中文简体', 'chs', 'zh hans', 'zh cn', 'gbk', 'gb2312', 'simplified chinese'],
+          hant: ['繁體中文', '繁体中文', '繁體中字', '繁体中字', '繁體', '繁体', '繁中', '中文繁體', 'cht', 'zh hant', 'zh tw', 'zh hk', 'big5', 'traditional chinese']
+        };
+        const hasKeyword = (hint, keyword) => {
+          if (!hint || !keyword) return false;
+          // 三字母语言码和 CJK 词可以直接包含；两字母缩写必须是完整词，避免 en
+          // 误中 "commentary" 之类普通单词。
+          if (keyword.length <= 2 && /^[a-z]+$/.test(keyword)) return (` ${hint} `).includes(` ${keyword} `);
+          return hint.includes(keyword);
+        };
+        const undesirable = ['forced', 'signs', 'songs', 'commentary', 'director', 'sdh', 'hearing impaired', '强制', '强迫', '注释', '評論', '评论'];
         let best = null;
         subtitles.forEach(track => {
           const candidate = parse(track.language);
-          if (!candidate.base || candidate.base === 'und') return;
+          const hint = normalizedHint(`${track.label || ''} ${track.title || ''} ${track.language || ''}`);
           preferred.forEach((tag, order) => {
             const wanted = parse(tag);
-            if (wanted.base !== candidate.base) return;
-            let score = 1;
-            if (candidate.script && wanted.script && candidate.script === wanted.script) score = 3;
-            else if (candidate.full === wanted.full) score = 3;
-            else if (!candidate.script || !wanted.script) score = 2;
-            // 浏览器语言列表是有序偏好，越靠前越优先。
-            const ranked = score * 100 - order;
+            let score = 0;
+            if (wanted.base && candidate.base === wanted.base) {
+              score += 300;
+              if (candidate.full === wanted.full) score += 100;
+              if (candidate.script && wanted.script && candidate.script === wanted.script) score += 120;
+              else if (candidate.script && wanted.script && candidate.script !== wanted.script) score -= 100;
+            }
+            const languageWords = keywordProfiles[wanted.base] || [];
+            if (languageWords.some(word => hasKeyword(hint, word))) score += 240;
+            if (wanted.script && (scriptKeywords[wanted.script] || []).some(word => hasKeyword(hint, word))) score += 180;
+            // 如果标签明确写着另一种中文书写系统，不能让笼统的“中文”盖过它。
+            if (wanted.script === 'hans' && scriptKeywords.hant.some(word => hasKeyword(hint, word))) score -= 220;
+            if (wanted.script === 'hant' && scriptKeywords.hans.some(word => hasKeyword(hint, word))) score -= 220;
+            if (undesirable.some(word => hasKeyword(hint, word))) score -= 80;
+            if (score <= 0) return;
+            // 浏览器语言列表是有序偏好，越靠前越优先；默认轨在同分时略优先。
+            const ranked = score * 100 - order * 10 + (track.isDefault ? 2 : 0);
             if (!best || ranked > best.ranked) best = { track, ranked };
           });
         });
         // 匹配不上就保持全关：硬塞一条读者看不懂的字幕比不开更糟。
-        if (best) best.track.mode = 'showing';
-        buildSubtitleMenu();
+        if (best) void selectSubtitleTrack(best.track.id, false);
       }
 
       const subtitleLabel = (value, fallback) => {
@@ -1630,51 +1779,185 @@ enum ServerWebMediaDetailPage {
       // 这件事必须在**起播之前**做完：要不要走重封装，取决于默认音轨浏览器能不能
       // 解码，而那正是"部分格式没有声音"的判定点。
       async function loadPlaybackTracks() {
-        if (mediaKind !== 'video' || playbackTracksLoaded || !itemID) return;
-        playbackTracksLoaded = true;
-        try {
-          const response = await fetch(mediaPath('/api/v1/playback/tracks/'), {
-            credentials: 'same-origin', headers: { 'Accept': 'application/json' }
-          });
-          if (response.status === 401) { window.location.assign('/login'); return; }
-          if (!response.ok) throw new Error('unavailable');
-          const payload = await response.json();
-          if (!payload || typeof payload !== 'object') throw new Error('invalid');
-          playbackTracks = {
-            audio: Array.isArray(payload.audio) ? payload.audio : [],
-            subtitles: Array.isArray(payload.subtitles) ? payload.subtitles : [],
-            remuxable: payload.remuxable === true,
-            remuxUnavailableReason: typeof payload.remuxUnavailableReason === 'string'
-              ? payload.remuxUnavailableReason : ''
-          };
-          attachSubtitleTracks(playbackTracks.subtitles);
-          buildAudioMenu();
-        } catch (_) {
-          // 轨道发现失败不影响直放，也不回显服务器文件信息。下次进播放页再试。
-          playbackTracksLoaded = false;
-        }
+        if (mediaKind !== 'video' || !itemID) return null;
+        if (playbackTracks) return playbackTracks;
+        // 页面进入时会预取一次，读者可能在 ffprobe 尚未结束前马上按播放。此前第二次
+        // 调用看到一个布尔“已开始”就直接返回，于是起播绕过了音轨判定，E-AC-3 MKV
+        // 仍按无声直放。共享同一个 Promise 才是真正的 single-flight：所有起播者都等
+        // 同一份事实，不会重复探测，也不会越过它。
+        if (playbackTracksPromise) return playbackTracksPromise;
+        playbackTracksPromise = (async () => {
+          try {
+            const response = await fetch(mediaPath('/api/v1/playback/tracks/'), {
+              credentials: 'same-origin', headers: { 'Accept': 'application/json' }
+            });
+            if (response.status === 401) { window.location.assign('/login'); return null; }
+            if (!response.ok) throw new Error('unavailable');
+            const payload = await response.json();
+            if (!payload || typeof payload !== 'object') throw new Error('invalid');
+            playbackTracks = {
+              audio: Array.isArray(payload.audio) ? payload.audio : [],
+              subtitles: Array.isArray(payload.subtitles) ? payload.subtitles : [],
+              remuxable: payload.remuxable === true,
+              remuxUnavailableReason: typeof payload.remuxUnavailableReason === 'string'
+                ? payload.remuxUnavailableReason : '',
+              durationSeconds: Number.isFinite(Number(payload.durationSeconds))
+                && Number(payload.durationSeconds) > 0
+                ? Number(payload.durationSeconds) : 0
+            };
+            if (playbackTracks.durationSeconds > 0) {
+              knownDurationSeconds = playbackTracks.durationSeconds;
+              updateTransportUI();
+            }
+            attachSubtitleTracks(playbackTracks.subtitles);
+            buildAudioMenu();
+            return playbackTracks;
+          } catch (_) {
+            // 轨道发现失败不影响直放，也不回显服务器文件信息。允许下一次起播重试。
+            playbackTracksPromise = null;
+            return null;
+          }
+        })();
+        return playbackTracksPromise;
       }
       function attachSubtitleTracks(tracks) {
-        tracks.slice(0, 16).forEach((track, index) => {
-          if (!Number.isInteger(track?.id) || track.id < 0 || track.id >= 16) return;
-          const element = document.createElement('track');
-          element.kind = 'subtitles';
-          element.label = subtitleLabel(track.label, `字幕 ${index + 1}`);
-          // 语言由服务端解析——外挂字幕从文件名，内封轨从容器标签，远程轨从来源
-          // 服务器。`und` 是从前的硬编码值，它让"按浏览器语言选默认字幕"无从判断。
-          element.srclang = subtitleLanguage(track.language);
-          element.src = subtitlePath(track.id);
-          // 轨道资源加载完成时浏览器会**重新**决定 mode，把我们刚归一好的结果
-          // 覆盖掉（实测 Chrome 会把多条轨一起打开）。所以每条轨加载/失败后都
-          // 再归一一次；这个函数是幂等的，重复执行没有副作用。
-          element.addEventListener('load', applyPreferredSubtitle);
-          element.addEventListener('error', applyPreferredSubtitle);
-          player.append(element);
-        });
-        // 这一页自己拥有传输控件（原生控件被显式关掉），所以字幕必须有自己的
-        // 选择入口——从前它们被挂上去了，却没有任何地方能选中它们。
+        // WebKit 会抢先请求动态插入的每一条 `<track>`，即使它们仍是 disabled；
+        // 多语言 MKV 因此一进页面就并发导出几十条字幕，选择时看到的反而是失败轨。
+        // 菜单只渲染服务端元数据，真正的字幕在选中后才拉取并挂载，始终只有一条。
+        if (!Array.isArray(tracks)) return;
         applyPreferredSubtitle();
         buildSubtitleMenu();
+      }
+
+      const subtitleOverlay = document.getElementById('subtitle-overlay');
+      const parseVTTTime = value => {
+        const parts = String(value || '').trim().replace(',', '.').split(':');
+        if (parts.length < 2 || parts.length > 3) return NaN;
+        const seconds = Number(parts.pop());
+        const minutes = Number(parts.pop());
+        const hours = parts.length ? Number(parts.pop()) : 0;
+        if (![hours, minutes, seconds].every(Number.isFinite) || minutes < 0 || minutes >= 60 || seconds < 0 || seconds >= 60) return NaN;
+        return hours * 3600 + minutes * 60 + seconds;
+      };
+      const plainSubtitleText = value => {
+        const entities = { amp: '&', lt: '<', gt: '>', nbsp: ' ', lrm: '', rlm: '' };
+        return String(value || '')
+          .replace(/<br\s*\/?>/gi, '\n')
+          .replace(/<[^>]{0,256}>/g, '')
+          .replace(/&([a-z]+);/gi, (match, name) => entities[name.toLowerCase()] ?? match)
+          .trim().slice(0, 4000);
+      };
+      const parseWebVTT = payload => {
+        const source = String(payload || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
+        if (!source.startsWith('WEBVTT')) throw new Error('invalid-webvtt');
+        const cues = [];
+        const blocks = source.split(/\n{2,}/);
+        for (const block of blocks) {
+          if (cues.length >= 20000) break;
+          const lines = block.split('\n');
+          const timingIndex = lines.findIndex(line => line.includes('-->'));
+          if (timingIndex < 0) continue;
+          const timing = lines[timingIndex].match(/^\s*([^\s]+)\s+-->\s+([^\s]+)/);
+          if (!timing) continue;
+          const start = parseVTTTime(timing[1]);
+          const end = parseVTTTime(timing[2]);
+          const text = plainSubtitleText(lines.slice(timingIndex + 1).join('\n'));
+          if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !text) continue;
+          cues.push({ start, end, text });
+        }
+        cues.sort((left, right) => left.start - right.start || left.end - right.end);
+        if (cues.length === 0) throw new Error('empty-webvtt');
+        return cues;
+      };
+      const renderActiveSubtitle = () => {
+        if (!subtitleOverlay || activeSubtitleCues.length === 0) {
+          if (subtitleOverlay) { subtitleOverlay.hidden = true; subtitleOverlay.replaceChildren(); }
+          activeSubtitleCueKey = '';
+          return;
+        }
+        const now = timelinePosition();
+        if (!Number.isFinite(now)) return;
+        let low = 0;
+        let high = activeSubtitleCues.length - 1;
+        let last = -1;
+        while (low <= high) {
+          const middle = (low + high) >> 1;
+          if (activeSubtitleCues[middle].start <= now + 0.04) { last = middle; low = middle + 1; }
+          else high = middle - 1;
+        }
+        const active = [];
+        // 同时显示的 cue 通常只有一两条；向前回看有限窗口可兼容重叠字幕，同时
+        // 避免恶意或损坏的 VTT 在每个 timeupdate 上扫描数万条记录。
+        for (let index = last, checked = 0; index >= 0 && checked < 64 && active.length < 16; index -= 1, checked += 1) {
+          const cue = activeSubtitleCues[index];
+          if (cue.end > now - 0.04) active.push(cue);
+        }
+        active.reverse();
+        const key = active.map(cue => `${cue.start}:${cue.end}:${cue.text}`).join('|');
+        if (key === activeSubtitleCueKey) return;
+        activeSubtitleCueKey = key;
+        const fragment = document.createDocumentFragment();
+        active.forEach(cue => {
+          const line = document.createElement('div');
+          line.className = 'player-subtitle-line';
+          line.textContent = cue.text;
+          fragment.append(line);
+        });
+        subtitleOverlay.replaceChildren(fragment);
+        subtitleOverlay.hidden = active.length === 0;
+      };
+      const releaseActiveSubtitle = () => {
+        activeSubtitleCues = [];
+        activeSubtitleCueKey = '';
+        if (subtitleOverlay) { subtitleOverlay.hidden = true; subtitleOverlay.replaceChildren(); }
+      };
+
+      async function selectSubtitleTrack(trackID, lockChoice = true) {
+        if (lockChoice) subtitleChoiceLocked = true;
+        if (trackID !== null && trackID !== -1 && selectedSubtitleTrackID === trackID) return;
+        const revision = ++subtitleLoadRevision;
+        releaseActiveSubtitle();
+        selectedSubtitleTrackID = null;
+        if (trackID === null || trackID === -1) {
+          buildSubtitleMenu();
+          setStatus('字幕已关闭。');
+          return;
+        }
+        const tracks = playbackTracks?.subtitles ?? [];
+        const track = tracks.find(candidate => candidate.id === trackID);
+        if (!track) {
+          buildSubtitleMenu();
+          return;
+        }
+        // 导出大体积 MKV 可能受 NAS 瞬时速度影响；失败不是轨道的永久属性，读者
+        // 再次点按必须能重试，而不是把这条字幕锁死到刷新页面为止。
+        failedSubtitleTrackIDs.delete(trackID);
+        selectedSubtitleTrackID = trackID;
+        buildSubtitleMenu();
+        setStatus('正在加载字幕…');
+        try {
+          const response = await fetch(subtitlePath(trackID), {
+            credentials: 'same-origin', headers: { 'Accept': 'text/vtt' }
+          });
+          if (!response.ok) throw new Error('subtitle-unavailable');
+          const payload = await response.text();
+          if (revision !== subtitleLoadRevision) return;
+          if (payload.length > 8 * 1024 * 1024 || !payload.replace(/^\uFEFF/, '').startsWith('WEBVTT')) {
+            throw new Error('invalid-webvtt');
+          }
+          activeSubtitleCues = parseWebVTT(payload);
+          activeSubtitleCueKey = '';
+          renderActiveSubtitle();
+          setStatus('字幕已加载。');
+          buildSubtitleMenu();
+        } catch (_) {
+          if (revision !== subtitleLoadRevision) return;
+          failedSubtitleTrackIDs.add(trackID);
+          selectedSubtitleTrackID = null;
+          releaseActiveSubtitle();
+          buildSubtitleMenu();
+          setStatus(`“${subtitleLabel(track.label, `字幕 ${trackID + 1}`)}”无法加载，请选择其他字幕。`, true);
+        }
       }
       /// 默认应该走哪条通路。
       //
@@ -1692,22 +1975,32 @@ enum ServerWebMediaDetailPage {
         if (tracks.length === 0) return true;
         return preferredAudioTrack()?.browserPlayable === true;
       };
+      // iPhone/iPad 的 WebKit 不支持 Matroska 容器；即使里面是 H.264 + AAC，
+      // canPlayType 也会失败。桌面 Chromium 对 MKV 的 canPlayType 又是假阴性，
+      // 所以不能全局按 MIME 重封装，只对 iOS 家族启用这条兼容路径。
+      const isIOSFamily = /iP(?:ad|hone|od)/.test(window.navigator?.userAgent || '')
+        || (window.navigator?.platform === 'MacIntel' && (window.navigator?.maxTouchPoints || 0) > 1);
+      const directPlayNeedsRemux = () => !directPlayHasSound()
+        || (isIOSFamily && !['video/mp4', 'video/quicktime'].includes(browserContentType));
 
       // ---- Track menus ------------------------------------------------------
       // Both menus are <details> inside the stage rather than document-level
       // popovers: a popover positioned in page coordinates disappears the moment
       // the player enters native fullscreen, which is exactly when a viewer
       // reaches for subtitles.
-      function trackButton(label, active, onSelect) {
+      function trackButton(label, active, onSelect, disabled = false) {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'player-track-item';
         button.setAttribute('role', 'menuitemradio');
         button.setAttribute('aria-checked', active ? 'true' : 'false');
+        button.disabled = disabled;
         button.textContent = label;
         button.addEventListener('click', () => {
-          onSelect();
+          // 选择回调会重建整块菜单；先收起再执行，避免按钮被 replaceChildren
+          // 移出 DOM 后 `closest()` 已经找不到原来的 details。
           button.closest('details')?.removeAttribute('open');
+          onSelect();
         });
         return button;
       }
@@ -1724,30 +2017,25 @@ enum ServerWebMediaDetailPage {
       function buildSubtitleMenu() {
         const menu = document.getElementById('subtitle-menu');
         const panel = document.getElementById('subtitle-panel');
-        if (!menu || !panel || !player.textTracks) return;
-        const tracks = Array.from(player.textTracks).filter(track => track.kind === 'subtitles');
+        if (!menu || !panel) return;
+        const tracks = (playbackTracks?.subtitles ?? []).slice(0, 32);
         if (tracks.length === 0) { menu.hidden = true; return; }
-        const activeIndex = tracks.findIndex(track => track.mode === 'showing');
-        const select = index => {
-          subtitleChoiceLocked = true;
-          tracks.forEach((track, position) => { track.mode = position === index ? 'showing' : 'disabled'; });
-          buildSubtitleMenu();
-        };
         const fragment = document.createDocumentFragment();
-        fragment.append(trackButton('关闭字幕', activeIndex < 0, () => select(-1)));
-        // `<track>` 是按服务端名单的顺序挂上去的，所以下标可以直接对回那份名单
-        // 拿到来源。名单没到（异常回退）时不分组，仍然逐条列出。
+        fragment.append(trackButton('关闭字幕', selectedSubtitleTrackID === null, () => { void selectSubtitleTrack(-1); }));
         var lastOrigin = null;
         tracks.forEach((track, index) => {
-          const origin = playbackTracks?.subtitles?.[index]?.origin;
+          const origin = track.origin;
           if (origin && origin !== lastOrigin && subtitleOriginNames[origin]) {
             fragment.append(trackGroupHeading(subtitleOriginNames[origin]));
             lastOrigin = origin;
           }
-          fragment.append(trackButton(track.label || `字幕 ${index + 1}`, index === activeIndex, () => select(index)));
+          const failed = failedSubtitleTrackIDs.has(track.id);
+          const label = `${track.label || `字幕 ${index + 1}`}${failed ? '（上次加载失败，点按重试）' : ''}`;
+          fragment.append(trackButton(label, track.id === selectedSubtitleTrackID, () => { void selectSubtitleTrack(track.id); }));
         });
         panel.replaceChildren(fragment);
         menu.hidden = false;
+        syncTrackMenuHeights();
       }
 
       /// 音轨菜单由**服务端**的名单渲染。
@@ -1762,7 +2050,7 @@ enum ServerWebMediaDetailPage {
         const tracks = playbackTracks?.audio ?? [];
         // 只有一条音轨、而且浏览器解得了它——没有任何可选的东西，不摆这个菜单。
         if (tracks.length < 2 && directPlayHasSound()) { menu.hidden = true; return; }
-        const activeID = playbackMode === 'remux' ? remuxAudioTrack : (preferredAudioTrack()?.id ?? 0);
+        const activeID = playbackMode === 'hls' ? remuxAudioTrack : (preferredAudioTrack()?.id ?? 0);
         const fragment = document.createDocumentFragment();
         tracks.forEach((track, index) => {
           const label = track.browserPlayable
@@ -1778,6 +2066,7 @@ enum ServerWebMediaDetailPage {
         }
         panel.replaceChildren(fragment);
         menu.hidden = false;
+        syncTrackMenuHeights();
       }
 
       /// 换音轨。
@@ -1788,7 +2077,7 @@ enum ServerWebMediaDetailPage {
         if (!track || !playbackTracks) return;
         const position = timelinePosition();
         const isFirstBrowserPlayable = track.browserPlayable && track.id === (playbackTracks.audio[0]?.id ?? 0);
-        if (isFirstBrowserPlayable) {
+        if (isFirstBrowserPlayable && !(isIOSFamily && !['video/mp4', 'video/quicktime'].includes(browserContentType))) {
           if (playbackMode === 'direct') return;
           void startDirect({ resumeAt: position });
           return;
@@ -1994,10 +2283,16 @@ enum ServerWebMediaDetailPage {
       // 这一段"，整部片子的位置要把偏移加回去；总长度则来自资料库里存的时长——
       // 分片流的 `duration` 是 Infinity，拿它当分母进度条会一直停在 0。
       const timelinePosition = () => finitePlaybackNumber(player.currentTime)
-        + (playbackMode === 'remux' ? remuxOffset : 0);
+        + (playbackMode === 'hls' ? remuxOffset : 0);
       const timelineDuration = () => {
-        if (playbackMode === 'remux') return knownDurationSeconds > 0 ? knownDurationSeconds : NaN;
-        return player.duration;
+        // HLS/remux sessions use the server-probed full duration as their
+        // authority. Safari can temporarily report the duration of only the
+        // currently known fragment (for example 12 seconds); accepting that
+        // finite-but-partial value collapses a feature film's slider.
+        if (playbackMode === 'hls' && knownDurationSeconds > 0) return knownDurationSeconds;
+        const nativeDuration = Number(player.duration);
+        if (Number.isFinite(nativeDuration) && nativeDuration > 0) return nativeDuration;
+        return knownDurationSeconds > 0 ? knownDurationSeconds : NaN;
       };
       // 这一条流已经缓冲到整部片子的第几秒。
       const timelineBufferedEnd = () => {
@@ -2005,7 +2300,7 @@ enum ServerWebMediaDetailPage {
         const local = finitePlaybackNumber(player.currentTime);
         for (let index = 0; index < player.buffered.length; index += 1) {
           if (player.buffered.start(index) <= local && local <= player.buffered.end(index)) {
-            return player.buffered.end(index) + (playbackMode === 'remux' ? remuxOffset : 0);
+            return player.buffered.end(index) + (playbackMode === 'hls' ? remuxOffset : 0);
           }
         }
         return 0;
@@ -2018,17 +2313,20 @@ enum ServerWebMediaDetailPage {
         const duration = timelineDuration();
         const upper = Number.isFinite(duration) && duration > 0 ? duration : Number.MAX_SAFE_INTEGER;
         const clamped = Math.min(Math.max(target, 0), upper);
-        if (playbackMode !== 'remux') {
+        if (playbackMode !== 'hls') {
           if (Number.isFinite(player.currentTime)) player.currentTime = clamped;
           return;
         }
-        const local = clamped - remuxOffset;
-        if (local >= 0 && local <= timelineBufferedEnd() - remuxOffset) {
-          player.currentTime = local;
-          return;
-        }
+        // A far HLS seek starts a new keyframe-aligned session. This keeps the
+        // response bounded and makes rapid seeks deterministic; the revision
+        // gate in startRemux guarantees that only the last result can replace
+        // the media source.
         void startRemux(remuxAudioTrack, clamped);
       };
+      // `canPlayType()` 只能作为失败文案的参考，不能当播放许可。Chromium 对 MKV 的
+      // MIME 经常回空字符串，却仍能解其中的 H.264；而音频重封装输出的是 MP4，和
+      // 原文件 MIME 更没有关系。硬拦截会让本来可播、也正需要补声音的 MKV 连按钮
+      // 都按不了。
       const browserCanPlay = () => !browserContentType || typeof player.canPlayType !== 'function' || player.canPlayType(browserContentType) !== '';
       const formatClock = (seconds) => {
         if (!Number.isFinite(seconds) || seconds < 0) return '--:--';
@@ -2080,10 +2378,14 @@ enum ServerWebMediaDetailPage {
         const volumePercent = Math.round((Number.isFinite(player.volume) ? player.volume : 1) * 100);
         volumeControl.value = String(volumePercent / 100);
         volumeValue.textContent = `${volumePercent}%`;
-        playbackTime.textContent = `${formatClock(timelinePosition())} / ${formatClock(timelineTotal)}`;
+        const visiblePosition = scrubState !== 'idle' && Number.isFinite(scrubTarget)
+          ? scrubTarget : timelinePosition();
+        playbackTime.textContent = `${formatClock(visiblePosition)} / ${formatClock(timelineTotal)}`;
         if (Number.isFinite(timelineTotal) && timelineTotal > 0) {
           playbackSeek.max = String(timelineTotal);
-          playbackSeek.value = String(Math.min(Math.max(timelinePosition(), 0), timelineTotal));
+          if (scrubState === 'idle') {
+            playbackSeek.value = String(Math.min(Math.max(timelinePosition(), 0), timelineTotal));
+          }
         } else {
           playbackSeek.max = '0';
           playbackSeek.value = '0';
@@ -2185,9 +2487,19 @@ enum ServerWebMediaDetailPage {
       }
       async function togglePlayback() {
         if (!hasPlayableSource()) return startPlayback();
+        if (!player.paused) {
+          lastUserPauseAt = window.performance.now();
+          player.pause();
+          return;
+        }
         try {
-          if (player.paused) await player.play(); else player.pause();
-        } catch (_) { setStatus('浏览器拦下了自动播放，点一下播放键就好。', true); }
+          await player.play();
+        } catch (error) {
+          // 用户在尚未兑现的 play() 期间按了暂停，WebKit/Chromium 都会以
+          // AbortError 拒绝旧 Promise；这是成功暂停，不是自动播放被拦截。
+          if (error?.name === 'AbortError' || !player.paused) return;
+          setStatus('浏览器拦下了自动播放，点一下播放键就好。', true);
+        }
       }
       function toggleMute() {
         if (player.muted || player.volume === 0) {
@@ -2210,17 +2522,35 @@ enum ServerWebMediaDetailPage {
         showOverlayControls();
       }
       function seekToControlPosition() {
-        const nextPosition = Number(playbackSeek.value);
+        const nextPosition = Number.isFinite(scrubTarget) ? scrubTarget : Number(playbackSeek.value);
         const total = timelineDuration();
-        if (!Number.isFinite(nextPosition) || !Number.isFinite(total) || total <= 0) return;
+        scrubState = 'seeking';
+        scrubTarget = nextPosition;
+        if (!Number.isFinite(nextPosition) || !Number.isFinite(total) || total <= 0) {
+          scrubState = 'idle';
+          scrubTarget = NaN;
+          return;
+        }
         seekTimeline(nextPosition);
         showOverlayControls();
       }
+      const settlePendingSeek = () => {
+        if (sourceTransitionPending || scrubState !== 'seeking' || !Number.isFinite(scrubTarget)) return;
+        const current = timelinePosition();
+        // Direct seeks normally land exactly. A copied H.264 stream can begin
+        // at the preceding keyframe, so keep the chosen value pinned until
+        // playback reaches it instead of visibly rebounding to the old source.
+        if (!Number.isFinite(current) || current + 0.75 < scrubTarget) return;
+        scrubState = 'idle';
+        scrubTarget = NaN;
+        scheduleTransportUI();
+      };
       const prepareNewSource = () => {
         resumeApplied = false;
         playbackStartedReported = false;
         lastProgressBucket = -1;
         playbackCompleted = false;
+        lastAdvancingTime = 0;
       };
       /// 播放入口。
       //
@@ -2229,10 +2559,54 @@ enum ServerWebMediaDetailPage {
       // 而且只在整个页面生命周期里做一次。
       async function startPlayback() {
         if (!canDirectPlay || isStarting) return;
-        await loadPlaybackTracks();
-        if (!directPlayHasSound() && playbackTracks?.remuxable) {
+        // iOS 对 MKV 的结论无需等待探测：容器本身就不被 WebKit 接受。立即用第一
+        // 条音轨发起兼容重封装，才能让 play() 仍发生在这次点击的用户手势里；轨道
+        // 名单并行补齐，之后仍可切到其他音轨。
+        if (!playbackTracks && isIOSFamily && !['video/mp4', 'video/quicktime'].includes(browserContentType)) {
+          void loadPlaybackTracks();
+          setStatus('正在为 iPhone / iPad 准备兼容播放流。');
+          const resumeAt = Number.isFinite(resumePosition) && resumePosition >= 10 ? resumePosition : 0;
+          await startRemux(0, resumeAt, { allowUnprobed: true });
+          return;
+        }
+        // iOS 把媒体播放严格绑定在当前触摸事件上。若轨道预取还没结束，先等 fetch
+        // 再 play() 会丢失这次授权，结果是所有格式都报“自动播放被阻止”。先同步
+        // 发起直放保住授权，同时完成单飞探测；需要补声音时再无缝换到重封装流。
+        if (!playbackTracks) {
+          const directAttempt = startDirect({ deferFailure: true });
+          await loadPlaybackTracks();
+          if (directPlayNeedsRemux() && (
+            (playbackTracks?.remuxable && (playbackTracks.audio?.length ?? 0) > 0) || isIOSFamily
+          )) {
+            const track = preferredAudioTrack();
+            setStatus(
+              isIOSFamily
+                ? '正在为 iPhone / iPad 准备兼容播放流。'
+                : '这段视频的音轨浏览器解不了，正在改用服务器转码的音频。'
+            );
+            const resumeAt = Number.isFinite(resumePosition) && resumePosition >= 10
+              ? resumePosition : timelinePosition();
+            await startRemux(track?.id ?? 0, resumeAt);
+            return;
+          }
+          const directSucceeded = await directAttempt;
+          if (!directSucceeded && player.paused && playbackMode === 'direct') {
+            const track = preferredAudioTrack();
+            const resumeAt = Number.isFinite(resumePosition) && resumePosition >= 10 ? resumePosition : timelinePosition();
+            setStatus('直放不兼容，正在改用兼容播放流。');
+            await startRemux(track?.id ?? 0, resumeAt, { allowUnprobed: true });
+          }
+          return;
+        }
+        if (directPlayNeedsRemux() && (
+          (playbackTracks?.remuxable && (playbackTracks.audio?.length ?? 0) > 0) || isIOSFamily
+        )) {
           const track = preferredAudioTrack();
-          setStatus('这段视频的音轨浏览器解不了，正在改用服务器转码的音频。');
+          setStatus(
+            isIOSFamily
+              ? '正在为 iPhone / iPad 准备兼容播放流。'
+              : '这段视频的音轨浏览器解不了，正在改用服务器转码的音频。'
+          );
           // 续播点在直放那条路上由 `loadedmetadata` 处理；重封装这条路没有那一步
           // （流本来就从 `start=` 开始），所以要在这里把它交出去。
           const resumeAt = resumeApplied
@@ -2255,11 +2629,11 @@ enum ServerWebMediaDetailPage {
       /// 浏览器直放：字节原样来自 `/api/v1/stream/`，支持 Range 跳转。
       async function startDirect(options = {}) {
         if (!canDirectPlay || isStarting) return;
-        if (!browserCanPlay()) {
-          setStatus('这个浏览器不支持这种视频格式。换一个浏览器试试。', true);
-          return;
-        }
         setBusy(true);
+        const sourceRevision = ++playbackSourceRevision;
+        sourceTransitionPending = true;
+        const previousSessionID = currentHLSSessionID;
+        currentHLSSessionID = '';
         const resumeAt = Number.isFinite(options.resumeAt) ? options.resumeAt : null;
         playbackMode = 'direct';
         remuxOffset = 0;
@@ -2270,13 +2644,17 @@ enum ServerWebMediaDetailPage {
         // stale no-source/error affordance while a same-origin stream is loading.
         player.controls = false;
         playerLanding?.setAttribute('hidden', '');
+        player.dataset.sourceRevision = String(sourceRevision);
         player.src = mediaPath('/api/v1/stream/');
         player.load();
+        sourceTransitionPending = false;
+        if (previousSessionID) cancelHLSSession(previousSessionID);
         if (resumeAt !== null) {
           // 换轨回直放要接着刚才的位置，不能从头开始。
           resumeApplied = true;
           player.addEventListener('loadedmetadata', () => {
-            if (Number.isFinite(player.duration)) player.currentTime = Math.min(resumeAt, player.duration);
+            const duration = timelineDuration();
+            if (Number.isFinite(duration) && duration > 0) seekTimeline(Math.min(resumeAt, duration));
           }, { once: true });
         }
         updateTransportUI();
@@ -2284,10 +2662,25 @@ enum ServerWebMediaDetailPage {
         setStatus('正在准备…');
         try {
           await player.play();
-          setStatus('正在播放。');
+          return true;
         } catch (error) {
-          setStatus(error?.name === 'NotAllowedError' ? '浏览器阻止了自动开始，请在播放器中再次按播放。' : '这个浏览器打不开这段视频。', true);
-        } finally { setBusy(false); }
+          if (sourceRevision !== playbackSourceRevision || (!player.paused && player.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA)) return;
+          setBusy(false);
+          if (error?.name === 'AbortError' || options.deferFailure === true) return false;
+          if (error?.name !== 'NotAllowedError' && options.compatibilityFallback !== false) {
+            const track = preferredAudioTrack();
+            setStatus('直放不兼容，正在改用兼容播放流。');
+            await startRemux(track?.id ?? 0, resumeAt ?? timelinePosition(), { allowUnprobed: true });
+            return false;
+          }
+          setStatus(
+            error?.name === 'NotAllowedError'
+              ? '浏览器阻止了自动开始，请在播放器中再次按播放。'
+              : (browserCanPlay() ? '这个浏览器打不开这段视频。' : '浏览器没有声明支持这种格式，实际播放也失败了。'),
+            true
+          );
+          return false;
+        }
       }
 
       /// 服务端重封装：画面原样搬运，音频转成 AAC，输出分片 MP4。
@@ -2317,50 +2710,101 @@ enum ServerWebMediaDetailPage {
         } catch (_) { return target; }
       }
 
-      async function startRemux(audioTrackID, startSeconds) {
-        if (!canDirectPlay || !playbackTracks?.remuxable) return;
+      const cancelHLSSession = (sessionID, keepalive = false) => {
+        if (!sessionID) return;
+        void fetch(`/api/v1/playback/sessions/${encodeURIComponent(sessionID)}/cancel`, {
+          method: 'POST', credentials: 'same-origin', keepalive,
+          headers: { 'X-MediaLIB-CSRF': csrfToken }
+        }).catch(() => {});
+      };
+
+      async function startRemux(audioTrackID, startSeconds, options = {}) {
+        if (!canDirectPlay || (!playbackTracks?.remuxable && options.allowUnprobed !== true && !isIOSFamily)) return;
         const wasReported = playbackStartedReported;
+        const shouldPlay = !hasPlayableSource() || !player.paused;
+        const requestedStart = Math.max(0, Number.isFinite(startSeconds) ? startSeconds : 0);
         setBusy(true);
-        playbackMode = 'remux';
+        const sourceRevision = ++playbackSourceRevision;
+        sourceTransitionPending = true;
         remuxAudioTrack = Number.isInteger(audioTrackID) && audioTrackID >= 0 ? audioTrackID : 0;
-        remuxOffset = await resolveRemuxStart(startSeconds);
-        prepareNewSource();
-        // 换一条流不是"重新开始看"：起播上报只该发一次，否则播放次数会随着每次
-        // 拖动进度条一起涨。
-        playbackStartedReported = wasReported;
-        resumeApplied = true;
-        player.hidden = false;
-        player.removeAttribute('aria-hidden');
-        player.controls = false;
-        playerLanding?.setAttribute('hidden', '');
-        const query = new URLSearchParams({
-          audio: String(remuxAudioTrack), start: remuxOffset.toFixed(3)
-        });
-        player.src = `${mediaPath('/api/v1/transcode/')}?${query.toString()}`;
-        player.load();
-        updateTransportUI();
-        buildAudioMenu();
-        setStatus('正在准备…');
+        setStatus('正在准备兼容播放流…');
         try {
-          await player.play();
-          setStatus('正在播放。');
+          const response = await fetch(mediaPath('/api/v1/playback/sessions/'), {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'X-MediaLIB-CSRF': csrfToken },
+            body: JSON.stringify({
+              audioTrackID: remuxAudioTrack,
+              startSeconds: requestedStart,
+              durationSeconds: knownDurationSeconds > 0 ? knownDurationSeconds : null
+            })
+          });
+          if (response.status === 401) { window.location.assign('/login'); return; }
+          if (!response.ok) throw new Error(response.status === 503 ? 'busy' : 'unavailable');
+          const descriptor = await response.json();
+          const sessionID = typeof descriptor?.sessionID === 'string' ? descriptor.sessionID : '';
+          const mediaURL = typeof descriptor?.mediaURL === 'string' ? descriptor.mediaURL : '';
+          if (!sessionID || !mediaURL.startsWith('/api/v1/playback/hls/')) throw new Error('invalid');
+          // Multiple rapid seeks may finish out of order. A stale result is
+          // explicitly cancelled and can never replace the newest source.
+          if (sourceRevision !== playbackSourceRevision) {
+            cancelHLSSession(sessionID);
+            return;
+          }
+          const previousSessionID = currentHLSSessionID;
+          currentHLSSessionID = sessionID;
+          playbackMode = 'hls';
+          remuxOffset = Number.isFinite(Number(descriptor.actualStartSeconds))
+            ? Math.max(0, Number(descriptor.actualStartSeconds)) : requestedStart;
+          if (Number.isFinite(Number(descriptor.durationSeconds)) && Number(descriptor.durationSeconds) > 0) {
+            knownDurationSeconds = Number(descriptor.durationSeconds);
+          }
+          prepareNewSource();
+          playbackStartedReported = wasReported;
+          resumeApplied = true;
+          player.hidden = false;
+          player.removeAttribute('aria-hidden');
+          player.controls = false;
+          playerLanding?.setAttribute('hidden', '');
+          player.dataset.sourceRevision = String(sourceRevision);
+          player.src = mediaURL;
+          player.load();
+          if (scrubState === 'seeking' && Number.isFinite(scrubTarget)) {
+            const targetForRevision = scrubTarget;
+            player.addEventListener('loadedmetadata', () => {
+              if (sourceRevision !== playbackSourceRevision || scrubState !== 'seeking') return;
+              // The server reports the keyframe-aligned stream origin. Move
+              // inside the new HLS stream to the exact requested point when
+              // its first seekable window already contains that point.
+              const localTarget = Math.max(0, targetForRevision - remuxOffset);
+              try {
+                if (localTarget > 0) player.currentTime = localTarget;
+              } catch (_) { /* WebKit may expose the seekable window one event later. */ }
+              settlePendingSeek();
+            }, { once: true });
+          }
+          sourceTransitionPending = false;
+          if (previousSessionID && previousSessionID !== sessionID) cancelHLSSession(previousSessionID);
+          updateTransportUI();
+          buildAudioMenu();
+          if (shouldPlay) await player.play();
         } catch (error) {
+          sourceTransitionPending = false;
+          if (sourceRevision !== playbackSourceRevision || (!player.paused && player.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA)) return;
+          scrubState = 'idle';
+          scrubTarget = NaN;
+          setBusy(false);
+          if (error?.name === 'AbortError') return;
           setStatus(
             error?.name === 'NotAllowedError'
               ? '浏览器阻止了自动开始，请在播放器中再次按播放。'
-              : '服务器没能转出这段视频。',
+              : (error?.message === 'busy' ? '服务器当前转码任务已满，请稍后重试。' : '服务器没能准备好兼容播放流。'),
             true
           );
-        } finally { setBusy(false); }
+        }
       }
 
       directButton.disabled = !canDirectPlay;
       if (!canDirectPlay) setStatus('这段内容现在播不了。确认存放它的硬盘或服务器已连接，然后重试。', true);
-      else if (!browserCanPlay()) {
-        directButton.disabled = true;
-        directButton.setAttribute('aria-disabled', 'true');
-        setStatus('这个浏览器不支持这种视频格式。换一个浏览器试试。', true);
-      }
       renderPreference();
       // 轨道名单在**进入页面时**就问，不等按下播放。
       //
@@ -2370,6 +2814,12 @@ enum ServerWebMediaDetailPage {
       // 窄屏与宽屏之间来回拖窗口时，这两颗按钮的有效性也跟着变。
       syncLayoutButtons();
       window.addEventListener('resize', syncLayoutButtons, { signal: lifecycle.signal });
+      window.addEventListener('resize', syncTrackMenuHeights, { signal: lifecycle.signal });
+      document.querySelectorAll('.player-settings').forEach(menu => {
+        menu.addEventListener('toggle', () => {
+          if (menu.open) window.requestAnimationFrame(syncTrackMenuHeights);
+        });
+      });
       directButton.addEventListener('click', () => { void startPlayback(); });
       defaultSizeButton?.addEventListener('click', () => setPlayerLayout('default'));
       wideSizeButton?.addEventListener('click', () => setPlayerLayout('wide'));
@@ -2392,8 +2842,13 @@ enum ServerWebMediaDetailPage {
       muteButton.addEventListener('click', toggleMute);
       volumeControl.addEventListener('input', setVolume);
       playbackSeek.addEventListener('input', () => {
+        scrubState = 'scrubbing';
+        scrubTarget = Number(playbackSeek.value);
         paintSeekProgress();
-        if (Number.isFinite(player.duration) && player.duration > 0) playbackTime.textContent = `${formatClock(Number(playbackSeek.value))} / ${formatClock(player.duration)}`;
+        const total = timelineDuration();
+        if (Number.isFinite(scrubTarget) && Number.isFinite(total) && total > 0) {
+          playbackTime.textContent = `${formatClock(scrubTarget)} / ${formatClock(total)}`;
+        }
       });
       playbackSeek.addEventListener('change', seekToControlPosition);
       addToQueueButton?.addEventListener('click', () => { void addToQueue(); });
@@ -2452,12 +2907,21 @@ enum ServerWebMediaDetailPage {
         pictureInPictureButton.addEventListener('click', togglePictureInPicture);
       }
       document.addEventListener('fullscreenchange', updateFullscreenLabel, { signal: lifecycle.signal });
-      playerStage.addEventListener('pointermove', () => showOverlayControls());
+      const coarsePointer = window.matchMedia('(hover: none), (pointer: coarse)');
+      playerStage.addEventListener('pointermove', () => { if (!coarsePointer.matches) showOverlayControls(); });
       playerStage.addEventListener('pointerdown', () => showOverlayControls(true));
-      playerStage.addEventListener('pointerleave', hideOverlayControls);
+      playerStage.addEventListener('pointerleave', () => { if (!coarsePointer.matches) hideOverlayControls(); });
       transportControls.addEventListener('focusin', () => showOverlayControls(true));
       transportControls.addEventListener('focusout', () => { window.setTimeout(() => { if (!transportControls.contains(document.activeElement)) showOverlayControls(); }, 0); });
-      player.addEventListener('click', () => { void togglePlayback(); });
+      player.addEventListener('click', () => {
+        // 触摸屏上单击画面只负责显隐控制栏：第一次固定显示，第二次隐藏。
+        // 播放/暂停由明确的播放键承担，避免“刚想点按钮，整条 UI 已经收走”。
+        if (coarsePointer.matches) {
+          setOverlayPinnedByTap(!overlayPinnedByTap);
+          return;
+        }
+        void togglePlayback();
+      });
       document.addEventListener('keydown', (event) => {
         if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || isEditableTarget(event.target)) return;
         showOverlayControls();
@@ -2473,14 +2937,17 @@ enum ServerWebMediaDetailPage {
       player.addEventListener('play', updateTransportUI);
       // 缓冲的可见形态。`waiting` 进、`playing`/`canplay` 出——起播顺利时那 320ms
       // 的延迟让它根本不出现。
-      player.addEventListener('waiting', () => { setBufferingVisible(true); }, { signal: lifecycle.signal });
-      player.addEventListener('stalled', () => { setBufferingVisible(true); }, { signal: lifecycle.signal });
-      player.addEventListener('canplay', () => { setBufferingVisible(false); }, { signal: lifecycle.signal });
+      player.addEventListener('waiting', () => { if (!player.paused && !player.ended) setBufferingVisible(true); }, { signal: lifecycle.signal });
+      player.addEventListener('stalled', () => { if (!player.paused && !player.ended) setBufferingVisible(true); }, { signal: lifecycle.signal });
+      player.addEventListener('canplay', () => { setBufferingVisible(false); setBusy(false); }, { signal: lifecycle.signal });
       player.addEventListener('progress', paintSeekProgress, { signal: lifecycle.signal });
       player.addEventListener('playing', () => {
         setBufferingVisible(false);
+        setBusy(false);
         updateTransportUI();
         showOverlayControls();
+        playbackHasPlayed = true;
+        applyPreferredSubtitle();
         // 轨道名单起播前就问过了；这里再调一次只是为了覆盖"页面加载时那次请求
         // 失败、但读者仍然按下了播放"的情况。函数自己带幂等闸。
         void loadPlaybackTracks();
@@ -2489,7 +2956,8 @@ enum ServerWebMediaDetailPage {
         // 快捷键存在但从来没有被说出来过。第一次真正开始播放时短暂提示一次，
         // 之后不再打扰。
         const hint = document.getElementById('shortcut-hint');
-        if (hint && !hint.dataset.shown) {
+        const mobileViewport = window.matchMedia('(max-width: 719px)');
+        if (hint && !coarsePointer.matches && !mobileViewport.matches && !hint.dataset.shown) {
           hint.dataset.shown = 'true';
           hint.hidden = false;
           window.setTimeout(() => hint.classList.add('is-leaving'), 2600);
@@ -2514,9 +2982,20 @@ enum ServerWebMediaDetailPage {
         }
         if (resumeApplied || !Number.isFinite(resumePosition) || resumePosition < 10) return;
         resumeApplied = true;
-        if (Number.isFinite(player.duration) && resumePosition < player.duration - 30) player.currentTime = resumePosition;
+        const duration = timelineDuration();
+        if (Number.isFinite(duration) && resumePosition < duration - 30) seekTimeline(resumePosition);
       });
       player.addEventListener('timeupdate', () => {
+        // `waiting`/`stalled` 在部分浏览器会迟到，甚至在解码已经恢复后不再补一个
+        // `playing`。时间轴真正向前才是最可靠的“画面正在播放”证据；它一前进就必须
+        // 收掉转圈与任何旧源留下的错误卡。
+        if (!player.paused && Number.isFinite(player.currentTime) && player.currentTime > lastAdvancingTime + 0.01) {
+          lastAdvancingTime = player.currentTime;
+          setBufferingVisible(false);
+          if (playerError && !playerError.hidden) setStatus('正在播放。');
+        }
+        renderActiveSubtitle();
+        settlePendingSeek();
         scheduleTransportUI();
         if (!playbackStartedReported || !Number.isFinite(player.currentTime)) return;
         const bucket = Math.floor(timelinePosition() / 15);
@@ -2524,13 +3003,23 @@ enum ServerWebMediaDetailPage {
         lastProgressBucket = bucket;
         void reportPlaybackState('progress');
       });
+      player.addEventListener('seeked', () => {
+        renderActiveSubtitle();
+        settlePendingSeek();
+      }, { signal: lifecycle.signal });
+      player.addEventListener('loadedmetadata', renderActiveSubtitle, { signal: lifecycle.signal });
       player.addEventListener('pause', () => {
+        const userPausedRecently = window.performance.now() - lastUserPauseAt < 2_000;
+        if (userPausedRecently) {
+          setBusy(false);
+          setBufferingVisible(false);
+        }
         updateTransportUI();
         showOverlayControls(true);
         if (playbackStartedReported && !player.ended) {
           void reportPlaybackState('stopped');
         }
-        if (!player.ended && !isStarting && hasPlayableSource()) setStatus('已暂停。');
+        if (!player.ended && (userPausedRecently || !isStarting) && hasPlayableSource()) setStatus('已暂停。');
       });
       player.addEventListener('ended', () => {
         updateTransportUI();
@@ -2547,16 +3036,35 @@ enum ServerWebMediaDetailPage {
       });
       player.addEventListener('error', () => {
         setBufferingVisible(false);
+        setBusy(false);
         updateTransportUI();
-        setStatus('这个浏览器打不开这段视频。换一个浏览器试试。', true);
+        // 创建 HLS 会话期间旧源可能先报一次失败；它不能覆盖即将接管的新源状态。
+        if (sourceTransitionPending) return;
+        // 切音轨/跳转会主动替换 src，旧请求的 error 可能晚于新流的首帧到达。只要
+        // 当前元素仍在推进且已有可显示数据，这个错误就不属于用户正在看的那条流。
+        if (!player.paused && player.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return;
+        if (player.paused && window.performance.now() - lastUserPauseAt < 2_000) {
+          setStatus('已暂停。');
+          return;
+        }
+        setStatus(
+          playbackMode === 'hls'
+            ? '服务器没能继续提供兼容播放流。'
+            : (browserCanPlay() ? '这个浏览器打不开这段视频。换一个浏览器试试。' : '浏览器没有声明支持这种格式，实际播放也失败了。'),
+          true
+        );
       });
       player.addEventListener('volumechange', scheduleTransportUI);
       window.addEventListener('pagehide', () => {
         if (playbackStartedReported) void reportPlaybackState('stopped', true);
+        if (currentHLSSessionID) cancelHLSSession(currentHLSSessionID, true);
       }, { signal: lifecycle.signal });
       document.addEventListener('medialib:pagewillunload', () => {
         if (transportFrame !== null) window.cancelAnimationFrame(transportFrame);
         if (playbackStartedReported) void reportPlaybackState('stopped', true);
+        if (currentHLSSessionID) cancelHLSSession(currentHLSSessionID, true);
+        subtitleLoadRevision += 1;
+        releaseActiveSubtitle();
         lifecycle.abort();
       }, { once: true });
       if (seriesID) void loadEpisodeSeason(activeEpisodeSeason, true);

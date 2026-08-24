@@ -229,7 +229,10 @@ final class ServerLibraryCatalogTests: XCTestCase {
 
         XCTAssertTrue(detail.canDirectPlay)
         XCTAssertEqual(detail.browserContentType, "video/mp4")
-        XCTAssertEqual(detail.playbackModes, [.directPlay])
+        XCTAssertEqual(
+            detail.playbackModes,
+            ServerMediaToolchain.ffmpegURL() == nil ? [.directPlay] : [.directPlay, .fullTranscode]
+        )
         XCTAssertEqual(asset.remoteURL?.host, "media.example")
         XCTAssertEqual(asset.byteLength, 1_024)
         XCTAssertTrue(extensionlessDetail.canDirectPlay)
@@ -421,10 +424,14 @@ final class ServerLibraryCatalogTests: XCTestCase {
         XCTAssertEqual(detail.communityRating, 8.6)
         XCTAssertTrue(detail.canDirectPlay)
         XCTAssertEqual(detail.browserContentType, "video/mp4")
-        // 网页播放器只消费受权原始字节流，解码能力属于当前浏览器；服务端
-        // 不再向网页公开或宣称任何 ffmpeg 转码回退能力。
-        XCTAssertFalse(detail.canTranscode)
-        XCTAssertEqual(detail.playbackModes, [.directPlay])
+        // HLS tiers are advertised only when the actual ffmpeg runtime exists.
+        XCTAssertEqual(detail.canTranscode, ServerMediaToolchain.ffmpegURL() != nil)
+        XCTAssertEqual(
+            detail.playbackModes,
+            ServerMediaToolchain.ffmpegURL() == nil
+                ? [.directPlay]
+                : [.directPlay, .directStream, .fullTranscode]
+        )
         XCTAssertNil(try catalog.publicDetail(id: "detail-item", for: deniedPrincipal))
         let encoded = try JSONEncoder().encode(detail)
         let text = String(data: encoded, encoding: .utf8)?.lowercased() ?? ""

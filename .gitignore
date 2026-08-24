@@ -61,3 +61,6 @@ fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
 .DS_Store
+dist/icons/AppIcon.iconset/icon_16x16@2x.png
+/dist
+/doc

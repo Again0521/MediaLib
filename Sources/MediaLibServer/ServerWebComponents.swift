@@ -144,7 +144,10 @@ enum ServerWebUI {
         chips: [ControlChip],
         chipsName: String = "",
         chipsGroupID: String? = nil,
+        mobileTrailing: String = "",
+        mobileDisclosureLabel: String? = nil,
         trailing: String = "",
+        trailingID: String? = nil,
         id: String? = nil,
         formID: String? = nil,
         extraClass: String = ""
@@ -164,13 +167,28 @@ enum ServerWebUI {
         <div class="ui-control-tray">\#
         <div class="ui-segmented"\#(ServerWebHTML.attribute("id", chipsGroupID)) role="group" aria-label="\#(ServerWebHTML.escape(chipsLabel))">\#(items)</div></div>
         """#
-        let trailingMarkup = trailing.isEmpty ? "" : #"<div class="ui-control-bar-trailing">\#(trailing)</div>"#
-        let classes = classList(["ui-control-bar", extraClass])
+        let disclosureEnabled = !trailing.isEmpty && mobileDisclosureLabel != nil && trailingID != nil
+        let disclosureButton = disclosureEnabled
+            ? iconButton(
+                .filter,
+                label: mobileDisclosureLabel ?? "高级筛选",
+                variant: .secondary,
+                extraClass: "ui-control-bar-disclosure",
+                attributes: #" aria-controls="\#(ServerWebHTML.escape(trailingID ?? ""))" aria-expanded="false""#
+            )
+            : mobileTrailing
+        let mobileTrailingMarkup = disclosureButton.isEmpty
+            ? ""
+            : #"<div class="ui-control-bar-mobile-trailing">\#(disclosureButton)</div>"#
+        let trailingMarkup = trailing.isEmpty
+            ? ""
+            : #"<div class="ui-control-bar-trailing"\#(ServerWebHTML.attribute("id", trailingID))>\#(trailing)</div>"#
+        let classes = classList(["ui-control-bar", disclosureEnabled ? "is-mobile-disclosable" : "", extraClass])
         let tag = formID == nil ? "section" : "form"
         let formAttributes = formID.map { #" id="\#(ServerWebHTML.escape($0))" role="search""# } ?? ""
         return #"""
         <\#(tag) class="\#(classes)"\#(ServerWebHTML.attribute("id", id))\#(formAttributes) aria-label="\#(ServerWebHTML.escape(label))">\#
-        \#(tray)\#(trailingMarkup)</\#(tag)>
+        \#(tray)\#(mobileTrailingMarkup)\#(trailingMarkup)</\#(tag)>
         """#
     }
 

@@ -261,7 +261,9 @@ enum ServerWebMusicPage {
             chips: chips,
             chipsName: "music_filter",
             chipsGroupID: "music-filter",
+            mobileDisclosureLabel: "高级筛选",
             trailing: sortControls,
+            trailingID: "music-advanced-filters",
             extraClass: "music-controls"
         )
     }

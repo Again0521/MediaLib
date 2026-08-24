@@ -726,6 +726,8 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertTrue(html.contains("data-hero-carousel"))
         XCTAssertTrue(html.contains("data-hero-track"))
         XCTAssertTrue(html.contains("class=\"hero-slide\""))
+        XCTAssertTrue(html.contains("class=\"hero-mobile-play-link\""))
+        XCTAssertTrue(html.contains("aria-label=\"播放 "))
         XCTAssertTrue(html.contains("data-hero-previous"))
         XCTAssertTrue(html.contains("data-hero-next"))
         // 分页点是真正的 tablist，而不是三个装饰性的圆。
@@ -781,6 +783,10 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertTrue(css.contains(".hero-arrow-previous"))
         // App Store Discover 的两个可测量常数：16/9 与 17px 圆角。
         XCTAssertTrue(css.contains("aspect-ratio: 16 / 9"))
+        XCTAssertTrue(css.contains("aspect-ratio: 5 / 3"), "移动端 banner 高度应为原 5:4 的 3/4")
+        XCTAssertTrue(css.contains("max-height: 255px"))
+        XCTAssertTrue(css.contains(".hero-actions { display: none; }"))
+        XCTAssertTrue(css.contains(".hero-mobile-play-link"))
         XCTAssertTrue(css.contains("border-radius: 17px"))
         // 遮罩必须是两层，且都取自共用停靠色。
         //
@@ -838,6 +844,7 @@ final class LocalHTTPRouterTests: XCTestCase {
 
         XCTAssertTrue(headers.contains("Content-Security-Policy: default-src 'none'"))
         XCTAssertTrue(headers.contains("style-src 'self'"))
+        XCTAssertTrue(headers.contains("media-src 'self' blob:"))
         XCTAssertFalse(headers.contains("style-src 'self' 'unsafe-inline'"))
         XCTAssertFalse(headers.contains("style-src-attr 'unsafe-inline'"))
         XCTAssertTrue(headers.contains("frame-ancestors 'none'"))
@@ -1295,7 +1302,10 @@ final class LocalHTTPRouterTests: XCTestCase {
             XCTAssertTrue(sharedRow.contains("\(rule) {") || sharedRow.contains("\(rule),"), "primitives 缺少 \(rule)")
             XCTAssertFalse(style.contains("\(rule) {"), "\(rule) 在页面样式表里被重新声明了一遍")
         }
-        XCTAssertTrue(style.contains("@media (max-width: 719px)"))
+        // 移动筛选断点现在属于所有浏览页面共用的 control bar，不应再由资料库
+        // 页面私藏一份；否则音乐、相册等页面会再次漂移。
+        XCTAssertFalse(style.contains("@media (max-width: 719px)"))
+        XCTAssertTrue(sharedRow.contains(".ui-control-bar.is-mobile-disclosable"))
         XCTAssertFalse(style.contains("server-001"))
         XCTAssertFalse(style.contains("token"))
         XCTAssertEqual(head.statusCode, 200)
@@ -1854,12 +1864,15 @@ final class LocalHTTPRouterTests: XCTestCase {
             serverID: "server-001",
             serverName: "客厅服务器",
             webVTTSubtitleTracksProvider: { itemID, _ in
-                itemID == "movie-1" ? [ServerWebVTTSubtitleTrack(id: 0, label: "字幕 1")] : nil
+                itemID == "movie-1" ? [
+                    ServerWebVTTSubtitleTrack(id: 0, label: "字幕 1"),
+                    ServerWebVTTSubtitleTrack(id: 17, label: "简体中文", language: "zh-Hans", origin: .embedded)
+                ] : nil
             },
             subtitleTrackProvider: { itemID, trackID, _ in
-                guard itemID == "movie-1", trackID == 0 else { return nil }
+                guard itemID == "movie-1", trackID == 0 || trackID == 17 else { return nil }
                 return ServerSubtitleTrackReference(
-                    label: "字幕 1", language: nil, origin: .sidecar,
+                    label: trackID == 17 ? "简体中文" : "字幕 1", language: trackID == 17 ? "zh-Hans" : nil, origin: .sidecar,
                     source: .sidecar(ServerMediaAsset(id: itemID, fileURL: subtitle, byteLength: 8))
                 )
             },
@@ -1868,12 +1881,17 @@ final class LocalHTTPRouterTests: XCTestCase {
 
         let list = router.response(for: "GET /api/v1/playback/subtitles/movie-1 HTTP/1.1\r\n\r\n")
         let asset = router.response(for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n")
+        let highIndexAsset = router.response(for: "GET /api/v1/subtitles/movie-1/17 HTTP/1.1\r\n\r\n")
         let malformed = router.response(for: "GET /api/v1/subtitles/movie-1/0/extra HTTP/1.1\r\n\r\n")
 
         XCTAssertEqual(list.statusCode, 200)
-        XCTAssertEqual(try JSONDecoder().decode([ServerWebVTTSubtitleTrack].self, from: list.body), [ServerWebVTTSubtitleTrack(id: 0, label: "字幕 1")])
+        XCTAssertEqual(try JSONDecoder().decode([ServerWebVTTSubtitleTrack].self, from: list.body), [
+            ServerWebVTTSubtitleTrack(id: 0, label: "字幕 1"),
+            ServerWebVTTSubtitleTrack(id: 17, label: "简体中文", language: "zh-Hans", origin: .embedded)
+        ])
         XCTAssertFalse((String(data: list.body, encoding: .utf8) ?? "").contains(subtitle.path))
         XCTAssertEqual(asset.statusCode, 200)
+        XCTAssertEqual(highIndexAsset.statusCode, 200, "第 18 条内封字幕仍须可寻址")
         XCTAssertEqual(asset.contentType, "text/vtt; charset=utf-8")
         XCTAssertEqual(asset.declaredContentLength, Data("WEBVTT\n\n".utf8).count)
         XCTAssertTrue(asset.body.isEmpty, "文件内容会由 socket 流式写出，路由层不复制进内存 body")
@@ -1897,7 +1915,8 @@ final class LocalHTTPRouterTests: XCTestCase {
                         id: 0, label: "简体中文", language: "zh-Hans", origin: .embedded
                     )],
                     remuxable: true,
-                    remuxUnavailableReason: nil
+                    remuxUnavailableReason: nil,
+                    durationSeconds: 3_019
                 )
             },
             authenticationProvider: { _ in .testAdministrator() }
@@ -1909,6 +1928,7 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertEqual(payload.audio.first?.browserPlayable, false)
         XCTAssertEqual(payload.subtitles.first?.origin, .embedded)
         XCTAssertTrue(payload.remuxable)
+        XCTAssertEqual(payload.durationSeconds, 3_019)
         let text = String(data: response.body, encoding: .utf8) ?? ""
         XCTAssertFalse(text.contains("/"), "名单里只有序号与标签，没有任何路径或地址")
         XCTAssertEqual(router.response(for: "GET /api/v1/playback/tracks/unknown HTTP/1.1\r\n\r\n").statusCode, 404)

@@ -380,6 +380,61 @@ final class ServerWebDesignSystemTests: XCTestCase {
         }
     }
 
+    func testEveryControlBarWithAdvancedControlsUsesTheSharedMobileDisclosure() {
+        let pagesAndPanels = [
+            ("/category/video", "advanced-filters"),
+            ("/music/songs", "music-advanced-filters"),
+            ("/music/albums", "music-advanced-filters"),
+            ("/music/artists", "music-advanced-filters"),
+            ("/music/recent", "music-advanced-filters"),
+            ("/queue", "queue-advanced-filters")
+        ]
+        for (path, panelID) in pagesAndPanels {
+            let html = page(path)
+            XCTAssertTrue(html.contains("is-mobile-disclosable"), "\(path) 没有接入共用移动展开样式")
+            XCTAssertTrue(html.contains("ui-control-bar-disclosure"), "\(path) 缺少高级筛选图标入口")
+            XCTAssertTrue(html.contains("aria-label=\"高级筛选\""), path)
+            XCTAssertTrue(html.contains("title=\"高级筛选\""), path)
+            XCTAssertFalse(html.contains(">高级筛选</span>"), "\(path) 的移动端入口不应占用文字宽度")
+            XCTAssertTrue(html.contains("aria-controls=\"\(panelID)\""), path)
+            XCTAssertTrue(html.contains("aria-expanded=\"false\""), path)
+            XCTAssertTrue(html.contains("id=\"\(panelID)\""), path)
+        }
+        // 相册只有内容分类，没有第二层筛选；保持同一 control bar 外观，但不能画一颗
+        // 点击后什么都没有的空按钮。
+        for path in ["/photos", "/albums", "/music/playlists"] {
+            let simpleBar = page(path)
+            XCTAssertTrue(simpleBar.contains("class=\"ui-control-bar"), path)
+            XCTAssertFalse(simpleBar.contains("ui-control-bar-disclosure"), path)
+        }
+
+        let style = asset("/assets/primitives.css")
+        XCTAssertTrue(style.contains(".ui-control-bar.is-mobile-disclosable"))
+        XCTAssertTrue(style.contains("grid-template-columns: minmax(0, 1fr) auto"))
+        XCTAssertTrue(style.contains(".ui-control-bar-disclosure { min-width: 44px; min-height: 44px"))
+        XCTAssertTrue(style.contains("justify-content: flex-start"))
+        XCTAssertTrue(style.contains("flex-wrap: nowrap"))
+        XCTAssertTrue(style.contains("overflow-x: auto"))
+        XCTAssertTrue(style.contains(".is-advanced-open > .ui-control-bar-trailing { display: flex; }"))
+        XCTAssertTrue(style.contains(".ui-control-bar-trailing > * { flex: 0 0 auto; }"))
+
+        let script = asset("/assets/app-shell.js")
+        XCTAssertTrue(script.contains("const closeControlBarDisclosures"))
+        XCTAssertTrue(script.contains("bar.classList.toggle('is-advanced-open')"))
+        XCTAssertTrue(script.contains("setAttribute('aria-expanded', expanded ? 'true' : 'false')"))
+        XCTAssertTrue(script.contains("(max-width: 719px)"))
+    }
+
+    func testHomeGreetingStaysOnOneLineAndShrinksOnPhones() {
+        let html = page("/")
+        XCTAssertTrue(html.contains("id=\"home-title\""))
+        XCTAssertTrue(html.contains("为你精选了一份片单"))
+        let style = asset("/assets/home.css")
+        XCTAssertTrue(style.contains(".home-document .app-page-head h1"))
+        XCTAssertTrue(style.contains("white-space: nowrap"))
+        XCTAssertTrue(style.contains("font-size: clamp(15px, 4.5vw, var(--type-display-size))"))
+    }
+
     /// 计数从前有六种呈现方式：筛选栏下的一个标题块、工具条里的一个 span、
     /// 一段游离的 `<p>`…… 现在它是副标题的一部分，与客户端的 "… · N 项" 同一句话。
     func testLiveCountsLiveInThePageSubtitle() {

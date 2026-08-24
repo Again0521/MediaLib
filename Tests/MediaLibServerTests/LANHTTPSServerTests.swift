@@ -1,9 +1,26 @@
 import Foundation
+import HTTPTypes
 import MediaLibCore
 import XCTest
 @testable import MediaLibServer
 
 final class LANHTTPSServerTests: XCTestCase {
+    func testTLSResponsePreservesDeclaredContentLengthForHEADBody() throws {
+        guard #available(macOS 14.0, *) else { return }
+        let local = LocalHTTPResponse(
+            statusCode: 200,
+            reason: "OK",
+            contentType: "video/mp4",
+            payload: .data(Data()),
+            declaredContentLength: 4_294_967_296,
+            additionalHeaders: ["Accept-Ranges: bytes"]
+        )
+        let translated = LANHTTPSServer.response(from: local)
+
+        XCTAssertEqual(translated.headers[.contentLength], "4294967296")
+        XCTAssertEqual(translated.headers[.acceptRanges], "bytes")
+    }
+
     func testLANAddressPolicyAllowsOnlyPrivateAndLoopbackIPv4() {
         for address in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.254", "192.168.31.100", "169.254.1.2"] {
             XCTAssertTrue(LANIPv4AddressPolicy.isPrivateOrLoopback(address), address)

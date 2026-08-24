@@ -133,7 +133,17 @@ struct LANHTTPSServer {
         let body: ResponseBody
         switch local.payload {
         case let .data(data):
-            body = .init(byteBuffer: ByteBuffer(bytes: data))
+            // `ResponseBody(byteBuffer:)` derives Content-Length from the
+            // bytes that are actually present. That turns every translated
+            // HEAD response into `Content-Length: 0`, even though the local
+            // router correctly declared the size of the corresponding GET.
+            // Preserve the application-level declaration at the TLS boundary.
+            body = .init(contentLength: contentLength) { writer in
+                if !data.isEmpty {
+                    try await writer.write(ByteBuffer(bytes: data))
+                }
+                try await writer.finish(nil)
+            }
         case let .fileRange(range):
             body = .init(contentLength: contentLength) { writer in
                 let handle = try FileHandle(forReadingFrom: range.url)
@@ -150,6 +160,8 @@ struct LANHTTPSServer {
             }
         case let .remoteRange(range):
             body = callbackBody(contentLength: contentLength) { consume in range.stream(consume) }
+        case let .remoteFull(full):
+            body = callbackBody(contentLength: contentLength) { consume in full.stream(consume) }
         case let .remuxStream(stream):
             body = callbackBody(contentLength: nil) { consume in stream.stream(consume) }
         }

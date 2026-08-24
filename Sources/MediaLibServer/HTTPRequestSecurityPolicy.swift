@@ -307,7 +307,8 @@ struct HTTPRequestSecurityPolicy {
         isAdminMemberJSONPath(path) ||
         path == "/api/v1/queue" ||
         path.hasPrefix("/api/v1/playback/state/") ||
-            path.hasPrefix("/api/v1/user-media/preferences/")
+            path.hasPrefix("/api/v1/user-media/preferences/") ||
+            isSingleOpaqueIdentifierPath(path, prefix: "/api/v1/playback/sessions/")
     }
 
     private static func isNativeMlinkMutationPath(_ path: String) -> Bool {

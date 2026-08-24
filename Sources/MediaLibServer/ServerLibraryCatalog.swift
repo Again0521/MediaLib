@@ -405,10 +405,25 @@ final class ServerLibraryCatalog {
             canDownload = false
         }
         let canDirectPlay = hasReadableAsset && isPlayable
-        // 网页端只拿到经过权限检查的同源字节流，并由浏览器完成解码。
-        // 不允许客户端进程或 HTTP 服务端替网页执行 ffmpeg 转码；不兼容的
-        // 容器/编码由浏览器明确反馈，避免播放链路悄然回退为服务端解码。
-        let canTranscode = false
+        let canTranscode = canDirectPlay &&
+            principal.permissions.contains(.transcodePlayback) &&
+            ServerMediaToolchain.ffmpegURL() != nil
+        let playbackModes: [ServerPlaybackMode] = {
+            guard canDirectPlay else { return [] }
+            var modes: [ServerPlaybackMode] = [.directPlay]
+            guard canTranscode else { return modes }
+            let videoCodec = item.videoCodec?.lowercased()
+            let audioCodec = item.audioCodec?.lowercased()
+            if videoCodec == "h264" && audioCodec == "aac" {
+                modes.append(.directStream)
+            } else if videoCodec == "h264" {
+                modes.append(.audioTranscode)
+            }
+            // HLS + VideoToolbox is the bounded compatibility tier for unknown
+            // or unsupported containers/codecs, including remote sources.
+            modes.append(.fullTranscode)
+            return modes
+        }()
         let episodeNavigation = try authorizedEpisodeNavigation(for: item, principal: principal)
         let detailExtras = try authorizedDetailExtras(for: item, principal: principal)
         let userState = try userMediaStateRepository.fetch(userID: principal.userID, mediaID: item.id)
@@ -469,10 +484,7 @@ final class ServerLibraryCatalog {
             browserContentType: browserContentType,
             canDirectPlay: canDirectPlay,
             canTranscode: canTranscode,
-            // 当前发布版本只配置授权 Range Direct Play。以显式层级发布该
-            // 事实，后续 Remux/音频转码/全转码只有在对应端点、资源限制与缓存
-            // 策略完整落地后才会进入此列表，绝不因探测到 ffmpeg 而误承诺。
-            playbackModes: canDirectPlay ? [.directPlay] : [],
+            playbackModes: playbackModes,
             canDownload: canDownload,
             previousEpisode: episodeNavigation.previous,
             nextEpisode: episodeNavigation.next,
@@ -1205,7 +1217,10 @@ final class ServerLibraryCatalog {
             references.append(
                 ServerSubtitleTrackReference(
                     label: Self.embeddedSubtitleLabel(stream),
-                    language: Self.normalizedSubtitleLanguage(stream.language),
+                    language: Self.normalizedSubtitleLanguage(
+                        stream.language,
+                        title: stream.title
+                    ),
                     origin: .embedded,
                     source: .embedded(asset: asset, streamIndex: stream.index)
                 )
@@ -1272,7 +1287,12 @@ final class ServerLibraryCatalog {
             audio: audio?.tracks ?? [],
             subtitles: subtitles,
             remuxable: audio?.remuxable ?? false,
-            remuxUnavailableReason: audio?.remuxUnavailableReason
+            remuxUnavailableReason: audio?.remuxUnavailableReason,
+            // 详情页时长来自资料库索引；AVFoundation 无法完整识别某些 MKV 时，
+            // 那里会是 nil。轨道探测已经为同一个文件运行过 ffprobe，复用它的
+            // format.duration 作为播放器时间轴事实源，避免重封装流的 duration
+            // 为 Infinity 时剩余时长与进度条一起失效。
+            durationSeconds: trackCatalog.probe(asset: asset)?.durationSeconds
         )
     }
 
@@ -1325,11 +1345,23 @@ final class ServerLibraryCatalog {
 
     /// 容器里的语言标记是 ISO 639-2（`chi`/`jpn`）。复用外挂字幕那份映射把它归一成
     /// BCP-47；映射不到就不声明，理由与外挂字幕一致。
-    private static func normalizedSubtitleLanguage(_ raw: String?) -> String? {
+    private static func normalizedSubtitleLanguage(_ raw: String?, title: String? = nil) -> String? {
         guard let raw, !raw.isEmpty else { return nil }
-        return ServerSubtitleSidecar.descriptor(
+        let language = ServerSubtitleSidecar.descriptor(
             mediaStem: "media", subtitleFileName: "media.\(raw).srt", fallbackIndex: 0
         ).language
+        guard language == "zh" else { return language }
+
+        // Matroska usually tags both Chinese variants as `chi`/`zho`; the script is
+        // carried only by the track title. Preserve it for browser auto-selection.
+        let hint = title?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if ["simplified", "hans", "简体", "簡體", "简中", "簡中"].contains(where: hint.contains) {
+            return "zh-Hans"
+        }
+        if ["traditional", "hant", "繁体", "繁體", "繁中"].contains(where: hint.contains) {
+            return "zh-Hant"
+        }
+        return language
     }
 
     /// 海报/背景图使用与详情相同的逐条目授权，不接受客户端路径。SVG 等可执行图片格式
@@ -1967,7 +1999,11 @@ struct ServerLibrarySnapshot {
 /// Web 专用的字幕轨引用。ID 只是稳定排序后的有界序号，绝不携带文件名、容器流号
 /// 或上游地址。
 struct ServerWebVTTSubtitleTrack: Codable, Equatable {
-    static let maximumTrackCount = 16
+    // Real-world anime/streaming MKVs commonly carry 18–25 language tracks.  A
+    // limit of 16 silently removed the Simplified/Traditional Chinese tracks in
+    // precisely those files.  Conversion remains on-demand and every payload is
+    // still capped at 8 MiB, so 32 expands discovery without making work unbounded.
+    static let maximumTrackCount = 32
     static let maximumByteLength = 8 * 1024 * 1024
 
     let id: Int
@@ -2024,6 +2060,25 @@ struct ServerWebPlaybackTrackSet: Codable, Equatable {
     let remuxable: Bool
     /// 不能的时候卡在哪一步。这句话会原样显示给读者。
     let remuxUnavailableReason: String?
+    /// ffprobe 从容器读取的真实总时长。数据库缺少 MKV 时长、浏览器对分片 MP4
+    /// 返回 Infinity 时，网页用它维持剩余时长与可拖动的虚拟时间轴。
+    let durationSeconds: Double?
+
+    init(
+        audio: [ServerWebAudioTrack],
+        subtitles: [ServerWebVTTSubtitleTrack],
+        remuxable: Bool,
+        remuxUnavailableReason: String?,
+        durationSeconds: Double? = nil
+    ) {
+        self.audio = audio
+        self.subtitles = subtitles
+        self.remuxable = remuxable
+        self.remuxUnavailableReason = remuxUnavailableReason
+        self.durationSeconds = durationSeconds.flatMap {
+            $0.isFinite && $0 > 0 && $0 < 86_400 ? $0 : nil
+        }
+    }
 }
 
 /// 保持在 Server target 内部的已授权媒体文件引用。任何协议响应都只携带媒体 ID，
@@ -2035,24 +2090,30 @@ struct ServerMediaAsset {
     /// `nil` 表示真正的本地文件；非 nil 时 fileURL 仅作为稳定的 MIME 名称来源，
     /// 实际字节必须由受限远程代理读取，不能交给 FileManager 或网页。
     let remoteURL: URL?
+    /// Whitelisted upstream MIME when the source supplied one. It is never a
+    /// raw response header: callers may provide only a normalized media type.
+    let declaredContentType: String?
 
     init(id: String, fileURL: URL, byteLength: Int64) {
         self.id = id
         self.fileURL = fileURL
         self.byteLength = byteLength
         self.remoteURL = nil
+        self.declaredContentType = nil
     }
 
-    init(id: String, remoteURL: URL, byteLength: Int64) {
+    init(id: String, remoteURL: URL, byteLength: Int64, contentType: String? = nil) {
         self.id = id
         self.fileURL = remoteURL
         self.byteLength = byteLength
         self.remoteURL = remoteURL
+        self.declaredContentType = Self.normalizedMediaContentType(contentType)
     }
 
     var localFileURL: URL? { remoteURL == nil ? fileURL : nil }
 
     var contentType: String {
+        if let declaredContentType { return declaredContentType }
         switch fileURL.pathExtension.lowercased() {
         case "mp4", "m4v": return "video/mp4"
         case "mkv": return "video/x-matroska"
@@ -2070,8 +2131,21 @@ struct ServerMediaAsset {
         case "webp": return "image/webp"
         case "gif": return "image/gif"
         case "avif": return "image/avif"
-        default: return "application/octet-stream"
+        // Emby/Plex stream URLs are often extensionless. These assets are
+        // video entries that have already passed per-item authorization; a
+        // safe video MIME lets Safari consume the same-origin proxy while
+        // `nosniff` remains enabled.
+        default: return remoteURL == nil ? "application/octet-stream" : "video/mp4"
         }
+    }
+
+    private static func normalizedMediaContentType(_ value: String?) -> String? {
+        guard let base = value?.split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              ["video/mp4", "video/quicktime", "video/x-matroska", "video/webm",
+               "audio/mp4", "audio/mpeg", "audio/aac", "audio/flac", "audio/wav"].contains(base)
+        else { return nil }
+        return base
     }
 }
 

@@ -202,6 +202,19 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
         XCTAssertEqual(policy.validate(unrelated, bodyLength: 64), .badRequest)
     }
 
+    func testHLSSessionCreationUsesBoundedJSONAndSameOriginCSRF() {
+        let request = "POST /api/v1/playback/sessions/movie-1 HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Type: application/json\r\nContent-Length: 96\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
+        XCTAssertNil(policy.validate(request, bodyLength: 96))
+        XCTAssertEqual(
+            policy.validate(request.replacingOccurrences(of: "X-MediaLIB-CSRF: known-csrf-token\r\n", with: ""), bodyLength: 96),
+            .forbidden
+        )
+        XCTAssertEqual(
+            policy.validate(request.replacingOccurrences(of: "/movie-1", with: "/movie-1/future"), bodyLength: 96),
+            .badRequest
+        )
+    }
+
     func testAllowsOnlyCSRFProtectedPreferenceJSONAtTheDynamicItemRoute() {
         let request = "POST /api/v1/user-media/preferences/movie-1 HTTP/1.1\r\nHost: localhost:8098\r\nOrigin: http://localhost:8098\r\nContent-Type: application/json\r\nContent-Length: 17\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"
         XCTAssertNil(policy.validate(request, bodyLength: 17))

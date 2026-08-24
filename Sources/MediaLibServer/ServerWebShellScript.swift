@@ -468,6 +468,32 @@ enum ServerWebShellScript {
       }
       if (window.__medialibNavigationInstalled === true) return;
       window.__medialibNavigationInstalled = true;
+
+      // ---- 共用移动端高级筛选 ----------------------------------------------
+      // 控制条由服务端页面逐次替换，因此这里使用事件委托，只安装一次就能覆盖资料库、
+      // 音乐、队列以及之后接入同一组件的页面。展开状态只属于当前页；回到桌面断点时
+      // 立即复位，让 aria 状态与视觉状态始终一致。
+      const closeControlBarDisclosures = () => {
+        for (const bar of document.querySelectorAll('.ui-control-bar.is-mobile-disclosable')) {
+          bar.classList.remove('is-advanced-open');
+          bar.querySelector('.ui-control-bar-disclosure')?.setAttribute('aria-expanded', 'false');
+        }
+      };
+      document.addEventListener('click', event => {
+        const trigger = event.target?.closest?.('.ui-control-bar-disclosure');
+        if (!trigger) return;
+        const bar = trigger.closest('.ui-control-bar.is-mobile-disclosable');
+        const targetID = trigger.getAttribute('aria-controls') || '';
+        const panel = targetID ? document.getElementById(targetID) : null;
+        if (!bar || !panel || panel.parentElement !== bar) return;
+        const expanded = bar.classList.toggle('is-advanced-open');
+        trigger.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      });
+      const narrowControlBars = window.matchMedia?.('(max-width: 719px)');
+      narrowControlBars?.addEventListener?.('change', event => { if (!event.matches) closeControlBarDisclosures(); });
+      window.addEventListener('medialib:pagedidload', () => {
+        if (narrowControlBars?.matches === false) closeControlBarDisclosures();
+      });
       document.documentElement.classList.add('app-shell-ready');
 
       // ---- 同源资源的重试与统一兜底 ------------------------------------------

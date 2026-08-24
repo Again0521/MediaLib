@@ -525,6 +525,7 @@ enum ServerWebHomePage {
             aria-pressed="\(isWatchlist)">\(watchlistIcon.html(size: .sm))<span>\(watchlistLabel)</span></button>
                 </div>
               </div>
+              <a class="hero-mobile-play-link" href="\(playable)" aria-label="播放 \(escape(item.title))"></a>
             </article>
             """
         }.joined()
@@ -780,6 +781,7 @@ enum ServerWebHomePage {
       -webkit-background-clip: text;
       background-clip: text;
       -webkit-text-fill-color: transparent;
+      white-space: nowrap;
     }
     /* One rhythm for the whole page, matching `.ui-section + .ui-section`
        everywhere else in the product.  Each section used to carry its own
@@ -1068,6 +1070,10 @@ enum ServerWebHomePage {
       width: clamp(var(--icon-sm), 1.8cqi, var(--icon-md));
       height: clamp(var(--icon-sm), 1.8cqi, var(--icon-md));
     }
+    /* The full-banner play affordance is a mobile-only semantic link.  Keeping
+       it as a real anchor preserves open-in-new-tab and browser navigation
+       behavior while desktop retains its two explicit actions. */
+    .hero-mobile-play-link { display: none; }
     /* 亮画面上白色实心按钮等于消失，半透明白也糊成一片：两颗都要跟着翻过来。 */
     .hero-slide.is-light-art .ui-btn-on-media-strong {
       color: #ffffff;
@@ -1487,25 +1493,35 @@ enum ServerWebHomePage {
       .home-music-layout { grid-template-columns: minmax(0, 1fr); }
     }
     @media (max-width: 719px) {
+      /* 问候语始终是一句话。用连续的视口比例在可用空间不足时缩小，而不是折成
+         两行后把搜索与 banner 一并向下推；15px 下限仍只用于标题，不降低正文。 */
+      .home-document .app-page-identity > div { min-width: 0; }
+      .home-document .app-page-head h1 {
+        font-size: clamp(15px, 4.5vw, var(--type-display-size));
+        line-height: 1.12;
+      }
       .hero-viewport { border-radius: var(--radius-md); }
-      /* 16:9 在手机上是一条 350×197 的窄带，而文案块（药丸 + 两行标题 + 副行
-         + 44px 的触摸按钮）本身就有约 200px 高——画面被文字占满，一寸剧照都
-         露不出来。缩字号只能解决一半，另一半是这条带子本身太矮。
-         手机上给它 5:4，画面因此有六七十像素是干净的。 */
-      .hero-slide { aspect-ratio: 5 / 4; max-height: 340px; }
-      /* 手机上文案区长高，两颗行动按钮正好顶到那排绝对定位的分页点上——按钮的
-         下半截被点盖住，点也读不清。
-
-         光加下内边距不够：文案块在 slide 里是**垂直居中**的，往一个居中的盒子
-         下面加内边距，内容只上移一半。所以窄屏改成底部对齐——这本来就是这套
-         banner 的意图（"文案块在左下角"），居中只是宽屏上看不出区别而已——
-         再留出分页点那一条的高度（20px 命中区 + 16px 下边距）。 */
+      /* 旧移动端是 5:4（高度 = 0.8 × 宽度）。改为 5:3 后高度 = 0.6 × 宽度，
+         正好是旧高度的 3/4；对应的 340px 上限也按同一比例收至 255px。 */
+      .hero-slide { aspect-ratio: 5 / 3; max-height: 255px; }
+      /* 移动端整张 banner 就是播放入口，不再让两个按钮挤占内容高度。文案仍贴底，
+         并为画面内分页点留出命中空间。 */
       .hero-slide { align-items: flex-end; }
       .hero-copy { padding: var(--space-5); padding-bottom: calc(var(--space-5) + 24px); gap: 4px; }
-      .hero-actions { margin-top: var(--space-3); }
-      /* `flex: 1 1 auto` 会让两颗按钮按内容比例分宽，字多的那颗被压到断行。
-         等分并允许收缩到 0 之下再靠 min-width 兜底，两颗才一样宽。 */
-      .hero-actions .ui-btn { flex: 1 1 0; min-width: 0; padding-inline: var(--space-4); }
+      .hero-actions { display: none; }
+      .hero-mobile-play-link {
+        position: absolute;
+        z-index: 2;
+        inset: 0;
+        display: block;
+        border-radius: inherit;
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .hero-mobile-play-link:focus-visible {
+        outline: 3px solid var(--accent);
+        outline-offset: -3px;
+      }
       /* A 20px blur across a phone viewport buys very little and costs a full
          screen of compositing every frame the wash cross-fades. */
       .hero-ambient-layer img, .hero-ambient-layer:not(:has(img))::before { filter: blur(12px) saturate(1.2); }

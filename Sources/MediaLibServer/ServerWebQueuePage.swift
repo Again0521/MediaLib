@@ -29,6 +29,7 @@ enum ServerWebQueuePage {
             label: "队列设置",
             chipsLabel: "队列设置",
             chips: [],
+            mobileDisclosureLabel: "高级筛选",
             // 同步状态不是计数，所以它留在条内而不是随计数搬进页头。
             trailing: #"""
             <span id="queue-status" class="t-footnote t-tertiary" role="status" aria-live="polite">\#(ServerWebHTML.escape(emptyState))</span>
@@ -42,6 +43,7 @@ enum ServerWebQueuePage {
             </label>
             \#(ServerWebUI.button(shuffleLabel, variant: .secondary, icon: .sort, id: "shuffle-toggle", attributes: #" aria-pressed="\#(shuffleEnabled)""#))
             """#,
+            trailingID: "queue-advanced-filters",
             extraClass: "queue-toolbar"
         ))
         <ol id="queue-list" class="queue-list" aria-live="polite">\(items)</ol>

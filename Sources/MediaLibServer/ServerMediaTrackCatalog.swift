@@ -22,11 +22,21 @@ final class ServerMediaTrackCatalog {
         let modifiedAt: TimeInterval
     }
 
+    private struct SubtitleCacheKey: Hashable {
+        let media: CacheKey
+        let streamIndex: Int
+    }
+
     private let inspector: FFprobeMediaInspector
     private let lock = NSLock()
     private var cache: [CacheKey: FFprobeMediaInspector.ProbedMedia] = [:]
     private var cacheOrder: [CacheKey] = []
     private static let maximumCacheEntries = 256
+    private var subtitleCache: [SubtitleCacheKey: Data] = [:]
+    private var subtitleCacheOrder: [SubtitleCacheKey] = []
+    private var subtitleCacheByteLength = 0
+    private static let maximumSubtitleCacheEntries = 64
+    private static let maximumSubtitleCacheByteLength = 32 * 1024 * 1024
 
     init(inspector: FFprobeMediaInspector = FFprobeMediaInspector()) {
         self.inspector = inspector
@@ -203,26 +213,60 @@ final class ServerMediaTrackCatalog {
     func embeddedSubtitleWebVTT(for asset: ServerMediaAsset, streamIndex: Int) -> Data? {
         guard asset.remoteURL == nil,
               let ffmpeg = ServerMediaToolchain.ffmpegURL(),
-              streamIndex >= 0
+              streamIndex >= 0,
+              let mediaKey = cacheKey(for: asset)
         else { return nil }
+        let subtitleKey = SubtitleCacheKey(media: mediaKey, streamIndex: streamIndex)
+        lock.lock()
+        if let cached = subtitleCache[subtitleKey] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
         let output = ServerBoundedProcess.run(
             executableURL: ffmpeg,
             arguments: [
                 "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-i", ServerMediaToolchain.inputArgument(for: asset.fileURL),
                 "-map", "0:\(streamIndex)",
+                "-map_metadata", "-1", "-map_chapters", "-1",
                 "-c:s", "webvtt",
                 "-f", "webvtt",
                 "-"
             ],
             maximumOutputByteLength: ServerWebVTTSubtitleTrack.maximumByteLength,
-            timeout: 45
+            timeout: Self.embeddedSubtitleExtractionTimeout(byteLength: mediaKey.byteLength)
         )
         guard let output, let text = ServerSubtitleSidecar.decodeText(output) else { return nil }
         // ffmpeg 偶尔会在没有可导出 cue 时仍然写出一个只有头部的文件。那种"有轨道
         // 但一句话都没有"的字幕在画面上和坏掉没有区别，宁可 404。
         guard text.contains("-->") else { return nil }
-        return Data(text.utf8)
+        let payload = Data(text.utf8)
+        lock.lock()
+        if subtitleCache[subtitleKey] == nil {
+            subtitleCache[subtitleKey] = payload
+            subtitleCacheOrder.append(subtitleKey)
+            subtitleCacheByteLength += payload.count
+            while subtitleCacheOrder.count > Self.maximumSubtitleCacheEntries
+                || subtitleCacheByteLength > Self.maximumSubtitleCacheByteLength {
+                let expired = subtitleCacheOrder.removeFirst()
+                if let removed = subtitleCache.removeValue(forKey: expired) {
+                    subtitleCacheByteLength -= removed.count
+                }
+            }
+        }
+        let cached = subtitleCache[subtitleKey] ?? payload
+        lock.unlock()
+        return cached
+    }
+
+    /// Matroska 的字幕包与视频包交错存放。导出 20 KiB 字幕仍可能需要扫过整部
+    /// 8 GiB 影片，固定 45 秒只对小测试文件成立。按 32 MiB/s 的保守顺序读取速度
+    /// 预算，并保留 45 秒下限与 5 分钟硬上限，兼顾 NAS 与服务端有界执行。
+    static func embeddedSubtitleExtractionTimeout(byteLength: Int64) -> TimeInterval {
+        let safeLength = max(0, byteLength)
+        let scanSeconds = Double(safeLength) / Double(32 * 1024 * 1024)
+        return min(300, max(45, 15 + scanSeconds))
     }
 }
 

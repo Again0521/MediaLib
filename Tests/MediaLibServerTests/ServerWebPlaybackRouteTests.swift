@@ -542,12 +542,17 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         // 第一帧解码出来才出现太晚；音轨那一侧更是从来没出现过。
         XCTAssertTrue(script.contains("/api/v1/playback/tracks/"))
         XCTAssertTrue(script.contains("/api/v1/subtitles/"))
-        XCTAssertTrue(script.contains("/api/v1/transcode/"))
-        XCTAssertTrue(script.contains("document.createElement('track')"))
+        XCTAssertTrue(script.contains("/api/v1/playback/sessions/"))
+        XCTAssertTrue(script.contains("/api/v1/playback/hls/"))
+        XCTAssertTrue(script.contains("document.createElement('div')"))
+        XCTAssertTrue(script.contains("parseWebVTT"))
+        XCTAssertTrue(script.contains("renderActiveSubtitle"))
         XCTAssertTrue(script.contains("void loadPlaybackTracks();"))
-        // 起播前必须已经知道默认音轨浏览器解不解得了——那正是"部分格式没有声音"
-        // 的判定点，晚一步就只能在无声播放之后才发现。
+        // 轨道仍须在最终通路选择前完成；若预取尚未结束，iOS 则先同步调用
+        // startDirect 保住当前触摸的媒体授权，再等待同一份 single-flight 结果。
         XCTAssertTrue(script.contains("await loadPlaybackTracks();"))
+        XCTAssertTrue(script.contains("if (playbackTracksPromise) return playbackTracksPromise"))
+        XCTAssertTrue(script.contains("const directAttempt = startDirect({ deferFailure: true })"))
         XCTAssertTrue(script.contains("directPlayHasSound()"))
         XCTAssertTrue(script.contains("method: 'POST'"))
         XCTAssertTrue(script.contains("X-MediaLIB-CSRF"))
@@ -586,19 +591,15 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertTrue(script.contains("replaceChildren"))
         XCTAssertTrue(script.contains("browserCanPlay"))
         XCTAssertTrue(script.contains("canPlayType(browserContentType)"))
-        XCTAssertTrue(script.contains("这个浏览器不支持这种视频格式"))
+        XCTAssertTrue(script.contains("浏览器没有声明支持这种格式，实际播放也失败了"))
         XCTAssertFalse(script.contains("innerHTML"))
         XCTAssertFalse(script.contains("insertAdjacentHTML"))
         XCTAssertFalse(script.contains("document.cookie"))
         XCTAssertFalse(script.contains("localStorage"))
         XCTAssertFalse(script.contains("sessionStorage"))
         XCTAssertFalse(script.contains("eval("))
-        XCTAssertFalse(script.contains("/api/v1/playback/hls/"))
         XCTAssertFalse(script.contains("/api/v1/hls/"))
-        // 这里从前是 `XCTAssertFalse(script.contains("ffmpeg"))`——那条断言表达的是
-        // "网页不宣称任何服务端转码能力"。这条边界已经**有意**改了：MKV 里的
-        // AC-3 / DTS 没有任何浏览器解得了，直放的结果是有画面没有声音且不报错，
-        // 只能由服务端重新封装音轨（`/api/v1/transcode/`）。
+        // MKV/不兼容编码现在走正式 HLS 会话，而不是未知长度的原始 fMP4 管道。
         //
         // 真正要守住的东西没有变，而且比一个可执行文件的名字更具体：网页不能拿到
         // 服务器上的**路径**。参数怎么拼、二进制在哪儿，全部留在服务端；浏览器只
@@ -606,7 +607,9 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertFalse(script.contains("-c:v"), "ffmpeg 参数属于服务端，不进浏览器")
         XCTAssertFalse(script.contains("/usr/bin"))
         XCTAssertFalse(script.contains("/opt/homebrew"))
-        XCTAssertTrue(script.contains("/api/v1/transcode/"))
+        XCTAssertFalse(script.contains("mediaPath('/api/v1/transcode/')"))
+        XCTAssertTrue(script.contains("currentHLSSessionID"))
+        XCTAssertTrue(script.contains("sourceRevision !== playbackSourceRevision"))
     }
 
     /// 轨道菜单里的条目不能被传输栏那条"每个 button 都是 36×36 图标"的规则压住。
@@ -625,6 +628,210 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         }
         XCTAssertEqual(itemRule?.contains("width: auto"), true)
         XCTAssertEqual(itemRule?.contains("height: auto"), true)
+    }
+
+    /// 音轨/字幕很多时，面板必须在播放器与视口内自己滚动，不能把末尾选项裁到
+    /// 屏幕外。高度的精确值由脚本按触发按钮的位置计算，CSS 保留 dvh 回退。
+    func testTrackMenusAreViewportBoundedScrollableLists() {
+        let style = ServerWebMediaDetailPage.style
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(style.contains("--track-menu-max-height"))
+        XCTAssertTrue(style.contains("overflow-y: auto"))
+        XCTAssertTrue(style.contains("overscroll-behavior: contain"))
+        XCTAssertTrue(style.contains("scrollbar-gutter: stable"))
+        XCTAssertTrue(script.contains("syncTrackMenuHeights"))
+        XCTAssertTrue(script.contains("trigger.getBoundingClientRect()"))
+        XCTAssertTrue(script.contains("boundaryRight - panelRect.width"))
+        XCTAssertTrue(script.contains("panel.style.left"))
+        XCTAssertTrue(script.contains("menu.addEventListener('toggle'"))
+    }
+
+    func testMobileTransportDropsTimeBeforeControlsOverflowAndUsesTapToggle() {
+        let style = ServerWebMediaDetailPage.style
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(style.contains("container-type: inline-size"))
+        XCTAssertTrue(style.contains("@container (max-width: 520px)"))
+        XCTAssertTrue(style.contains("@media (max-width: 559px) { .playback-time { display: none; } }"))
+        XCTAssertTrue(script.contains("const coarsePointer = window.matchMedia('(hover: none), (pointer: coarse)')"))
+        XCTAssertTrue(script.contains("setOverlayPinnedByTap(!overlayPinnedByTap)"))
+        XCTAssertTrue(script.contains("if (!coarsePointer.matches) hideOverlayControls()"))
+        XCTAssertTrue(style.contains(".player-shortcut-hint { display: none !important; }"))
+        XCTAssertTrue(script.contains("!coarsePointer.matches && !mobileViewport.matches"))
+    }
+
+    func testSubtitleSelectionLoadsOneValidatedWebVTTAndClosesMenuFirst() {
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(script.contains("credentials: 'same-origin', headers: { 'Accept': 'text/vtt' }"))
+        XCTAssertTrue(script.contains("activeSubtitleCues = parseWebVTT(payload)"))
+        XCTAssertTrue(script.contains("source.startsWith('WEBVTT')"))
+        XCTAssertTrue(script.contains("line.textContent = cue.text"))
+        XCTAssertTrue(script.contains("cues.length >= 20000"))
+        XCTAssertTrue(script.contains("failedSubtitleTrackIDs.delete(trackID)"))
+        XCTAssertTrue(script.contains("上次加载失败，点按重试"))
+        XCTAssertTrue(script.contains("releaseActiveSubtitle()"))
+        XCTAssertFalse(script.contains("URL.createObjectURL"))
+        XCTAssertFalse(script.contains("element.src = subtitlePath(track.id)"))
+        let close = script.range(of: "button.closest('details')?.removeAttribute('open');")
+        let select = close.flatMap { script.range(of: "onSelect();", range: $0.upperBound..<script.endIndex) }
+        XCTAssertNotNil(close)
+        XCTAssertNotNil(select)
+    }
+
+    func testPreferredSubtitleUsesLanguageAndCommonLabelKeywords() {
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(script.contains("简体中文"))
+        XCTAssertTrue(script.contains("繁體中文"))
+        XCTAssertTrue(script.contains("simplified chinese"))
+        XCTAssertTrue(script.contains("traditional chinese"))
+        XCTAssertTrue(script.contains("日本語"))
+        XCTAssertTrue(script.contains("undesirable"))
+        XCTAssertTrue(script.contains("track.isDefault ? 2 : 0"))
+    }
+
+    func testPauseAbortDoesNotBecomePlaybackFailure() {
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(script.contains("error?.name === 'AbortError'"))
+        XCTAssertTrue(script.contains("lastUserPauseAt = window.performance.now()"))
+        XCTAssertTrue(script.contains("window.performance.now() - lastUserPauseAt < 2_000"))
+    }
+
+    func testIOSMatroskaUsesCompatibilityRemuxWithoutChangingDesktopProbePolicy() {
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(script.contains("const isIOSFamily = /iP(?:ad|hone|od)/"))
+        XCTAssertTrue(script.contains("!['video/mp4', 'video/quicktime'].includes(browserContentType)"))
+        XCTAssertTrue(script.contains("const directPlayNeedsRemux"))
+        XCTAssertTrue(script.contains("await startRemux(0, resumeAt, { allowUnprobed: true })"))
+        XCTAssertTrue(script.contains("正在为 iPhone / iPad 准备兼容播放流。"))
+        XCTAssertFalse(script.contains("if (!browserCanPlay())"))
+    }
+
+    /// Loki 这类 MKV 会因为 E-AC-3 自动走分片 MP4 重封装。该流的原生 duration
+    /// 是 Infinity；资料库又可能因 AVFoundation 不识别 MKV 而没有时长。轨道接口
+    /// 必须把 ffprobe 时长补给统一时间轴，否则剩余时长与拖动会同时失效。
+    func testPlayerUsesProbedDurationWhenNativeDurationIsUnavailable() {
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(script.contains("var knownDurationSeconds"))
+        XCTAssertTrue(script.contains("payload.durationSeconds"))
+        XCTAssertTrue(script.contains("knownDurationSeconds = playbackTracks.durationSeconds"))
+        XCTAssertTrue(script.contains("const nativeDuration = Number(player.duration)"))
+        XCTAssertTrue(script.contains("return knownDurationSeconds > 0 ? knownDurationSeconds : NaN"))
+        XCTAssertTrue(script.contains("seekTimeline(Math.min(resumeAt, duration))"))
+        XCTAssertTrue(script.contains("if (playbackMode === 'hls' && knownDurationSeconds > 0) return knownDurationSeconds"))
+    }
+
+    func testScrubbingKeepsCapturedTargetUntilOneCommittedSeek() {
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(script.contains("var scrubState = 'idle'"))
+        XCTAssertTrue(script.contains("scrubState = 'scrubbing'"))
+        XCTAssertTrue(script.contains("scrubTarget = Number(playbackSeek.value)"))
+        XCTAssertTrue(script.contains("const nextPosition = Number.isFinite(scrubTarget) ? scrubTarget"))
+        XCTAssertTrue(script.contains("scrubTarget = nextPosition"))
+        XCTAssertTrue(script.contains("if (scrubState === 'idle')"))
+        XCTAssertTrue(script.contains("const settlePendingSeek = () =>"))
+        XCTAssertTrue(script.contains("current + 0.75 < scrubTarget"))
+        XCTAssertFalse(script.contains("seekTimeline(nextPosition);\n        scrubState = 'idle';"))
+        XCTAssertTrue(script.contains("sourceRevision !== playbackSourceRevision"))
+        XCTAssertTrue(script.contains("cancelHLSSession(sessionID)"))
+    }
+
+    func testAuthenticatedHLSSessionRoutesBindManifestAndCancellationToPrincipal() throws {
+        let sessionID = String(repeating: "a", count: 32)
+        let descriptor = ServerHLSPlaybackDescriptor(
+            sessionID: sessionID,
+            mode: "hlsRemux",
+            durationSeconds: 3_600,
+            actualStartSeconds: 120,
+            reason: "containerOrAudioCompatibility",
+            mediaURL: "/api/v1/playback/hls/\(sessionID)/index.m3u8"
+        )
+        var cancelledBy: String?
+        let router = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            hlsSessionProvider: { itemID, request, principal in
+                itemID == "movie-1" && request.audioTrackID == 1 && principal.userID == "viewer"
+                    ? descriptor : nil
+            },
+            hlsResourceProvider: { requestedSession, fileName, principal in
+                guard requestedSession == sessionID,
+                      fileName == "index.m3u8",
+                      principal.userID == "viewer"
+                else { return nil }
+                return ServerHLSResource(
+                    data: Data("#EXTM3U\n#EXT-X-VERSION:6\n".utf8),
+                    contentType: "application/vnd.apple.mpegurl"
+                )
+            },
+            hlsCancellationProvider: { _, principal in cancelledBy = principal.userID },
+            authenticationProvider: { head in
+                let user = head.contains("Bearer viewer") ? "viewer" : (head.contains("Bearer other") ? "other" : nil)
+                return user.map {
+                    ServerRequestPrincipal(
+                        userID: $0, deviceID: "device-\($0)", sessionID: "session-\($0)",
+                        permissions: [.viewMedia, .playMedia, .transcodePlayback], libraryGrants: [:]
+                    )
+                }
+            },
+            csrfToken: "known-csrf"
+        )
+        let requestBody = Data(#"{"audioTrackID":1,"startSeconds":120,"durationSeconds":3600}"#.utf8)
+        let created = router.response(
+            for: mutationRequest("/api/v1/playback/sessions/movie-1", bodyLength: requestBody.count),
+            body: requestBody
+        )
+        XCTAssertEqual(created.statusCode, 200)
+        XCTAssertEqual(try JSONDecoder().decode(ServerHLSPlaybackDescriptor.self, from: created.body), descriptor)
+
+        let manifestPath = "/api/v1/playback/hls/\(sessionID)/index.m3u8"
+        let manifest = router.response(for: request(manifestPath, token: "viewer"))
+        XCTAssertEqual(manifest.statusCode, 200)
+        XCTAssertEqual(manifest.contentType, "application/vnd.apple.mpegurl")
+        XCTAssertEqual(router.response(for: request(manifestPath, token: "other")).statusCode, 404)
+        XCTAssertEqual(router.response(for: request(
+            "/api/v1/playback/hls/\(sessionID)/../secret", token: "viewer"
+        )).statusCode, 404)
+
+        let cancel = Data()
+        XCTAssertEqual(router.response(
+            for: mutationRequest(
+                "/api/v1/playback/sessions/\(sessionID)/cancel", bodyLength: cancel.count
+            ), body: cancel
+        ).statusCode, 204)
+        XCTAssertEqual(cancelledBy, "viewer")
+    }
+
+    /// 音量不再通过 `slider-vertical` 退回各浏览器不同的系统外观；它与进度、倍速
+    /// 共用同一个横向 `.ui-range` primitive。
+    func testVolumeUsesTheSharedHorizontalRangePrimitive() {
+        let style = ServerWebMediaDetailPage.style
+        let html = ServerWebMediaDetailPage.render(
+            serverName: "测试服务器", detail: safeDetail, csrfToken: "csrf",
+            showAdministration: false, sidebarExtras: .empty
+        )
+
+        XCTAssertTrue(html.contains("id=\"playback-volume\" class=\"ui-range ui-range-on-media\""))
+        XCTAssertFalse(html.contains("orient=\"vertical\""))
+        XCTAssertFalse(style.contains("-webkit-appearance: slider-vertical"))
+        XCTAssertTrue(style.contains(".volume-control input[type=\"range\"] { width: 100%"))
+    }
+
+    /// `canPlayType` 对 MKV 经常是假阴性，不能在尝试播放或音频重封装之前就把按钮
+    /// 禁掉。真实失败仍会根据它给出更准确的恢复文案。
+    func testBrowserCapabilityProbeIsAdvisoryAndPlaybackProgressClearsStaleUI() {
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(script.contains("const browserCanPlay"))
+        XCTAssertFalse(script.contains("else if (!browserCanPlay())"))
+        XCTAssertTrue(script.contains("player.currentTime > lastAdvancingTime + 0.01"))
+        XCTAssertTrue(script.contains("if (playerError && !playerError.hidden) setStatus('正在播放。')"))
+        XCTAssertTrue(script.contains("sourceRevision !== playbackSourceRevision"))
     }
 
     func testDownloadRouteRequiresSeparatePermissionAndUsesGenericAttachmentName() {
@@ -674,6 +881,48 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
             }
         )
         XCTAssertEqual(denied.response(for: request("/api/v1/download/movie-1", token: "viewer")).statusCode, 404)
+    }
+
+    func testRemoteStreamUsesFull200WithoutRangeAndBounded206WithRange() {
+        let bytes = Data((0..<64).map(UInt8.init))
+        let fetcher = ServerRemoteAssetFetcher(
+            responseOverride: { _, offset, length in
+                guard let offset, let length else { return nil }
+                return bytes.subdata(in: Int(offset)..<Int(offset + length))
+            },
+            mediaLengthOverride: { _ in Int64(bytes.count) }
+        )
+        let asset = ServerMediaAsset(
+            id: "remote-1",
+            remoteURL: URL(string: "https://nas.local/emby/Videos/1/stream")!,
+            byteLength: Int64(bytes.count)
+        )
+        let router = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            mediaAssetProvider: { id, _, permission in
+                id == asset.id && permission == .playMedia ? asset : nil
+            },
+            remoteAssetFetcher: fetcher,
+            authenticationProvider: { _ in .testAdministrator() }
+        )
+
+        let full = router.response(for: request("/api/v1/stream/remote-1", token: "viewer"))
+        XCTAssertEqual(full.statusCode, 200)
+        XCTAssertEqual(full.declaredContentLength, bytes.count)
+        XCTAssertEqual(full.contentType, "video/mp4")
+        if case let .remoteFull(payload) = full.payload {
+            var received = Data()
+            XCTAssertTrue(payload.stream { received.append($0); return true })
+            XCTAssertEqual(received, bytes)
+        } else {
+            XCTFail("A no-Range remote GET must stay a streamed full entity")
+        }
+
+        let partial = router.response(for:
+            "GET /api/v1/stream/remote-1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer viewer\r\nRange: bytes=8-15\r\n\r\n"
+        )
+        XCTAssertEqual(partial.statusCode, 206)
+        XCTAssertEqual(partial.body, bytes.subdata(in: 8..<16))
     }
 
     func testEpisodeNavigationControlsUseSafeServerDerivedLinks() {

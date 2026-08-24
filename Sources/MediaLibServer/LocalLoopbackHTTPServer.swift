@@ -73,6 +73,9 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         playbackTracksProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerWebPlaybackTrackSet? = { _, _ in nil },
         audioRemuxProvider: @escaping (String, Int, Double, ServerRequestPrincipal) throws -> ServerAudioRemuxStream? = { _, _, _, _ in nil },
         remuxStartProvider: @escaping (String, Double, ServerRequestPrincipal) throws -> Double? = { _, _, _ in nil },
+        hlsSessionProvider: @escaping (String, ServerHLSPlaybackRequest, ServerRequestPrincipal) throws -> ServerHLSPlaybackDescriptor? = { _, _, _ in nil },
+        hlsResourceProvider: @escaping (String, String, ServerRequestPrincipal) throws -> ServerHLSResource? = { _, _, _ in nil },
+        hlsCancellationProvider: @escaping (String, ServerRequestPrincipal) -> Void = { _, _ in },
         artworkAssetProvider: @escaping (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
         detailImageProvider: @escaping (String, ServerDetailImageKind, Int, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _, _ in nil },
         /// 保险库对这个账号的可见性。默认 `.locked`——没有显式接线的调用方拿不到
@@ -143,6 +146,9 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             playbackTracksProvider: playbackTracksProvider,
             audioRemuxProvider: audioRemuxProvider,
             remuxStartProvider: remuxStartProvider,
+            hlsSessionProvider: hlsSessionProvider,
+            hlsResourceProvider: hlsResourceProvider,
+            hlsCancellationProvider: hlsCancellationProvider,
             artworkAssetProvider: artworkAssetProvider,
             detailImageProvider: detailImageProvider,
             vaultAccessProvider: vaultAccessProvider,
@@ -435,6 +441,11 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             write(fileRange: range, to: client)
         case let .remoteRange(range):
             write(remoteRange: range, to: client)
+        case let .remoteFull(full):
+            _ = full.stream { [weak self] chunk in
+                guard let self else { return false }
+                return self.write(data: chunk, to: client)
+            }
         case let .remuxStream(stream):
             stream.stream { [weak self] chunk in
                 guard let self else { return false }
@@ -728,6 +739,9 @@ struct LocalHTTPRouter {
     private let playbackTracksProvider: (String, ServerRequestPrincipal) throws -> ServerWebPlaybackTrackSet?
     private let audioRemuxProvider: (String, Int, Double, ServerRequestPrincipal) throws -> ServerAudioRemuxStream?
     private let remuxStartProvider: (String, Double, ServerRequestPrincipal) throws -> Double?
+    private let hlsSessionProvider: (String, ServerHLSPlaybackRequest, ServerRequestPrincipal) throws -> ServerHLSPlaybackDescriptor?
+    private let hlsResourceProvider: (String, String, ServerRequestPrincipal) throws -> ServerHLSResource?
+    private let hlsCancellationProvider: (String, ServerRequestPrincipal) -> Void
     private let artworkAssetProvider: (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset?
     private let detailImageProvider: (String, ServerDetailImageKind, Int, ServerRequestPrincipal) throws -> ServerMediaAsset?
     private let vaultAccessProvider: (ServerRequestPrincipal) throws -> ServerLibraryCatalog.VaultAccess
@@ -790,6 +804,9 @@ struct LocalHTTPRouter {
         playbackTracksProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerWebPlaybackTrackSet? = { _, _ in nil },
         audioRemuxProvider: @escaping (String, Int, Double, ServerRequestPrincipal) throws -> ServerAudioRemuxStream? = { _, _, _, _ in nil },
         remuxStartProvider: @escaping (String, Double, ServerRequestPrincipal) throws -> Double? = { _, _, _ in nil },
+        hlsSessionProvider: @escaping (String, ServerHLSPlaybackRequest, ServerRequestPrincipal) throws -> ServerHLSPlaybackDescriptor? = { _, _, _ in nil },
+        hlsResourceProvider: @escaping (String, String, ServerRequestPrincipal) throws -> ServerHLSResource? = { _, _, _ in nil },
+        hlsCancellationProvider: @escaping (String, ServerRequestPrincipal) -> Void = { _, _ in },
         artworkAssetProvider: @escaping (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
         detailImageProvider: @escaping (String, ServerDetailImageKind, Int, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _, _ in nil },
         /// 保险库对这个账号的可见性。默认 `.locked`——没有显式接线的调用方拿不到
@@ -838,6 +855,9 @@ struct LocalHTTPRouter {
         self.playbackTracksProvider = playbackTracksProvider
         self.audioRemuxProvider = audioRemuxProvider
         self.remuxStartProvider = remuxStartProvider
+        self.hlsSessionProvider = hlsSessionProvider
+        self.hlsResourceProvider = hlsResourceProvider
+        self.hlsCancellationProvider = hlsCancellationProvider
         self.artworkAssetProvider = artworkAssetProvider
         self.detailImageProvider = detailImageProvider
         self.vaultAccessProvider = vaultAccessProvider
@@ -925,6 +945,26 @@ struct LocalHTTPRouter {
             return .unauthorized()
         }
         if method == "POST" {
+            if path.hasPrefix("/api/v1/playback/sessions/") {
+                if let limited = limitedResponse(
+                    scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
+                ) { return limited }
+                if path.hasSuffix("/cancel") {
+                    let raw = String(
+                        path.dropFirst("/api/v1/playback/sessions/".count).dropLast("/cancel".count)
+                    )
+                    guard !raw.isEmpty, !raw.contains("/") else { return .notFound() }
+                    hlsCancellationProvider(raw, principal)
+                    return .noContent()
+                }
+                guard let itemID = decodedPathIdentifier(path, prefix: "/api/v1/playback/sessions/"),
+                      let request = try? JSONDecoder().decode(ServerHLSPlaybackRequest.self, from: body),
+                      request.isValid,
+                      let descriptor = try? hlsSessionProvider(itemID, request, principal),
+                      let encoded = ServerCommandOutput.jsonData(descriptor)
+                else { return .serviceUnavailable() }
+                return .json(body: encoded, additionalHeaders: ["Cache-Control: no-store"])
+            }
             if path == "/api/v1/auth/password" {
                 if let limited = limitedResponse(
                     scope: .authenticatedMutation,
@@ -1007,6 +1047,25 @@ struct LocalHTTPRouter {
         }
         guard method == "GET" || isHeadRequest else {
             return .methodNotAllowed()
+        }
+
+        if path.hasPrefix("/api/v1/playback/hls/") {
+            if let limited = limitedResponse(
+                scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            let remainder = String(path.dropFirst("/api/v1/playback/hls/".count))
+            let pieces = remainder.split(separator: "/", omittingEmptySubsequences: false)
+            guard pieces.count == 2,
+                  let resource = try? hlsResourceProvider(String(pieces[0]), String(pieces[1]), principal)
+            else { return .notFound() }
+            return LocalHTTPResponse(
+                statusCode: 200,
+                reason: "OK",
+                contentType: resource.contentType,
+                payload: .data(isHeadRequest ? Data() : resource.data),
+                declaredContentLength: resource.data.count,
+                additionalHeaders: ["Cache-Control: no-store"]
+            )
         }
 
         let body: Data
@@ -2849,12 +2908,17 @@ struct LocalHTTPRouter {
     private func remoteAssetWithResolvedLength(_ asset: ServerMediaAsset, remoteURL: URL) -> ServerMediaAsset? {
         if asset.byteLength > 0 { return asset }
         guard let byteLength = remoteAssetFetcher.mediaByteLength(url: remoteURL), byteLength > 0 else { return nil }
-        return ServerMediaAsset(id: asset.id, remoteURL: remoteURL, byteLength: byteLength)
+        return ServerMediaAsset(
+            id: asset.id,
+            remoteURL: remoteURL,
+            byteLength: byteLength,
+            contentType: asset.declaredContentType ?? asset.contentType
+        )
     }
 
-    /// 对上游媒体始终做有界 Range 读取。未带 Range 的浏览器首请求也只取首个
-    /// 块并以 206 返回，随后浏览器会继续按需请求，避免服务进程把整部远程影片
-    /// 缓进内存或磁盘。
+    /// 对上游媒体始终做有界 Range 读取，但对浏览器保持标准 HTTP 语义：没有
+    /// `Range` 的 GET 是完整 200，明确带 Range 的请求才是 206。完整响应仍按
+    /// 16 MiB 上游窗口逐段转发，不会把整部影片缓进内存或磁盘。
     private func remoteStreamResponse(
         asset: ServerMediaAsset,
         remoteURL: URL,
@@ -2867,7 +2931,6 @@ struct LocalHTTPRouter {
         ServerPlaybackTelemetry.shared.recordTransportReason(
             remoteAccessPolicy.transportDecisionReason(upstream: remoteURL)
         )
-        let range: ResolvedHTTPByteRange
         if let rangeHeader {
             guard let request = HTTPByteRangeRequest(headerValue: rangeHeader),
                   let resolved = request.resolve(totalLength: asset.byteLength)
@@ -2876,35 +2939,49 @@ struct LocalHTTPRouter {
             // 该开放范围一次性缓冲整部影片。返回同一起点的有界 206 分段，让浏览器
             // 继续按需请求即可，同时保持服务进程内存上限。
             let length = min(resolved.length, Int64(ServerRemoteAssetFetcher.maximumMediaRangeByteLength))
-            range = ResolvedHTTPByteRange(
+            let range = ResolvedHTTPByteRange(
                 lowerBound: resolved.lowerBound,
                 upperBound: resolved.lowerBound + length - 1,
                 totalLength: asset.byteLength
             )
-        } else {
-            let length = min(asset.byteLength, Int64(ServerRemoteAssetFetcher.maximumMediaRangeByteLength))
-            guard length > 0 else { return .rangeNotSatisfiable(totalLength: asset.byteLength) }
-            range = ResolvedHTTPByteRange(lowerBound: 0, upperBound: length - 1, totalLength: asset.byteLength)
+            return LocalHTTPResponse(
+                statusCode: 206,
+                reason: "Partial Content",
+                contentType: asset.contentType,
+                payload: omitBody
+                    ? .data(Data())
+                    : .remoteRange(
+                        LocalHTTPRemoteRange(
+                            fetcher: remoteAssetFetcher,
+                            url: remoteURL,
+                            offset: range.lowerBound,
+                            length: range.length
+                        )
+                    ),
+                declaredContentLength: Int(range.length),
+                additionalHeaders: [
+                    "Accept-Ranges: bytes",
+                    "Content-Range: \(range.contentRangeHeader)",
+                    "Cache-Control: no-store"
+                ] + additionalHeaders
+            )
         }
-
         return LocalHTTPResponse(
-            statusCode: 206,
-            reason: "Partial Content",
+            statusCode: 200,
+            reason: "OK",
             contentType: asset.contentType,
             payload: omitBody
                 ? .data(Data())
-                : .remoteRange(
-                    LocalHTTPRemoteRange(
+                : .remoteFull(
+                    LocalHTTPRemoteFull(
                         fetcher: remoteAssetFetcher,
                         url: remoteURL,
-                        offset: range.lowerBound,
-                        length: range.length
+                        byteLength: asset.byteLength
                     )
                 ),
-            declaredContentLength: Int(range.length),
+            declaredContentLength: Int(asset.byteLength),
             additionalHeaders: [
                 "Accept-Ranges: bytes",
-                "Content-Range: \(range.contentRangeHeader)",
                 "Cache-Control: no-store"
             ] + additionalHeaders
         )
@@ -3671,7 +3748,9 @@ struct LocalHTTPResponse {
         switch payload {
         case let .data(body): return body
         case let .remoteRange(range): return range.materializedBody()
-        case .fileRange, .remuxStream: return Data()
+        // Full remote entities deliberately stay lazy. Materializing a movie
+        // exists only for small explicit Range fixtures in router tests.
+        case .fileRange, .remoteFull, .remuxStream: return Data()
         }
     }
 
@@ -3935,7 +4014,7 @@ struct LocalHTTPResponse {
     }
 
     private static let securityHeaders = [
-        "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
+        "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
         "Cross-Origin-Embedder-Policy: require-corp",
         "Cross-Origin-Opener-Policy: same-origin",
         "Cross-Origin-Resource-Policy: same-origin",
@@ -3960,6 +4039,7 @@ enum LocalHTTPResponsePayload {
     case data(Data)
     case fileRange(LocalHTTPFileRange)
     case remoteRange(LocalHTTPRemoteRange)
+    case remoteFull(LocalHTTPRemoteFull)
     /// 长度未知的实时重封装流。它是唯一一种不带 `Content-Length` 的响应，
     /// 因此也必须是连接上的最后一个响应（见 `LocalHTTPResponse.unknownContentLength`）。
     case remuxStream(ServerAudioRemuxStream)
@@ -3991,6 +4071,34 @@ struct LocalHTTPRemoteRange {
             return true
         }) else { return Data() }
         return body
+    }
+}
+
+/// A full remote entity delivered as bounded upstream Range windows. The
+/// browser receives one standards-compliant 200 response with the real length;
+/// only the private server-to-source side is split into bounded requests.
+struct LocalHTTPRemoteFull {
+    let fetcher: ServerRemoteAssetFetcher
+    let url: URL
+    let byteLength: Int64
+
+    func stream(_ consume: @escaping (Data) -> Bool) -> Bool {
+        guard byteLength > 0 else { return false }
+        var offset: Int64 = 0
+        while offset < byteLength {
+            let length = min(
+                byteLength - offset,
+                Int64(ServerRemoteAssetFetcher.maximumMediaRangeByteLength)
+            )
+            guard fetcher.streamMediaBytes(
+                url: url,
+                offset: offset,
+                length: length,
+                consume: consume
+            ) else { return false }
+            offset += length
+        }
+        return true
     }
 }
 

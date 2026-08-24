@@ -77,7 +77,18 @@ enum ServerBoundedProcess {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
         process.standardInput = FileHandle.nullDevice
-        do { try process.run() } catch { return nil }
+        // The completion handler must exist before `run()`.  Subtitle-only ffmpeg
+        // jobs can finish in a few milliseconds; installing the handler after the
+        // process has started leaves a race where the exit is missed and a valid
+        // embedded subtitle waits for the full 45-second timeout.
+        let finished = DispatchGroup()
+        finished.enter()
+        process.terminationHandler = { _ in finished.leave() }
+        do { try process.run() } catch {
+            process.terminationHandler = nil
+            finished.leave()
+            return nil
+        }
 
         let lock = NSLock()
         var output = Data()
@@ -110,9 +121,6 @@ enum ServerBoundedProcess {
             while !errorPipe.fileHandleForReading.availableData.isEmpty {}
         }
 
-        let finished = DispatchGroup()
-        finished.enter()
-        process.terminationHandler = { _ in finished.leave() }
         if finished.wait(timeout: .now() + timeout) == .timedOut {
             if process.isRunning { process.terminate() }
             _ = finished.wait(timeout: .now() + 2)

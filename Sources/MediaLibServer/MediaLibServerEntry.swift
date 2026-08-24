@@ -48,6 +48,9 @@ struct MediaLibServer {
             // 会在不同入口得到不同的答案。
             let mediaTrackCatalog = ServerMediaTrackCatalog()
             let remoteAssetFetcher = ServerRemoteAssetFetcher()
+            let hlsPlaybackSessions = ServerHLSPlaybackSessionManager(
+                remoteAssetFetcher: remoteAssetFetcher
+            )
             let catalog = ServerLibraryCatalog(
                 database: database,
                 vaultUnlockProvider: { vaultUnlockStore.isUnlocked() },
@@ -104,6 +107,51 @@ struct MediaLibServer {
                     try catalog.audioRemuxStream(id: $0, audioTrackID: $1, startSeconds: $2, for: $3)
                 },
                 remuxStartProvider: { try catalog.remuxStartSeconds(id: $0, at: $1, for: $2) },
+                hlsSessionProvider: { itemID, request, principal in
+                    guard var asset = try catalog.publicAsset(
+                        id: itemID,
+                        for: principal,
+                        requiring: .playMedia
+                    ) else { return nil }
+                    if let remoteURL = asset.remoteURL, asset.byteLength <= 0 {
+                        guard let length = remoteAssetFetcher.mediaByteLength(url: remoteURL), length > 0 else {
+                            return nil
+                        }
+                        asset = ServerMediaAsset(
+                            id: asset.id,
+                            remoteURL: remoteURL,
+                            byteLength: length,
+                            contentType: asset.contentType
+                        )
+                    }
+                    let probe = mediaTrackCatalog.probe(asset: asset)
+                    let videoCodec = probe?.video.first?.codec
+                    let selectedAudioID = request.audioTrackID ?? 0
+                    let audioCodec = probe?.audio.first(where: { $0.typeOrdinal == selectedAudioID })?.codec
+                    let requestedStart = request.startSeconds ?? 0
+                    let actualStart = videoCodec?.lowercased() == "h264"
+                        ? (try catalog.remuxStartSeconds(id: itemID, at: requestedStart, for: principal) ?? requestedStart)
+                        : requestedStart
+                    let normalizedRequest = ServerHLSPlaybackRequest(
+                        audioTrackID: request.audioTrackID,
+                        startSeconds: request.startSeconds,
+                        durationSeconds: probe?.durationSeconds ?? request.durationSeconds
+                    )
+                    return hlsPlaybackSessions.create(
+                        asset: asset,
+                        request: normalizedRequest,
+                        actualStartSeconds: actualStart,
+                        videoCodec: videoCodec,
+                        audioCodec: audioCodec,
+                        principal: principal
+                    )
+                },
+                hlsResourceProvider: {
+                    hlsPlaybackSessions.resource(sessionID: $0, fileName: $1, principal: $2)
+                },
+                hlsCancellationProvider: {
+                    hlsPlaybackSessions.cancel(sessionID: $0, principal: $1)
+                },
                 artworkAssetProvider: { try catalog.publicArtwork(id: $0, kind: $1, for: $2) },
                 detailImageProvider: { try catalog.detailImageAsset(itemID: $0, kind: $1, index: $2, for: $3) },
                 vaultAccessProvider: { try catalog.vaultAccess(for: $0) },

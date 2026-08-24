@@ -268,7 +268,6 @@ enum ServerWebLibraryPage {
             },
             isReversed: false
         )
-
         let content = """
         \(ServerWebPageHeader.render(
             icon: headerIcon,
@@ -299,8 +298,10 @@ enum ServerWebLibraryPage {
             ],
             chipsName: "state_tab",
             chipsGroupID: "playback-filter-tabs",
+            mobileDisclosureLabel: "高级筛选",
             trailing: categorySelect + genreSelect + sortControl
                 + #"<button id="submit" type="submit" hidden>应用筛选</button>"#,
+            trailingID: "advanced-filters",
             formID: "filters"
         ))
         <p class="ui-state-line library-status t-footnote t-tertiary" id="status" role="status" aria-live="polite">正在载入资料库…</p>
@@ -382,9 +383,6 @@ enum ServerWebLibraryPage {
        没有任何元素用这个名字）。列表本身只需要声明"结果区改成单列"。 */
     #grid.music-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
 
-    @media (max-width: 719px) {
-      .ui-control-bar-trailing .ui-select { flex: 1 1 auto; min-width: 0; }
-    }
     """#
 
     static let script = #"""

@@ -574,6 +574,9 @@ enum ServerWebPrimitives {
         gap: var(--space-2);
         margin-left: auto;
       }
+      /* Optional narrow-layout actions (for example a progressive-disclosure
+         trigger) stay out of the desktop row unless a page opts them in. */
+      .ui-control-bar-mobile-trailing { display: none; }
       .ui-control-bar-trailing .ui-select { width: auto; min-width: 132px; }
 
       /* Sort is a key plus a direction.  A single `<select>` cannot express
@@ -626,6 +629,39 @@ enum ServerWebPrimitives {
         }
         .ui-control-tray { width: 100%; }
         .ui-control-bar-trailing { margin-left: 0; justify-content: flex-end; flex-wrap: wrap; }
+        /* Every browsing surface with secondary controls uses the same mobile
+           progressive disclosure: state/category pills stay on the first row,
+           the icon trigger remains independent at the right, and the expanded
+           controls form one left-to-right rail instead of a right-aligned wrap. */
+        .ui-control-bar.is-mobile-disclosable {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+        }
+        .ui-control-bar.is-mobile-disclosable > .ui-control-tray { width: 100%; min-width: 0; }
+        .ui-control-bar.is-mobile-disclosable > .ui-control-bar-mobile-trailing {
+          display: flex;
+          grid-column: 2;
+          justify-content: flex-end;
+        }
+        .ui-control-bar-disclosure { min-width: 44px; min-height: 44px; }
+        .ui-control-bar.is-mobile-disclosable > .ui-control-bar-trailing {
+          display: none;
+          width: 100%;
+          min-width: 0;
+          grid-column: 1 / -1;
+          margin-left: 0;
+          justify-content: flex-start;
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          overflow-y: hidden;
+          overscroll-behavior-inline: contain;
+          scrollbar-width: none;
+          -webkit-overflow-scrolling: touch;
+        }
+        .ui-control-bar.is-mobile-disclosable > .ui-control-bar-trailing::-webkit-scrollbar { display: none; }
+        .ui-control-bar.is-mobile-disclosable.is-advanced-open > .ui-control-bar-trailing { display: flex; }
+        .ui-control-bar.is-mobile-disclosable > .ui-control-bar-trailing > * { flex: 0 0 auto; }
       }
       @media (pointer: coarse) {
         .ui-sort-order { width: var(--field-height-lg); height: var(--field-height-lg); }

@@ -204,7 +204,31 @@ final class ServerWebBrowserFixtureTests: XCTestCase {
             serverName: "MediaLIB 详情布局验收", detail: detail, csrfToken: "fixture-token",
             showAdministration: false, sidebarExtras: .empty
         )
-        try Data(Self.localisingAssetURLs(in: html).utf8)
+        // 静态夹具没有轨道 API，正常脚本不会填充菜单。验收这一轮正好需要覆盖
+        // “二十多条字幕时能否在各种窗口内滚动”，因此只在隔离夹具里放入与脚本
+        // 生成结果同构的 24 个 menuitemradio；生产页面仍全部由授权 API 驱动。
+        let trackItems = (1...24).map { index in
+            let language = index == 23 ? "简体中文" : (index == 24 ? "繁体中文" : "字幕语言 \(index)")
+            return #"<button type="button" class="player-track-item" role="menuitemradio" aria-checked="\#(index == 23 ? "true" : "false")">\#(language)</button>"#
+        }.joined()
+        let fixtureHTML = html
+            .replacingOccurrences(
+                of: #"class="player-stage" tabindex="0""#,
+                with: #"class="player-stage controls-visible" tabindex="0""#
+            )
+            .replacingOccurrences(
+                of: #"class="transport-controls player-overlay-controls" aria-label="播放控制" hidden"#,
+                with: #"class="transport-controls player-overlay-controls" aria-label="播放控制""#
+            )
+            .replacingOccurrences(
+                of: #"<details class="player-settings" id="subtitle-menu" hidden>"#,
+                with: #"<details class="player-settings" id="subtitle-menu" open>"#
+            )
+            .replacingOccurrences(
+                of: #"<div class="player-settings-panel player-track-panel" id="subtitle-panel" role="group" aria-label="字幕轨道"></div>"#,
+                with: #"<div class="player-settings-panel player-track-panel" id="subtitle-panel" role="group" aria-label="字幕轨道"><p class="player-track-group">内封字幕</p>\#(trackItems)</div>"#
+            )
+        try Data(Self.localisingAssetURLs(in: fixtureHTML).utf8)
             .write(to: root.appendingPathComponent("index.html"), options: .atomic)
         for (name, contents) in Self.fixtureAssets {
             try Data(contents.utf8).write(to: root.appendingPathComponent(name), options: .atomic)

@@ -6,7 +6,7 @@ final class ServerWebScriptMutabilityTests: XCTestCase {
         assertMutableBindings(
             [
                 "isStarting", "resumeApplied", "playbackStartedReported", "lastProgressBucket",
-                "playbackTracksLoaded", "playbackCompleted", "playerLayout",
+                "playbackTracksPromise", "playbackCompleted", "playerLayout",
                 "playbackMode", "remuxOffset", "remuxAudioTrack", "playbackTracks",
                 "activeEpisodeSeason", "episodeOffset", "episodeHasMore", "episodeLoading",
                 "overlayHideTimer", "transportFrame", "preference", "nextSeasonIndex"
