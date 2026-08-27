@@ -53,7 +53,11 @@ struct MediaLibServer {
             let remoteAssetFetcher = ServerRemoteAssetFetcher()
             let hlsPlaybackSessions = ServerHLSPlaybackSessionManager(
                 remoteAssetFetcher: remoteAssetFetcher,
-                maximumConcurrentSessions: operationalSettings.maximumTranscodeSessions
+                maximumConcurrentSessions: operationalSettings.maximumTranscodeSessions,
+                defaultRemoteBitrateMbps: operationalSettings.defaultRemoteBitrateMbps,
+                operationalSettingsProvider: {
+                    (try? experienceRepository.operationalSettings().value) ?? operationalSettings
+                }
             )
             let catalog = ServerLibraryCatalog(
                 database: database,
@@ -63,11 +67,23 @@ struct MediaLibServer {
                 remoteAssetFetcher: remoteAssetFetcher
             )
             let administrationCatalog = ServerAdministrationCatalog(database: database)
+            let identityRepository = ServerIdentityRepository(database: database)
             let authentication = try ServerAuthenticationService(database: database)
             let maintenanceService = ServerMaintenanceService(
                 database: database,
                 experienceRepository: experienceRepository,
-                backupDirectory: dataDirectories.databaseBackups
+                backupDirectory: dataDirectories.databaseBackups,
+                transcodeCacheCleanup: { hlsPlaybackSessions.clearAllSessionsAndCache() }
+            )
+            let hostControlClient = ServerHostControlClient()
+            let runtimeDiagnostics = ServerRuntimeDiagnostics(
+                databaseURL: dataDirectories.database,
+                volumeURL: dataDirectories.root,
+                listenerMode: configuration.networkAccessMode,
+                configuredPort: configuration.port,
+                publicOrigin: configuration.publicOrigin?.absoluteString,
+                trustedProxyAddresses: Array(configuration.trustedProxyAddresses),
+                hostControlAvailable: { hostControlClient?.isAvailable == true }
             )
             let inspector = FFprobeMediaInspector()
             // 首屏海报会同时抵达多条 320px 缩略图请求，冷启动时它们全要 decode +
@@ -90,6 +106,7 @@ struct MediaLibServer {
                 librarySnapshotProvider: { try catalog.snapshot(for: $0) },
                 libraryBrowseProvider: { try catalog.browse($0, for: $1) },
                 libraryCategoriesProvider: { try catalog.categories(for: $0) },
+                navigationRevisionProvider: { try catalog.navigationRevision(for: $0) },
                 homeRecommendationsProvider: { try catalog.homeRecommendations(for: $0) },
                 libraryFacetsProvider: { try catalog.facets(type: $0, group: $1, for: $2) },
                 mediaDetailProvider: { try catalog.publicDetail(id: $0, for: $1) },
@@ -137,24 +154,45 @@ struct MediaLibServer {
                     }
                     let probe = mediaTrackCatalog.probe(asset: asset)
                     let videoCodec = probe?.video.first?.codec
+                    let videoHeight = probe?.video.first?.height
+                    let sourceIsHDR = probe?.video.first?.isHDR == true
                     let selectedAudioID = request.audioTrackID ?? 0
                     let audioCodec = probe?.audio.first(where: { $0.typeOrdinal == selectedAudioID })?.codec
+                    let burnInSubtitleStreamIndex: Int? = {
+                        guard let subtitleTrackID = request.subtitleTrackID,
+                              let reference = try? catalog.subtitleTrack(
+                                id: itemID,
+                                trackID: subtitleTrackID,
+                                for: principal
+                              ),
+                              reference.renderingMode == .burnIn,
+                              case let .embedded(_, streamIndex) = reference.source
+                        else { return nil }
+                        return streamIndex
+                    }()
+                    guard request.subtitleTrackID == nil || burnInSubtitleStreamIndex != nil else { return nil }
                     let requestedStart = request.startSeconds ?? 0
                     let actualStart = videoCodec?.lowercased() == "h264"
                         ? (try catalog.remuxStartSeconds(id: itemID, at: requestedStart, for: principal) ?? requestedStart)
                         : requestedStart
                     let normalizedRequest = ServerHLSPlaybackRequest(
                         audioTrackID: request.audioTrackID,
+                        subtitleTrackID: request.subtitleTrackID,
                         startSeconds: request.startSeconds,
                         durationSeconds: probe?.durationSeconds ?? request.durationSeconds,
-                        capabilities: request.capabilities
+                        capabilities: request.capabilities,
+                        quality: request.quality,
+                        maximumBitrateMbps: request.maximumBitrateMbps
                     )
                     return hlsPlaybackSessions.create(
                         asset: asset,
                         request: normalizedRequest,
                         actualStartSeconds: actualStart,
                         videoCodec: videoCodec,
+                        videoHeight: videoHeight,
+                        sourceIsHDR: sourceIsHDR,
                         audioCodec: audioCodec,
+                        burnInSubtitleStreamIndex: burnInSubtitleStreamIndex,
                         principal: principal,
                         policy: policy
                     )
@@ -167,6 +205,22 @@ struct MediaLibServer {
                 },
                 hlsCancellationProvider: {
                     hlsPlaybackSessions.cancel(sessionID: $0, principal: $1)
+                },
+                adminHLSSessionsProvider: {
+                    hlsPlaybackSessions.administrativeSessions()
+                },
+                adminHLSCancellationProvider: { sessionID, principal in
+                    guard hlsPlaybackSessions.administrativelyCancel(sessionID: sessionID) else { return false }
+                    try? identityRepository.appendSecurityEvent(ServerSecurityEvent(
+                        category: .session,
+                        action: "playback.session.terminated",
+                        outcome: .success,
+                        actorUserID: principal.userID,
+                        sessionID: principal.sessionID,
+                        deviceID: principal.deviceID,
+                        detailCode: "administrator"
+                    ))
+                    return true
                 },
                 artworkAssetProvider: { try catalog.publicArtwork(id: $0, kind: $1, for: $2) },
                 detailImageProvider: { try catalog.detailImageAsset(itemID: $0, kind: $1, index: $2, for: $3) },
@@ -186,6 +240,25 @@ struct MediaLibServer {
                 administrationCatalog: administrationCatalog,
                 experienceRepository: experienceRepository,
                 maintenanceService: maintenanceService,
+                runtimeDiagnosticsProvider: { runtimeDiagnostics.snapshot() },
+                runtimeConfigurationApplyProvider: { request in
+                    guard let hostControlClient else { return false }
+                    let normalized = ServerModeConfiguration(
+                        serverName: request.serverName,
+                        port: request.port,
+                        networkAccessMode: request.networkAccessMode,
+                        publicOrigin: request.publicOrigin,
+                        trustedProxyAddresses: request.trustedProxyAddresses
+                    )
+                    let response = try hostControlClient.apply(ServerHostRuntimeConfiguration(
+                        serverName: normalized.serverName,
+                        port: normalized.port,
+                        networkAccessMode: normalized.networkAccessMode.rawValue,
+                        publicOrigin: normalized.publicOrigin,
+                        trustedProxyAddresses: normalized.trustedProxyAddresses
+                    ))
+                    return response.status == .accepted
+                },
                 authenticationService: authentication,
                 authenticationProvider: { try authentication.principal(forRequestHead: $0) }
             )

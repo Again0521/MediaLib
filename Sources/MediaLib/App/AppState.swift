@@ -1075,6 +1075,11 @@ final class AppState: ObservableObject {
         serverModeForwarding = serverModeController.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
+        serverModeController.setHostControlApplyHandler { [weak self] configuration in
+            Task { @MainActor [weak self] in
+                await self?.applyServerRuntimeConfigurationFromHost(configuration)
+            }
+        }
         serverAdministrationForwarding = serverAdministrationStore.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }

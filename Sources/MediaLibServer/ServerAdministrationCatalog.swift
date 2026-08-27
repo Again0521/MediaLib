@@ -77,6 +77,36 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
         ))
     }
 
+    func recordRuntimeConfigurationApply(
+        accepted: Bool,
+        actor: ServerRequestPrincipal,
+        detailCode: String
+    ) throws {
+        try repository.appendSecurityEvent(ServerSecurityEvent(
+            category: .authorization,
+            action: "runtime.configuration.apply",
+            outcome: accepted ? .success : .failure,
+            actorUserID: actor.userID,
+            targetUserID: actor.userID,
+            sessionID: actor.sessionID,
+            deviceID: actor.deviceID,
+            detailCode: detailCode
+        ))
+    }
+
+    func recordDiagnosticExport(actor: ServerRequestPrincipal) throws {
+        try repository.appendSecurityEvent(ServerSecurityEvent(
+            category: .authorization,
+            action: "diagnostics.exported",
+            outcome: .success,
+            actorUserID: actor.userID,
+            targetUserID: actor.userID,
+            sessionID: actor.sessionID,
+            deviceID: actor.deviceID,
+            detailCode: "redacted.json"
+        ))
+    }
+
     func activeSessions() throws -> ServerManagedSessionsResponse {
         let devices = try repository.activeDevices(limit: Self.maximumDeviceCount + 1)
         let sessions = try repository.activeSessions(limit: Self.maximumSessionCount + 1)

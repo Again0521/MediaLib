@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import MediaLibCore
+import MediaLibServerProtocol
 
 @MainActor
 final class ServerModeProcessController: ObservableObject {
@@ -22,6 +23,8 @@ final class ServerModeProcessController: ObservableObject {
 
     @Published private(set) var status: Status = .stopped
     private var process: Process?
+    private var hostControlListener: ServerHostControlListener?
+    private let hostControlRelay = ServerHostControlApplyRelay()
     private var readinessTask: Task<Void, Never>?
     private var restartTask: Task<Void, Never>?
     /// `nil` only when the user (or application termination) explicitly stops
@@ -52,6 +55,13 @@ final class ServerModeProcessController: ObservableObject {
         readinessTask?.cancel()
         restartTask?.cancel()
         process?.terminate()
+        hostControlListener?.stop()
+    }
+
+    func setHostControlApplyHandler(
+        _ handler: @escaping @Sendable (ServerHostRuntimeConfiguration) -> Void
+    ) {
+        hostControlRelay.handler = handler
     }
 
     func start(configuration: ServerModeConfiguration) throws {
@@ -62,14 +72,18 @@ final class ServerModeProcessController: ObservableObject {
         status = .starting
 
         do {
+            let hostControlListener = try makeHostControlListenerIfNeeded()
             let executableURL = try executableURLProvider()
             let process = Process()
             process.executableURL = executableURL
             process.arguments = ["--serve"]
-            process.environment = Self.processEnvironment(
+            var environment = Self.processEnvironment(
                 configuration: configuration,
                 base: ProcessInfo.processInfo.environment
             )
+            environment[ServerHostControlEnvironment.socketPath] = hostControlListener.socketPath
+            environment[ServerHostControlEnvironment.token] = hostControlListener.token
+            process.environment = environment
             process.qualityOfService = configuration.isLightweightMode ? .utility : .userInitiated
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
@@ -127,6 +141,8 @@ final class ServerModeProcessController: ObservableObject {
         restartTask?.cancel()
         restartTask = nil
         requestedConfiguration = nil
+        hostControlListener?.stop()
+        hostControlListener = nil
         guard let process else {
             status = .stopped
             return
@@ -144,6 +160,8 @@ final class ServerModeProcessController: ObservableObject {
         restartTask?.cancel()
         restartTask = nil
         requestedConfiguration = nil
+        hostControlListener?.stop()
+        hostControlListener = nil
         guard let process else {
             readinessTask?.cancel()
             readinessTask = nil
@@ -187,6 +205,17 @@ final class ServerModeProcessController: ObservableObject {
                 // after an application-initiated stop.
             }
         }
+    }
+
+    private func makeHostControlListenerIfNeeded() throws -> ServerHostControlListener {
+        if let hostControlListener { return hostControlListener }
+        let relay = hostControlRelay
+        let listener = try ServerHostControlListener { configuration in
+            relay.dispatch(configuration)
+        }
+        listener.start()
+        hostControlListener = listener
+        return listener
     }
 
     private static func defaultReadinessChecker(_ configuration: ServerModeConfiguration) async -> Bool {
@@ -282,6 +311,29 @@ final class ServerModeProcessController: ObservableObject {
             environment["MEDIALIB_SERVER_TRUSTED_PROXIES"] = configuration.effectiveTrustedProxyAddresses.joined(separator: ",")
         }
         return environment
+    }
+}
+
+private final class ServerHostControlApplyRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedHandler: (@Sendable (ServerHostRuntimeConfiguration) -> Void)?
+
+    var handler: (@Sendable (ServerHostRuntimeConfiguration) -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedHandler
+        }
+        set {
+            lock.lock()
+            storedHandler = newValue
+            lock.unlock()
+        }
+    }
+
+    func dispatch(_ configuration: ServerHostRuntimeConfiguration) {
+        guard let handler else { return }
+        handler(configuration)
     }
 }
 

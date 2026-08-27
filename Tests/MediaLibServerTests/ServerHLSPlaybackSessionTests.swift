@@ -4,6 +4,61 @@ import XCTest
 @testable import MediaLibServer
 
 final class ServerHLSPlaybackSessionTests: XCTestCase {
+    func testFFmpegHDRFilterCapabilitiesRequireACompleteChain() {
+        XCTAssertEqual(
+            ServerMediaToolchain.FFmpegFilterCapabilities.parse(" TS tonemap V->V\n TS zscale V->V\n"),
+            .init(softwareHDRToneMapping: true, videoToolboxHDRToneMapping: false)
+        )
+        XCTAssertEqual(
+            ServerMediaToolchain.FFmpegFilterCapabilities.parse(" TS tonemap V->V\n"),
+            .init(softwareHDRToneMapping: false, videoToolboxHDRToneMapping: false),
+            "tonemap 没有 zscale 不能正确线性化 HDR 输入"
+        )
+        XCTAssertTrue(ServerHLSPlaybackSessionManager.softwareHDRToneMappingFilter.contains("bt709"))
+    }
+
+    func testQualityNegotiationNeverUpscalesAndBoundsBitrateByNetworkTierAndPolicy() {
+        let capabilities = ServerWebClientCapabilities(
+            nativeHLS: false,
+            mediaSource: true,
+            videoCodecs: ["h264"],
+            audioCodecs: ["aac"],
+            screenWidth: 1920,
+            screenHeight: 1080,
+            hdrDisplay: false,
+            measuredDownlinkMbps: 6
+        )
+        let request = ServerHLSPlaybackRequest(
+            audioTrackID: 0,
+            startSeconds: 0,
+            durationSeconds: 3_600,
+            capabilities: capabilities,
+            quality: .quality720p,
+            maximumBitrateMbps: 100
+        )
+        XCTAssertEqual(ServerHLSPlaybackSessionManager.targetVideoHeight(
+            quality: .quality720p, sourceHeight: 2_160, capabilities: capabilities
+        ), 720)
+        XCTAssertNil(ServerHLSPlaybackSessionManager.targetVideoHeight(
+            quality: .quality2160p, sourceHeight: 1_080, capabilities: capabilities
+        ), "手动画质不能把 1080p 源放大成 2160p")
+        XCTAssertEqual(ServerHLSPlaybackSessionManager.targetVideoHeight(
+            quality: .auto, sourceHeight: 2_160, capabilities: capabilities
+        ), 720, "自动档同时受屏幕与测得吞吐约束")
+        var policy = ServerUserPolicy()
+        policy.remoteBitrateLimitMbps = 3
+        XCTAssertEqual(ServerHLSPlaybackSessionManager.effectiveBitrateMbps(
+            request: request, policy: policy, defaultValue: 20, targetHeight: 720
+        ), 3)
+        XCTAssertFalse(ServerHLSPlaybackRequest(
+            audioTrackID: 0,
+            startSeconds: 0,
+            durationSeconds: 1,
+            capabilities: capabilities,
+            maximumBitrateMbps: 201
+        ).isValid)
+    }
+
     func testRemoteMKVProducesAuthenticatedHLSWithoutExposingUpstreamURL() async throws {
         guard let ffmpeg = ServerMediaToolchain.ffmpegURL() else {
             throw XCTSkip("ffmpeg is not installed in this test environment")

@@ -541,6 +541,10 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         // 页面时**就问：字幕与音轨的入口属于"先看看有没有中文字幕"这件事，等到
         // 第一帧解码出来才出现太晚；音轨那一侧更是从来没出现过。
         XCTAssertTrue(script.contains("/api/v1/playback/tracks/"))
+        XCTAssertTrue(script.contains("/api/v1/me/playback-overrides/media/"))
+        XCTAssertTrue(script.contains("audioFingerprint"))
+        XCTAssertTrue(script.contains("subtitleFingerprint"))
+        XCTAssertTrue(script.contains("subtitleDisabled"))
         XCTAssertTrue(script.contains("/api/v1/subtitles/"))
         XCTAssertTrue(script.contains("/api/v1/playback/sessions/"))
         XCTAssertTrue(script.contains("/api/v1/playback/hls/"))
@@ -711,6 +715,37 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertTrue(script.contains("日本語"))
         XCTAssertTrue(script.contains("undesirable"))
         XCTAssertTrue(script.contains("track.isDefault ? 2 : 0"))
+    }
+
+    func testBitmapSubtitleSelectionCreatesAndPreservesBurnInHLSSession() {
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(script.contains("track.renderingMode === 'burnIn'"))
+        XCTAssertTrue(script.contains("subtitleTrackID:trackID"))
+        XCTAssertTrue(script.contains("activeBurnInSubtitleTrackID"))
+        XCTAssertTrue(script.contains("subtitleTrackID:activeBurnInSubtitleTrackID"))
+        XCTAssertTrue(script.contains("图形字幕无法套用文字样式"))
+    }
+
+    func testSavedQualityAndBitrateParticipateInSingleProfileSessionNegotiation() {
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(script.contains("playbackPreferences?.defaultQuality"))
+        XCTAssertTrue(script.contains("maximumBitrateMbps"))
+        XCTAssertTrue(script.contains("正在按默认画质"))
+        XCTAssertFalse(script.contains("levels.forEach"), "播放器不能同时创建多档服务端转码")
+    }
+
+    func testManualQualitySwitchUsesCurrentTimelineAndRevisionGatedAtomicSourceSwap() {
+        let script = ServerWebMediaDetailPage.script
+
+        XCTAssertTrue(script.contains("document.getElementById('quality-menu')"))
+        XCTAssertTrue(script.contains("async function selectPlaybackQuality"))
+        XCTAssertTrue(script.contains("const position = timelinePosition()"))
+        XCTAssertTrue(script.contains("qualityChoiceLocked = true"))
+        XCTAssertTrue(script.contains("quality:requestedQuality"))
+        XCTAssertTrue(script.contains("if (sourceRevision !== playbackSourceRevision)"))
+        XCTAssertTrue(script.contains("if (previousSessionID && previousSessionID !== sessionID) cancelHLSSession(previousSessionID)"))
     }
 
     func testPauseAbortDoesNotBecomePlaybackFailure() {

@@ -1,5 +1,6 @@
 import Foundation
 import MediaLibCore
+import MediaLibServerProtocol
 
 extension AppState {
     var serverModeStatus: ServerModeProcessController.Status {
@@ -234,6 +235,81 @@ extension AppState {
         }
     }
 
+    /// 仅由同一用户、0600 Unix Socket 和随机令牌认证过的服务子进程调用。
+    /// Web 请求已完成近期密码确认；宿主仍重新规范化每个字段，并在新实例未通过
+    /// 健康检查时恢复旧配置与旧监听方式。
+    func applyServerRuntimeConfigurationFromHost(
+        _ proposed: ServerHostRuntimeConfiguration
+    ) async {
+        guard serverModeConfiguration.isEnabled,
+              case .running = serverModeController.status,
+              let mode = ServerNetworkAccessMode(rawValue: proposed.networkAccessMode)
+        else { return }
+
+        let previous = serverModeConfiguration
+        var candidate = previous
+        candidate.updateServerName(proposed.serverName)
+        candidate.updatePort(proposed.port)
+        candidate.updateNetworkAccessMode(mode)
+        candidate.updatePublicOrigin(proposed.publicOrigin)
+        candidate.updateTrustedProxyAddresses(proposed.trustedProxyAddresses)
+        if mode == .lanHTTPS {
+            guard proposed.publicOrigin == nil,
+                  proposed.trustedProxyAddresses.isEmpty,
+                  let address = LANNetworkAddressResolver.preferredPrivateIPv4Address(),
+                  candidate.enableLANHTTPS(address: address)
+            else { return }
+        }
+        guard candidate.serverName == proposed.serverName.trimmingCharacters(in: .whitespacesAndNewlines),
+              candidate.port == proposed.port,
+              candidate.publicOrigin == proposed.publicOrigin,
+              candidate.trustedProxyAddresses == proposed.trustedProxyAddresses
+        else { return }
+
+        serverModeController.stop()
+        serverModeConfiguration = candidate
+        serverModeSettingsStore.save(candidate)
+        do {
+            try serverModeController.start(configuration: candidate)
+            guard await waitForServerRuntimeHealth(timeout: 7) else {
+                throw ServerModeHostApplyError.healthCheckFailed
+            }
+            showFloatingNotice(
+                title: "服务配置已应用",
+                message: "新的监听配置已经通过健康检查。",
+                kind: .success
+            )
+        } catch {
+            serverModeController.stop()
+            serverModeConfiguration = previous
+            serverModeSettingsStore.save(previous)
+            do {
+                try serverModeController.start(configuration: previous)
+                _ = await waitForServerRuntimeHealth(timeout: 7)
+            } catch {
+                // 保留旧配置；下一次桌面端启动仍会按旧边界恢复，不能持久化失败配置。
+            }
+            showFloatingNotice(
+                title: "服务配置已回滚",
+                message: "新配置未通过健康检查，已恢复此前的监听设置。",
+                kind: .error
+            )
+        }
+    }
+
+    private func waitForServerRuntimeHealth(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(max(timeout, 0.1))
+        while Date() < deadline {
+            switch serverModeController.status {
+            case .running: return true
+            case .failed, .stopped: return false
+            case .starting:
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        return false
+    }
+
     private func applyServerModeConfiguration(_ configuration: ServerModeConfiguration) {
         guard configuration != serverModeConfiguration else { return }
         let shouldRestart = serverModeConfiguration.isEnabled
@@ -304,4 +380,8 @@ private enum ServerModeLANConfigurationError: LocalizedError {
     var errorDescription: String? {
         "未找到可用的 Wi-Fi 或有线局域网 IPv4 地址；服务保持关闭。"
     }
+}
+
+private enum ServerModeHostApplyError: Error {
+    case healthCheckFailed
 }

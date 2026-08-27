@@ -271,6 +271,39 @@ final class ServerAuthenticationService: @unchecked Sendable {
             )
     }
 
+    /// 危险管理操作的即时再认证。它只确认当前会话所属账号的密码，不签发新令牌，
+    /// 也不接受调用方指定其它用户；成功与失败均写入不含密码的安全审计。
+    func verifyCurrentPassword(
+        for principal: ServerRequestPrincipal,
+        password: String,
+        purpose: String,
+        at date: Date = Date()
+    ) throws -> Bool {
+        guard (1...1_024).contains(password.utf8.count),
+              let record = try authenticationRecord(userID: principal.userID),
+              !record.user.isDisabled,
+              !record.user.requiresInitialPassword
+        else {
+            _ = passwordHasher.verify(password: password, encodedHash: dummyHash)
+            try recordAuthenticationEvent(
+                action: "reauth.denied", outcome: .denied,
+                actorUserID: principal.userID, targetUserID: principal.userID,
+                sessionID: principal.sessionID, deviceID: principal.deviceID,
+                detailCode: purpose, at: date
+            )
+            return false
+        }
+        let verified = passwordHasher.verify(password: password, encodedHash: record.passwordHash)
+        try recordAuthenticationEvent(
+            action: verified ? "reauth.succeeded" : "reauth.denied",
+            outcome: verified ? .success : .denied,
+            actorUserID: principal.userID, targetUserID: principal.userID,
+            sessionID: principal.sessionID, deviceID: principal.deviceID,
+            detailCode: purpose, at: date
+        )
+        return verified
+    }
+
     func logout(accessToken: String, at date: Date = Date()) throws {
         guard let principal = try principal(forAccessToken: accessToken, at: date) else { return }
         try identityRepository.revokeSession(id: principal.sessionID, at: date)
@@ -350,6 +383,37 @@ final class ServerAuthenticationService: @unchecked Sendable {
             LIMIT 1
             """,
             bindings: [.text(normalizedUsername)]
+        ) { row in
+            AuthenticationRecord(
+                user: ServerUser(
+                    id: row.string(0) ?? "",
+                    username: row.string(1) ?? "",
+                    displayName: row.string(2) ?? "",
+                    isDisabled: row.bool(3),
+                    requiresInitialPassword: row.bool(4),
+                    createdAt: row.date(5) ?? Date(),
+                    updatedAt: row.date(6) ?? Date()
+                ),
+                passwordHash: row.string(7) ?? self.dummyHash,
+                failedAttemptCount: row.int(8) ?? 0,
+                lockedUntil: row.date(9)
+            )
+        }.first
+    }
+
+    private func authenticationRecord(userID: String) throws -> AuthenticationRecord? {
+        try database.query(
+            """
+            SELECT user.id, user.username, user.display_name, user.is_disabled,
+                   user.requires_initial_password, user.created_at, user.updated_at,
+                   credential.password_hash, credential.failed_attempt_count,
+                   credential.locked_until
+            FROM server_users AS user
+            LEFT JOIN server_credentials AS credential ON credential.user_id = user.id
+            WHERE user.id = ?
+            LIMIT 1
+            """,
+            bindings: [.text(userID)]
         ) { row in
             AuthenticationRecord(
                 user: ServerUser(

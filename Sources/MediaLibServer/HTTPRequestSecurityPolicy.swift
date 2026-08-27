@@ -308,6 +308,8 @@ struct HTTPRequestSecurityPolicy {
         path == "/api/v1/me/preferences/device" ||
         path == "/api/v1/admin/settings" ||
         path == "/api/v1/admin/jobs" ||
+        path == "/api/v1/admin/runtime/validate" ||
+        path == "/api/v1/admin/runtime/apply" ||
         path == "/api/v1/playback/sessions" ||
         path == "/api/v1/admin/users" ||
         isAdminMemberJSONPath(path) ||

@@ -21,6 +21,38 @@ final class ServerLibraryCatalogTests: XCTestCase {
         temporaryDirectory = nil
     }
 
+    func testNavigationRevisionChangesWhenMediaOrUserAuthorizationChanges() throws {
+        let sourceRepository = SourceRepository(database: database)
+        let mediaRepository = MediaRepository(database: database)
+        let identity = ServerIdentityRepository(database: database)
+        try sourceRepository.save(MediaSource(
+            id: "revision-source", name: "Revision", path: "/Volumes/Revision", mediaType: .movie
+        ))
+        try mediaRepository.upsert(MediaItem(
+            id: "revision-item", type: .movie, title: "First", sourcePath: "/Volumes/Revision",
+            filePath: "/Volumes/Revision/first.mp4", updatedAt: Date(timeIntervalSince1970: 100)
+        ))
+        let member = try identity.createUser(id: "revision-member", username: "revision-member", displayName: "Revision")
+        let principal = ServerRequestPrincipal(
+            userID: member.id, deviceID: "device", sessionID: "session",
+            permissions: [.viewMedia], libraryGrants: [:]
+        )
+        let catalog = ServerLibraryCatalog(database: database)
+        let initial = try catalog.navigationRevision(for: principal)
+
+        try mediaRepository.upsert(MediaItem(
+            id: "revision-item", type: .movie, title: "Second", sourcePath: "/Volumes/Revision",
+            filePath: "/Volumes/Revision/first.mp4", updatedAt: Date(timeIntervalSince1970: 200)
+        ))
+        let mediaChanged = try catalog.navigationRevision(for: principal)
+        XCTAssertNotEqual(initial, mediaChanged)
+
+        _ = try identity.setLibraryGrant(ServerLibraryGrant(
+            userID: member.id, libraryID: "revision-source", canView: true, canPlay: false, canDownload: false
+        ))
+        XCTAssertNotEqual(mediaChanged, try catalog.navigationRevision(for: principal))
+    }
+
     func testSnapshotExcludesPrivateSourcesAndPathFields() throws {
         let sourceRepository = SourceRepository(database: database)
         let mediaRepository = MediaRepository(database: database)
@@ -313,7 +345,17 @@ final class ServerLibraryCatalogTests: XCTestCase {
 
         // 标签与语言现在从文件名后缀解析而来（`…​.en.vtt`），不再是无信息的序号，
         // 播放器才能按浏览器语言挑默认轨。
-        XCTAssertEqual(tracks, [ServerWebVTTSubtitleTrack(id: 0, label: "en", language: "en")])
+        XCTAssertEqual(tracks.count, 1)
+        XCTAssertEqual(tracks[0].id, 0)
+        XCTAssertEqual(tracks[0].label, "en")
+        XCTAssertEqual(tracks[0].language, "en")
+        XCTAssertEqual(tracks[0].origin, .sidecar)
+        XCTAssertEqual(tracks[0].renderingMode, .text)
+        XCTAssertEqual(
+            tracks,
+            try catalog.webVTTSubtitleTracks(id: "subtitle-item", for: principal),
+            "同一个服务端来源必须生成稳定指纹，才能跨会话恢复手动选择"
+        )
         XCTAssertEqual(asset.contentType, "text/vtt; charset=utf-8")
         XCTAssertEqual(try Data(contentsOf: asset.fileURL), expectedVTT)
         XCTAssertFalse((String(data: encoded, encoding: .utf8) ?? "").contains(directory.path))

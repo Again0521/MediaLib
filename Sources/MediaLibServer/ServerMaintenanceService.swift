@@ -19,6 +19,7 @@ final class ServerMaintenanceService: @unchecked Sendable {
     private let mediaRepository: MediaRepository
     private let backupDirectory: URL
     private let fileManager: FileManager
+    private let transcodeCacheCleanup: @Sendable () -> Int
     private let operationLock = NSLock()
     private var operationTail: Task<Void, Never>?
 
@@ -27,6 +28,7 @@ final class ServerMaintenanceService: @unchecked Sendable {
         experienceRepository: ServerExperienceRepository? = nil,
         identityRepository: ServerIdentityRepository? = nil,
         backupDirectory: URL,
+        transcodeCacheCleanup: @escaping @Sendable () -> Int = { 0 },
         fileManager: FileManager = .default
     ) {
         self.database = database
@@ -35,6 +37,7 @@ final class ServerMaintenanceService: @unchecked Sendable {
         self.sourceRepository = SourceRepository(database: database)
         self.mediaRepository = MediaRepository(database: database)
         self.backupDirectory = backupDirectory
+        self.transcodeCacheCleanup = transcodeCacheCleanup
         self.fileManager = fileManager
     }
 
@@ -134,8 +137,66 @@ final class ServerMaintenanceService: @unchecked Sendable {
         return job
     }
 
+    func enqueueRestore(backupID: String, requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
+        let activeCount = try experienceRepository.jobs(limit: 200, state: .queued).count
+            + experienceRepository.jobs(limit: 200, state: .running).count
+        guard activeCount < 8 else { throw ServerMaintenanceError.queueFull }
+        guard let backup = try backupFile(id: backupID) else { throw ServerMaintenanceError.backupNotFound }
+        let job = try experienceRepository.saveJob(ServerJob(
+            kind: "database.restore",
+            requestedByUserID: principal.userID
+        ))
+        try appendAudit(
+            category: .authorization,
+            action: "restore.requested",
+            outcome: .success,
+            principal: principal,
+            detailCode: "job.queued"
+        )
+        enqueueOperation { [database, backupDirectory, experienceRepository, identityRepository] in
+            var running = job
+            running.state = .running
+            running.startedAt = Date()
+            _ = try? experienceRepository.saveJob(running)
+            do {
+                try database.restore(from: backup.url, safetyBackupDirectory: backupDirectory)
+                // The restored snapshot may predate this job. Reinsert the stable job record
+                // into the restored database before reporting success.
+                running.state = .succeeded
+                running.progress = 1
+                running.resultCode = "restore.completed"
+                running.finishedAt = Date()
+                _ = try experienceRepository.saveJob(running)
+                try identityRepository.appendSecurityEvent(ServerSecurityEvent(
+                    category: .authorization,
+                    action: "restore.completed",
+                    outcome: .success,
+                    actorUserID: principal.userID,
+                    sessionID: principal.sessionID,
+                    deviceID: principal.deviceID,
+                    detailCode: "database.snapshot"
+                ))
+            } catch {
+                running.state = .failed
+                running.resultCode = "restore.failed"
+                running.finishedAt = Date()
+                _ = try? experienceRepository.saveJob(running)
+                try? identityRepository.appendSecurityEvent(ServerSecurityEvent(
+                    category: .authorization,
+                    action: "restore.failed",
+                    outcome: .failure,
+                    actorUserID: principal.userID,
+                    sessionID: principal.sessionID,
+                    deviceID: principal.deviceID,
+                    detailCode: "database.snapshot"
+                ))
+            }
+        }
+        return job
+    }
+
     func enqueueLibraryJob(kind: String, requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
-        guard kind == "library.scan" || kind == "library.reindex" else {
+        guard ["library.scan", "library.reindex", "metadata.refresh"].contains(kind) else {
             throw ServerMaintenanceError.unsupportedJob
         }
         let activeCount = try experienceRepository.jobs(limit: 200, state: .queued).count
@@ -150,10 +211,49 @@ final class ServerMaintenanceService: @unchecked Sendable {
             action: "maintenance.requested",
             outcome: .success,
             principal: principal,
-            detailCode: kind == "library.scan" ? "library.scan" : "library.reindex"
+            detailCode: kind
         )
         enqueueOperation { [weak self] in
             await self?.runLibraryJob(job, principal: principal)
+        }
+        return job
+    }
+
+    func enqueueTranscodeCacheCleanup(requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
+        let activeCount = try experienceRepository.jobs(limit: 200, state: .queued).count
+            + experienceRepository.jobs(limit: 200, state: .running).count
+        guard activeCount < 8 else { throw ServerMaintenanceError.queueFull }
+        let job = try experienceRepository.saveJob(ServerJob(
+            kind: "transcode-cache.clear",
+            requestedByUserID: principal.userID
+        ))
+        try appendAudit(
+            category: .authorization,
+            action: "transcode-cache.clear.requested",
+            outcome: .success,
+            principal: principal,
+            detailCode: "job.queued"
+        )
+        enqueueOperation { [experienceRepository, identityRepository, transcodeCacheCleanup] in
+            var running = job
+            running.state = .running
+            running.startedAt = Date()
+            _ = try? experienceRepository.saveJob(running)
+            let removedSessionCount = transcodeCacheCleanup()
+            running.state = .succeeded
+            running.progress = 1
+            running.resultCode = removedSessionCount == 0 ? "cache.already-empty" : "cache.cleared"
+            running.finishedAt = Date()
+            _ = try? experienceRepository.saveJob(running)
+            try? identityRepository.appendSecurityEvent(ServerSecurityEvent(
+                category: .authorization,
+                action: "transcode-cache.cleared",
+                outcome: .success,
+                actorUserID: principal.userID,
+                sessionID: principal.sessionID,
+                deviceID: principal.deviceID,
+                detailCode: removedSessionCount == 0 ? "cache.already-empty" : "cache.sessions-removed"
+            ))
         }
         return job
     }
@@ -164,10 +264,31 @@ final class ServerMaintenanceService: @unchecked Sendable {
         running.startedAt = Date()
         _ = try? experienceRepository.saveJob(running)
         do {
+            if job.kind == "library.reindex" {
+                // FTS5 external-content index rebuilds from the authoritative media table.
+                // It does not need to touch media files or source credentials.
+                try database.execute("INSERT INTO media_items_fts(media_items_fts) VALUES ('rebuild')")
+                running.state = .succeeded
+                running.progress = 1
+                running.resultCode = "index.rebuilt"
+                running.finishedAt = Date()
+                _ = try experienceRepository.saveJob(running)
+                try identityRepository.appendSecurityEvent(ServerSecurityEvent(
+                    category: .authorization,
+                    action: "maintenance.completed",
+                    outcome: .success,
+                    actorUserID: principal.userID,
+                    sessionID: principal.sessionID,
+                    deviceID: principal.deviceID,
+                    detailCode: job.kind
+                ))
+                return
+            }
             // 网页只能触发已有本地普通媒体库的完整扫描；远程来源、URL、SMB/FTP
             // 和保险库仍由桌面宿主管理，避免 Web 进程接触来源凭据或未解锁隐私路径。
             let sources = try sourceRepository.fetchAll().filter {
-                $0.sourceKind == .local && $0.mediaType != .privateCollection
+                $0.sourceKind == .local && $0.mediaType != .privateCollection &&
+                    (job.kind != "metadata.refresh" || $0.includeInMetadataFetch)
             }
             let scanner = MediaScanner(
                 thumbnailGenerator: nil,
@@ -182,9 +303,10 @@ final class ServerMaintenanceService: @unchecked Sendable {
             }
             running.state = errorCount == 0 ? .succeeded : .failed
             running.progress = 1
+            let operation = job.kind == "metadata.refresh" ? "metadata" : "scan"
             running.resultCode = errorCount == 0
-                ? (sources.isEmpty ? "scan.no-eligible-sources" : "scan.completed")
-                : "scan.completed-with-errors"
+                ? (sources.isEmpty ? "\(operation).no-eligible-sources" : "\(operation).completed")
+                : "\(operation).completed-with-errors"
             running.finishedAt = Date()
             _ = try experienceRepository.saveJob(running)
             try identityRepository.appendSecurityEvent(ServerSecurityEvent(
@@ -194,7 +316,7 @@ final class ServerMaintenanceService: @unchecked Sendable {
                 actorUserID: principal.userID,
                 sessionID: principal.sessionID,
                 deviceID: principal.deviceID,
-                detailCode: job.kind == "library.scan" ? "library.scan" : "library.reindex"
+                detailCode: job.kind
             ))
         } catch {
             running.state = .failed
@@ -208,7 +330,7 @@ final class ServerMaintenanceService: @unchecked Sendable {
                 actorUserID: principal.userID,
                 sessionID: principal.sessionID,
                 deviceID: principal.deviceID,
-                detailCode: job.kind == "library.scan" ? "library.scan" : "library.reindex"
+                detailCode: job.kind
             ))
         }
     }
@@ -279,4 +401,5 @@ final class ServerMaintenanceService: @unchecked Sendable {
 enum ServerMaintenanceError: Error, Equatable {
     case unsupportedJob
     case queueFull
+    case backupNotFound
 }

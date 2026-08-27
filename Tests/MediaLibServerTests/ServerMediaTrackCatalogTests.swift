@@ -99,6 +99,23 @@ final class ServerMediaTrackCatalogTests: XCTestCase {
         XCTAssertEqual(streams.map(\.index), [1, 3])
     }
 
+    /// 位图字幕不能伪装成 WebVTT，但必须作为一条明确要求烧录转码的轨道提供给
+    /// 播放协商层。两份目录互斥，避免同一轨道同时走文字覆盖与画面烧录。
+    func testBitmapSubtitlesAreDiscoveredOnlyByBurnInCatalog() throws {
+        let catalog = catalog(streams: """
+        {"index":0,"codec_type":"video","codec_name":"h264"},
+        {"index":1,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"chi"}},
+        {"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng"}},
+        {"index":3,"codec_type":"subtitle","codec_name":"dvd_subtitle","tags":{"language":"jpn"}}
+        """)
+        guard ServerMediaToolchain.ffmpegURL() != nil else {
+            throw XCTSkip("ffmpeg is required before bitmap subtitle tracks can be offered")
+        }
+        let media = try asset()
+        XCTAssertEqual(catalog.embeddedSubtitleStreams(for: media).map(\.index), [1])
+        XCTAssertEqual(catalog.embeddedBitmapSubtitleStreams(for: media).map(\.index), [2, 3])
+    }
+
     /// 探测一次是一个 ffprobe 进程。同一部片子在详情页、字幕菜单与重封装决策里
     /// 会被问好几次，不缓存的话每次都要重新起进程。
     func testProbeIsCachedPerFile() throws {

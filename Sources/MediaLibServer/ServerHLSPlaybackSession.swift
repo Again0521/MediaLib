@@ -3,32 +3,44 @@ import MediaLibCore
 
 struct ServerHLSPlaybackRequest: Codable, Equatable {
     let audioTrackID: Int?
+    let subtitleTrackID: Int?
     let startSeconds: Double?
     let durationSeconds: Double?
     let capabilities: ServerWebClientCapabilities?
+    let quality: ServerPlaybackQuality?
+    let maximumBitrateMbps: Int?
 
     init(
         audioTrackID: Int?,
+        subtitleTrackID: Int? = nil,
         startSeconds: Double?,
         durationSeconds: Double?,
-        capabilities: ServerWebClientCapabilities? = nil
+        capabilities: ServerWebClientCapabilities? = nil,
+        quality: ServerPlaybackQuality? = nil,
+        maximumBitrateMbps: Int? = nil
     ) {
         self.audioTrackID = audioTrackID
+        self.subtitleTrackID = subtitleTrackID
         self.startSeconds = startSeconds
         self.durationSeconds = durationSeconds
         self.capabilities = capabilities
+        self.quality = quality
+        self.maximumBitrateMbps = maximumBitrateMbps
     }
 
     var isValid: Bool {
         let audio = audioTrackID ?? 0
+        let subtitle = subtitleTrackID ?? 0
         let start = startSeconds ?? 0
         return (0..<ServerWebAudioTrackSet.maximumTrackCount).contains(audio) &&
+            (subtitleTrackID == nil || (0..<ServerWebVTTSubtitleTrack.maximumTrackCount).contains(subtitle)) &&
             start.isFinite && start >= 0 && start < 86_400 &&
             (durationSeconds == nil || (
                 durationSeconds?.isFinite == true &&
                 (durationSeconds ?? 0) > 0 &&
                 (durationSeconds ?? 0) < 86_400
-            )) && (capabilities?.isValid ?? true)
+            )) && (capabilities?.isValid ?? true) &&
+            (maximumBitrateMbps.map { (1...200).contains($0) } ?? true)
     }
 }
 
@@ -58,16 +70,22 @@ struct ServerWebClientCapabilities: Codable, Equatable {
 struct ServerHLSPlaybackSessionCreationRequest: Codable {
     let itemID: String
     let audioTrackID: Int?
+    let subtitleTrackID: Int?
     let startSeconds: Double?
     let durationSeconds: Double?
     let capabilities: ServerWebClientCapabilities?
+    let quality: ServerPlaybackQuality?
+    let maximumBitrateMbps: Int?
 
     var playbackRequest: ServerHLSPlaybackRequest {
         ServerHLSPlaybackRequest(
             audioTrackID: audioTrackID,
+            subtitleTrackID: subtitleTrackID,
             startSeconds: startSeconds,
             durationSeconds: durationSeconds,
-            capabilities: capabilities
+            capabilities: capabilities,
+            quality: quality,
+            maximumBitrateMbps: maximumBitrateMbps
         )
     }
 
@@ -103,6 +121,16 @@ struct ServerHLSPlaybackDescriptor: Codable, Equatable {
         self.reason = reason
         self.mediaURL = mediaURL
     }
+}
+
+struct ServerAdminHLSPlaybackSession: Codable, Equatable {
+    let sessionID: String
+    let userID: String
+    let state: ServerHLSPlaybackSessionState
+    let mode: String
+    let startedAt: Date
+    let lastAccessedAt: Date
+    let durationSeconds: Double?
 }
 
 enum ServerHLSPlaybackSessionState: String, Codable, Equatable {
@@ -151,6 +179,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         let reason: String
         let mediaURL: String
         let bridge: ServerRemoteMediaBridge?
+        var lastAccessedAt: Date
         var process: Process?
         var state: ServerHLSPlaybackSessionState = .preparing
         var readinessTimer: DispatchSourceTimer?
@@ -177,6 +206,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             self.reason = reason
             self.mediaURL = mediaURL
             self.bridge = bridge
+            self.lastAccessedAt = Date()
         }
 
         var descriptor: ServerHLSPlaybackDescriptor {
@@ -206,13 +236,16 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
 
     private let rootDirectory: URL
     private let remoteAssetFetcher: ServerRemoteAssetFetcher
-    private let maximumConcurrentSessions: Int
+    private let configurationProvider: @Sendable () -> ServerOperationalSettings
+    private let configurationLock = NSLock()
+    private var cachedConfiguration: ServerOperationalSettings
+    private var configurationFetchedAt = Date.distantPast
+    private let ffmpegFilterCapabilities: ServerMediaToolchain.FFmpegFilterCapabilities
     private let lock = NSLock()
     private let readinessQueue = DispatchQueue(label: "MediaLibServer.HLSReadiness", qos: .utility)
     private var sessions: [String: Session] = [:]
     private var pendingSessionIDs: [String] = []
     private static let maximumQueuedSessions = 8
-    private static let activeLifetime: TimeInterval = 4 * 60 * 60
     private static let finishedRetention: TimeInterval = 5 * 60
     private static let maximumPlaylistBytes = 1 * 1_024 * 1_024
     private static let maximumSegmentBytes = 96 * 1_024 * 1_024
@@ -220,10 +253,20 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
     init(
         remoteAssetFetcher: ServerRemoteAssetFetcher,
         rootDirectory: URL? = nil,
-        maximumConcurrentSessions: Int = 2
+        maximumConcurrentSessions: Int = 2,
+        defaultRemoteBitrateMbps: Int = 20,
+        ffmpegFilterCapabilities: ServerMediaToolchain.FFmpegFilterCapabilities? = nil,
+        operationalSettingsProvider: (@Sendable () -> ServerOperationalSettings)? = nil
     ) {
         self.remoteAssetFetcher = remoteAssetFetcher
-        self.maximumConcurrentSessions = min(max(maximumConcurrentSessions, 1), 4)
+        let initialConfiguration = ServerOperationalSettings(
+            maximumTranscodeSessions: maximumConcurrentSessions,
+            defaultRemoteBitrateMbps: defaultRemoteBitrateMbps
+        )
+        self.cachedConfiguration = initialConfiguration
+        self.configurationProvider = operationalSettingsProvider ?? { initialConfiguration }
+        self.ffmpegFilterCapabilities = ffmpegFilterCapabilities
+            ?? ServerMediaToolchain.ffmpegFilterCapabilities()
         self.rootDirectory = rootDirectory ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("MediaLIB-HLS-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
         try? FileManager.default.createDirectory(
@@ -247,7 +290,10 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         request: ServerHLSPlaybackRequest,
         actualStartSeconds: Double,
         videoCodec: String?,
+        videoHeight: Int? = nil,
+        sourceIsHDR: Bool = false,
         audioCodec: String?,
+        burnInSubtitleStreamIndex: Int? = nil,
         principal: ServerRequestPrincipal,
         policy: ServerUserPolicy = ServerUserPolicy()
     ) -> ServerHLSPlaybackDescriptor? {
@@ -259,13 +305,15 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
               let executable = ServerMediaToolchain.ffmpegURL()
         else { return nil }
         prune()
+        let configuration = currentConfiguration()
+        guard hasStorageCapacity(for: configuration) else { return nil }
         lock.lock()
         let owner = Owner(principal)
         let ownedSessionCount = sessions.values.filter {
             $0.owner.userID == owner.userID && ![.finished, .failed, .cancelled].contains($0.state)
         }.count
         let hasCapacity = ownedSessionCount < policy.maximumConcurrentStreams && (
-            activeSessionCountLocked() < maximumConcurrentSessions ||
+            activeSessionCountLocked() < configuration.maximumTranscodeSessions ||
                 pendingSessionIDs.count < Self.maximumQueuedSessions
         )
         lock.unlock()
@@ -291,11 +339,29 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         // VideoToolbox path so Safari always receives an Apple-supported HLS
         // profile; this is the last compatibility tier, not the default.
         let normalizedVideoCodec = videoCodec?.lowercased()
-        let copiesVideo = normalizedVideoCodec == "h264" || (
+        let targetHeight = Self.targetVideoHeight(
+            quality: request.quality ?? .auto,
+            sourceHeight: videoHeight,
+            capabilities: request.capabilities
+        )
+        let preservesHDR = sourceIsHDR && request.capabilities?.hdrDisplay == true &&
+            targetHeight == nil && burnInSubtitleStreamIndex == nil &&
+            ["hevc", "h265"].contains(normalizedVideoCodec ?? "") &&
+            request.capabilities?.nativeHLS == true &&
+            request.capabilities?.videoCodecs.contains(where: {
+                ["hevc", "h265", "hvc1"].contains($0.lowercased())
+            }) == true
+        let toneMapsHDR = sourceIsHDR && !preservesHDR
+        guard !toneMapsHDR || ffmpegFilterCapabilities.softwareHDRToneMapping else {
+            bridge?.stop()
+            try? FileManager.default.removeItem(at: directory)
+            return nil
+        }
+        let copiesVideo = !toneMapsHDR && burnInSubtitleStreamIndex == nil && targetHeight == nil && (normalizedVideoCodec == "h264" || (
             ["hevc", "h265"].contains(normalizedVideoCodec ?? "") &&
                 request.capabilities?.nativeHLS == true &&
                 request.capabilities?.videoCodecs.contains(where: { ["hevc", "h265", "hvc1"].contains($0.lowercased()) }) == true
-        )
+        ))
         let copiesAudio = audioCodec?.lowercased() == "aac"
         let mode = copiesVideo
             ? (copiesAudio ? "hlsRemux" : "hlsAudioTranscode")
@@ -307,7 +373,11 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             try? FileManager.default.removeItem(at: directory)
             return nil
         }
-        let reason = copiesVideo
+        let reason = burnInSubtitleStreamIndex != nil
+            ? "bitmapSubtitleCompatibility"
+            : targetHeight != nil
+            ? "qualityCompatibility"
+            : copiesVideo
             ? (copiesAudio ? "containerCompatibility" : "audioCodecCompatibility")
             : "videoCodecCompatibility"
         let playlist = directory.appendingPathComponent("index.m3u8")
@@ -319,18 +389,63 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             // playlist below this bounds temporary storage instead of racing
             // through a multi-hour movie and materializing gigabytes of HLS.
             "-re",
-            "-i", input,
-            "-map", "0:v:0?",
+            "-i", input
+        ]
+        let hdrFilter = toneMapsHDR ? Self.softwareHDRToneMappingFilter : nil
+        if let burnInSubtitleStreamIndex {
+            let graph: String
+            let inputVideo = hdrFilter.map { "[0:v:0]\($0)[toned]" }
+            let videoLabel = hdrFilter == nil ? "[0:v:0]" : "[toned]"
+            if let targetHeight {
+                graph = [
+                    inputVideo,
+                    "\(videoLabel)[0:\(burnInSubtitleStreamIndex)]overlay=eof_action=pass[burned]",
+                    "[burned]scale=-2:min(\(targetHeight)\\,ih)[vout]"
+                ].compactMap { $0 }.joined(separator: ";")
+            } else {
+                graph = [
+                    inputVideo,
+                    "\(videoLabel)[0:\(burnInSubtitleStreamIndex)]overlay=eof_action=pass[vout]"
+                ].compactMap { $0 }.joined(separator: ";")
+            }
+            arguments += [
+                "-filter_complex", graph,
+                "-map", "[vout]"
+            ]
+        } else {
+            arguments += ["-map", "0:v:0?"]
+            let filters = [
+                hdrFilter,
+                targetHeight.map { "scale=-2:min(\($0)\\,ih)" }
+            ].compactMap { $0 }
+            if !filters.isEmpty {
+                arguments += ["-vf", filters.joined(separator: ",")]
+            }
+        }
+        arguments += [
             "-map", "0:a:\(request.audioTrackID ?? 0)?",
             "-sn", "-dn", "-map_chapters", "-1"
         ]
         if copiesVideo {
             arguments += ["-c:v", "copy"]
         } else {
-            arguments += [
-                "-c:v", "h264_videotoolbox", "-allow_sw", "1",
-                "-pix_fmt", "yuv420p", "-b:v", "6000k",
-                "-maxrate", "8000k", "-bufsize", "12000k",
+            let bitrate = Self.effectiveBitrateMbps(
+                request: request,
+                policy: policy,
+                defaultValue: configuration.defaultRemoteBitrateMbps,
+                targetHeight: targetHeight
+            )
+            let encoderArguments: [String] = switch configuration.transcodeEngine {
+            case .software:
+                ["-c:v", "libx264", "-preset", "medium"]
+            case .automatic:
+                ["-c:v", "h264_videotoolbox", "-allow_sw", "1"]
+            case .videoToolbox:
+                ["-c:v", "h264_videotoolbox", "-allow_sw", "0"]
+            }
+            arguments += encoderArguments + [
+                "-pix_fmt", "yuv420p", "-b:v", "\(bitrate * 1_000)k",
+                "-maxrate", "\(bitrate * 1_250)k", "-bufsize", "\(bitrate * 2_000)k",
                 "-force_key_frames", "expr:gte(t,n_forced*6)"
             ]
         }
@@ -371,7 +486,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         lock.lock()
         // Recheck while reserving so simultaneous creates cannot overrun either
         // the active slots or the bounded waiting queue.
-        let shouldLaunch = activeSessionCountLocked() < maximumConcurrentSessions
+        let shouldLaunch = activeSessionCountLocked() < configuration.maximumTranscodeSessions
         guard shouldLaunch || pendingSessionIDs.count < Self.maximumQueuedSessions else {
             lock.unlock()
             stopAndRemove(session)
@@ -387,12 +502,64 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         return session.descriptor
     }
 
+    static let softwareHDRToneMappingFilter = "zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p"
+
+    static func targetVideoHeight(
+        quality: ServerPlaybackQuality,
+        sourceHeight: Int?,
+        capabilities: ServerWebClientCapabilities?
+    ) -> Int? {
+        guard let sourceHeight, sourceHeight > 0 else { return nil }
+        let requested: Int?
+        switch quality {
+        case .original: requested = nil
+        case .quality2160p: requested = 2_160
+        case .quality1080p: requested = 1_080
+        case .quality720p: requested = 720
+        case .quality480p: requested = 480
+        case .auto:
+            let screen = capabilities.map { max($0.screenWidth, $0.screenHeight) } ?? sourceHeight
+            let networkCap: Int
+            switch capabilities?.measuredDownlinkMbps {
+            case let value? where value < 5: networkCap = 480
+            case let value? where value < 10: networkCap = 720
+            case let value? where value < 20: networkCap = 1_080
+            default: networkCap = 2_160
+            }
+            requested = min(screen, networkCap)
+        }
+        guard let requested, requested < sourceHeight else { return nil }
+        return requested >= 2_160 ? 2_160 : requested >= 1_080 ? 1_080 : requested >= 720 ? 720 : 480
+    }
+
+    static func effectiveBitrateMbps(
+        request: ServerHLSPlaybackRequest,
+        policy: ServerUserPolicy,
+        defaultValue: Int,
+        targetHeight: Int?
+    ) -> Int {
+        var cap = request.maximumBitrateMbps ?? defaultValue
+        if let policyCap = policy.remoteBitrateLimitMbps { cap = min(cap, policyCap) }
+        if let measured = request.capabilities?.measuredDownlinkMbps {
+            cap = min(cap, max(1, Int((measured * 0.8).rounded(.down))))
+        }
+        let tierCap = switch targetHeight {
+        case 480: 4
+        case 720: 8
+        case 1_080: 16
+        case 2_160: 40
+        default: defaultValue
+        }
+        return min(max(cap, 1), tierCap)
+    }
+
     func status(sessionID: String, principal: ServerRequestPrincipal) -> ServerHLSPlaybackDescriptor? {
         prune()
         guard Self.isSafeSessionID(sessionID) else { return nil }
         lock.lock()
         defer { lock.unlock() }
         guard let session = sessions[sessionID], session.owner == Owner(principal) else { return nil }
+        session.lastAccessedAt = Date()
         return session.descriptor
     }
 
@@ -417,6 +584,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
               size <= limit
         else { return nil }
         lock.lock()
+        session.lastAccessedAt = Date()
         if session.state == .ready { session.state = .playing }
         lock.unlock()
         return ServerHLSResource(
@@ -446,14 +614,70 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         startNextIfPossible()
     }
 
+    func administrativeSessions() -> [ServerAdminHLSPlaybackSession] {
+        prune()
+        lock.lock()
+        defer { lock.unlock() }
+        return sessions.values.map {
+            ServerAdminHLSPlaybackSession(
+                sessionID: $0.id,
+                userID: $0.owner.userID,
+                state: $0.state,
+                mode: $0.mode,
+                startedAt: $0.startedAt,
+                lastAccessedAt: $0.lastAccessedAt,
+                durationSeconds: $0.durationSeconds
+            )
+        }.sorted {
+            if $0.startedAt != $1.startedAt { return $0.startedAt > $1.startedAt }
+            return $0.sessionID < $1.sessionID
+        }
+    }
+
+    @discardableResult
+    func administrativelyCancel(sessionID: String) -> Bool {
+        guard Self.isSafeSessionID(sessionID) else { return false }
+        lock.lock()
+        guard let session = sessions.removeValue(forKey: sessionID) else {
+            lock.unlock()
+            return false
+        }
+        session.state = .cancelled
+        session.finishedAt = Date()
+        pendingSessionIDs.removeAll { $0 == sessionID }
+        lock.unlock()
+        stopAndRemove(session)
+        startNextIfPossible()
+        return true
+    }
+
+    /// 管理维护只通过后台任务调用：先从状态机原子摘除全部会话，再终止进程、
+    /// 远程桥与私有目录。返回值仅是会话数量，不暴露目录或媒体标识。
+    func clearAllSessionsAndCache() -> Int {
+        lock.lock()
+        let current = Array(sessions.values)
+        sessions.removeAll()
+        pendingSessionIDs.removeAll()
+        lock.unlock()
+        current.forEach(stopAndRemove)
+        try? FileManager.default.removeItem(at: rootDirectory)
+        try? FileManager.default.createDirectory(
+            at: rootDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return current.count
+    }
+
     private func prune() {
         let now = Date()
+        let idleLifetime = TimeInterval(currentConfiguration().sessionIdleMinutes * 60)
         lock.lock()
         let stale = sessions.values.filter { session in
             if let finishedAt = session.finishedAt {
                 return now.timeIntervalSince(finishedAt) > Self.finishedRetention
             }
-            return now.timeIntervalSince(session.startedAt) > Self.activeLifetime
+            return now.timeIntervalSince(session.lastAccessedAt) > idleLifetime
         }
         stale.forEach { sessions.removeValue(forKey: $0.id) }
         let staleIDs = Set(stale.map(\.id))
@@ -554,6 +778,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
 
     private func startNextIfPossible() {
         while true {
+            let maximumConcurrentSessions = currentConfiguration().maximumTranscodeSessions
             lock.lock()
             guard activeSessionCountLocked() < maximumConcurrentSessions,
                   !pendingSessionIDs.isEmpty else {
@@ -569,6 +794,43 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             lock.unlock()
             _ = launch(session)
         }
+    }
+
+    private func currentConfiguration() -> ServerOperationalSettings {
+        configurationLock.lock()
+        defer { configurationLock.unlock() }
+        let now = Date()
+        guard now.timeIntervalSince(configurationFetchedAt) >= 2 else { return cachedConfiguration }
+        let candidate = configurationProvider()
+        if candidate.isValid { cachedConfiguration = candidate }
+        configurationFetchedAt = now
+        return cachedConfiguration
+    }
+
+    private func hasStorageCapacity(for configuration: ServerOperationalSettings) -> Bool {
+        let limit = Int64(configuration.temporaryStorageLimitGB) * 1_024 * 1_024 * 1_024
+        guard Self.directoryByteCount(rootDirectory, stoppingAt: limit) < limit else { return false }
+        guard let values = try? rootDirectory.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        ), let available = values.volumeAvailableCapacityForImportantUsage else { return true }
+        let reserve = Int64(configuration.minimumFreeDiskGB) * 1_024 * 1_024 * 1_024
+        return available > reserve
+    }
+
+    private static func directoryByteCount(_ directory: URL, stoppingAt limit: Int64) -> Int64 {
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileAllocatedSizeKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return 0 }
+        var total: Int64 = 0
+        for case let url as URL in enumerator {
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileAllocatedSizeKey]),
+                  values.isRegularFile == true else { continue }
+            total += Int64(values.fileAllocatedSize ?? 0)
+            if total >= limit { return total }
+        }
+        return total
     }
 
     private static func isSafeSessionID(_ value: String) -> Bool {

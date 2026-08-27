@@ -171,16 +171,35 @@ public final class DatabaseManager: @unchecked Sendable {
             throw DatabaseError.backupFailed("不能从当前正在使用的数据库文件恢复。")
         }
         try validateBackup(at: backupURL)
-        _ = try createBackup(in: safetyBackupDirectory, reason: "auto-pre-restore")
+        let safetyBackupURL = try createBackup(in: safetyBackupDirectory, reason: "auto-pre-restore")
 
+        do {
+            try replaceCurrentDatabase(with: backupURL)
+            try migrate()
+            try validateCurrentDatabase()
+        } catch {
+            let restoreError = error
+            do {
+                try validateBackup(at: safetyBackupURL)
+                try replaceCurrentDatabase(with: safetyBackupURL)
+                try migrate()
+                try validateCurrentDatabase()
+            } catch {
+                throw DatabaseError.backupFailed(
+                    "数据库恢复失败，且安全回滚也未完成：\(error.localizedDescription)"
+                )
+            }
+            throw restoreError
+        }
+    }
+
+    private func replaceCurrentDatabase(with backupURL: URL) throws {
         try queue.sync {
             try self.unsafeExecute("PRAGMA wal_checkpoint(TRUNCATE)")
             try self.unsafeRestore(from: backupURL)
             try self.unsafeExecute("PRAGMA foreign_keys = ON")
             try self.unsafeExecute("PRAGMA journal_mode = WAL")
         }
-        try migrate()
-        try validateCurrentDatabase()
     }
 
     public func validateCurrentDatabase() throws {

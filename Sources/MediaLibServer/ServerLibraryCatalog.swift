@@ -12,6 +12,7 @@ final class ServerLibraryCatalog {
     }
 
     private let mediaRepository: MediaRepository
+    private let database: DatabaseManager
     private let mediaDetailRepository: MediaDetailRepository
     private let sourceRepository: SourceRepository
     private let userMediaStateRepository: ServerUserMediaStateRepository
@@ -42,6 +43,7 @@ final class ServerLibraryCatalog {
         trackCatalog: ServerMediaTrackCatalog = ServerMediaTrackCatalog(),
         remoteAssetFetcher: ServerRemoteAssetFetcher = ServerRemoteAssetFetcher()
     ) {
+        self.database = database
         self.vaultUnlockProvider = vaultUnlockProvider
         self.homeRecommendationProvider = homeRecommendationProvider
         self.trackCatalog = trackCatalog
@@ -54,6 +56,29 @@ final class ServerLibraryCatalog {
         self.userQueueRepository = ServerUserQueueRepository(database: database)
         self.smartCollectionRepository = VideoSmartCollectionRepository(database: database)
         self.smartPlaylistRepository = MusicSmartPlaylistRepository(database: database)
+    }
+
+    /// 侧栏只需一个廉价修订键，而不是在每次页面导航重新扫描整库。键覆盖会影响
+    /// 导航内容的媒体、来源、集合、歌单、逐用户状态/收藏与资料库授权。
+    func navigationRevision(for principal: ServerRequestPrincipal) throws -> String {
+        let row = try database.query(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM media_items), COALESCE((SELECT MAX(updated_at) FROM media_items), ''),
+              (SELECT COUNT(*) FROM media_sources), COALESCE((SELECT MAX(updated_at) FROM media_sources), ''),
+              (SELECT COUNT(*) FROM video_smart_collections), COALESCE((SELECT MAX(updated_at) FROM video_smart_collections), ''),
+              (SELECT COUNT(*) FROM music_smart_playlists), COALESCE((SELECT MAX(updated_at) FROM music_smart_playlists), ''),
+              (SELECT COUNT(*) FROM music_playlists), COALESCE((SELECT MAX(updated_at) FROM music_playlists), ''),
+              (SELECT COUNT(*) FROM server_library_grants WHERE user_id = ?),
+              COALESCE((SELECT MAX(updated_at) FROM server_library_grants WHERE user_id = ?), ''),
+              COALESCE((SELECT MAX(updated_at) FROM server_user_media_state WHERE user_id = ?), ''),
+              COALESCE((SELECT MAX(updated_at) FROM server_user_media_preferences WHERE user_id = ?), '')
+            """,
+            bindings: [.text(principal.userID), .text(principal.userID), .text(principal.userID), .text(principal.userID)]
+        ) { row in
+            (0..<14).map { index in row.string(index) ?? String(row.int(index) ?? 0) }.joined(separator: "|")
+        }.first ?? "empty"
+        return "\(principal.userID)|\(row)"
     }
 
     /// 保险库当前是否在这台机器上解锁。
@@ -1226,6 +1251,17 @@ final class ServerLibraryCatalog {
                 )
             )
         }
+        for stream in trackCatalog.embeddedBitmapSubtitleStreams(for: asset) {
+            references.append(
+                ServerSubtitleTrackReference(
+                    label: "\(Self.embeddedSubtitleLabel(stream)) · 图形字幕（需烧录）",
+                    language: Self.normalizedSubtitleLanguage(stream.language, title: stream.title),
+                    origin: .embedded,
+                    renderingMode: .burnIn,
+                    source: .embedded(asset: asset, streamIndex: stream.index)
+                )
+            )
+        }
         if let remoteURL = asset.remoteURL,
            let item = try publicItem(id: id, for: principal, requiring: .playMedia) {
             for track in ServerRemoteSubtitleCatalog.tracks(
@@ -2007,6 +2043,7 @@ struct ServerWebVTTSubtitleTrack: Codable, Equatable {
     static let maximumByteLength = 8 * 1024 * 1024
 
     let id: Int
+    let fingerprint: String
     let label: String
     /// BCP-47 语言标记，从文件名或轨道标签解析而来；解析不出就是 nil。
     /// 播放器靠它按浏览器语言挑默认轨——声明一个错的语言比不声明更糟。
@@ -2014,12 +2051,24 @@ struct ServerWebVTTSubtitleTrack: Codable, Equatable {
     /// 这条轨来自哪里。菜单要靠它分组（外挂 / 内封 / 来源服务器），读者才知道
     /// 为什么同一部片子会同时有好几条"简体中文"。
     let origin: ServerSubtitleTrackOrigin
+    let renderingMode: ServerSubtitleRenderingMode
 
-    init(id: Int, label: String, language: String? = nil, origin: ServerSubtitleTrackOrigin = .sidecar) {
+    init(
+        id: Int,
+        fingerprint: String? = nil,
+        label: String,
+        language: String? = nil,
+        origin: ServerSubtitleTrackOrigin = .sidecar,
+        renderingMode: ServerSubtitleRenderingMode = .text
+    ) {
         self.id = id
+        self.fingerprint = fingerprint
+            ?? ServerTokenSecurity.digest("subtitle|\(id)|\(origin.rawValue)|\(label)")
+            ?? "subtitle-\(id)"
         self.label = label
         self.language = language
         self.origin = origin
+        self.renderingMode = renderingMode
     }
 }
 
@@ -2030,6 +2079,11 @@ enum ServerSubtitleTrackOrigin: String, Codable, Equatable {
     case embedded
     /// Emby / Jellyfin / Plex 上的字幕轨。
     case remote
+}
+
+enum ServerSubtitleRenderingMode: String, Codable, Equatable {
+    case text
+    case burnIn
 }
 
 /// 一条字幕轨在服务端的真实来源。它**不出服务端**：路由拿它去取字节，网页只见序号。
@@ -2044,10 +2098,40 @@ struct ServerSubtitleTrackReference {
     let label: String
     let language: String?
     let origin: ServerSubtitleTrackOrigin
+    let renderingMode: ServerSubtitleRenderingMode
     let source: Source
 
+    init(
+        label: String,
+        language: String?,
+        origin: ServerSubtitleTrackOrigin,
+        renderingMode: ServerSubtitleRenderingMode = .text,
+        source: Source
+    ) {
+        self.label = label
+        self.language = language
+        self.origin = origin
+        self.renderingMode = renderingMode
+        self.source = source
+    }
+
     func descriptor(id: Int) -> ServerWebVTTSubtitleTrack {
-        ServerWebVTTSubtitleTrack(id: id, label: label, language: language, origin: origin)
+        let sourceIdentity: String
+        switch source {
+        case let .sidecar(asset): sourceIdentity = "sidecar|\(asset.fileURL.lastPathComponent)"
+        case let .embedded(_, streamIndex): sourceIdentity = "embedded|\(streamIndex)"
+        case let .remote(track): sourceIdentity = "remote|\(track.downloadURL.host ?? "")|\(track.downloadURL.path)"
+        }
+        return ServerWebVTTSubtitleTrack(
+            id: id,
+            fingerprint: ServerTokenSecurity.digest(
+                "subtitle|\(origin.rawValue)|\(language ?? "")|\(label)|\(sourceIdentity)"
+            ) ?? "subtitle-\(id)",
+            label: label,
+            language: language,
+            origin: origin,
+            renderingMode: renderingMode
+        )
     }
 }
 
@@ -2063,13 +2147,15 @@ struct ServerWebPlaybackTrackSet: Codable, Equatable {
     /// ffprobe 从容器读取的真实总时长。数据库缺少 MKV 时长、浏览器对分片 MP4
     /// 返回 Infinity 时，网页用它维持剩余时长与可拖动的虚拟时间轴。
     let durationSeconds: Double?
+    let selectionOverride: ServerTrackSelectionOverride?
 
     init(
         audio: [ServerWebAudioTrack],
         subtitles: [ServerWebVTTSubtitleTrack],
         remuxable: Bool,
         remuxUnavailableReason: String?,
-        durationSeconds: Double? = nil
+        durationSeconds: Double? = nil,
+        selectionOverride: ServerTrackSelectionOverride? = nil
     ) {
         self.audio = audio
         self.subtitles = subtitles
@@ -2078,6 +2164,18 @@ struct ServerWebPlaybackTrackSet: Codable, Equatable {
         self.durationSeconds = durationSeconds.flatMap {
             $0.isFinite && $0 > 0 && $0 < 86_400 ? $0 : nil
         }
+        self.selectionOverride = selectionOverride
+    }
+
+    func applying(selectionOverride: ServerTrackSelectionOverride?) -> Self {
+        Self(
+            audio: audio,
+            subtitles: subtitles,
+            remuxable: remuxable,
+            remuxUnavailableReason: remuxUnavailableReason,
+            durationSeconds: durationSeconds,
+            selectionOverride: selectionOverride
+        )
     }
 }
 

@@ -43,6 +43,7 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         libraryCategoriesProvider: @escaping (ServerRequestPrincipal) throws -> ServerLibraryCategoriesResponse = { _ in
             ServerLibraryCategoriesResponse(categories: [])
         },
+        navigationRevisionProvider: @escaping (ServerRequestPrincipal) throws -> String = { _ in UUID().uuidString },
         // 首页推荐名单由客户端算好发布，服务端只按请求者的授权把它查出来。
         // 默认空 = 没有客户端（测试、纯服务端部署），首页回落到服务端自己的推导。
         homeRecommendationsProvider: @escaping (ServerRequestPrincipal) throws -> ServerHomeRecommendations = { _ in .empty },
@@ -77,6 +78,8 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         hlsStatusProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerHLSPlaybackDescriptor? = { _, _ in nil },
         hlsResourceProvider: @escaping (String, String, ServerRequestPrincipal) throws -> ServerHLSResource? = { _, _, _ in nil },
         hlsCancellationProvider: @escaping (String, ServerRequestPrincipal) -> Void = { _, _ in },
+        adminHLSSessionsProvider: @escaping () -> [ServerAdminHLSPlaybackSession] = { [] },
+        adminHLSCancellationProvider: @escaping (String, ServerRequestPrincipal) -> Bool = { _, _ in false },
         artworkAssetProvider: @escaping (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
         detailImageProvider: @escaping (String, ServerDetailImageKind, Int, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _, _ in nil },
         /// 保险库对这个账号的可见性。默认 `.locked`——没有显式接线的调用方拿不到
@@ -92,6 +95,8 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         administrationCatalog: ServerAdministrationCatalog? = nil,
         experienceRepository: ServerExperienceRepository? = nil,
         maintenanceService: ServerMaintenanceService? = nil,
+        runtimeDiagnosticsProvider: @escaping () -> ServerRuntimeDiagnosticsSnapshot? = { nil },
+        runtimeConfigurationApplyProvider: @escaping (ServerRuntimeConfigurationMutationRequest) throws -> Bool = { _ in false },
         authenticationService: ServerAuthenticationService? = nil,
         authenticationProvider: @escaping (String) throws -> ServerRequestPrincipal? = { _ in nil },
         rateLimiter: ServerRequestRateLimiter = ServerRequestRateLimiter(),
@@ -125,6 +130,7 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             librarySnapshotProvider: librarySnapshotProvider,
             libraryBrowseProvider: libraryBrowseProvider,
             libraryCategoriesProvider: libraryCategoriesProvider,
+            navigationRevisionProvider: navigationRevisionProvider,
             homeRecommendationsProvider: homeRecommendationsProvider,
             libraryFacetsProvider: libraryFacetsProvider,
             mediaDetailProvider: mediaDetailProvider,
@@ -153,6 +159,8 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             hlsStatusProvider: hlsStatusProvider,
             hlsResourceProvider: hlsResourceProvider,
             hlsCancellationProvider: hlsCancellationProvider,
+            adminHLSSessionsProvider: adminHLSSessionsProvider,
+            adminHLSCancellationProvider: adminHLSCancellationProvider,
             artworkAssetProvider: artworkAssetProvider,
             detailImageProvider: detailImageProvider,
             vaultAccessProvider: vaultAccessProvider,
@@ -164,6 +172,8 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             administrationCatalog: administrationCatalog,
             experienceRepository: experienceRepository,
             maintenanceService: maintenanceService,
+            runtimeDiagnosticsProvider: runtimeDiagnosticsProvider,
+            runtimeConfigurationApplyProvider: runtimeConfigurationApplyProvider,
             authenticationService: authenticationService,
             authenticationProvider: authenticationProvider,
             rateLimiter: rateLimiter,
@@ -632,6 +642,28 @@ private struct ServerPasswordChangeRequest: Decodable {
     }
 }
 
+/// 数据库恢复只接受当前会话账号的密码。备份 ID 来自路径中的不透明服务端 ID，
+/// 正文不能夹带文件名、路径、用户或其它恢复参数。
+private struct ServerBackupRestoreRequest: Decodable {
+    let currentPassword: String
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case currentPassword
+    }
+
+    init(from decoder: Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
+        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.rawValue)) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unexpected fields"))
+        }
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        currentPassword = try values.decode(String.self, forKey: .currentPassword)
+        guard (1...1_024).contains(currentPassword.utf8.count) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "invalid password length"))
+        }
+    }
+}
+
 private struct DynamicCodingKey: CodingKey {
     let stringValue: String
     let intValue: Int?
@@ -655,6 +687,33 @@ private enum LocalHTTPRequestReceiveResult {
 private enum ArtworkRequest {
     case original
     case thumbnail(Int)
+}
+
+private final class ServerNavigationSnapshotCache: @unchecked Sendable {
+    private struct Entry {
+        let value: ServerWebSidebarExtras
+        let createdAt: Date
+    }
+
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+    private static let maximumEntries = 32
+
+    func value(for key: String) -> ServerWebSidebarExtras? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[key]?.value
+    }
+
+    func store(_ value: ServerWebSidebarExtras, for key: String) {
+        lock.lock()
+        entries[key] = Entry(value: value, createdAt: Date())
+        if entries.count > Self.maximumEntries,
+           let oldest = entries.min(by: { $0.value.createdAt < $1.value.createdAt })?.key {
+            entries.removeValue(forKey: oldest)
+        }
+        lock.unlock()
+    }
 }
 
 struct LocalHTTPRouter {
@@ -723,6 +782,7 @@ struct LocalHTTPRouter {
     private let librarySnapshotProvider: (ServerRequestPrincipal) throws -> ServerLibrarySnapshot
     private let libraryBrowseProvider: (ServerLibraryQuery, ServerRequestPrincipal) throws -> ServerLibraryItemsPage
     private let libraryCategoriesProvider: (ServerRequestPrincipal) throws -> ServerLibraryCategoriesResponse
+    private let navigationRevisionProvider: (ServerRequestPrincipal) throws -> String
     private let homeRecommendationsProvider: (ServerRequestPrincipal) throws -> ServerHomeRecommendations
     private let libraryFacetsProvider: (String?, ServerLibraryMediaGroup?, ServerRequestPrincipal) throws -> ServerLibraryFacetsResponse
     private let mediaDetailProvider: (String, ServerRequestPrincipal) throws -> ServerMediaItemDetail?
@@ -751,6 +811,8 @@ struct LocalHTTPRouter {
     private let hlsStatusProvider: (String, ServerRequestPrincipal) throws -> ServerHLSPlaybackDescriptor?
     private let hlsResourceProvider: (String, String, ServerRequestPrincipal) throws -> ServerHLSResource?
     private let hlsCancellationProvider: (String, ServerRequestPrincipal) -> Void
+    private let adminHLSSessionsProvider: () -> [ServerAdminHLSPlaybackSession]
+    private let adminHLSCancellationProvider: (String, ServerRequestPrincipal) -> Bool
     private let artworkAssetProvider: (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset?
     private let detailImageProvider: (String, ServerDetailImageKind, Int, ServerRequestPrincipal) throws -> ServerMediaAsset?
     private let vaultAccessProvider: (ServerRequestPrincipal) throws -> ServerLibraryCatalog.VaultAccess
@@ -762,10 +824,13 @@ struct LocalHTTPRouter {
     private let administrationCatalog: ServerAdministrationCatalog?
     private let experienceRepository: ServerExperienceRepository?
     private let maintenanceService: ServerMaintenanceService?
+    private let runtimeDiagnosticsProvider: () -> ServerRuntimeDiagnosticsSnapshot?
+    private let runtimeConfigurationApplyProvider: (ServerRuntimeConfigurationMutationRequest) throws -> Bool
     private let authenticationService: ServerAuthenticationService?
     private let authenticationProvider: (String) throws -> ServerRequestPrincipal?
     private let rateLimiter: ServerRequestRateLimiter
     private let csrfToken: String
+    private let navigationCache = ServerNavigationSnapshotCache()
 
     init(
         serverID: String,
@@ -785,6 +850,7 @@ struct LocalHTTPRouter {
         libraryCategoriesProvider: @escaping (ServerRequestPrincipal) throws -> ServerLibraryCategoriesResponse = { _ in
             ServerLibraryCategoriesResponse(categories: [])
         },
+        navigationRevisionProvider: @escaping (ServerRequestPrincipal) throws -> String = { _ in UUID().uuidString },
         // 首页推荐名单由客户端算好发布，服务端只按请求者的授权把它查出来。
         // 默认空 = 没有客户端（测试、纯服务端部署），首页回落到服务端自己的推导。
         homeRecommendationsProvider: @escaping (ServerRequestPrincipal) throws -> ServerHomeRecommendations = { _ in .empty },
@@ -819,6 +885,8 @@ struct LocalHTTPRouter {
         hlsStatusProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerHLSPlaybackDescriptor? = { _, _ in nil },
         hlsResourceProvider: @escaping (String, String, ServerRequestPrincipal) throws -> ServerHLSResource? = { _, _, _ in nil },
         hlsCancellationProvider: @escaping (String, ServerRequestPrincipal) -> Void = { _, _ in },
+        adminHLSSessionsProvider: @escaping () -> [ServerAdminHLSPlaybackSession] = { [] },
+        adminHLSCancellationProvider: @escaping (String, ServerRequestPrincipal) -> Bool = { _, _ in false },
         artworkAssetProvider: @escaping (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _ in nil },
         detailImageProvider: @escaping (String, ServerDetailImageKind, Int, ServerRequestPrincipal) throws -> ServerMediaAsset? = { _, _, _, _ in nil },
         /// 保险库对这个账号的可见性。默认 `.locked`——没有显式接线的调用方拿不到
@@ -832,6 +900,8 @@ struct LocalHTTPRouter {
         administrationCatalog: ServerAdministrationCatalog? = nil,
         experienceRepository: ServerExperienceRepository? = nil,
         maintenanceService: ServerMaintenanceService? = nil,
+        runtimeDiagnosticsProvider: @escaping () -> ServerRuntimeDiagnosticsSnapshot? = { nil },
+        runtimeConfigurationApplyProvider: @escaping (ServerRuntimeConfigurationMutationRequest) throws -> Bool = { _ in false },
         authenticationService: ServerAuthenticationService? = nil,
         authenticationProvider: @escaping (String) throws -> ServerRequestPrincipal? = { _ in nil },
         rateLimiter: ServerRequestRateLimiter = ServerRequestRateLimiter(),
@@ -845,6 +915,7 @@ struct LocalHTTPRouter {
         self.librarySnapshotProvider = librarySnapshotProvider
         self.libraryBrowseProvider = libraryBrowseProvider
         self.libraryCategoriesProvider = libraryCategoriesProvider
+        self.navigationRevisionProvider = navigationRevisionProvider
         self.homeRecommendationsProvider = homeRecommendationsProvider
         self.libraryFacetsProvider = libraryFacetsProvider
         self.mediaDetailProvider = mediaDetailProvider
@@ -873,6 +944,8 @@ struct LocalHTTPRouter {
         self.hlsStatusProvider = hlsStatusProvider
         self.hlsResourceProvider = hlsResourceProvider
         self.hlsCancellationProvider = hlsCancellationProvider
+        self.adminHLSSessionsProvider = adminHLSSessionsProvider
+        self.adminHLSCancellationProvider = adminHLSCancellationProvider
         self.artworkAssetProvider = artworkAssetProvider
         self.detailImageProvider = detailImageProvider
         self.vaultAccessProvider = vaultAccessProvider
@@ -884,6 +957,8 @@ struct LocalHTTPRouter {
         self.administrationCatalog = administrationCatalog
         self.experienceRepository = experienceRepository
         self.maintenanceService = maintenanceService
+        self.runtimeDiagnosticsProvider = runtimeDiagnosticsProvider
+        self.runtimeConfigurationApplyProvider = runtimeConfigurationApplyProvider
         self.authenticationService = authenticationService
         self.authenticationProvider = authenticationProvider
         self.rateLimiter = rateLimiter
@@ -1137,25 +1212,51 @@ struct LocalHTTPRouter {
             hlsCancellationProvider(raw, principal)
             return .noContent()
         }
+        if method == "DELETE", path.hasPrefix("/api/v1/admin/playback-sessions/") {
+            if let limited = limitedResponse(
+                scope: .managementMutation, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.manageSessions) else { return .forbidden() }
+            let raw = String(path.dropFirst("/api/v1/admin/playback-sessions/".count))
+            guard !raw.isEmpty, !raw.contains("/"), body.isEmpty else { return .notFound() }
+            guard adminHLSCancellationProvider(raw, principal) else { return .notFound() }
+            return .noContent()
+        }
+        if method == "DELETE", path == "/api/v1/admin/storage/transcode-cache" {
+            if let limited = limitedResponse(
+                scope: .managementMutation,
+                principal: principal,
+                clientAddressKey: clientAddressKey,
+                cost: 3
+            ) { return limited }
+            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+            guard body.isEmpty, let maintenanceService else { return .badRequest() }
+            do {
+                let job = try maintenanceService.enqueueTranscodeCacheCleanup(requestedBy: principal)
+                guard let encoded = ServerCommandOutput.jsonData(job) else { return .serviceUnavailable() }
+                return .accepted(body: encoded, additionalHeaders: ["Cache-Control: no-store"])
+            } catch { return .serviceUnavailable() }
+        }
         if method == "POST" {
             if path == "/api/v1/playback/sessions" {
                 if let limited = limitedResponse(
                     scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
                 ) { return limited }
-                guard let policy = experiencePolicy(for: principal),
-                      policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
-                      policy.remuxAllowed || policy.transcodeAllowed else {
-                    return .forbidden()
-                }
                 guard let creation: ServerHLSPlaybackSessionCreationRequest = strictlyDecode(
                     ServerHLSPlaybackSessionCreationRequest.self,
                     from: body,
-                    allowedKeys: ["itemID", "audioTrackID", "startSeconds", "durationSeconds", "capabilities"],
+                    allowedKeys: ["itemID", "audioTrackID", "subtitleTrackID", "startSeconds", "durationSeconds", "capabilities", "quality", "maximumBitrateMbps"],
                     nestedAllowedKeys: ["capabilities": [
                         "nativeHLS", "mediaSource", "videoCodecs", "audioCodecs",
                         "screenWidth", "screenHeight", "hdrDisplay", "measuredDownlinkMbps"
                     ]]
                 ), creation.isValid else { return .badRequest() }
+                guard let policy = experiencePolicy(for: principal),
+                      policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
+                      policyAllowsItem(policy, itemID: creation.itemID, principal: principal),
+                      policy.remuxAllowed || policy.transcodeAllowed else {
+                    return .forbidden()
+                }
                 guard let descriptor = try? hlsSessionProvider(
                     creation.itemID, creation.playbackRequest, principal
                 ), let encoded = ServerCommandOutput.jsonData(descriptor)
@@ -1174,21 +1275,22 @@ struct LocalHTTPRouter {
                     hlsCancellationProvider(raw, principal)
                     return .noContent()
                 }
-                guard let policy = experiencePolicy(for: principal),
-                      policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
-                      policy.remuxAllowed || policy.transcodeAllowed else {
-                    return .forbidden()
-                }
                 guard let itemID = decodedPathIdentifier(path, prefix: "/api/v1/playback/sessions/"),
                       let request: ServerHLSPlaybackRequest = strictlyDecode(
                         ServerHLSPlaybackRequest.self,
                         from: body,
-                        allowedKeys: ["audioTrackID", "startSeconds", "durationSeconds", "capabilities"],
+                        allowedKeys: ["audioTrackID", "subtitleTrackID", "startSeconds", "durationSeconds", "capabilities", "quality", "maximumBitrateMbps"],
                         nestedAllowedKeys: ["capabilities": [
                             "nativeHLS", "mediaSource", "videoCodecs", "audioCodecs",
                             "screenWidth", "screenHeight", "hdrDisplay", "measuredDownlinkMbps"
                         ]]
                       ), request.isValid else { return .badRequest() }
+                guard let policy = experiencePolicy(for: principal),
+                      policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
+                      policyAllowsItem(policy, itemID: itemID, principal: principal),
+                      policy.remuxAllowed || policy.transcodeAllowed else {
+                    return .forbidden()
+                }
                 guard let descriptor = try? hlsSessionProvider(itemID, request, principal),
                       let encoded = ServerCommandOutput.jsonData(descriptor)
                 else { return .serviceUnavailable() }
@@ -1238,7 +1340,79 @@ struct LocalHTTPRouter {
                 ) { return limited }
                 return updateMediaPreferenceResponse(path: path, body: body, principal: principal)
             }
+            if path == "/api/v1/admin/runtime/validate" || path == "/api/v1/admin/runtime/apply" {
+                guard method == "POST" else { return .methodNotAllowed() }
+                if let limited = limitedResponse(
+                    scope: .managementMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey,
+                    cost: path.hasSuffix("/apply") ? 3 : 1
+                ) { return limited }
+                guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+                guard let request: ServerRuntimeConfigurationMutationRequest = strictlyDecode(
+                    ServerRuntimeConfigurationMutationRequest.self,
+                    from: body,
+                    allowedKeys: [
+                        "currentPassword", "serverName", "port", "networkAccessMode",
+                        "publicOrigin", "trustedProxyAddresses"
+                    ]
+                ) else { return .badRequest() }
+                let hostControlAvailable = runtimeDiagnosticsProvider()?.hostControlAvailable == true
+                let validation = ServerRuntimeConfigurationValidator.validate(
+                    request,
+                    hostControlAvailable: hostControlAvailable
+                )
+                guard validation.valid else {
+                    guard let encoded = ServerCommandOutput.jsonData(validation) else {
+                        return .serviceUnavailable()
+                    }
+                    return .jsonError(
+                        statusCode: 400,
+                        reason: "Bad Request",
+                        body: encoded,
+                        additionalHeaders: ["Cache-Control: no-store"]
+                    )
+                }
+                if path.hasSuffix("/apply") {
+                    guard hostControlAvailable else { return .serviceUnavailable() }
+                    guard let authenticationService,
+                          let password = request.currentPassword,
+                          (try? authenticationService.verifyCurrentPassword(
+                            for: principal,
+                            password: password,
+                            purpose: "runtime.apply"
+                          )) == true
+                    else { return .forbidden() }
+                    do {
+                        let accepted = try runtimeConfigurationApplyProvider(request)
+                        try administrationCatalog?.recordRuntimeConfigurationApply(
+                            accepted: accepted,
+                            actor: principal,
+                            detailCode: accepted ? "host.accepted" : "host.rejected"
+                        )
+                        guard accepted,
+                              let encoded = ServerCommandOutput.jsonData(validation)
+                        else { return .serviceUnavailable() }
+                        return .accepted(
+                            body: encoded,
+                            additionalHeaders: ["Cache-Control: no-store", "Retry-After: 1"]
+                        )
+                    } catch {
+                        try? administrationCatalog?.recordRuntimeConfigurationApply(
+                            accepted: false,
+                            actor: principal,
+                            detailCode: "host.transport-failed"
+                        )
+                        return .serviceUnavailable()
+                    }
+                }
+                guard let encoded = ServerCommandOutput.jsonData(validation) else {
+                    return .serviceUnavailable()
+                }
+                return .json(body: encoded, additionalHeaders: ["Cache-Control: no-store"])
+            }
             if path == "/api/v1/admin/jobs" {
+                guard method == "POST" else { return .methodNotAllowed() }
                 if let limited = limitedResponse(
                     scope: .managementMutation,
                     principal: principal,
@@ -1261,6 +1435,7 @@ struct LocalHTTPRouter {
                 } catch { return .serviceUnavailable() }
             }
             if path == "/api/v1/admin/backups" {
+                guard method == "POST" else { return .methodNotAllowed() }
                 if let limited = limitedResponse(
                     scope: .managementMutation,
                     principal: principal,
@@ -1274,6 +1449,49 @@ struct LocalHTTPRouter {
                     guard let encoded = ServerCommandOutput.jsonData(job) else { return .serviceUnavailable() }
                     return .created(body: encoded, additionalHeaders: ["Cache-Control: no-store"])
                 } catch { return .serviceUnavailable() }
+            }
+            if path.hasPrefix("/api/v1/admin/backups/"), path.hasSuffix("/restore") {
+                guard method == "POST" else { return .methodNotAllowed() }
+                if let limited = limitedResponse(
+                    scope: .managementMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey,
+                    cost: 4
+                ) { return limited }
+                guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+                let backupID = String(
+                    path.dropFirst("/api/v1/admin/backups/".count).dropLast("/restore".count)
+                )
+                guard !backupID.isEmpty, !backupID.contains("/"),
+                      let request: ServerBackupRestoreRequest = strictlyDecode(
+                        ServerBackupRestoreRequest.self,
+                        from: body,
+                        allowedKeys: ["currentPassword"]
+                      )
+                else { return .badRequest() }
+                guard let authenticationService,
+                      (try? authenticationService.verifyCurrentPassword(
+                        for: principal,
+                        password: request.currentPassword,
+                        purpose: "backup.restore"
+                      )) == true
+                else { return .forbidden() }
+                guard let maintenanceService else { return .serviceUnavailable() }
+                do {
+                    let job = try maintenanceService.enqueueRestore(
+                        backupID: backupID,
+                        requestedBy: principal
+                    )
+                    guard let encoded = ServerCommandOutput.jsonData(job) else { return .serviceUnavailable() }
+                    return .accepted(body: encoded, additionalHeaders: [
+                        "Cache-Control: no-store",
+                        "Clear-Site-Data: \"cache\""
+                    ])
+                } catch ServerMaintenanceError.backupNotFound {
+                    return .notFound()
+                } catch {
+                    return .serviceUnavailable()
+                }
             }
             if path == "/api/v1/admin/users" {
                 if let limited = limitedResponse(
@@ -1324,6 +1542,27 @@ struct LocalHTTPRouter {
                   let descriptor = try? hlsStatusProvider(raw, principal),
                   let encoded = ServerCommandOutput.jsonData(descriptor)
             else { return .notFound() }
+            return .json(body: encoded, omitBody: isHeadRequest, additionalHeaders: ["Cache-Control: no-store"])
+        }
+
+        if path == "/api/v1/admin/playback-sessions" ||
+            path.hasPrefix("/api/v1/admin/playback-sessions/") {
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+            ) { return limited }
+            guard principal.permissions.contains(.manageSessions) else { return .forbidden() }
+            let sessions = adminHLSSessionsProvider()
+            let encoded: Data?
+            if path == "/api/v1/admin/playback-sessions" {
+                encoded = ServerCommandOutput.jsonData(sessions)
+            } else {
+                let raw = String(path.dropFirst("/api/v1/admin/playback-sessions/".count))
+                guard !raw.isEmpty, !raw.contains("/"),
+                      let session = sessions.first(where: { $0.sessionID == raw })
+                else { return .notFound() }
+                encoded = ServerCommandOutput.jsonData(session)
+            }
+            guard let encoded else { return .serviceUnavailable() }
             return .json(body: encoded, omitBody: isHeadRequest, additionalHeaders: ["Cache-Control: no-store"])
         }
 
@@ -1390,6 +1629,41 @@ struct LocalHTTPRouter {
                     body: encoded,
                     omitBody: isHeadRequest,
                     additionalHeaders: ["Cache-Control: no-store"]
+                )
+            } catch { return .serviceUnavailable() }
+        }
+        if path == "/api/v1/admin/diagnostics" {
+            if let limited = limitedResponse(
+                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey, cost: 2
+            ) { return limited }
+            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+            guard let administrationCatalog,
+                  let experienceRepository,
+                  let runtime = runtimeDiagnosticsProvider()
+            else { return .serviceUnavailable() }
+            do {
+                try administrationCatalog.recordDiagnosticExport(actor: principal)
+                let users = try administrationCatalog.users(limit: 1)
+                let sessions = try administrationCatalog.activeSessions()
+                let sources = try administrationCatalog.sources()
+                let security = try administrationCatalog.securityEvents()
+                let export = ServerRedactedDiagnosticExport(
+                    runtime: runtime,
+                    userCount: users.totalCount,
+                    activeDeviceCount: sessions.devices.count,
+                    activeSessionCount: sessions.sessions.count,
+                    managedSourceCount: sources?.totalCount ?? 0,
+                    jobs: try experienceRepository.jobs(limit: 25),
+                    securityEvents: security.events
+                )
+                guard let encoded = ServerCommandOutput.jsonData(export) else { return .serviceUnavailable() }
+                return .json(
+                    body: encoded,
+                    omitBody: isHeadRequest,
+                    additionalHeaders: [
+                        "Cache-Control: no-store",
+                        "Content-Disposition: attachment; filename=\"MediaLIB-diagnostics.json\""
+                    ]
                 )
             } catch { return .serviceUnavailable() }
         }
@@ -2523,8 +2797,10 @@ struct LocalHTTPRouter {
                     queuedJobCount: jobs.filter { $0.state == .queued }.count,
                     runningJobCount: jobs.filter { $0.state == .running }.count,
                     failedJobCount: jobs.filter { $0.state == .failed }.count,
+                    recentSecurityEventCount: (try? administrationCatalog?.securityEvents().events.count) ?? 0,
                     playback: playbackTelemetry.snapshot(),
-                    lan: remoteAccessPolicy.lanAccessReadiness()
+                    lan: remoteAccessPolicy.lanAccessReadiness(),
+                    runtime: runtimeDiagnosticsProvider()
                 )
                 guard let encoded = ServerCommandOutput.jsonData(response) else { return .serviceUnavailable() }
                 return .json(body: encoded, omitBody: isHeadRequest, additionalHeaders: ["Cache-Control: no-store"])
@@ -2681,9 +2957,24 @@ struct LocalHTTPRouter {
             guard let itemID = decodedPathIdentifier(trackListPath, prefix: "/api/v1/playback/tracks/") else {
                 return .notFound()
             }
-            guard let tracks = try? playbackTracksProvider(itemID, principal),
-                  let encoded = ServerCommandOutput.jsonData(tracks)
+            guard let baseTracks = try? playbackTracksProvider(itemID, principal)
             else { return .notFound() }
+            var selectionOverride = try? experienceRepository?.trackOverride(
+                userID: principal.userID,
+                scope: .media,
+                scopeID: itemID
+            )
+            if selectionOverride == nil,
+               let detail = try? mediaDetailProvider(itemID, principal),
+               let seriesID = detail.episodeContext?.seriesID {
+                selectionOverride = try? experienceRepository?.trackOverride(
+                    userID: principal.userID,
+                    scope: .series,
+                    scopeID: seriesID
+                )
+            }
+            let tracks = baseTracks.applying(selectionOverride: selectionOverride ?? nil)
+            guard let encoded = ServerCommandOutput.jsonData(tracks) else { return .serviceUnavailable() }
             return .ok(body: encoded, omitBody: isHeadRequest)
         case let keyframePath where keyframePath.hasPrefix("/api/v1/playback/keyframe/"):
             if let limited = limitedResponse(
@@ -3223,13 +3514,28 @@ struct LocalHTTPRouter {
         for principal: ServerRequestPrincipal,
         activeRemoteScopeID: String? = nil
     ) -> ServerWebSidebarExtras {
-        ServerWebSidebarExtras(
-            smartCollections: (try? smartCollectionsProvider(0, 24, principal))?.items ?? [],
-            smartPlaylists: (try? musicPlaylistsProvider(0, 100, principal))?.items ?? [],
-            // 每台远程服务器一个分组；远程内容不并入一级分类，与客户端一致。
+        let revision = (try? navigationRevisionProvider(principal)) ?? UUID().uuidString
+        let permissionKey = principal.permissions.map(\.rawValue).sorted().joined(separator: ",")
+        let key = "\(revision)|\(permissionKey)"
+        var base = navigationCache.value(for: key)
+        if base == nil {
+            base = ServerWebSidebarExtras(
+                smartCollections: (try? smartCollectionsProvider(0, 24, principal))?.items ?? [],
+                smartPlaylists: (try? musicPlaylistsProvider(0, 100, principal))?.items ?? [],
+                remoteSources: [],
+                videoGroupItemCount: (try? libraryCategoriesProvider(principal))?.videoGroupItemCount ?? 0
+            )
+            if let base {
+                navigationCache.store(base, for: key)
+            }
+        }
+        let resolved = base ?? .empty
+        return ServerWebSidebarExtras(
+            smartCollections: resolved.smartCollections,
+            smartPlaylists: resolved.smartPlaylists,
+            // 远程来源可能由桌面宿主断开或重新认证，不进入数据库导航快照。
             remoteSources: (try? remoteSourceGroupsProvider(principal)) ?? [],
-            // 分类响应在目录层有 15 秒缓存，因此这次取用与路由自己那次是同一份。
-            videoGroupItemCount: (try? libraryCategoriesProvider(principal))?.videoGroupItemCount ?? 0,
+            videoGroupItemCount: resolved.videoGroupItemCount,
             activeRemoteScopeID: activeRemoteScopeID
         )
     }
@@ -3335,7 +3641,9 @@ struct LocalHTTPRouter {
         omitBody: Bool
     ) -> LocalHTTPResponse {
         guard let policy = experiencePolicy(for: principal),
-              policyAllowsPlayback(policy, clientAddressKey: clientAddressKey), policy.directPlayAllowed
+              policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
+              policyAllowsItem(policy, itemID: itemID, principal: principal),
+              policy.directPlayAllowed
         else { return .notFound() }
         guard let asset = try? mediaAssetProvider(itemID, principal, .playMedia) else {
             // 与不存在的条目统一返回 404，避免 ID 或资料库权限被枚举。
@@ -3374,7 +3682,9 @@ struct LocalHTTPRouter {
         omitBody: Bool
     ) -> LocalHTTPResponse {
         guard let policy = experiencePolicy(for: principal),
-              policyAllowsPlayback(policy, clientAddressKey: clientAddressKey), policy.downloadAllowed
+              policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
+              policyAllowsItem(policy, itemID: itemID, principal: principal),
+              policy.downloadAllowed
         else { return .notFound() }
         guard let asset = try? mediaAssetProvider(itemID, principal, .downloadMedia) else {
             // 下载与播放使用同一条目隐藏策略；无权时不能通过状态码差异枚举媒体。
@@ -3596,7 +3906,9 @@ struct LocalHTTPRouter {
         omitBody: Bool
     ) -> LocalHTTPResponse {
         guard let policy = experiencePolicy(for: principal),
-              policyAllowsPlayback(policy, clientAddressKey: clientAddressKey), policy.transcodeAllowed
+              policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
+              policyAllowsItem(policy, itemID: itemID, principal: principal),
+              policy.transcodeAllowed
         else { return .notFound() }
         guard let stream = try? audioRemuxProvider(itemID, audioTrackID, startSeconds, principal) else {
             return .notFound()
@@ -4248,6 +4560,19 @@ struct LocalHTTPRouter {
         return start <= end ? (start...end).contains(current) : (current >= start || current <= end)
     }
 
+    private func policyAllowsItem(
+        _ policy: ServerUserPolicy,
+        itemID: String,
+        principal: ServerRequestPrincipal
+    ) -> Bool {
+        guard policy.maximumContentRating != nil else { return true }
+        guard let detail = try? mediaDetailProvider(itemID, principal) else { return false }
+        return ServerContentRatingPolicy.allows(
+            contentRating: detail.detailExtras?.contentRating,
+            maximum: policy.maximumContentRating
+        )
+    }
+
     private func isRemoteClientAddressKey(_ value: String) -> Bool {
         let normalized = value.lowercased()
         return !(normalized == "localhost" || normalized == "::1" || normalized == "[::1]" ||
@@ -4325,7 +4650,7 @@ private struct ServerJobCreationRequest: Decodable {
     let kind: String
 
     var isValid: Bool {
-        ["library.scan", "library.reindex"]
+        ["library.scan", "library.reindex", "metadata.refresh"]
             .contains(kind)
     }
 }
@@ -4338,8 +4663,10 @@ private struct ServerAdminDashboardResponse: Encodable {
     let queuedJobCount: Int
     let runningJobCount: Int
     let failedJobCount: Int
+    let recentSecurityEventCount: Int
     let playback: ServerPlaybackTelemetrySnapshot
     let lan: ServerLanAccessReadiness
+    let runtime: ServerRuntimeDiagnosticsSnapshot?
 }
 
 private enum ServerAuthenticationDelivery: String, Decodable {
@@ -4433,10 +4760,37 @@ struct LocalHTTPResponse {
         )
     }
 
+    static func jsonError(
+        statusCode: Int,
+        reason: String,
+        body: Data,
+        additionalHeaders: [String] = []
+    ) -> Self {
+        Self(
+            statusCode: statusCode,
+            reason: reason,
+            contentType: "application/json; charset=utf-8",
+            payload: .data(body),
+            declaredContentLength: body.count,
+            additionalHeaders: additionalHeaders
+        )
+    }
+
     static func created(body: Data, additionalHeaders: [String] = []) -> Self {
         Self(
             statusCode: 201,
             reason: "Created",
+            contentType: "application/json; charset=utf-8",
+            payload: .data(body),
+            declaredContentLength: body.count,
+            additionalHeaders: additionalHeaders
+        )
+    }
+
+    static func accepted(body: Data, additionalHeaders: [String] = []) -> Self {
+        Self(
+            statusCode: 202,
+            reason: "Accepted",
             contentType: "application/json; charset=utf-8",
             payload: .data(body),
             declaredContentLength: body.count,

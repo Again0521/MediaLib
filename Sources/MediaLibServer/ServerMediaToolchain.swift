@@ -7,8 +7,46 @@ import Foundation
 /// 音轨重封装与内嵌字幕导出都要 ffmpeg，而"能不能转"这个判断必须和"能不能探测"
 /// 用同一份事实，否则网页会显示一个按下去什么都不会发生的入口。
 enum ServerMediaToolchain {
+    struct FFmpegFilterCapabilities: Equatable {
+        let softwareHDRToneMapping: Bool
+        let videoToolboxHDRToneMapping: Bool
+
+        static func parse(_ output: String) -> Self {
+            let filterNames = Set(output.split(whereSeparator: \ .isNewline).compactMap { line -> String? in
+                let fields = line.split(whereSeparator: \ .isWhitespace)
+                guard fields.count >= 2 else { return nil }
+                return String(fields[1])
+            })
+            return Self(
+                softwareHDRToneMapping: filterNames.contains("zscale") && filterNames.contains("tonemap"),
+                videoToolboxHDRToneMapping: filterNames.contains("tonemap_videotoolbox")
+            )
+        }
+    }
+
     static func ffprobeURL() -> URL? { executable(named: "ffprobe") }
     static func ffmpegURL() -> URL? { executable(named: "ffmpeg") }
+
+    /// Reads the selected executable once per HLS manager, never once per request.
+    /// `tonemap` alone is not enough: it expects linear-light input, which is why
+    /// the software path is offered only when `zscale` is present as well.
+    static func ffmpegFilterCapabilities(executableURL: URL? = ffmpegURL()) -> FFmpegFilterCapabilities {
+        guard let executableURL,
+              let data = ServerBoundedProcess.run(
+                executableURL: executableURL,
+                arguments: ["-nostdin", "-hide_banner", "-filters"],
+                maximumOutputByteLength: 2 * 1_024 * 1_024,
+                timeout: 5
+              ),
+              let output = String(data: data, encoding: .utf8)
+        else {
+            return FFmpegFilterCapabilities(
+                softwareHDRToneMapping: false,
+                videoToolboxHDRToneMapping: false
+            )
+        }
+        return FFmpegFilterCapabilities.parse(output)
+    }
 
     private static func executable(named name: String) -> URL? {
         let fileManager = FileManager.default

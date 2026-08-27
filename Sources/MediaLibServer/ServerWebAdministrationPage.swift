@@ -136,6 +136,7 @@ enum ServerWebAdministrationPage {
         <div class="admin-dashboard">
           \(dataPanel(id: "users", title: "用户", note: "谁可以使用这台服务器"))
           \(dataPanel(id: "sessions", title: "已登录的设备", note: "最近登录过的设备"))
+          \(dataPanel(id: "playback-sessions", title: "当前播放", note: "正在准备、排队或播放的 HLS 会话"))
           \(dataPanel(id: "events", title: "安全记录", note: "最近 100 条登录与权限变更", extraClass: "admin-panel-wide"))
         </div>
         <p class="t-footnote t-tertiary admin-footnote">管理操作受角色、资料库授权、CSRF、限速和审计保护 · 响应不包含密码、Cookie、token、摘要、媒体路径、请求头或客户端地址。</p>
@@ -792,6 +793,45 @@ enum ServerWebAdministrationPage {
           button.disabled = false;
         }
       }
+      function renderPlaybackSessions(data, usersByID) {
+        const sessions = Array.isArray(data) ? data : [];
+        byID('playback-sessions-count').textContent = String(sessions.length);
+        if (!sessions.length) { setState('playback-sessions', '目前没有活动播放。'); return; }
+        const stateLabel = { queued:'排队', preparing:'准备', ready:'就绪', playing:'播放', finished:'完成', failed:'失败', cancelled:'取消' };
+        const rows = element('div', 'rows');
+        sessions.forEach((session) => {
+          const user = usersByID.get(session.userID);
+          const terminate = element('button', 'ui-btn ui-btn-secondary', '终止');
+          terminate.type = 'button';
+          terminate.addEventListener('click', () => terminatePlaybackSession(session.sessionID, terminate));
+          rows.append(row([
+            element('div', 'primary', user ? (user.displayName || user.username) : shortID(session.userID)),
+            element('div', 'secondary', `${session.mode || 'HLS'} · ${stateLabel[session.state] || session.state || '未知'}`),
+            element('div', 'meta mono', `开始 ${safeDate(session.startedAt)}`),
+            terminate
+          ]));
+        });
+        showContent('playback-sessions', rows);
+      }
+      async function terminatePlaybackSession(id, button) {
+        if (typeof id !== 'string' || !id || !window.confirm('此播放会立即停止。要继续吗？')) return;
+        button.disabled = true;
+        try {
+          const token = document.querySelector('meta[name="medialib-csrf-token"]')?.getAttribute('content');
+          if (!token) throw new Error('页面安全令牌不可用，请刷新后重试');
+          const response = await fetch(`/api/v1/admin/playback-sessions/${encodeURIComponent(id)}`, {
+            method: 'DELETE', credentials: 'same-origin', headers: { 'X-MediaLIB-CSRF': token }
+          });
+          if (response.status === 401) { window.location.assign('/login'); return; }
+          if (response.status === 403) throw new Error('你没有终止播放会话的权限。');
+          if (!response.ok) throw new Error('播放会话已结束或暂时无法终止。');
+          await load();
+        } catch (error) {
+          globalStatus.hidden = false;
+          globalStatusText.textContent = error && error.message ? error.message : '无法终止播放会话。';
+          button.disabled = false;
+        }
+      }
       function renderEvents(data) {
         const events = Array.isArray(data.events) ? data.events : [];
         byID('events-count').textContent = String(events.length);
@@ -812,12 +852,13 @@ enum ServerWebAdministrationPage {
         refreshButton.disabled = true;
         globalStatus.hidden = false;
         globalStatusText.textContent = '正在加载管理数据…';
-        ['users', 'sessions', 'events'].forEach((name) => setState(name, '正在加载…'));
+        ['users', 'sessions', 'playback-sessions', 'events'].forEach((name) => setState(name, '正在加载…'));
         const results = await Promise.allSettled([
           fetchJSON('/api/v1/admin/users?offset=0&limit=100'),
           fetchJSON('/api/v1/admin/sessions'),
           fetchJSON('/api/v1/admin/security-events'),
-          fetchJSON('/api/v1/admin/libraries')
+          fetchJSON('/api/v1/admin/libraries'),
+          fetchJSON('/api/v1/admin/playback-sessions')
         ]);
         var failures = 0;
         var usersByID = new Map();
@@ -831,6 +872,8 @@ enum ServerWebAdministrationPage {
         else { failures += 1; setState('events', results[2].reason.message || '无法读取安全事件。', true); }
         if (results[3].status === 'fulfilled') renderLibraries(results[3].value);
         else setLibraryLoadFailure('看不到可分配的资料库，不过仍然可以先把人加进来。');
+        if (results[4].status === 'fulfilled') renderPlaybackSessions(results[4].value, usersByID);
+        else { failures += 1; setState('playback-sessions', results[4].reason.message || '无法读取当前播放。', true); }
         globalStatusText.textContent = failures ? `已加载，其中 ${failures} 个区域不可用。可检查账号权限后重试。` : '管理数据已更新。';
         refreshButton.disabled = false;
       }

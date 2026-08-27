@@ -195,6 +195,10 @@ enum ServerWebMediaDetailPage {
                           <summary class="ui-btn ui-btn-icon player-btn" aria-label="音轨" title="音轨">\(ServerWebIcon.volumeOn.html(size: .md))</summary>
                           <div class="player-settings-panel player-track-panel" id="audio-panel" role="group" aria-label="音频轨道"></div>
                         </details>
+                        <details class="player-settings" id="quality-menu">
+                          <summary class="ui-btn ui-btn-icon player-btn" aria-label="画质" title="画质">\(ServerWebIcon.display.html(size: .md))</summary>
+                          <div class="player-settings-panel player-track-panel" id="quality-panel" role="group" aria-label="播放画质"></div>
+                        </details>
                       </div>
                       <div class="player-control-cluster">
                         <button id="picture-in-picture" class="ui-btn ui-btn-icon player-btn" type="button" aria-label="画中画" title="画中画" hidden>\(ServerWebIcon.pictureInPicture.html(size: .md))</button>
@@ -1473,6 +1477,8 @@ enum ServerWebMediaDetailPage {
       var playbackPreferencesPromise = null;
       var playbackPreferences = null;
       var playbackPreferencesUseLegacySelection = true;
+      var playbackTrackOverride = null;
+      var autoplayTimer = null;
       var playbackCompleted = false;
       // ---- 播放通路 ---------------------------------------------------------
       // `direct` 是浏览器自己解容器；`hls` 是服务端按浏览器能力重封装或转码后的
@@ -1481,6 +1487,9 @@ enum ServerWebMediaDetailPage {
       var playbackMode = 'direct';
       var remuxOffset = 0;
       var remuxAudioTrack = 0;
+      var activeBurnInSubtitleTrackID = null;
+      var activePlaybackQuality = 'auto';
+      var qualityChoiceLocked = false;
       var currentHLSSessionID = '';
       var currentHLSClient = null;
       var lastHLSMediaRecoveryAt = 0;
@@ -1762,7 +1771,11 @@ enum ServerWebMediaDetailPage {
             if (!effective || typeof effective !== 'object') throw new Error('invalid');
             playbackPreferences = effective;
             playbackPreferencesUseLegacySelection = Number(payload?.account?.version ?? 0) === 0;
+            if (!qualityChoiceLocked && ['auto','original','2160p','1080p','720p','480p'].includes(String(effective.defaultQuality))) {
+              activePlaybackQuality = String(effective.defaultQuality);
+            }
             applySubtitleStyle(effective.subtitleStyle);
+            buildQualityMenu();
             return effective;
           } catch (_) {
             playbackPreferencesPromise = null;
@@ -1771,6 +1784,10 @@ enum ServerWebMediaDetailPage {
         })();
         return playbackPreferencesPromise;
       }
+      const configuredResumePosition = () => {
+        if (playbackPreferences?.resumePlayback === false) return 0;
+        return Number.isFinite(resumePosition) && resumePosition >= 10 ? resumePosition : 0;
+      };
 
       /// 按浏览器语言挑一条默认字幕。
       //
@@ -1782,6 +1799,11 @@ enum ServerWebMediaDetailPage {
       var subtitleChoiceLocked = false;
       function applyPreferredSubtitle() {
         if (subtitleChoiceLocked || !playbackHasPlayed) return;
+        if (playbackTrackOverride?.subtitleDisabled === true) return;
+        const overriddenSubtitle = (playbackTracks?.subtitles ?? []).find(track =>
+          track.fingerprint && track.fingerprint === playbackTrackOverride?.subtitleFingerprint
+        );
+        if (overriddenSubtitle) { void selectSubtitleTrack(overriddenSubtitle.id, false); return; }
         const mode = playbackPreferencesUseLegacySelection
           ? 'legacy'
           : String(playbackPreferences?.subtitleMode || 'foreignAudio');
@@ -1922,6 +1944,13 @@ enum ServerWebMediaDetailPage {
                 && Number(payload.durationSeconds) > 0
                 ? Number(payload.durationSeconds) : 0
             };
+            playbackTrackOverride = payload.selectionOverride && typeof payload.selectionOverride === 'object'
+              ? {
+                  audioFingerprint:typeof payload.selectionOverride.audioFingerprint === 'string' ? payload.selectionOverride.audioFingerprint : null,
+                  subtitleFingerprint:typeof payload.selectionOverride.subtitleFingerprint === 'string' ? payload.selectionOverride.subtitleFingerprint : null,
+                  subtitleDisabled:payload.selectionOverride.subtitleDisabled === true
+                }
+              : null;
             await loadPlaybackPreferences();
             if (playbackTracks.durationSeconds > 0) {
               knownDurationSeconds = playbackTracks.durationSeconds;
@@ -2030,6 +2059,28 @@ enum ServerWebMediaDetailPage {
         if (subtitleOverlay) { subtitleOverlay.hidden = true; subtitleOverlay.replaceChildren(); }
       };
 
+      const persistPlaybackTrackOverride = async changes => {
+        if (!itemID) return;
+        const next = {
+          audioFingerprint:playbackTrackOverride?.audioFingerprint || null,
+          subtitleFingerprint:playbackTrackOverride?.subtitleFingerprint || null,
+          subtitleDisabled:playbackTrackOverride?.subtitleDisabled === true,
+          ...changes
+        };
+        playbackTrackOverride = next;
+        try {
+          const response = await fetch(`/api/v1/me/playback-overrides/media/${encodeURIComponent(itemID)}`, {
+            method:'PUT', credentials:'same-origin',
+            headers:{'Accept':'application/json','Content-Type':'application/json','X-MediaLIB-CSRF':csrfToken},
+            body:JSON.stringify(next), signal:lifecycle.signal
+          });
+          if (response.status === 401) { window.location.assign('/login'); return; }
+          if (!response.ok) throw new Error('override-save-failed');
+        } catch (error) {
+          if (error?.name !== 'AbortError') setStatus('轨道已切换，但未能保存为此媒体的默认选择。', true);
+        }
+      };
+
       async function selectSubtitleTrack(trackID, lockChoice = true) {
         if (lockChoice) subtitleChoiceLocked = true;
         if (trackID !== null && trackID !== -1 && selectedSubtitleTrackID === trackID) return;
@@ -2037,8 +2088,12 @@ enum ServerWebMediaDetailPage {
         releaseActiveSubtitle();
         selectedSubtitleTrackID = null;
         if (trackID === null || trackID === -1) {
+          if (activeBurnInSubtitleTrackID !== null) {
+            await startRemux(remuxAudioTrack, timelinePosition(), { allowUnprobed:true });
+          }
           buildSubtitleMenu();
           setStatus('字幕已关闭。');
+          if (lockChoice) void persistPlaybackTrackOverride({subtitleFingerprint:null, subtitleDisabled:true});
           return;
         }
         const tracks = playbackTracks?.subtitles ?? [];
@@ -2046,6 +2101,20 @@ enum ServerWebMediaDetailPage {
         if (!track) {
           buildSubtitleMenu();
           return;
+        }
+        if (track.renderingMode === 'burnIn') {
+          selectedSubtitleTrackID = trackID;
+          buildSubtitleMenu();
+          setStatus('图形字幕无法套用文字样式，正在创建烧录字幕的兼容播放流…');
+          await startRemux(preferredAudioTrack()?.id ?? remuxAudioTrack, timelinePosition(), {
+            allowUnprobed:true,
+            subtitleTrackID:trackID
+          });
+          if (lockChoice) void persistPlaybackTrackOverride({subtitleFingerprint:track.fingerprint || null, subtitleDisabled:false});
+          return;
+        }
+        if (activeBurnInSubtitleTrackID !== null) {
+          await startRemux(remuxAudioTrack, timelinePosition(), { allowUnprobed:true });
         }
         // 导出大体积 MKV 可能受 NAS 瞬时速度影响；失败不是轨道的永久属性，读者
         // 再次点按必须能重试，而不是把这条字幕锁死到刷新页面为止。
@@ -2068,6 +2137,7 @@ enum ServerWebMediaDetailPage {
           renderActiveSubtitle();
           setStatus('字幕已加载。');
           buildSubtitleMenu();
+          if (lockChoice) void persistPlaybackTrackOverride({subtitleFingerprint:track.fingerprint || null, subtitleDisabled:false});
         } catch (_) {
           if (revision !== subtitleLoadRevision) return;
           failedSubtitleTrackIDs.add(trackID);
@@ -2084,6 +2154,10 @@ enum ServerWebMediaDetailPage {
       const preferredAudioTrack = () => {
         const tracks = playbackTracks?.audio ?? [];
         if (tracks.length === 0) return null;
+        const overridden = tracks.find(track =>
+          track.fingerprint && track.fingerprint === playbackTrackOverride?.audioFingerprint
+        );
+        if (overridden) return overridden;
         const preferredLanguage = String(playbackPreferences?.preferredAudioLanguage || '').toLowerCase();
         if (preferredLanguage) {
           const base = preferredLanguage.split('-')[0];
@@ -2194,15 +2268,54 @@ enum ServerWebMediaDetailPage {
         syncTrackMenuHeights();
       }
 
+      function buildQualityMenu() {
+        const menu = document.getElementById('quality-menu');
+        const panel = document.getElementById('quality-panel');
+        if (!menu || !panel) return;
+        const labels = {auto:'自动', original:'原画', '2160p':'2160p', '1080p':'1080p', '720p':'720p', '480p':'480p'};
+        const fragment = document.createDocumentFragment();
+        Object.entries(labels).forEach(([value, label]) => {
+          fragment.append(trackButton(label, value === activePlaybackQuality, () => { void selectPlaybackQuality(value); }));
+        });
+        panel.replaceChildren(fragment);
+        syncTrackMenuHeights();
+      }
+
+      async function selectPlaybackQuality(quality) {
+        if (!['auto','original','2160p','1080p','720p','480p'].includes(quality) || quality === activePlaybackQuality) return;
+        qualityChoiceLocked = true;
+        const previous = activePlaybackQuality;
+        activePlaybackQuality = quality;
+        buildQualityMenu();
+        const position = timelinePosition();
+        if (quality === 'original' && activeBurnInSubtitleTrackID === null && !directPlayNeedsRemux()) {
+          setStatus('正在切换到原画直放…');
+          await startDirect({resumeAt:position, quality:'original'});
+          return;
+        }
+        setStatus(`正在切换到${quality === 'auto' ? '自动画质' : quality}…`);
+        const committed = await startRemux(remuxAudioTrack, position, {
+          allowUnprobed:true,
+          subtitleTrackID:activeBurnInSubtitleTrackID,
+          quality
+        });
+        if (committed !== true) {
+          activePlaybackQuality = previous;
+          buildQualityMenu();
+        }
+      }
+
       /// 换音轨。
       //
       // 目标是第一条、而且浏览器自己解得了，就回到直放——那条路不占服务器 CPU，
       // 也支持真正的 Range 跳转。其余情况一律换一条重封装流，并把当前位置带过去。
       function selectAudioTrack(track) {
         if (!track || !playbackTracks) return;
+        void persistPlaybackTrackOverride({audioFingerprint:track.fingerprint || null});
         const position = timelinePosition();
         const isFirstBrowserPlayable = track.browserPlayable && track.id === (playbackTracks.audio[0]?.id ?? 0);
-        if (isFirstBrowserPlayable && !(isIOSFamily && !['video/mp4', 'video/quicktime'].includes(browserContentType))) {
+        if (isFirstBrowserPlayable && activeBurnInSubtitleTrackID === null &&
+            !(isIOSFamily && !['video/mp4', 'video/quicktime'].includes(browserContentType))) {
           if (playbackMode === 'direct') return;
           void startDirect({ resumeAt: position });
           return;
@@ -2211,7 +2324,10 @@ enum ServerWebMediaDetailPage {
           setStatus(playbackTracks.remuxUnavailableReason || '这台服务器现在没法切换音轨。', true);
           return;
         }
-        void startRemux(track.id, position);
+        void startRemux(track.id, position, {
+          subtitleTrackID:activeBurnInSubtitleTrackID,
+          allowUnprobed:activeBurnInSubtitleTrackID !== null
+        });
       }
 
       const seasonKeyIsSafe = value => value === 'unspecified' || /^\d{1,5}$/.test(value);
@@ -2446,7 +2562,10 @@ enum ServerWebMediaDetailPage {
         // response bounded and makes rapid seeks deterministic; the revision
         // gate in startRemux guarantees that only the last result can replace
         // the media source.
-        void startRemux(remuxAudioTrack, clamped);
+        void startRemux(remuxAudioTrack, clamped, {
+          subtitleTrackID:activeBurnInSubtitleTrackID,
+          allowUnprobed:activeBurnInSubtitleTrackID !== null
+        });
       };
       // `canPlayType()` 只能作为失败文案的参考，不能当播放许可。Chromium 对 MKV 的
       // MIME 经常回空字符串，却仍能解其中的 H.264；而音频重封装输出的是 MP4，和
@@ -2688,14 +2807,29 @@ enum ServerWebMediaDetailPage {
       // 而且只在整个页面生命周期里做一次。
       async function startPlayback() {
         if (!canDirectPlay || isStarting) return;
+        if (autoplayTimer !== null) {
+          window.clearTimeout(autoplayTimer);
+          autoplayTimer = null;
+        }
         // iOS 对 MKV 的结论无需等待探测：容器本身就不被 WebKit 接受。立即用第一
         // 条音轨发起兼容重封装，才能让 play() 仍发生在这次点击的用户手势里；轨道
         // 名单并行补齐，之后仍可切到其他音轨。
         if (!playbackTracks && isIOSFamily && !['video/mp4', 'video/quicktime'].includes(browserContentType)) {
           void loadPlaybackTracks();
           setStatus('正在为 iPhone / iPad 准备兼容播放流。');
-          const resumeAt = Number.isFinite(resumePosition) && resumePosition >= 10 ? resumePosition : 0;
+          const resumeAt = configuredResumePosition();
           await startRemux(0, resumeAt, { allowUnprobed: true });
+          return;
+        }
+        // 桌面浏览器可以在起播前等账号偏好；iOS 的普通直放必须保留当前触摸手势，
+        // 所以只使用页面进入时已经完成的偏好预取。
+        if (!isIOSFamily) await loadPlaybackPreferences();
+        const preferredQuality = String(playbackPreferences?.defaultQuality || 'auto');
+        if (['2160p','1080p','720p','480p'].includes(preferredQuality)) {
+          await loadPlaybackTracks();
+          const track = preferredAudioTrack();
+          setStatus(`正在按默认画质 ${preferredQuality} 准备单档兼容播放流。`);
+          await startRemux(track?.id ?? 0, configuredResumePosition(), { allowUnprobed:true });
           return;
         }
         // iOS 把媒体播放严格绑定在当前触摸事件上。若轨道预取还没结束，先等 fetch
@@ -2713,15 +2847,14 @@ enum ServerWebMediaDetailPage {
                 ? '正在为 iPhone / iPad 准备兼容播放流。'
                 : '这段视频的音轨浏览器解不了，正在改用服务器转码的音频。'
             );
-            const resumeAt = Number.isFinite(resumePosition) && resumePosition >= 10
-              ? resumePosition : timelinePosition();
+            const resumeAt = configuredResumePosition() || timelinePosition();
             await startRemux(track?.id ?? 0, resumeAt);
             return;
           }
           const directSucceeded = await directAttempt;
           if (!directSucceeded && player.paused && playbackMode === 'direct') {
             const track = preferredAudioTrack();
-            const resumeAt = Number.isFinite(resumePosition) && resumePosition >= 10 ? resumePosition : timelinePosition();
+            const resumeAt = configuredResumePosition() || timelinePosition();
             setStatus('直放不兼容，正在改用兼容播放流。');
             await startRemux(track?.id ?? 0, resumeAt, { allowUnprobed: true });
           }
@@ -2740,7 +2873,7 @@ enum ServerWebMediaDetailPage {
           // （流本来就从 `start=` 开始），所以要在这里把它交出去。
           const resumeAt = resumeApplied
             ? timelinePosition()
-            : (Number.isFinite(resumePosition) && resumePosition >= 10 ? resumePosition : 0);
+            : configuredResumePosition();
           await startRemux(track?.id ?? 0, resumeAt);
           return;
         }
@@ -2765,6 +2898,7 @@ enum ServerWebMediaDetailPage {
         currentHLSSessionID = '';
         const resumeAt = Number.isFinite(options.resumeAt) ? options.resumeAt : null;
         playbackMode = 'direct';
+        if (typeof options.quality === 'string') activePlaybackQuality = options.quality;
         remuxOffset = 0;
         prepareNewSource();
         player.hidden = false;
@@ -2775,6 +2909,7 @@ enum ServerWebMediaDetailPage {
         playerLanding?.setAttribute('hidden', '');
         player.dataset.sourceRevision = String(sourceRevision);
         player.src = mediaPath('/api/v1/stream/');
+        activeBurnInSubtitleTrackID = null;
         player.load();
         sourceTransitionPending = false;
         if (previousSessionID) cancelHLSSession(previousSessionID);
@@ -2788,6 +2923,7 @@ enum ServerWebMediaDetailPage {
         }
         updateTransportUI();
         buildAudioMenu();
+        buildQualityMenu();
         setStatus('正在准备…');
         try {
           await player.play();
@@ -2921,6 +3057,8 @@ enum ServerWebMediaDetailPage {
         let pendingHLSSessionID = '';
         sourceTransitionPending = true;
         remuxAudioTrack = Number.isInteger(audioTrackID) && audioTrackID >= 0 ? audioTrackID : 0;
+        const requestedQuality = ['auto','original','2160p','1080p','720p','480p'].includes(String(options.quality))
+          ? String(options.quality) : activePlaybackQuality;
         setStatus('正在准备兼容播放流…');
         try {
           const response = await fetch('/api/v1/playback/sessions', {
@@ -2929,9 +3067,13 @@ enum ServerWebMediaDetailPage {
             body: JSON.stringify({
               itemID,
               audioTrackID: remuxAudioTrack,
+              subtitleTrackID:Number.isInteger(options.subtitleTrackID) ? options.subtitleTrackID : null,
               startSeconds: requestedStart,
               durationSeconds: knownDurationSeconds > 0 ? knownDurationSeconds : null,
-              capabilities: clientPlaybackCapabilities
+              capabilities: clientPlaybackCapabilities,
+              quality:requestedQuality,
+              maximumBitrateMbps:Number.isInteger(playbackPreferences?.remoteBitrateMbps)
+                ? playbackPreferences.remoteBitrateMbps : null
             })
           });
           if (response.status === 401) { window.location.assign('/login'); return; }
@@ -2954,6 +3096,8 @@ enum ServerWebMediaDetailPage {
           const previousSessionID = currentHLSSessionID;
           currentHLSSessionID = sessionID;
           playbackMode = 'hls';
+          activePlaybackQuality = requestedQuality;
+          activeBurnInSubtitleTrackID = Number.isInteger(options.subtitleTrackID) ? options.subtitleTrackID : null;
           remuxOffset = Number.isFinite(Number(descriptor.actualStartSeconds))
             ? Math.max(0, Number(descriptor.actualStartSeconds)) : requestedStart;
           if (Number.isFinite(Number(descriptor.durationSeconds)) && Number(descriptor.durationSeconds) > 0) {
@@ -2986,7 +3130,9 @@ enum ServerWebMediaDetailPage {
           if (previousSessionID && previousSessionID !== sessionID) cancelHLSSession(previousSessionID);
           updateTransportUI();
           buildAudioMenu();
+          buildQualityMenu();
           if (shouldPlay) await player.play();
+          return true;
         } catch (error) {
           if (pendingHLSSessionID && pendingHLSSessionID !== currentHLSSessionID) cancelHLSSession(pendingHLSSessionID);
           sourceTransitionPending = false;
@@ -2994,13 +3140,14 @@ enum ServerWebMediaDetailPage {
           scrubState = 'idle';
           scrubTarget = NaN;
           setBusy(false);
-          if (error?.name === 'AbortError') return;
+          if (error?.name === 'AbortError') return false;
           setStatus(
             error?.name === 'NotAllowedError'
               ? '浏览器阻止了自动开始，请在播放器中再次按播放。'
               : (error?.message === 'busy' ? '服务器当前转码任务已满，请稍后重试。' : '服务器没能准备好兼容播放流。'),
             true
           );
+          return false;
         }
       }
 
@@ -3008,6 +3155,7 @@ enum ServerWebMediaDetailPage {
       if (!canDirectPlay) setStatus('这段内容现在播不了。确认存放它的硬盘或服务器已连接，然后重试。', true);
       renderPreference();
       void loadPlaybackPreferences();
+      buildQualityMenu();
       // 轨道名单在**进入页面时**就问，不等按下播放。
       //
       // 字幕与音轨的入口属于"我打开这一集，先看看有没有中文字幕"这件事；从前它们
@@ -3182,10 +3330,13 @@ enum ServerWebMediaDetailPage {
           );
           scheduleEpisodePanelHeight();
         }
-        if (resumeApplied || !Number.isFinite(resumePosition) || resumePosition < 10) return;
+        const preferredResumePosition = configuredResumePosition();
+        if (resumeApplied || preferredResumePosition < 10) return;
         resumeApplied = true;
         const duration = timelineDuration();
-        if (Number.isFinite(duration) && resumePosition < duration - 30) seekTimeline(resumePosition);
+        if (Number.isFinite(duration) && preferredResumePosition < duration - 30) {
+          seekTimeline(preferredResumePosition);
+        }
       });
       player.addEventListener('timeupdate', () => {
         // `waiting`/`stalled` 在部分浏览器会迟到，甚至在解码已经恢复后不再补一个
@@ -3234,7 +3385,16 @@ enum ServerWebMediaDetailPage {
         }
         playbackStartedReported = false;
         void reportPlaybackState('completed');
-        setStatus('看完啦。');
+        const next = nextEpisodeURL();
+        if (playbackPreferences?.autoplayNext !== false && next) {
+          setStatus('看完啦，即将播放下一集。');
+          autoplayTimer = window.setTimeout(() => {
+            autoplayTimer = null;
+            window.location.assign(`${next.pathname}${next.search}#autoplay`);
+          }, 1500);
+        } else {
+          setStatus('看完啦。');
+        }
       });
       player.addEventListener('error', () => {
         setBufferingVisible(false);
@@ -3258,11 +3418,13 @@ enum ServerWebMediaDetailPage {
       });
       player.addEventListener('volumechange', scheduleTransportUI);
       window.addEventListener('pagehide', () => {
+        if (autoplayTimer !== null) { window.clearTimeout(autoplayTimer); autoplayTimer = null; }
         if (currentHLSClient) { currentHLSClient.destroy(); currentHLSClient = null; }
         if (playbackStartedReported) void reportPlaybackState('stopped', true);
         if (currentHLSSessionID) cancelHLSSession(currentHLSSessionID, true);
       }, { signal: lifecycle.signal });
       document.addEventListener('medialib:pagewillunload', () => {
+        if (autoplayTimer !== null) { window.clearTimeout(autoplayTimer); autoplayTimer = null; }
         if (currentHLSClient) { currentHLSClient.destroy(); currentHLSClient = null; }
         if (transportFrame !== null) window.cancelAnimationFrame(transportFrame);
         if (playbackStartedReported) void reportPlaybackState('stopped', true);
@@ -3284,7 +3446,10 @@ enum ServerWebMediaDetailPage {
         history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
       } else if (window.location.hash === '#autoplay' && canDirectPlay) {
         history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
-        window.setTimeout(() => { void startPlayback(); }, 0);
+        void loadPlaybackPreferences().then(preferences => {
+          if (preferences?.autoplayNext === false) return;
+          window.setTimeout(() => { void startPlayback(); }, 0);
+        });
       }
     })();
     """#

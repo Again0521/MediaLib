@@ -22,6 +22,7 @@ final class FFprobeMediaInspectorTests: XCTestCase {
         XCTAssertEqual(info.streams[0].width, 1920)
         XCTAssertEqual(info.streams[1].language, "zh")
         XCTAssertEqual(info.streams[2].type, "subtitle")
+        XCTAssertTrue(try inspector.probe(asset: asset()).video[0].isHDR)
     }
 
     func testProbeFailureDoesNotExposeRawStderr() {
@@ -110,7 +111,7 @@ final class FFprobeMediaInspectorTests: XCTestCase {
         "bit_rate": "4000000"
       },
       "streams": [
-        { "index": 0, "codec_type": "video", "codec_name": "h264", "profile": "High", "width": 1920, "height": 1080 },
+        { "index": 0, "codec_type": "video", "codec_name": "h264", "profile": "High", "width": 1920, "height": 1080, "pix_fmt": "yuv420p10le", "color_transfer": "smpte2084", "color_primaries": "bt2020", "color_space": "bt2020nc" },
         { "index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2, "tags": { "language": "zh" } },
         { "index": 2, "codec_type": "subtitle", "codec_name": "subrip", "tags": { "language": "en" } },
         { "index": 3, "codec_type": "attachment", "codec_name": "ttf" }

@@ -71,6 +71,10 @@ final class FFprobeMediaInspector {
                 title: tag(["title", "handler_name"]),
                 width: stream.width,
                 height: stream.height,
+                pixelFormat: stream.pixelFormat,
+                colorTransfer: stream.colorTransfer,
+                colorPrimaries: stream.colorPrimaries,
+                colorSpace: stream.colorSpace,
                 channels: stream.channels,
                 isDefault: stream.disposition?["default"] == 1,
                 isForced: stream.disposition?["forced"] == 1
@@ -96,9 +100,18 @@ final class FFprobeMediaInspector {
         let title: String?
         let width: Int?
         let height: Int?
+        let pixelFormat: String?
+        let colorTransfer: String?
+        let colorPrimaries: String?
+        let colorSpace: String?
         let channels: Int?
         let isDefault: Bool
         let isForced: Bool
+
+        var isHDR: Bool {
+            guard type == "video" else { return false }
+            return ["smpte2084", "arib-std-b67"].contains(colorTransfer?.lowercased() ?? "")
+        }
     }
 
     struct ProbedMedia: Equatable {
@@ -244,6 +257,10 @@ private struct FFprobeStream: Decodable {
     let profile: String?
     let width: Int?
     let height: Int?
+    let pixelFormat: String?
+    let colorTransfer: String?
+    let colorPrimaries: String?
+    let colorSpace: String?
     let channels: Int?
     let tags: [String: String]?
     let disposition: [String: Int]?
@@ -252,6 +269,10 @@ private struct FFprobeStream: Decodable {
         case index
         case codecType = "codec_type"
         case codecName = "codec_name"
+        case pixelFormat = "pix_fmt"
+        case colorTransfer = "color_transfer"
+        case colorPrimaries = "color_primaries"
+        case colorSpace = "color_space"
         case profile, width, height, channels, tags, disposition
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import MediaLibCore
 
 /// 网页播放器的音轨 / 字幕轨事实源。
 ///
@@ -92,6 +93,10 @@ final class ServerMediaTrackCatalog {
         let tracks = audio.prefix(ServerWebAudioTrackSet.maximumTrackCount).map { stream in
             ServerWebAudioTrack(
                 id: stream.typeOrdinal,
+                fingerprint: ServerTokenSecurity.digest([
+                    "audio", String(stream.typeOrdinal), stream.title ?? "",
+                    stream.language ?? "", stream.codec ?? "", stream.channels.map(String.init) ?? ""
+                ].joined(separator: "|")) ?? "audio-\(stream.typeOrdinal)",
                 label: Self.audioLabel(stream, ordinal: stream.typeOrdinal),
                 language: stream.language,
                 codec: stream.codec,
@@ -195,6 +200,9 @@ final class ServerMediaTrackCatalog {
     static let textSubtitleCodecs: Set<String> = [
         "subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text", "microdvd", "subviewer"
     ]
+    static let bitmapSubtitleCodecs: Set<String> = [
+        "hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"
+    ]
 
     func embeddedSubtitleStreams(
         for asset: ServerMediaAsset
@@ -202,6 +210,15 @@ final class ServerMediaTrackCatalog {
         guard ServerMediaToolchain.ffmpegURL() != nil, let probed = probe(asset: asset) else { return [] }
         return probed.subtitles.filter { stream in
             stream.codec.map { Self.textSubtitleCodecs.contains($0) } ?? false
+        }
+    }
+
+    func embeddedBitmapSubtitleStreams(
+        for asset: ServerMediaAsset
+    ) -> [FFprobeMediaInspector.ProbedStream] {
+        guard ServerMediaToolchain.ffmpegURL() != nil, let probed = probe(asset: asset) else { return [] }
+        return probed.subtitles.filter { stream in
+            stream.codec.map { Self.bitmapSubtitleCodecs.contains($0) } ?? false
         }
     }
 
@@ -274,6 +291,7 @@ final class ServerMediaTrackCatalog {
 /// 数字；容器里的全局流序号从不外发。
 struct ServerWebAudioTrack: Codable, Equatable {
     let id: Int
+    let fingerprint: String
     let label: String
     let language: String?
     let codec: String?
@@ -282,6 +300,28 @@ struct ServerWebAudioTrack: Codable, Equatable {
     /// 没声音"。
     let browserPlayable: Bool
     let isDefault: Bool
+
+    init(
+        id: Int,
+        fingerprint: String? = nil,
+        label: String,
+        language: String?,
+        codec: String?,
+        channels: Int?,
+        browserPlayable: Bool,
+        isDefault: Bool
+    ) {
+        self.id = id
+        self.fingerprint = fingerprint
+            ?? ServerTokenSecurity.digest("audio|\(id)|\(label)")
+            ?? "audio-\(id)"
+        self.label = label
+        self.language = language
+        self.codec = codec
+        self.channels = channels
+        self.browserPlayable = browserPlayable
+        self.isDefault = isDefault
+    }
 }
 
 struct ServerWebAudioTrackSet: Codable, Equatable {

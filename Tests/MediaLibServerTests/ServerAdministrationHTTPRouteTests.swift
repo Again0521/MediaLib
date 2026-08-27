@@ -176,6 +176,45 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(router.response(for: nestedRequest, body: nestedBody).statusCode, 400)
     }
 
+    func testPlaybackTrackResponseResolvesSavedMediaOverrideWithoutLeakingIdentifiers() throws {
+        let experience = ServerExperienceRepository(database: database)
+        _ = try experience.saveTrackOverride(
+            userID: "user-alice",
+            value: ServerTrackSelectionOverride(
+                scope: .media,
+                scopeID: "movie-1",
+                audioFingerprint: "audio-safe-fingerprint",
+                subtitleFingerprint: "subtitle-safe-fingerprint"
+            )
+        )
+        router = makeRouter(playbackTracksProvider: { itemID, _ in
+            guard itemID == "movie-1" else { return nil }
+            return ServerWebPlaybackTrackSet(
+                audio: [ServerWebAudioTrack(
+                    id: 0, fingerprint: "audio-safe-fingerprint", label: "英语",
+                    language: "en", codec: "aac", channels: 2,
+                    browserPlayable: true, isDefault: true
+                )],
+                subtitles: [ServerWebVTTSubtitleTrack(
+                    id: 0, fingerprint: "subtitle-safe-fingerprint",
+                    label: "简体中文", language: "zh-Hans", origin: .embedded
+                )],
+                remuxable: true,
+                remuxUnavailableReason: nil
+            )
+        })
+        let response = response(path: "/api/v1/playback/tracks/movie-1", token: "preferences")
+        XCTAssertEqual(response.statusCode, 200)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let tracks = try decoder.decode(ServerWebPlaybackTrackSet.self, from: response.body)
+        XCTAssertEqual(tracks.selectionOverride?.audioFingerprint, "audio-safe-fingerprint")
+        XCTAssertEqual(tracks.selectionOverride?.subtitleFingerprint, "subtitle-safe-fingerprint")
+        let json = try XCTUnwrap(String(data: response.body, encoding: .utf8))
+        XCTAssertFalse(json.contains("user-alice"))
+        XCTAssertFalse(json.contains(directory.path))
+    }
+
     func testUserPolicyRequiresUserManagementUsesETagAndWritesAudit() throws {
         let path = "/api/v1/admin/users/user-bob/policy"
         XCTAssertEqual(response(path: path, token: "member").statusCode, 403)
@@ -266,7 +305,154 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertFalse(String(decoding: logs.body, as: UTF8.self).contains(directory.path))
     }
 
-    func testLibraryMaintenanceJobExecutesAndRejectsDecorativeUnsupportedKinds() async throws {
+    func testBackupRestoreRequiresReauthenticationAndRestoresThroughAuditedBackgroundJob() async throws {
+        let password = "restore password with enough entropy"
+        try repository.setCredential(
+            userID: "user-alice",
+            argon2idEncodedHash: try ServerPasswordHasher().hash(password: password)
+        )
+        router = makeRouter(authenticationService: try ServerAuthenticationService(database: database))
+
+        let create = router.response(
+            for: mutationRequest("/api/v1/admin/backups", token: "server-manager", bodyLength: 0)
+        )
+        XCTAssertEqual(create.statusCode, 201)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let backupJob = try decoder.decode(ServerJob.self, from: create.body)
+        let experience = ServerExperienceRepository(database: database)
+        for _ in 0..<100 {
+            if try experience.jobs(limit: 20).first(where: { $0.id == backupJob.id })?.state == .succeeded { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let listing = response(path: "/api/v1/admin/backups", token: "server-manager")
+        let backup = try XCTUnwrap(try decoder.decode([ServerBackupSummary].self, from: listing.body).first)
+
+        try database.execute(
+            "UPDATE server_users SET display_name = 'Changed after backup' WHERE id = 'user-alice'"
+        )
+        let wrong = Data(#"{"currentPassword":"wrong"}"#.utf8)
+        XCTAssertEqual(router.response(
+            for: mutationRequest(
+                "/api/v1/admin/backups/\(backup.id)/restore",
+                token: "server-manager",
+                bodyLength: wrong.count
+            ),
+            body: wrong
+        ).statusCode, 403)
+        XCTAssertEqual(try repository.user(id: "user-alice")?.displayName, "Changed after backup")
+
+        let body = try JSONEncoder().encode(["currentPassword": password])
+        let accepted = router.response(
+            for: mutationRequest(
+                "/api/v1/admin/backups/\(backup.id)/restore",
+                token: "server-manager",
+                bodyLength: body.count
+            ),
+            body: body
+        )
+        XCTAssertEqual(accepted.statusCode, 202)
+        let restoreJob = try decoder.decode(ServerJob.self, from: accepted.body)
+        var completed: ServerJob?
+        for _ in 0..<200 {
+            completed = try experience.jobs(limit: 50).first(where: { $0.id == restoreJob.id })
+            if completed?.state == .succeeded || completed?.state == .failed { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(completed?.state, .succeeded)
+        XCTAssertEqual(completed?.resultCode, "restore.completed")
+        XCTAssertEqual(try repository.user(id: "user-alice")?.displayName, "Alice <script>")
+        XCTAssertTrue(try repository.securityEvents(limit: 30).contains {
+            $0.action == "restore.completed" && $0.outcome == .success
+        })
+        let safetyBackups = try FileManager.default.contentsOfDirectory(
+            at: directory.appendingPathComponent("backups", isDirectory: true),
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.contains("auto-pre-restore") }
+        XCTAssertFalse(safetyBackups.isEmpty)
+    }
+
+    func testDiagnosticExportIsPermissionedBoundedAndOmitsSensitiveFields() throws {
+        router = makeRouter(runtimeDiagnosticsProvider: {
+            ServerRuntimeDiagnosticsSnapshot(
+                serviceVersion: "1.8.0-test",
+                startedAt: Date(timeIntervalSince1970: 1),
+                uptimeSeconds: 42,
+                databaseAccessible: true,
+                databaseByteLength: 4096,
+                availableDiskByteLength: 8192,
+                ffmpegAvailable: true,
+                ffprobeAvailable: true,
+                videoToolboxH264Available: true,
+                videoToolboxHEVCAvailable: false,
+                listenerMode: "loopback",
+                configuredPort: 8098,
+                publicOrigin: "https://private.example.invalid",
+                trustedProxyAddresses: ["10.0.0.9"],
+                hostControlAvailable: true
+            )
+        })
+        XCTAssertEqual(response(path: "/api/v1/admin/diagnostics", token: "member").statusCode, 403)
+        let granted = response(path: "/api/v1/admin/diagnostics", token: "server-manager")
+        XCTAssertEqual(granted.statusCode, 200)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let value = try decoder.decode(ServerRedactedDiagnosticExport.self, from: granted.body)
+        XCTAssertEqual(value.runtime.serviceVersion, "1.8.0-test")
+        XCTAssertEqual(value.databaseSchemaVersion, 30)
+        XCTAssertGreaterThanOrEqual(value.userCount, 1)
+        XCTAssertLessThanOrEqual(value.recentJobs.count, 25)
+        XCTAssertLessThanOrEqual(value.recentSecurityEvents.count, 25)
+        let raw = String(decoding: granted.body, as: UTF8.self)
+        for forbidden in [
+            directory.path, "/private/Media/Movies", "private.example.invalid", "10.0.0.9",
+            "user-alice", "session-alice", "Alice <script>", "source-private", "publicOrigin",
+            "trustedProxyAddresses", "configuredPort"
+        ] {
+            XCTAssertFalse(raw.contains(forbidden), "诊断导出泄露了受保护字段：\(forbidden)")
+        }
+        XCTAssertTrue(try repository.securityEvents(limit: 20).contains {
+            $0.action == "diagnostics.exported" && $0.outcome == .success
+        })
+    }
+
+    func testTranscodeCacheCleanupRunsAsBoundedAuditedBackgroundJob() async throws {
+        let counter = LockedCleanupCounter()
+        router = makeRouter(transcodeCacheCleanup: { counter.incrementAndReturnRemovedCount() })
+        let denied = router.response(
+            for: mutationRequest(
+                "/api/v1/admin/storage/transcode-cache",
+                token: "member",
+                bodyLength: 0,
+                method: "DELETE"
+            )
+        )
+        let accepted = router.response(
+            for: mutationRequest(
+                "/api/v1/admin/storage/transcode-cache",
+                token: "server-manager",
+                bodyLength: 0,
+                method: "DELETE"
+            )
+        )
+        XCTAssertEqual(denied.statusCode, 403)
+        XCTAssertEqual(accepted.statusCode, 202)
+        let experience = ServerExperienceRepository(database: database)
+        var completed: ServerJob?
+        for _ in 0..<50 {
+            completed = try experience.jobs(limit: 10).first { $0.kind == "transcode-cache.clear" }
+            if completed?.state == .succeeded { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(completed?.state, .succeeded)
+        XCTAssertEqual(completed?.resultCode, "cache.cleared")
+        XCTAssertEqual(counter.callCount, 1)
+        XCTAssertTrue(try repository.securityEvents(limit: 20).contains {
+            $0.action == "transcode-cache.cleared" && $0.outcome == .success
+        })
+    }
+
+    func testLibraryMaintenanceJobsExecuteRealWorkAndRejectUnsupportedKinds() async throws {
         let sourceRepository = SourceRepository(database: database)
         let existingSources = try sourceRepository.fetchAll()
         for source in existingSources {
@@ -306,7 +492,23 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
             $0.action == "maintenance.completed" && $0.detailCode == "library.scan"
         })
 
-        let unsupported = Data(#"{"kind":"metadata.refresh"}"#.utf8)
+        let metadata = Data(#"{"kind":"metadata.refresh"}"#.utf8)
+        let metadataCreation = router.response(
+            for: mutationRequest("/api/v1/admin/jobs", token: "library-manager", bodyLength: metadata.count),
+            body: metadata
+        )
+        XCTAssertEqual(metadataCreation.statusCode, 201)
+        let metadataJob = try decoder.decode(ServerJob.self, from: metadataCreation.body)
+        var metadataCompleted: ServerJob?
+        for _ in 0..<100 {
+            metadataCompleted = try experience.jobs(limit: 20).first(where: { $0.id == metadataJob.id })
+            if metadataCompleted?.state == .succeeded || metadataCompleted?.state == .failed { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(metadataCompleted?.state, .succeeded)
+        XCTAssertEqual(metadataCompleted?.resultCode, "metadata.no-eligible-sources")
+
+        let unsupported = Data(#"{"kind":"source.credentials.rotate"}"#.utf8)
         XCTAssertEqual(router.response(
             for: mutationRequest("/api/v1/admin/jobs", token: "library-manager", bodyLength: unsupported.count),
             body: unsupported
@@ -346,6 +548,134 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         for forbidden in ["browser-fixture", "/private/", "api_key", "Bearer", "session-", "user-"] {
             XCTAssertFalse(json.contains(forbidden), "播放遥测不得出现 \(forbidden)")
         }
+    }
+
+    func testDashboardIncludesOnlyNonSensitiveRuntimeDiagnostics() throws {
+        router = makeRouter(runtimeDiagnosticsProvider: {
+            ServerRuntimeDiagnosticsSnapshot(
+                serviceVersion: "1.8.0",
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                uptimeSeconds: 3_661,
+                databaseAccessible: true,
+                databaseByteLength: 4_294_967_297,
+                availableDiskByteLength: 8_589_934_592,
+                ffmpegAvailable: true,
+                ffprobeAvailable: true,
+                videoToolboxH264Available: true,
+                videoToolboxHEVCAvailable: false,
+                listenerMode: ServerNetworkAccessMode.loopbackOnly.rawValue,
+                configuredPort: 8098,
+                publicOrigin: nil,
+                trustedProxyAddresses: [],
+                hostControlAvailable: false
+            )
+        })
+
+        let denied = response(path: "/api/v1/admin/dashboard", token: "member")
+        let granted = response(path: "/api/v1/admin/dashboard", token: "server-manager")
+        XCTAssertEqual(denied.statusCode, 403)
+        XCTAssertEqual(granted.statusCode, 200)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: granted.body) as? [String: Any])
+        let runtime = try XCTUnwrap(object["runtime"] as? [String: Any])
+        XCTAssertEqual(runtime["serviceVersion"] as? String, "1.8.0")
+        XCTAssertEqual(runtime["uptimeSeconds"] as? Int, 3_661)
+        XCTAssertEqual(runtime["databaseByteLength"] as? Int64, 4_294_967_297)
+        XCTAssertEqual(runtime["listenerMode"] as? String, "loopback")
+        XCTAssertEqual(runtime["hostControlAvailable"] as? Bool, false)
+        let json = try XCTUnwrap(String(data: granted.body, encoding: .utf8))
+        for forbidden in [directory.path, "/private/", "127.0.0.1", "ffmpeg -", "Bearer", "token"] {
+            XCTAssertFalse(json.contains(forbidden), "运行诊断不得出现 \(forbidden)")
+        }
+    }
+
+    func testRuntimeValidationIsPermissionedStrictAndApplyFailsClosedWithoutHost() throws {
+        let validBody = Data(#"{"serverName":"Living Room","port":8098,"networkAccessMode":"loopback","publicOrigin":"https://media.example.com","trustedProxyAddresses":["10.0.0.2"]}"#.utf8)
+        let denied = router.response(
+            for: mutationRequest("/api/v1/admin/runtime/validate", token: "member", bodyLength: validBody.count),
+            body: validBody
+        )
+        let validated = router.response(
+            for: mutationRequest("/api/v1/admin/runtime/validate", token: "server-manager", bodyLength: validBody.count),
+            body: validBody
+        )
+        XCTAssertEqual(denied.statusCode, 403)
+        XCTAssertEqual(validated.statusCode, 200)
+        let validation = try JSONDecoder().decode(ServerRuntimeConfigurationValidation.self, from: validated.body)
+        XCTAssertTrue(validation.valid)
+        XCTAssertFalse(validation.hostControlAvailable)
+        XCTAssertEqual(validation.normalizedPublicOrigin, "https://media.example.com")
+
+        let invalidBody = Data(#"{"serverName":"","port":80,"networkAccessMode":"loopback","publicOrigin":"http://unsafe.example.com","trustedProxyAddresses":["not-an-ip"]}"#.utf8)
+        let invalid = router.response(
+            for: mutationRequest("/api/v1/admin/runtime/validate", token: "server-manager", bodyLength: invalidBody.count),
+            body: invalidBody
+        )
+        XCTAssertEqual(invalid.statusCode, 400)
+        let rejected = try JSONDecoder().decode(ServerRuntimeConfigurationValidation.self, from: invalid.body)
+        XCTAssertFalse(rejected.valid)
+        XCTAssertTrue(rejected.issueCodes.contains("server-name.invalid"))
+        XCTAssertTrue(rejected.issueCodes.contains("port.out-of-range"))
+        XCTAssertTrue(rejected.issueCodes.contains("public-origin.invalid"))
+        XCTAssertTrue(rejected.issueCodes.contains("trusted-proxies.invalid"))
+
+        let applyBody = Data(#"{"currentPassword":"not-forwarded","serverName":"Living Room","port":8098,"networkAccessMode":"loopback","publicOrigin":null,"trustedProxyAddresses":[]}"#.utf8)
+        let apply = router.response(
+            for: mutationRequest("/api/v1/admin/runtime/apply", token: "server-manager", bodyLength: applyBody.count),
+            body: applyBody
+        )
+        XCTAssertEqual(apply.statusCode, 503)
+
+        let extraFieldBody = Data(#"{"serverName":"Living Room","port":8098,"networkAccessMode":"loopback","publicOrigin":null,"trustedProxyAddresses":[],"lanAddress":"10.0.0.3"}"#.utf8)
+        XCTAssertEqual(router.response(
+            for: mutationRequest("/api/v1/admin/runtime/validate", token: "server-manager", bodyLength: extraFieldBody.count),
+            body: extraFieldBody
+        ).statusCode, 400)
+    }
+
+    func testRuntimeApplyRequiresCurrentPasswordDelegatesToHostAndAudits() throws {
+        let password = "correct horse battery staple"
+        try repository.setCredential(
+            userID: "user-alice",
+            argon2idEncodedHash: try ServerPasswordHasher().hash(password: password)
+        )
+        let authentication = try ServerAuthenticationService(database: database)
+        var appliedRequest: ServerRuntimeConfigurationMutationRequest?
+        router = makeRouter(
+            runtimeDiagnosticsProvider: {
+                ServerRuntimeDiagnosticsSnapshot(
+                    serviceVersion: "test", startedAt: Date(), uptimeSeconds: 1,
+                    databaseAccessible: true, databaseByteLength: 1,
+                    availableDiskByteLength: 1, ffmpegAvailable: true, ffprobeAvailable: true,
+                    videoToolboxH264Available: true, videoToolboxHEVCAvailable: true,
+                    listenerMode: "loopback", configuredPort: 8098,
+                    publicOrigin: nil, trustedProxyAddresses: [], hostControlAvailable: true
+                )
+            },
+            runtimeConfigurationApplyProvider: { request in
+                appliedRequest = request
+                return true
+            },
+            authenticationService: authentication
+        )
+        let wrongBody = Data(#"{"currentPassword":"wrong","serverName":"Living Room","port":8099,"networkAccessMode":"loopback","publicOrigin":null,"trustedProxyAddresses":[]}"#.utf8)
+        XCTAssertEqual(router.response(
+            for: mutationRequest("/api/v1/admin/runtime/apply", token: "server-manager", bodyLength: wrongBody.count),
+            body: wrongBody
+        ).statusCode, 403)
+        XCTAssertNil(appliedRequest)
+
+        let body = Data(#"{"currentPassword":"correct horse battery staple","serverName":"Living Room","port":8099,"networkAccessMode":"loopback","publicOrigin":null,"trustedProxyAddresses":[]}"#.utf8)
+        let response = router.response(
+            for: mutationRequest("/api/v1/admin/runtime/apply", token: "server-manager", bodyLength: body.count),
+            body: body
+        )
+        XCTAssertEqual(response.statusCode, 202)
+        XCTAssertEqual(appliedRequest?.port, 8099)
+        XCTAssertEqual(appliedRequest?.serverName, "Living Room")
+        let events = try repository.securityEvents(limit: 20)
+        XCTAssertTrue(events.contains { $0.action == "reauth.denied" && $0.detailCode == "runtime.apply" })
+        XCTAssertTrue(events.contains { $0.action == "reauth.succeeded" && $0.detailCode == "runtime.apply" })
+        XCTAssertTrue(events.contains { $0.action == "runtime.configuration.apply" && $0.outcome == .success })
     }
 
     func testAdministrationResponsesAreBoundedAndContainNoCredentialOrPathFields() throws {
@@ -709,17 +1039,27 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
     }
 
     private func makeRouter(
-        rateLimiter: ServerRequestRateLimiter = ServerRequestRateLimiter()
+        rateLimiter: ServerRequestRateLimiter = ServerRequestRateLimiter(),
+        runtimeDiagnosticsProvider: @escaping () -> ServerRuntimeDiagnosticsSnapshot? = { nil },
+        runtimeConfigurationApplyProvider: @escaping (ServerRuntimeConfigurationMutationRequest) throws -> Bool = { _ in false },
+        authenticationService: ServerAuthenticationService? = nil,
+        transcodeCacheCleanup: @escaping @Sendable () -> Int = { 0 },
+        playbackTracksProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerWebPlaybackTrackSet? = { _, _ in nil }
     ) -> LocalHTTPRouter {
         LocalHTTPRouter(
             serverID: "server",
             serverName: "Media & <script>alert(1)</script>",
+            playbackTracksProvider: playbackTracksProvider,
             administrationCatalog: catalog,
             experienceRepository: ServerExperienceRepository(database: database),
             maintenanceService: ServerMaintenanceService(
                 database: database,
-                backupDirectory: directory.appendingPathComponent("backups", isDirectory: true)
+                backupDirectory: directory.appendingPathComponent("backups", isDirectory: true),
+                transcodeCacheCleanup: transcodeCacheCleanup
             ),
+            runtimeDiagnosticsProvider: runtimeDiagnosticsProvider,
+            runtimeConfigurationApplyProvider: runtimeConfigurationApplyProvider,
+            authenticationService: authenticationService,
             authenticationProvider: { requestHead in
                 guard let token = httpHeader(named: "Authorization", in: requestHead)?
                     .replacingOccurrences(of: "Bearer ", with: "") else { return nil }
@@ -755,7 +1095,30 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         )
     }
 
-    private func mutationRequest(_ path: String, token: String, bodyLength: Int) -> String {
-        "POST \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nContent-Length: \(bodyLength)\r\nX-MediaLIB-CSRF: test-csrf-token\r\n\r\n"
+    private func mutationRequest(
+        _ path: String,
+        token: String,
+        bodyLength: Int,
+        method: String = "POST"
+    ) -> String {
+        "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nContent-Length: \(bodyLength)\r\nX-MediaLIB-CSRF: test-csrf-token\r\n\r\n"
+    }
+}
+
+private final class LockedCleanupCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedCallCount = 0
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCallCount
+    }
+
+    func incrementAndReturnRemovedCount() -> Int {
+        lock.lock()
+        storedCallCount += 1
+        lock.unlock()
+        return 2
     }
 }
