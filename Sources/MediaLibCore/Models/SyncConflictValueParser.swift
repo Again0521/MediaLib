@@ -64,4 +64,3 @@ public enum SyncConflictValueParser {
             .lowercased()
     }
 }
-

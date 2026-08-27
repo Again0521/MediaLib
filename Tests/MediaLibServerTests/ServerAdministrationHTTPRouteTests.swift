@@ -67,8 +67,7 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         try SourceRepository(database: database).save(MediaSource(
             id: "source-private",
             name: "家庭电影 <script>",
-            // 维护任务只扫描本地普通来源；使用远程 fixture 才能稳定覆盖“无可扫描来源”。
-            path: "emby://fixture/source-private",
+            path: "/private/Media/Movies",
             mediaType: .movie,
             autoScan: true,
             includeInMetadataFetch: true,
@@ -268,6 +267,17 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
     }
 
     func testLibraryMaintenanceJobExecutesAndRejectsDecorativeUnsupportedKinds() async throws {
+        let sourceRepository = SourceRepository(database: database)
+        let existingSources = try sourceRepository.fetchAll()
+        for source in existingSources {
+            try sourceRepository.delete(id: source.id)
+        }
+        defer {
+            for source in existingSources {
+                try? sourceRepository.save(source)
+            }
+        }
+
         let body = Data(#"{"kind":"library.scan"}"#.utf8)
         let denied = router.response(
             for: mutationRequest("/api/v1/admin/jobs", token: "member", bodyLength: body.count),

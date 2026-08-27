@@ -72,4 +72,3 @@ final class SyncConflictStore: ObservableObject {
         pendingCount = max(0, pendingCount - 1)
     }
 }
-

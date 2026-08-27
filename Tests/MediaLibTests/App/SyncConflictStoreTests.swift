@@ -98,4 +98,3 @@ final class SyncConflictStoreTests: XCTestCase {
         XCTAssertTrue(bare.pendingConflicts.isEmpty)
     }
 }
-
