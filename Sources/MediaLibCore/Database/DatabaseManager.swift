@@ -4,7 +4,7 @@ import SQLite3
 // 内部所有可变状态（db 句柄）只通过私有串行 queue 访问，线程安全由队列约束保证，
 // 编译器无法静态验证这一点，因此显式标注 @unchecked Sendable（而非让调用处到处 @Sendable 警告）。
 public final class DatabaseManager: @unchecked Sendable {
-    public static let currentSchemaVersion = 29
+    public static let currentSchemaVersion = 30
 
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
@@ -144,13 +144,25 @@ public final class DatabaseManager: @unchecked Sendable {
     }
 
     private func unsafeCreateBackup(in directory: URL, reason: String) throws -> URL {
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: directory.path
+        )
         let safeReason = reason
             .lowercased()
             .map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-" }
         let timestamp = backupTimestampProvider()
         let backupURL = directory.appendingPathComponent("MediaLib-\(String(safeReason))-\(timestamp).sqlite")
         try unsafeBackupCurrent(to: backupURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: backupURL.path
+        )
         return backupURL
     }
 
@@ -456,6 +468,13 @@ public final class DatabaseManager: @unchecked Sendable {
                 try execute("PRAGMA user_version = 29")
             }
             version = 29
+        }
+        if version < 30 {
+            try transaction {
+                try migrateToVersion30()
+                try execute("PRAGMA user_version = 30")
+            }
+            version = 30
         }
         guard version == Self.currentSchemaVersion else {
             throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
@@ -1463,6 +1482,82 @@ public final class DatabaseManager: @unchecked Sendable {
         )
         // 只有音乐会被判定，所以索引也只对音乐有意义。
         try execute("CREATE INDEX IF NOT EXISTS index_media_items_music_lyrics ON media_items(type, has_lyrics)")
+    }
+
+    /// 服务端账号、设备与运维设置统一进入版本化 JSON 文档。
+    ///
+    /// JSON 只承载已经由 Codable 模型和仓储校验过的非敏感设置；媒体源路径、连接
+    /// 凭据、Cookie、token 与 ffmpeg 命令永远不进入这些表。独立版本列用于 ETag
+    /// 乐观并发，避免多个浏览器页面互相覆盖设置。
+    private func migrateToVersion30() throws {
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_user_preferences (
+          user_id TEXT PRIMARY KEY,
+          document_version INTEGER NOT NULL DEFAULT 1 CHECK (document_version > 0),
+          payload_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_device_preferences (
+          user_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          document_version INTEGER NOT NULL DEFAULT 1 CHECK (document_version > 0),
+          payload_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(user_id, device_id),
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE,
+          FOREIGN KEY(device_id) REFERENCES server_devices(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_user_track_overrides (
+          user_id TEXT NOT NULL,
+          scope_kind TEXT NOT NULL CHECK (scope_kind IN ('media', 'series')),
+          scope_id TEXT NOT NULL,
+          audio_fingerprint TEXT,
+          subtitle_fingerprint TEXT,
+          subtitle_disabled INTEGER NOT NULL DEFAULT 0 CHECK (subtitle_disabled IN (0, 1)),
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(user_id, scope_kind, scope_id),
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_server_track_overrides_scope ON server_user_track_overrides(user_id, scope_kind, scope_id)")
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_user_policies (
+          user_id TEXT PRIMARY KEY,
+          document_version INTEGER NOT NULL DEFAULT 1 CHECK (document_version > 0),
+          payload_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          FOREIGN KEY(user_id) REFERENCES server_users(id) ON DELETE CASCADE
+        )
+        """)
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_operational_settings (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          document_version INTEGER NOT NULL DEFAULT 1 CHECK (document_version > 0),
+          payload_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        )
+        """)
+        try execute("""
+        CREATE TABLE IF NOT EXISTS server_jobs (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+          progress REAL NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 1),
+          result_code TEXT,
+          created_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT,
+          requested_by_user_id TEXT,
+          FOREIGN KEY(requested_by_user_id) REFERENCES server_users(id) ON DELETE SET NULL
+        )
+        """)
+        try execute("CREATE INDEX IF NOT EXISTS index_server_jobs_recent ON server_jobs(created_at DESC, id)")
+        try execute("CREATE INDEX IF NOT EXISTS index_server_jobs_state ON server_jobs(state, created_at DESC)")
     }
 
     private func validateBackup(at backupURL: URL) throws {

@@ -1,0 +1,282 @@
+import Foundation
+import MediaLibCore
+
+struct ServerBackupSummary: Codable, Equatable, Sendable {
+    let id: String
+    let createdAt: Date
+    let byteLength: Int64
+}
+
+/// 执行不会改变媒体源配置的本机维护操作。
+///
+/// 文件系统路径永不跨过此边界；HTTP 层只能看到稳定的不透明 ID、时间和字节数。
+/// 所有慢操作在专用串行队列执行，并通过 v30 `server_jobs` 暴露有界状态。
+final class ServerMaintenanceService: @unchecked Sendable {
+    private let database: DatabaseManager
+    private let experienceRepository: ServerExperienceRepository
+    private let identityRepository: ServerIdentityRepository
+    private let sourceRepository: SourceRepository
+    private let mediaRepository: MediaRepository
+    private let backupDirectory: URL
+    private let fileManager: FileManager
+    private let operationLock = NSLock()
+    private var operationTail: Task<Void, Never>?
+
+    init(
+        database: DatabaseManager,
+        experienceRepository: ServerExperienceRepository? = nil,
+        identityRepository: ServerIdentityRepository? = nil,
+        backupDirectory: URL,
+        fileManager: FileManager = .default
+    ) {
+        self.database = database
+        self.experienceRepository = experienceRepository ?? ServerExperienceRepository(database: database)
+        self.identityRepository = identityRepository ?? ServerIdentityRepository(database: database)
+        self.sourceRepository = SourceRepository(database: database)
+        self.mediaRepository = MediaRepository(database: database)
+        self.backupDirectory = backupDirectory
+        self.fileManager = fileManager
+    }
+
+    func backups(limit: Int = 100) throws -> [ServerBackupSummary] {
+        let boundedLimit = min(max(limit, 1), 100)
+        try secureBackupDirectory()
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .creationDateKey, .contentModificationDateKey]
+        let candidates = try fileManager.contentsOfDirectory(
+            at: backupDirectory,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+        )
+        return try candidates.compactMap { url -> ServerBackupSummary? in
+            guard isManagedBackup(url) else { return nil }
+            let values = try url.resourceValues(forKeys: keys)
+            guard values.isRegularFile == true else { return nil }
+            return ServerBackupSummary(
+                id: opaqueIdentifier(for: url.lastPathComponent),
+                createdAt: values.creationDate ?? values.contentModificationDate ?? .distantPast,
+                byteLength: Int64(values.fileSize ?? 0)
+            )
+        }
+        .sorted {
+            if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
+            return $0.id < $1.id
+        }
+        .prefix(boundedLimit)
+        .map { $0 }
+    }
+
+    func backupFile(id: String) throws -> (url: URL, byteLength: Int64)? {
+        guard isOpaqueIdentifier(id) else { return nil }
+        try secureBackupDirectory()
+        let candidates = try fileManager.contentsOfDirectory(
+            at: backupDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
+        )
+        for url in candidates where isManagedBackup(url) && opaqueIdentifier(for: url.lastPathComponent) == id {
+            let values = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard values.isRegularFile == true else { return nil }
+            return (url, Int64(values.fileSize ?? 0))
+        }
+        return nil
+    }
+
+    func enqueueBackup(requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
+        let job = try experienceRepository.saveJob(ServerJob(
+            kind: "database.backup",
+            requestedByUserID: principal.userID
+        ))
+        try appendAudit(
+            category: .authorization,
+            action: "backup.requested",
+            outcome: .success,
+            principal: principal,
+            detailCode: "job.queued"
+        )
+        enqueueOperation { [database, backupDirectory, experienceRepository, identityRepository] in
+            var running = job
+            running.state = .running
+            running.startedAt = Date()
+            _ = try? experienceRepository.saveJob(running)
+            do {
+                let url = try await database.createBackupAsync(in: backupDirectory, reason: "manual")
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+                running.state = .succeeded
+                running.progress = 1
+                running.resultCode = "backup.created"
+                running.finishedAt = Date()
+                _ = try experienceRepository.saveJob(running)
+                try identityRepository.appendSecurityEvent(ServerSecurityEvent(
+                    category: .authorization,
+                    action: "backup.created",
+                    outcome: .success,
+                    actorUserID: principal.userID,
+                    sessionID: principal.sessionID,
+                    deviceID: principal.deviceID,
+                    detailCode: "database.snapshot"
+                ))
+            } catch {
+                running.state = .failed
+                running.resultCode = "backup.failed"
+                running.finishedAt = Date()
+                _ = try? experienceRepository.saveJob(running)
+                try? identityRepository.appendSecurityEvent(ServerSecurityEvent(
+                    category: .authorization,
+                    action: "backup.failed",
+                    outcome: .failure,
+                    actorUserID: principal.userID,
+                    sessionID: principal.sessionID,
+                    deviceID: principal.deviceID,
+                    detailCode: "database.snapshot"
+                ))
+            }
+        }
+        return job
+    }
+
+    func enqueueLibraryJob(kind: String, requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
+        guard kind == "library.scan" || kind == "library.reindex" else {
+            throw ServerMaintenanceError.unsupportedJob
+        }
+        let activeCount = try experienceRepository.jobs(limit: 200, state: .queued).count
+            + experienceRepository.jobs(limit: 200, state: .running).count
+        guard activeCount < 8 else { throw ServerMaintenanceError.queueFull }
+        let job = try experienceRepository.saveJob(ServerJob(
+            kind: kind,
+            requestedByUserID: principal.userID
+        ))
+        try appendAudit(
+            category: .authorization,
+            action: "maintenance.requested",
+            outcome: .success,
+            principal: principal,
+            detailCode: kind == "library.scan" ? "library.scan" : "library.reindex"
+        )
+        enqueueOperation { [weak self] in
+            await self?.runLibraryJob(job, principal: principal)
+        }
+        return job
+    }
+
+    private func runLibraryJob(_ job: ServerJob, principal: ServerRequestPrincipal) async {
+        var running = job
+        running.state = .running
+        running.startedAt = Date()
+        _ = try? experienceRepository.saveJob(running)
+        do {
+            // 网页只能触发已有本地普通媒体库的完整扫描；远程来源、URL、SMB/FTP
+            // 和保险库仍由桌面宿主管理，避免 Web 进程接触来源凭据或未解锁隐私路径。
+            let sources = try sourceRepository.fetchAll().filter {
+                $0.sourceKind == .local && $0.mediaType != .privateCollection
+            }
+            let scanner = MediaScanner(
+                thumbnailGenerator: nil,
+                mediaRepository: mediaRepository
+            )
+            var errorCount = 0
+            for (index, source) in sources.enumerated() {
+                let summary = await scanner.scan(source: source, settings: AppSettings(), progress: { _ in })
+                errorCount += summary.errors.count
+                running.progress = sources.isEmpty ? 1 : Double(index + 1) / Double(sources.count)
+                _ = try? experienceRepository.saveJob(running)
+            }
+            running.state = errorCount == 0 ? .succeeded : .failed
+            running.progress = 1
+            running.resultCode = errorCount == 0
+                ? (sources.isEmpty ? "scan.no-eligible-sources" : "scan.completed")
+                : "scan.completed-with-errors"
+            running.finishedAt = Date()
+            _ = try experienceRepository.saveJob(running)
+            try identityRepository.appendSecurityEvent(ServerSecurityEvent(
+                category: .authorization,
+                action: errorCount == 0 ? "maintenance.completed" : "maintenance.failed",
+                outcome: errorCount == 0 ? .success : .failure,
+                actorUserID: principal.userID,
+                sessionID: principal.sessionID,
+                deviceID: principal.deviceID,
+                detailCode: job.kind == "library.scan" ? "library.scan" : "library.reindex"
+            ))
+        } catch {
+            running.state = .failed
+            running.resultCode = "maintenance.failed"
+            running.finishedAt = Date()
+            _ = try? experienceRepository.saveJob(running)
+            try? identityRepository.appendSecurityEvent(ServerSecurityEvent(
+                category: .authorization,
+                action: "maintenance.failed",
+                outcome: .failure,
+                actorUserID: principal.userID,
+                sessionID: principal.sessionID,
+                deviceID: principal.deviceID,
+                detailCode: job.kind == "library.scan" ? "library.scan" : "library.reindex"
+            ))
+        }
+    }
+
+    private func enqueueOperation(_ operation: @escaping @Sendable () async -> Void) {
+        operationLock.lock()
+        let predecessor = operationTail
+        let task = Task.detached(priority: .utility) {
+            _ = await predecessor?.value
+            await operation()
+        }
+        operationTail = task
+        operationLock.unlock()
+    }
+
+    private func appendAudit(
+        category: ServerSecurityEventCategory,
+        action: String,
+        outcome: ServerSecurityEventOutcome,
+        principal: ServerRequestPrincipal,
+        detailCode: String?
+    ) throws {
+        try identityRepository.appendSecurityEvent(ServerSecurityEvent(
+            category: category,
+            action: action,
+            outcome: outcome,
+            actorUserID: principal.userID,
+            sessionID: principal.sessionID,
+            deviceID: principal.deviceID,
+            detailCode: detailCode
+        ))
+    }
+
+    private func secureBackupDirectory() throws {
+        try fileManager.createDirectory(
+            at: backupDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: backupDirectory.path)
+    }
+
+    private func isManagedBackup(_ url: URL) -> Bool {
+        let standardizedParent = url.deletingLastPathComponent().standardizedFileURL
+        return standardizedParent == backupDirectory.standardizedFileURL
+            && url.pathExtension == "sqlite"
+            && url.lastPathComponent.hasPrefix("MediaLib-")
+    }
+
+    private func isOpaqueIdentifier(_ value: String) -> Bool {
+        value.utf8.count == 32 && value.utf8.allSatisfy {
+            (48...57).contains($0) || (97...102).contains($0)
+        }
+    }
+
+    /// 两个独立种子的 FNV-1a 64 位摘要。这里的 ID 只用于隐藏文件名与阻止路径输入，
+    /// 不承担鉴权；真正的授权仍在每次 HTTP 请求上完成。
+    private func opaqueIdentifier(for value: String) -> String {
+        func digest(seed: UInt64) -> UInt64 {
+            value.utf8.reduce(seed) { partial, byte in
+                (partial ^ UInt64(byte)) &* 1_099_511_628_211
+            }
+        }
+        return String(format: "%016llx%016llx", digest(seed: 14_695_981_039_346_656_037), digest(seed: 7_807_822_957_089_402_873))
+    }
+}
+
+enum ServerMaintenanceError: Error, Equatable {
+    case unsupportedJob
+    case queueFull
+}

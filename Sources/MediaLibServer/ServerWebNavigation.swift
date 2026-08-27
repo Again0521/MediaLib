@@ -70,9 +70,15 @@ struct ServerWebSidebarExtras {
 }
 
 enum ServerWebNavigation {
+    enum Context {
+        case playback
+        case administration
+    }
+
     enum Active: String {
         case home, library, musicSongs, musicAlbums, musicArtists, musicPlaylists, musicRecent, people, collections, photos, albums, queue, watching, history, search, favorites, watchlist, ratings, watched, unwatched
         case sources, status, administration, account, vault
+        case adminSessions, adminPlayback, adminNetwork, adminTasks, adminStorage, adminSecurity, adminLogs
 
         var title: String {
             switch self {
@@ -101,6 +107,13 @@ enum ServerWebNavigation {
             case .administration: return "服务管理"
             case .account: return "设置"
             case .vault: return "保险库"
+            case .adminSessions: return "会话"
+            case .adminPlayback: return "播放与转码"
+            case .adminNetwork: return "网络"
+            case .adminTasks: return "任务"
+            case .adminStorage: return "存储与备份"
+            case .adminSecurity: return "安全"
+            case .adminLogs: return "日志"
             }
         }
 
@@ -120,7 +133,10 @@ enum ServerWebNavigation {
             case .musicSongs, .musicAlbums, .musicArtists, .musicPlaylists, .musicRecent: return "music"
             case .search: return "search"
             case .account, .queue, .watching, .history, .favorites, .watchlist, .ratings: return "you"
-            case .sources, .status, .administration, .vault: return "none"
+            case .sources, .status, .administration, .vault,
+                    .adminSessions, .adminPlayback, .adminNetwork, .adminTasks,
+                    .adminStorage, .adminSecurity, .adminLogs:
+                return "none"
             }
         }
     }
@@ -169,11 +185,21 @@ enum ServerWebNavigation {
     //   /people   详情页「演员」区块的"查看全部"
     // 删掉一个入口而不给它接上新的，等于把页面做成了只能靠手输地址才进得去。
 
-    private static let managementItems: [Item] = [
-        Item(active: .sources, path: "/sources", icon: .source, managementOnly: true),
-        Item(active: .status, path: "/status", icon: .dashboard, managementOnly: false),
-        Item(active: .administration, path: "/admin", icon: .users, managementOnly: true),
+    private static let accountItems: [Item] = [
         Item(active: .account, path: "/account", icon: .settings, managementOnly: false)
+    ]
+
+    private static let administrationItems: [Item] = [
+        Item(active: .status, path: "/admin", icon: .dashboard, managementOnly: true),
+        Item(active: .administration, path: "/admin/users", icon: .users, managementOnly: true),
+        Item(active: .adminSessions, path: "/admin/sessions", icon: .account, managementOnly: true),
+        Item(active: .sources, path: "/admin/libraries", icon: .source, managementOnly: true),
+        Item(active: .adminPlayback, path: "/admin/playback", icon: .play, managementOnly: true),
+        Item(active: .adminNetwork, path: "/admin/network", icon: .server, managementOnly: true),
+        Item(active: .adminTasks, path: "/admin/tasks", icon: .refresh, managementOnly: true),
+        Item(active: .adminStorage, path: "/admin/storage", icon: .library, managementOnly: true),
+        Item(active: .adminSecurity, path: "/admin/security", icon: .shield, managementOnly: true),
+        Item(active: .adminLogs, path: "/admin/logs", icon: .history, managementOnly: true)
     ]
 
     private static let musicItems: [(active: Active, title: String, path: String)] = [
@@ -190,7 +216,8 @@ enum ServerWebNavigation {
         note: Note,
         categories: [ServerLibraryCategory] = [],
         activeCategoryID: String? = nil,
-        extras: ServerWebSidebarExtras
+        extras: ServerWebSidebarExtras,
+        context: Context = .playback
     ) -> String {
         let noteMarkup = note == .none ? "" : #"<p class="app-sidebar-note">\#(note.html)</p>"#
         let navigation = navigationMarkup(
@@ -198,44 +225,56 @@ enum ServerWebNavigation {
             showAdministration: showAdministration,
             categories: categories,
             activeCategoryID: activeCategoryID,
-            extras: extras
+            extras: extras,
+            context: context
         )
+
+        let isAdministration = context == .administration
+        let brandPath = isAdministration ? "/admin" : "/"
+        let brandSubtitle = isAdministration ? "服务器管理" : "家庭影音库"
+        let utilityPath = isAdministration ? "/" : "/account"
+        let utilityTitle = isAdministration ? "返回播放系统" : "个人设置"
+        let utilityDetail = isAdministration ? "浏览和播放媒体" : "账号与个性化"
+        let utilityIcon: ServerWebIcon = isAdministration ? .play : .account
 
         // Ordering matters: the drawer checkbox must precede the sidebar and the
         // scrim so the sibling selectors in `app-shell.css` can reach them.
         return """
         <input class="app-drawer-state" id="app-drawer-state" type="checkbox" aria-hidden="true" tabindex="-1">
-        \(mobileBar(active: active))
+        \(mobileBar(active: active, context: context))
         <aside class="app-sidebar" id="app-sidebar">
-          <a class="app-brand" href="/" data-native-navigation="true">
+          <a class="app-brand" href="\(brandPath)" data-native-navigation="true">
             <span class="ui-icon-tile ui-icon-tile-sm ui-icon-tile-brand app-brand-mark" aria-hidden="true">\(ServerWebIcon.play.html(size: .sm))</span>
-            <span class="app-brand-copy"><strong>MediaLIB</strong><span>家庭影音库</span></span>
+            <span class="app-brand-copy"><strong>MediaLIB</strong><span>\(brandSubtitle)</span></span>
           </a>
           \(navigation)
           <div class="app-sidebar-foot">
             \(appearanceControl())
-            <a class="app-status-card" href="/status" data-native-navigation="true">
-              <span class="ui-icon-tile ui-icon-tile-sm ui-icon-tile-tint app-status-icon" aria-hidden="true">\(ServerWebIcon.render(.activity, size: .sm, variant: .duotone))</span>
-              <span class="app-status-copy"><strong>服务状态</strong><span>查看运行详情</span></span>
+            <a class="app-status-card" href="\(utilityPath)" data-native-navigation="true">
+              <span class="ui-icon-tile ui-icon-tile-sm ui-icon-tile-tint app-status-icon" aria-hidden="true">\(ServerWebIcon.render(utilityIcon, size: .sm, variant: .duotone))</span>
+              <span class="app-status-copy"><strong>\(utilityTitle)</strong><span>\(utilityDetail)</span></span>
               \(ServerWebIcon.chevronRight.html(size: .xs, extraClass: "icon-muted"))
             </a>
             \(noteMarkup)
           </div>
         </aside>
         <label class="app-drawer-scrim" for="app-drawer-state" aria-hidden="true"></label>
-        \(tabBar(active: active))
+        \(isAdministration ? "" : tabBar(active: active))
         """
     }
 
     /// The phone header: drawer toggle, current location, and a direct route to
     /// search.  It repeats the page title because on a phone the sidebar that
     /// would otherwise say where you are is off-screen.
-    private static func mobileBar(active: Active) -> String {
-        """
+    private static func mobileBar(active: Active, context: Context) -> String {
+        let trailing = context == .administration
+            ? #"<a class="ui-btn ui-btn-icon ui-btn-ghost" href="/" aria-label="返回播放系统" data-native-navigation="true">\#(ServerWebIcon.play.html(size: .md))</a>"#
+            : #"<a class="ui-btn ui-btn-icon ui-btn-ghost" href="/search" aria-label="搜索" data-native-navigation="true">\#(ServerWebIcon.search.html(size: .md))</a>"#
+        return """
         <div class="app-mobile-bar">
           <label class="app-drawer-toggle ui-btn ui-btn-icon ui-btn-ghost" for="app-drawer-state" role="button" tabindex="0" aria-controls="app-sidebar" aria-label="打开导航">\(ServerWebIcon.menu.html(size: .md))</label>
           <span class="app-mobile-title">\(ServerWebHTML.escape(active.title))</span>
-          <a class="ui-btn ui-btn-icon ui-btn-ghost" href="/search" aria-label="搜索" data-native-navigation="true">\(ServerWebIcon.search.html(size: .md))</a>
+          \(trailing)
         </div>
         """
     }
@@ -266,8 +305,19 @@ enum ServerWebNavigation {
         showAdministration: Bool,
         categories: [ServerLibraryCategory],
         activeCategoryID: String?,
-        extras: ServerWebSidebarExtras
+        extras: ServerWebSidebarExtras,
+        context: Context
     ) -> String {
+        if context == .administration {
+            return """
+            <nav class="app-nav" aria-label="管理导航">
+              <div class="app-nav-group">
+                <p class="app-nav-title">管理控制台</p>
+                \(links(administrationItems, active: active, showAdministration: showAdministration))
+              </div>
+            </nav>
+            """
+        }
         // `homeVideo`（录像）归「相册」，不再同时出现在「视频」里。它此前两边都
         // 在：侧栏里同一个分类有两个入口，而它的条数也被「视频」和「相册」各加了
         // 一遍——两个徽标加起来比库里真实的条目还多。
@@ -369,8 +419,8 @@ enum ServerWebNavigation {
             \(remoteGroups)
           </div>
           <div class="app-nav-group">
-            <p class="app-nav-title">管理</p>
-            \(links(managementItems, active: active, showAdministration: showAdministration))
+            <p class="app-nav-title">账户</p>
+            \(links(accountItems, active: active, showAdministration: showAdministration))
           </div>
         </nav>
         """

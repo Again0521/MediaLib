@@ -13,6 +13,7 @@ enum ServerRateLimitScope: String, CaseIterable, Sendable {
     case mediaProbe
     case mediaStream
     case authenticatedMutation
+    case managementMutation
 }
 
 struct ServerRateLimitPolicy: Equatable, Sendable {
@@ -53,7 +54,10 @@ final class ServerRequestRateLimiter: @unchecked Sendable {
         .artworkRead: .init(capacity: 120, refillPerSecond: 2),
         .mediaProbe: .init(capacity: 12, refillPerSecond: 0.1),
         .mediaStream: .init(capacity: 240, refillPerSecond: 4),
-        .authenticatedMutation: .init(capacity: 30, refillPerSecond: 0.5)
+        .authenticatedMutation: .init(capacity: 30, refillPerSecond: 0.5),
+        // 管理写入包含密码重置、会话撤销、任务和维护操作。它与普通账号偏好写入
+        // 分桶，既不会被页面个性化操作耗尽，也不能靠扩大共享额度掩盖滥用。
+        .managementMutation: .init(capacity: 12, refillPerSecond: 0.2)
     ]
 
     private struct BucketKey: Hashable {

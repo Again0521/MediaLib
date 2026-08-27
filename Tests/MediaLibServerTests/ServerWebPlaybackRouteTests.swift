@@ -610,6 +610,27 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertFalse(script.contains("mediaPath('/api/v1/transcode/')"))
         XCTAssertTrue(script.contains("currentHLSSessionID"))
         XCTAssertTrue(script.contains("sourceRevision !== playbackSourceRevision"))
+        XCTAssertTrue(script.contains("window.Hls.isSupported()"))
+        XCTAssertTrue(script.contains("recoverMediaError()"))
+        XCTAssertTrue(script.contains("client.startLoad(-1)"))
+        XCTAssertTrue(script.contains("currentHLSClient.destroy()"))
+        XCTAssertTrue(script.contains("waitForHLSReady"))
+    }
+
+    func testHLSJSIsSameOriginPinnedAndLicensed() {
+        let router = makeRouter()
+        let script = router.response(
+            for: "GET /assets/vendor/hls-1.7.1.min.js HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        let license = router.response(
+            for: "GET /assets/vendor/hls.js-LICENSE.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        )
+        XCTAssertEqual(script.statusCode, 200)
+        XCTAssertEqual(script.body.count, 618_156)
+        XCTAssertTrue(String(decoding: script.body, as: UTF8.self).contains("1.7.1"))
+        XCTAssertEqual(license.statusCode, 200)
+        XCTAssertTrue(String(decoding: license.body, as: UTF8.self).contains("Apache License"))
+        XCTAssertFalse(ServerWebMediaDetailPage.script.contains("cdn"))
     }
 
     /// 轨道菜单里的条目不能被传输栏那条"每个 button 都是 36×36 图标"的规则压住。
@@ -753,11 +774,16 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
             mediaURL: "/api/v1/playback/hls/\(sessionID)/index.m3u8"
         )
         var cancelledBy: String?
+        var receivedCapabilities: ServerWebClientCapabilities?
         let router = LocalHTTPRouter(
             serverID: "server", serverName: "Server",
             hlsSessionProvider: { itemID, request, principal in
-                itemID == "movie-1" && request.audioTrackID == 1 && principal.userID == "viewer"
+                receivedCapabilities = request.capabilities
+                return itemID == "movie-1" && request.audioTrackID == 1 && principal.userID == "viewer"
                     ? descriptor : nil
+            },
+            hlsStatusProvider: { requestedSession, principal in
+                requestedSession == sessionID && principal.userID == "viewer" ? descriptor : nil
             },
             hlsResourceProvider: { requestedSession, fileName, principal in
                 guard requestedSession == sessionID,
@@ -789,6 +815,27 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertEqual(created.statusCode, 200)
         XCTAssertEqual(try JSONDecoder().decode(ServerHLSPlaybackDescriptor.self, from: created.body), descriptor)
 
+        let capabilityBody = Data(#"{"itemID":"movie-1","audioTrackID":1,"startSeconds":120,"durationSeconds":3600,"capabilities":{"nativeHLS":false,"mediaSource":true,"videoCodecs":["h264"],"audioCodecs":["aac"],"screenWidth":1920,"screenHeight":1080,"hdrDisplay":false,"measuredDownlinkMbps":80}}"#.utf8)
+        let negotiated = router.response(
+            for: mutationRequest("/api/v1/playback/sessions", bodyLength: capabilityBody.count),
+            body: capabilityBody
+        )
+        XCTAssertEqual(negotiated.statusCode, 200)
+        XCTAssertEqual(receivedCapabilities?.mediaSource, true)
+        XCTAssertEqual(receivedCapabilities?.screenWidth, 1920)
+
+        let unknownCapabilityBody = Data(#"{"itemID":"movie-1","audioTrackID":1,"capabilities":{"nativeHLS":false,"mediaSource":true,"videoCodecs":["h264"],"audioCodecs":["aac"],"screenWidth":1920,"screenHeight":1080,"hdrDisplay":false,"measuredDownlinkMbps":80,"unsafe":true}}"#.utf8)
+        XCTAssertEqual(router.response(
+            for: mutationRequest("/api/v1/playback/sessions", bodyLength: unknownCapabilityBody.count),
+            body: unknownCapabilityBody
+        ).statusCode, 400)
+
+        let statusPath = "/api/v1/playback/sessions/\(sessionID)"
+        let status = router.response(for: request(statusPath, token: "viewer"))
+        XCTAssertEqual(status.statusCode, 200)
+        XCTAssertEqual(try JSONDecoder().decode(ServerHLSPlaybackDescriptor.self, from: status.body), descriptor)
+        XCTAssertEqual(router.response(for: request(statusPath, token: "other")).statusCode, 404)
+
         let manifestPath = "/api/v1/playback/hls/\(sessionID)/index.m3u8"
         let manifest = router.response(for: request(manifestPath, token: "viewer"))
         XCTAssertEqual(manifest.statusCode, 200)
@@ -805,6 +852,8 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
             ), body: cancel
         ).statusCode, 204)
         XCTAssertEqual(cancelledBy, "viewer")
+        let delete = "DELETE \(statusPath) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer viewer\r\nX-MediaLIB-CSRF: known-csrf\r\nContent-Length: 0\r\n\r\n"
+        XCTAssertEqual(router.response(for: delete).statusCode, 204)
     }
 
     /// 音量不再通过 `slider-vertical` 退回各浏览器不同的系统外观；它与进度、倍速
@@ -881,6 +930,69 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
             }
         )
         XCTAssertEqual(denied.response(for: request("/api/v1/download/movie-1", token: "viewer")).statusCode, 404)
+    }
+
+    func testUserPolicyNarrowsDirectDownloadRemoteAndHLSSessionAccess() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ServerPlaybackPolicyTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try DatabaseManager(url: directory.appendingPathComponent("library.sqlite"))
+        _ = try ServerIdentityRepository(database: database).createUser(
+            id: "viewer", username: "viewer", displayName: "Viewer"
+        )
+        let experience = ServerExperienceRepository(database: database)
+        var deniedPolicy = ServerUserPolicy()
+        deniedPolicy.directPlayAllowed = false
+        deniedPolicy.remuxAllowed = false
+        deniedPolicy.transcodeAllowed = false
+        deniedPolicy.downloadAllowed = false
+        _ = try experience.saveUserPolicy(userID: "viewer", value: deniedPolicy, expectedVersion: 0)
+
+        let asset = ServerMediaAsset(
+            id: "movie-1", fileURL: directory.appendingPathComponent("movie.mkv"), byteLength: 42
+        )
+        let sessionID = String(repeating: "a", count: 32)
+        let descriptor = ServerHLSPlaybackDescriptor(
+            sessionID: sessionID, mode: "hlsRemux", durationSeconds: 60,
+            actualStartSeconds: 0, reason: "containerCompatibility",
+            mediaURL: "/api/v1/playback/hls/\(sessionID)/index.m3u8"
+        )
+        let router = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            mediaAssetProvider: { _, _, _ in asset },
+            hlsSessionProvider: { _, _, _ in descriptor },
+            experienceRepository: experience,
+            authenticationProvider: { head in
+                head.contains("Bearer viewer") ? ServerRequestPrincipal(
+                    userID: "viewer", deviceID: "device", sessionID: "session",
+                    permissions: [.viewMedia, .playMedia, .downloadMedia, .transcodePlayback],
+                    libraryGrants: [:]
+                ) : nil
+            },
+            csrfToken: "known-csrf"
+        )
+        XCTAssertEqual(router.response(for: request("/api/v1/stream/movie-1", token: "viewer")).statusCode, 404)
+        XCTAssertEqual(router.response(for: request("/api/v1/download/movie-1", token: "viewer")).statusCode, 404)
+        let hlsBody = Data(#"{"itemID":"movie-1","audioTrackID":0}"#.utf8)
+        XCTAssertEqual(router.response(
+            for: mutationRequest("/api/v1/playback/sessions", bodyLength: hlsBody.count), body: hlsBody
+        ).statusCode, 403)
+
+        var allowedPolicy = deniedPolicy
+        allowedPolicy.directPlayAllowed = true
+        allowedPolicy.remuxAllowed = true
+        allowedPolicy.downloadAllowed = true
+        allowedPolicy.remoteAccessAllowed = false
+        _ = try experience.saveUserPolicy(userID: "viewer", value: allowedPolicy, expectedVersion: 1)
+        XCTAssertEqual(router.response(for: request("/api/v1/stream/movie-1", token: "viewer")).statusCode, 200)
+        XCTAssertEqual(router.response(
+            for: request("/api/v1/stream/movie-1", token: "viewer"), clientAddressKey: "192.168.1.20"
+        ).statusCode, 404)
+        XCTAssertEqual(router.response(for: request("/api/v1/download/movie-1", token: "viewer")).statusCode, 200)
+        XCTAssertEqual(router.response(
+            for: mutationRequest("/api/v1/playback/sessions", bodyLength: hlsBody.count), body: hlsBody
+        ).statusCode, 200)
     }
 
     func testRemoteStreamUsesFull200WithoutRangeAndBounded206WithRange() {

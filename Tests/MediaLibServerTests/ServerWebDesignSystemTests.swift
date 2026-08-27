@@ -352,7 +352,7 @@ final class ServerWebDesignSystemTests: XCTestCase {
         let paths = [
             "/", "/category/video", "/search", "/watching", "/history", "/favorites",
             "/music/songs", "/music/playlists", "/photos", "/albums", "/queue", "/people", "/collections",
-            "/status", "/sources", "/admin", "/account", "/vault"
+            "/admin", "/admin/libraries", "/admin/users", "/account", "/vault"
         ]
         for path in paths {
             let html = page(path)
@@ -561,7 +561,7 @@ final class ServerWebDesignSystemTests: XCTestCase {
 
 
     func testProductionIconsAreNotEmojiOrPunctuation() {
-        let paths = ["/", "/category/video", "/search", "/music/songs", "/photos", "/people", "/collections", "/queue", "/status", "/sources", "/admin", "/account", "/vault"]
+        let paths = ["/", "/category/video", "/search", "/music/songs", "/photos", "/people", "/collections", "/queue", "/admin", "/admin/libraries", "/admin/users", "/account", "/vault"]
         // Emoji and box-drawing characters used to stand in for icons; they
         // render at whatever size and weight the platform font chooses and
         // cannot take a colour.
@@ -634,7 +634,7 @@ final class ServerWebDesignSystemTests: XCTestCase {
     func testOneVersionCounterInvalidatesEveryBrowserAsset() {
         // Nine assets previously shipped unversioned and served stale for the
         // full cache lifetime after any change.
-        let paths = ["/", "/category/video", "/queue", "/people", "/collections", "/photos", "/status", "/sources", "/admin", "/account", "/vault", "/login"]
+        let paths = ["/", "/category/video", "/queue", "/people", "/collections", "/photos", "/admin", "/admin/libraries", "/admin/users", "/account", "/vault", "/login"]
         for path in paths {
             let response = router.response(for: "GET \(path) HTTP/1.1\r\nHost: localhost\r\n\r\n")
             let html = String(data: response.body, encoding: .utf8) ?? ""
@@ -675,7 +675,7 @@ final class ServerWebDesignSystemTests: XCTestCase {
     }
 
     func testAuthenticatedPagesExposeSkipLinkMainLandmarkAndLiveRegion() {
-        for path in ["/", "/category/video", "/queue", "/status", "/account"] {
+        for path in ["/", "/category/video", "/queue", "/admin", "/account"] {
             let response = router.response(for: "GET \(path) HTTP/1.1\r\nHost: localhost\r\n\r\n")
             let html = String(data: response.body, encoding: .utf8) ?? ""
             XCTAssertTrue(html.contains("class=\"skip\" href=\"#main\""), path)
@@ -708,7 +708,7 @@ final class ServerWebDesignSystemTests: XCTestCase {
             )),
             ("emptyState+action", ServerWebUI.emptyState(
                 icon: .library, title: "没有内容", message: "先添加媒体源。",
-                action: "去添加", actionHref: "/sources"
+                action: "查看来源", actionHref: "/admin/libraries"
             )),
             ("posterSkeletons", ServerWebUI.posterSkeletons(3))
         ]
@@ -768,8 +768,9 @@ final class ServerWebDesignSystemTests: XCTestCase {
         // 侧栏能到达的每一个页面都是一个合法的来处。少一个，从那里点进详情页再
         // 返回就会被扔回首页——这正是「返回」一度对所有二级页面都只会回首页的原因。
         for (path, label) in [
-            ("/albums", "返回相册"), ("/vault", "返回保险库"), ("/sources", "返回媒体源"),
-            ("/status", "返回仪表盘"), ("/admin", "返回服务管理"), ("/account", "返回设置")
+            ("/albums", "返回相册"), ("/vault", "返回保险库"),
+            ("/admin", "返回仪表盘"), ("/admin/libraries", "返回媒体库与来源"),
+            ("/admin/users", "返回用户"), ("/account", "返回设置")
         ] {
             let resolved = target(referer: "http://127.0.0.1:8098\(path)")
             XCTAssertEqual(resolved.href, path)

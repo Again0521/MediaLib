@@ -147,7 +147,7 @@ enum ServerWebHomePage {
                 title: "资料库还是空的",
                 message: "添加一个媒体源，扫描完成后你的影片、剧集和音乐就会出现在这里。",
                 action: "去添加媒体源",
-                actionHref: "/sources"
+                actionHref: "/admin/libraries"
             )
             : contentSections.joined(separator: "\n")
         let featuredContent = featuredHero(featuredCandidates)
@@ -578,7 +578,7 @@ enum ServerWebHomePage {
     /// 有意的偏离，记在 `doc/MediaLIB_Web设计系统.md` §9.4。
     ///
     /// 它只汇总当前账号**看得见**的东西。这里不放服务器负载或磁盘信息——首页是
-    /// 内容页，运维细节在 `/status`。
+    /// 内容页，运维细节在 `/admin`。
     private static func overviewSection(
         snapshot: ServerLibrarySnapshot,
         videoCount: Int,
@@ -621,7 +621,7 @@ enum ServerWebHomePage {
             icon: .library,
             titleID: "home-overview-title",
             moreLabel: showAdministration ? "仪表盘" : nil,
-            moreHref: showAdministration ? "/status" : nil
+            moreHref: showAdministration ? "/admin" : nil
           ))
           <div class="home-overview">
             <div class="home-overview-lead" data-tint="editorial">

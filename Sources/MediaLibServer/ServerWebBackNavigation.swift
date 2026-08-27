@@ -48,9 +48,16 @@ enum ServerWebBackNavigation {
         // 被扔回首页。相册、保险库和管理区此前全部缺席。
         "/albums": "相册",
         "/vault": "保险库",
-        "/sources": "媒体源",
-        "/status": "仪表盘",
-        "/admin": "服务管理",
+        "/admin": "仪表盘",
+        "/admin/users": "用户",
+        "/admin/sessions": "会话",
+        "/admin/libraries": "媒体库与来源",
+        "/admin/playback": "播放与转码",
+        "/admin/network": "网络",
+        "/admin/tasks": "任务",
+        "/admin/storage": "存储与备份",
+        "/admin/security": "安全",
+        "/admin/logs": "日志",
         "/account": "设置"
     ]
 

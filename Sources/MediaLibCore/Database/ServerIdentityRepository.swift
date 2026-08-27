@@ -34,6 +34,15 @@ public enum ServerIdentityRepositoryError: Error, LocalizedError, Equatable, Sen
     }
 }
 
+public struct ServerManagedUserAggregate: Sendable {
+    public let user: ServerUser
+    public let roleIDs: [String]
+    public let libraryIDs: [String]
+    public let libraryGrantCount: Int
+    public let activeDeviceCount: Int
+    public let activeSessionCount: Int
+}
+
 /// 服务端身份数据边界。调用方只能提交 Argon2id 编码结果与 BLAKE2b-256 十六进制摘要，
 /// 此类型没有接收明文密码或原始令牌的 API。
 public final class ServerIdentityRepository: @unchecked Sendable {
@@ -153,6 +162,80 @@ public final class ServerIdentityRepository: @unchecked Sendable {
             """,
             map: mapUser(row:)
         )
+    }
+
+    /// One bounded administration query replaces role/grant/device/session queries per user.
+    /// Aggregates are calculated before the final join, preventing cross-product over-counting.
+    public func managedUsers(
+        limit: Int,
+        offset: Int = 0,
+        at date: Date = Date()
+    ) throws -> (totalCount: Int, users: [ServerManagedUserAggregate]) {
+        guard (1...500).contains(limit), (0...1_000_000).contains(offset) else {
+            throw ServerIdentityRepositoryError.invalidIdentifier
+        }
+        let total = try database.query("SELECT COUNT(*) FROM server_users") {
+            Int($0.int(0) ?? 0)
+        }.first ?? 0
+        let rows = try database.query(
+            """
+            WITH
+              roles AS (
+                SELECT user_id, GROUP_CONCAT(role_id, X'1F') AS role_ids
+                FROM server_user_roles GROUP BY user_id
+              ),
+              grants AS (
+                SELECT user_id, GROUP_CONCAT(library_id, X'1F') AS library_ids, COUNT(*) AS grant_count
+                FROM server_library_grants GROUP BY user_id
+              ),
+              devices AS (
+                SELECT user_id, COUNT(*) AS device_count
+                FROM server_devices WHERE revoked_at IS NULL GROUP BY user_id
+              ),
+              sessions AS (
+                SELECT session.user_id, COUNT(*) AS session_count
+                FROM server_auth_sessions AS session
+                JOIN server_devices AS device ON device.id = session.device_id
+                WHERE session.revoked_at IS NULL AND device.revoked_at IS NULL
+                  AND session.refresh_expires_at > ?
+                GROUP BY session.user_id
+              )
+            SELECT user.id, user.username, user.display_name, user.is_disabled,
+                   user.requires_initial_password, user.created_at, user.updated_at,
+                   roles.role_ids, grants.library_ids, COALESCE(grants.grant_count, 0),
+                   COALESCE(devices.device_count, 0), COALESCE(sessions.session_count, 0)
+            FROM server_users AS user
+            LEFT JOIN roles ON roles.user_id = user.id
+            LEFT JOIN grants ON grants.user_id = user.id
+            LEFT JOIN devices ON devices.user_id = user.id
+            LEFT JOIN sessions ON sessions.user_id = user.id
+            ORDER BY user.normalized_username, user.id
+            LIMIT ? OFFSET ?
+            """,
+            bindings: [.optionalDate(date), .int(Int64(limit)), .int(Int64(offset))]
+        ) { row in
+            let separator = Character(UnicodeScalar(0x1F)!)
+            func identifiers(_ value: String?) -> [String] {
+                value?.split(separator: separator).map(String.init).sorted() ?? []
+            }
+            return ServerManagedUserAggregate(
+                user: ServerUser(
+                    id: row.string(0) ?? "",
+                    username: row.string(1) ?? "",
+                    displayName: row.string(2) ?? "",
+                    isDisabled: row.bool(3),
+                    requiresInitialPassword: row.bool(4),
+                    createdAt: row.date(5) ?? Date(),
+                    updatedAt: row.date(6) ?? Date()
+                ),
+                roleIDs: identifiers(row.string(7)),
+                libraryIDs: identifiers(row.string(8)),
+                libraryGrantCount: Int(row.int(9) ?? 0),
+                activeDeviceCount: Int(row.int(10) ?? 0),
+                activeSessionCount: Int(row.int(11) ?? 0)
+            )
+        }
+        return (total, rows)
     }
 
     public func roles() throws -> [ServerRole] {
@@ -560,6 +643,21 @@ public final class ServerIdentityRepository: @unchecked Sendable {
         )
     }
 
+    public func activeDevices(limit: Int) throws -> [ServerDevice] {
+        guard (1...1_001).contains(limit) else { throw ServerIdentityRepositoryError.invalidIdentifier }
+        return try database.query(
+            """
+            SELECT id, user_id, name, platform, created_at, last_seen_at, revoked_at
+            FROM server_devices
+            WHERE revoked_at IS NULL
+            ORDER BY last_seen_at DESC, created_at DESC, id
+            LIMIT ?
+            """,
+            bindings: [.int(Int64(limit))],
+            map: mapDevice(row:)
+        )
+    }
+
     @discardableResult
     public func createSession(
         id: String = UUID().uuidString,
@@ -739,6 +837,24 @@ public final class ServerIdentityRepository: @unchecked Sendable {
             ORDER BY session.last_used_at DESC, session.created_at DESC
             """,
             bindings: bindings,
+            map: mapSession(row:)
+        )
+    }
+
+    public func activeSessions(limit: Int, at date: Date = Date()) throws -> [ServerAuthSession] {
+        guard (1...1_001).contains(limit) else { throw ServerIdentityRepositoryError.invalidIdentifier }
+        return try database.query(
+            """
+            SELECT session.id, session.user_id, session.device_id, session.access_expires_at,
+                   session.refresh_expires_at, session.created_at, session.last_used_at, session.revoked_at
+            FROM server_auth_sessions AS session
+            JOIN server_devices AS device ON device.id = session.device_id
+            WHERE session.revoked_at IS NULL AND device.revoked_at IS NULL
+              AND session.refresh_expires_at > ?
+            ORDER BY session.last_used_at DESC, session.created_at DESC, session.id
+            LIMIT ?
+            """,
+            bindings: [.optionalDate(date), .int(Int64(limit))],
             map: mapSession(row:)
         )
     }

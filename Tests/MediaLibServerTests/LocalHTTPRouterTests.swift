@@ -76,8 +76,8 @@ final class LocalHTTPRouterTests: XCTestCase {
     }
 
     func testAuthenticatedStatusPageKeepsMachineHealthProbeSeparateAndUsesSafeScript() {
-        let page = router.response(for: "GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        let head = router.response(for: "HEAD /status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let page = router.response(for: "GET /admin HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let head = router.response(for: "HEAD /admin HTTP/1.1\r\nHost: localhost\r\n\r\n")
         let asset = router.response(for: "GET /assets/status.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
         let stylesheet = router.response(for: "GET /assets/status.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
         let html = String(data: page.body, encoding: .utf8) ?? ""
@@ -117,7 +117,9 @@ final class LocalHTTPRouterTests: XCTestCase {
         let tokens = String(data: tokensAsset.body, encoding: .utf8) ?? ""
         let base = String(data: baseAsset.body, encoding: .utf8) ?? ""
         let primitives = String(data: primitivesAsset.body, encoding: .utf8) ?? ""
-        let pages = ["/", "/category/video", "/search", "/watching", "/history", "/favorites", "/watchlist", "/ratings", "/watched", "/unwatched", "/music/songs", "/music/albums", "/music/artists", "/music/playlists", "/music/recent", "/people", "/collections", "/photos", "/queue", "/status", "/account", "/admin", "/sources", "/vault"]
+        let playbackPages = ["/", "/category/video", "/search", "/watching", "/history", "/favorites", "/watchlist", "/ratings", "/watched", "/unwatched", "/music/songs", "/music/albums", "/music/artists", "/music/playlists", "/music/recent", "/people", "/collections", "/photos", "/queue", "/account", "/vault"]
+        let administrationPages = ["/admin", "/admin/users", "/admin/sessions", "/admin/libraries", "/admin/playback", "/admin/network", "/admin/tasks", "/admin/storage", "/admin/security", "/admin/logs"]
+        let pages = playbackPages + administrationPages
 
         XCTAssertEqual(asset.statusCode, 200)
         XCTAssertEqual(asset.contentType, "text/css; charset=utf-8")
@@ -281,14 +283,22 @@ final class LocalHTTPRouterTests: XCTestCase {
             XCTAssertTrue(html.contains("<script src=\"/assets/appearance.js?v="), path)
             XCTAssertFalse(html.contains("appearance.js?v=88\" defer"), path)
             XCTAssertTrue(html.contains("class=\"app-sidebar\""), path)
-            XCTAssertTrue(html.contains("class=\"app-tabbar\""), path)
             XCTAssertTrue(html.contains("class=\"app-drawer-state\""), path)
-            XCTAssertTrue(html.contains("class=\"nav-disclosure\""), path)
             XCTAssertTrue(html.contains("class=\"app-status-card\""), path)
             XCTAssertTrue(html.contains("data-appearance-mode=\"auto\""), path)
-            XCTAssertTrue(html.contains("aria-label=\"主导航\""), path)
-            XCTAssertTrue(html.contains(">媒体库</p>"), path)
-            XCTAssertTrue(html.contains(">管理</p>"), path)
+            if administrationPages.contains(path) {
+                XCTAssertFalse(html.contains("class=\"app-tabbar\""), path)
+                XCTAssertFalse(html.contains("class=\"nav-disclosure\""), path)
+                XCTAssertTrue(html.contains("aria-label=\"管理导航\""), path)
+                XCTAssertTrue(html.contains(">管理控制台</p>"), path)
+                XCTAssertFalse(html.contains(">媒体库</p>"), path)
+            } else {
+                XCTAssertTrue(html.contains("class=\"app-tabbar\""), path)
+                XCTAssertTrue(html.contains("class=\"nav-disclosure\""), path)
+                XCTAssertTrue(html.contains("aria-label=\"主导航\""), path)
+                XCTAssertTrue(html.contains(">媒体库</p>"), path)
+                XCTAssertFalse(html.contains(">管理控制台</p>"), path)
+            }
             // The override stylesheet that used to flatten every page to white
             // is gone, along with the fake macOS window furniture.
             XCTAssertFalse(html.contains("reference-system.css"), path)
@@ -324,7 +334,8 @@ final class LocalHTTPRouterTests: XCTestCase {
             active: .home, showAdministration: false, note: .library, extras: .empty
         )
         let administrator = ServerWebNavigation.render(
-            active: .administration, showAdministration: true, note: .security, extras: .empty
+            active: .administration, showAdministration: true, note: .security, extras: .empty,
+            context: .administration
         )
 
         XCTAssertTrue(member.contains("href=\"/\""))
@@ -340,7 +351,7 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertTrue(member.contains("href=\"/albums\""))
         XCTAssertFalse(member.contains("href=\"/admin\""))
         XCTAssertFalse(member.contains("href=\"/sources\""))
-        XCTAssertTrue(member.contains("href=\"/status\""))
+        XCTAssertFalse(member.contains("href=\"/status\""))
         XCTAssertTrue(member.contains("href=\"/account\""))
         XCTAssertTrue(member.contains("href=\"/category/video\""))
         XCTAssertTrue(member.contains("href=\"/category/video\" data-native-navigation=\"true\""))
@@ -354,10 +365,10 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertTrue(member.contains("class=\"nav-disclosure\""))
         // 三个可展开分组：视频 / 音乐 / 相册，与客户端一致。
         XCTAssertEqual(member.components(separatedBy: "class=\"nav-disclosure\"").count - 1, 3)
-        XCTAssertEqual(administrator.components(separatedBy: "class=\"nav-disclosure\"").count - 1, 3)
+        XCTAssertEqual(administrator.components(separatedBy: "class=\"nav-disclosure\"").count - 1, 0)
         XCTAssertTrue(member.contains("class=\"app-status-card\""))
-        XCTAssertTrue(administrator.contains("href=\"/admin\" data-native-navigation=\"true\" aria-current=\"page\""))
-        XCTAssertTrue(administrator.contains("href=\"/sources\""))
+        XCTAssertTrue(administrator.contains("href=\"/admin/users\" data-native-navigation=\"true\" aria-current=\"page\""))
+        XCTAssertTrue(administrator.contains("href=\"/admin/libraries\""))
         XCTAssertTrue(administrator.contains("敏感信息不会显示在这里"))
         XCTAssertFalse(administrator.contains("app-shell.js"))
         XCTAssertFalse(administrator.contains("<script>"))
@@ -369,7 +380,7 @@ final class LocalHTTPRouterTests: XCTestCase {
             encoding: .utf8
         ) ?? ""
         let status = String(
-            data: router.response(for: "GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n").body,
+            data: router.response(for: "GET /admin HTTP/1.1\r\nHost: localhost\r\n\r\n").body,
             encoding: .utf8
         ) ?? ""
 
@@ -385,7 +396,7 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertTrue(status.contains("class=\"status-policy\""))
         // A scoped browse page is titled by its scope, not "browse everything".
         XCTAssertTrue(library.contains("视频"))
-        XCTAssertTrue(status.contains("服务状态"))
+        XCTAssertTrue(status.contains("仪表盘"))
     }
 
     func testDynamicAuthenticatedHTMLAndAPIsRemainNoStoreWhenStaticAssetsAreCacheable() {
@@ -1266,7 +1277,7 @@ final class LocalHTTPRouterTests: XCTestCase {
         )
 
         XCTAssertTrue(status.contains("<title>仪表盘 · 客厅 &lt;服务器&gt;</title>"))
-        XCTAssertTrue(sources.contains("<title>媒体源 · 客厅 &lt;服务器&gt;</title>"))
+        XCTAssertTrue(sources.contains("<title>媒体库与来源 · 客厅 &lt;服务器&gt;</title>"))
         XCTAssertTrue(administration.contains("管理谁能使用 客厅 &lt;服务器&gt;"))
         XCTAssertFalse(status.contains("(serverName)"))
         XCTAssertFalse(sources.contains("(serverName)"))

@@ -277,7 +277,9 @@ enum ServerWebMediaDetailPage {
             sidebar: sidebar,
             content: content,
             pageStylesheets: ["/assets/player.css"],
-            pageScripts: isMusic ? ["/assets/overlays.js"] : ["/assets/overlays.js", "/assets/player.js"],
+            pageScripts: isMusic ? ["/assets/overlays.js"] : [
+                "/assets/overlays.js", "/assets/vendor/hls-1.7.1.min.js", "/assets/player.js"
+            ],
             // 这两张就是整页最先被看见的像素。放在 <body> 里的 <img> 要排在样式表
             // 之后才开始下载；先声明出来，它们和样式表并行取。
             preloadedImages: [backdropURL, isMusic ? nil : landingURL].compactMap { $0 },
@@ -402,28 +404,30 @@ enum ServerWebMediaDetailPage {
       position: absolute;
       z-index: 3;
       right: clamp(12px, 5vw, 72px);
-      bottom: clamp(42px, 9%, 86px);
+      bottom: var(--subtitle-bottom, clamp(42px, 9%, 86px));
       left: clamp(12px, 5vw, 72px);
       display: grid;
       justify-items: center;
       gap: 2px;
-      color: #fff;
+      color: var(--subtitle-color, #fff);
       font-size: clamp(16px, 2.15vw, 32px);
       font-weight: var(--weight-semibold);
       line-height: 1.35;
       text-align: center;
-      text-shadow: 0 1px 2px #000, 0 2px 8px #000;
+      text-shadow: var(--subtitle-edge, 0 1px 2px #000, 0 2px 8px #000);
       pointer-events: none;
     }
     .player-subtitle-line {
       max-width: min(100%, 48em);
       padding: 0.08em 0.34em;
       border-radius: 0.22em;
-      background: rgba(0, 0, 0, 0.58);
+      background: rgba(0, 0, 0, var(--subtitle-background-opacity, 0.58));
       white-space: pre-line;
       overflow-wrap: anywhere;
     }
-    .player-stage.controls-visible .player-subtitle-overlay { bottom: clamp(68px, 16%, 128px); }
+    .player-stage.controls-visible .player-subtitle-overlay {
+      bottom: max(var(--subtitle-bottom, 0px), clamp(68px, 16%, 128px));
+    }
     /* `.player-landing` 从前完全没有规则，而铺满的那条写的是
        `.player-landing-art img`——类名就在 <img> 自己身上，那个选择器匹配不到
        任何元素。结果画面前置图既没有铺满也没有压暗，按固有尺寸挤在舞台里。 */
@@ -1369,11 +1373,13 @@ enum ServerWebMediaDetailPage {
       .player-shortcut-hint { display: none !important; }
       .player-subtitle-overlay {
         right: var(--space-3);
-        bottom: clamp(36px, 10%, 58px);
+        bottom: var(--subtitle-bottom, clamp(36px, 10%, 58px));
         left: var(--space-3);
         font-size: clamp(15px, 4.8vw, 22px);
       }
-      .player-stage.controls-visible .player-subtitle-overlay { bottom: clamp(66px, 23%, 104px); }
+      .player-stage.controls-visible .player-subtitle-overlay {
+        bottom: max(var(--subtitle-bottom, 0px), clamp(66px, 23%, 104px));
+      }
     }
     """#
 
@@ -1432,11 +1438,41 @@ enum ServerWebMediaDetailPage {
       const lifecycle = new AbortController();
       const subtitlePath = (trackID) => `/api/v1/subtitles/${encodeURIComponent(itemID)}/${encodeURIComponent(String(trackID))}`;
       const csrfToken = document.querySelector('meta[name="medialib-csrf-token"]')?.content || '';
+      const clientPlaybackCapabilities = (() => {
+        const supports = (mime) => {
+          try {
+            return player.canPlayType(mime) !== '' ||
+              (window.MediaSource && typeof window.MediaSource.isTypeSupported === 'function' && window.MediaSource.isTypeSupported(mime));
+          } catch (_) { return false; }
+        };
+        const videoCodecs = [];
+        if (supports('video/mp4; codecs="avc1.42E01E"')) videoCodecs.push('h264');
+        if (supports('video/mp4; codecs="hvc1.1.6.L93.B0"')) videoCodecs.push('hevc');
+        if (supports('video/webm; codecs="vp09.00.10.08"')) videoCodecs.push('vp9');
+        if (supports('video/mp4; codecs="av01.0.05M.08"')) videoCodecs.push('av1');
+        const audioCodecs = [];
+        if (supports('audio/mp4; codecs="mp4a.40.2"')) audioCodecs.push('aac');
+        if (supports('audio/webm; codecs="opus"')) audioCodecs.push('opus');
+        const downlink = Number(navigator.connection?.downlink);
+        return {
+          nativeHLS:player.canPlayType('application/vnd.apple.mpegurl') !== '',
+          mediaSource:Boolean(window.MediaSource),
+          videoCodecs,
+          audioCodecs,
+          screenWidth:Math.max(1,Math.min(16384,Math.round(window.screen.width * (window.devicePixelRatio || 1)))),
+          screenHeight:Math.max(1,Math.min(16384,Math.round(window.screen.height * (window.devicePixelRatio || 1)))),
+          hdrDisplay:Boolean(window.matchMedia?.('(dynamic-range: high)').matches),
+          measuredDownlinkMbps:Number.isFinite(downlink) && downlink > 0 ? downlink : null
+        };
+      })();
       var isStarting = false;
       var resumeApplied = false;
       var playbackStartedReported = false;
       var lastProgressBucket = -1;
       var playbackTracksPromise = null;
+      var playbackPreferencesPromise = null;
+      var playbackPreferences = null;
+      var playbackPreferencesUseLegacySelection = true;
       var playbackCompleted = false;
       // ---- 播放通路 ---------------------------------------------------------
       // `direct` 是浏览器自己解容器；`hls` 是服务端按浏览器能力重封装或转码后的
@@ -1446,6 +1482,9 @@ enum ServerWebMediaDetailPage {
       var remuxOffset = 0;
       var remuxAudioTrack = 0;
       var currentHLSSessionID = '';
+      var currentHLSClient = null;
+      var lastHLSMediaRecoveryAt = 0;
+      var hlsNetworkRecoveryCount = 0;
       var playbackTracks = null;
       var playbackSourceRevision = 0;
       var sourceTransitionPending = false;
@@ -1679,6 +1718,60 @@ enum ServerWebMediaDetailPage {
         return /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,2}$/.test(normalized) ? normalized : 'und';
       };
 
+      const boundedNumber = (value, minimum, maximum, fallback) => {
+        const number = Number(value);
+        return Number.isFinite(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
+      };
+      const applySubtitleStyle = style => {
+        if (!subtitleOverlay || !style || typeof style !== 'object') return;
+        const families = {
+          system: '-apple-system, BlinkMacSystemFont, sans-serif',
+          sansSerif: '-apple-system, BlinkMacSystemFont, sans-serif',
+          serif: 'ui-serif, New York, Georgia, serif',
+          monospace: 'ui-monospace, SFMono-Regular, Menlo, monospace'
+        };
+        const scale = boundedNumber(style.fontScalePercent, 75, 200, 100) / 100;
+        const weight = Math.round(boundedNumber(style.fontWeight, 400, 800, 600) / 100) * 100;
+        const color = /^#[0-9A-Fa-f]{6}$/.test(String(style.textColor || '')) ? style.textColor : '#FFFFFF';
+        const opacity = boundedNumber(style.backgroundOpacityPercent, 0, 100, 55) / 100;
+        const vertical = boundedNumber(style.verticalPositionPercent, 60, 95, 88);
+        const edges = {
+          none: 'none',
+          shadow: '0 1px 2px #000, 0 2px 8px #000',
+          outline: '-1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000'
+        };
+        subtitleOverlay.style.fontFamily = families[style.fontFamily] || families.system;
+        subtitleOverlay.style.fontSize = `clamp(${(16 * scale).toFixed(2)}px, ${(2.15 * scale).toFixed(3)}vw, ${(32 * scale).toFixed(2)}px)`;
+        subtitleOverlay.style.fontWeight = String(weight);
+        subtitleOverlay.style.setProperty('--subtitle-color', color);
+        subtitleOverlay.style.setProperty('--subtitle-background-opacity', String(opacity));
+        subtitleOverlay.style.setProperty('--subtitle-edge', edges[style.edgeStyle] || edges.shadow);
+        subtitleOverlay.style.setProperty('--subtitle-bottom', `${100 - vertical}%`);
+      };
+      async function loadPlaybackPreferences() {
+        if (playbackPreferences) return playbackPreferences;
+        if (playbackPreferencesPromise) return playbackPreferencesPromise;
+        playbackPreferencesPromise = (async () => {
+          try {
+            const response = await fetch('/api/v1/me/preferences', {
+              credentials: 'same-origin', headers: { 'Accept': 'application/json' }
+            });
+            if (!response.ok) throw new Error('unavailable');
+            const payload = await response.json();
+            const effective = payload?.effective;
+            if (!effective || typeof effective !== 'object') throw new Error('invalid');
+            playbackPreferences = effective;
+            playbackPreferencesUseLegacySelection = Number(payload?.account?.version ?? 0) === 0;
+            applySubtitleStyle(effective.subtitleStyle);
+            return effective;
+          } catch (_) {
+            playbackPreferencesPromise = null;
+            return null;
+          }
+        })();
+        return playbackPreferencesPromise;
+      }
+
       /// 按浏览器语言挑一条默认字幕。
       //
       // 匹配分三档，取分最高的一条：完整标记相同（`zh-Hans` = `zh-Hans`）、
@@ -1689,11 +1782,19 @@ enum ServerWebMediaDetailPage {
       var subtitleChoiceLocked = false;
       function applyPreferredSubtitle() {
         if (subtitleChoiceLocked || !playbackHasPlayed) return;
-        const subtitles = (playbackTracks?.subtitles ?? []).filter(track => !failedSubtitleTrackIDs.has(track.id));
+        const mode = playbackPreferencesUseLegacySelection
+          ? 'legacy'
+          : String(playbackPreferences?.subtitleMode || 'foreignAudio');
+        if (mode === 'off' || mode === 'manual') return;
+        let subtitles = (playbackTracks?.subtitles ?? []).filter(track => !failedSubtitleTrackIDs.has(track.id));
         if (subtitles.length === 0) return;
-        const preferred = (window.navigator?.languages && window.navigator.languages.length
+        const browserLanguages = (window.navigator?.languages && window.navigator.languages.length
           ? Array.from(window.navigator.languages)
           : [window.navigator?.language || '']).filter(Boolean).map(tag => tag.toLowerCase());
+        const configuredLanguage = playbackPreferences?.preferredSubtitleLanguage;
+        const preferred = [configuredLanguage, ...browserLanguages]
+          .filter(Boolean).map(tag => String(tag).toLowerCase())
+          .filter((tag, index, values) => values.indexOf(tag) === index);
         if (preferred.length === 0) return;
         // 浏览器报的是地区（`zh-CN`），字幕轨带的是书写系统（`zh-Hans`），两者不能
         // 直接比对。四字母子标签是书写系统，两字母是地区；中文再按地区反推书写
@@ -1733,7 +1834,20 @@ enum ServerWebMediaDetailPage {
           if (keyword.length <= 2 && /^[a-z]+$/.test(keyword)) return (` ${hint} `).includes(` ${keyword} `);
           return hint.includes(keyword);
         };
+        const forcedWords = ['forced', 'signs', 'songs', '强制', '強制'];
+        const isForced = track => {
+          const hint = normalizedHint(`${track.label || ''} ${track.title || ''}`);
+          return forcedWords.some(word => hasKeyword(hint, word));
+        };
+        const forcedTracks = subtitles.filter(isForced);
+        if (mode === 'preferForced' && forcedTracks.length > 0) subtitles = forcedTracks;
+        if (mode === 'foreignAudio' || (mode === 'preferForced' && forcedTracks.length === 0)) {
+          const audioLanguage = preferredAudioTrack()?.language;
+          const subtitleLanguage = configuredLanguage || preferred[0];
+          if (audioLanguage && subtitleLanguage && parse(audioLanguage).base === parse(subtitleLanguage).base) return;
+        }
         const undesirable = ['forced', 'signs', 'songs', 'commentary', 'director', 'sdh', 'hearing impaired', '强制', '强迫', '注释', '評論', '评论'];
+        const sdhPreference = String(playbackPreferences?.subtitleSDHPreference || 'automatic');
         let best = null;
         subtitles.forEach(track => {
           const candidate = parse(track.language);
@@ -1754,6 +1868,9 @@ enum ServerWebMediaDetailPage {
             if (wanted.script === 'hans' && scriptKeywords.hant.some(word => hasKeyword(hint, word))) score -= 220;
             if (wanted.script === 'hant' && scriptKeywords.hans.some(word => hasKeyword(hint, word))) score -= 220;
             if (undesirable.some(word => hasKeyword(hint, word))) score -= 80;
+            const isSDH = ['sdh', 'hearing impaired', '听障', '聽障'].some(word => hasKeyword(hint, word));
+            if (isSDH && sdhPreference === 'prefer') score += 140;
+            if (isSDH && sdhPreference === 'avoid') score -= 240;
             if (score <= 0) return;
             // 浏览器语言列表是有序偏好，越靠前越优先；默认轨在同分时略优先。
             const ranked = score * 100 - order * 10 + (track.isDefault ? 2 : 0);
@@ -1805,6 +1922,7 @@ enum ServerWebMediaDetailPage {
                 && Number(payload.durationSeconds) > 0
                 ? Number(payload.durationSeconds) : 0
             };
+            await loadPlaybackPreferences();
             if (playbackTracks.durationSeconds > 0) {
               knownDurationSeconds = playbackTracks.durationSeconds;
               updateTransportUI();
@@ -1966,6 +2084,13 @@ enum ServerWebMediaDetailPage {
       const preferredAudioTrack = () => {
         const tracks = playbackTracks?.audio ?? [];
         if (tracks.length === 0) return null;
+        const preferredLanguage = String(playbackPreferences?.preferredAudioLanguage || '').toLowerCase();
+        if (preferredLanguage) {
+          const base = preferredLanguage.split('-')[0];
+          const matching = tracks.find(track => String(track.language || '').toLowerCase() === preferredLanguage)
+            || tracks.find(track => String(track.language || '').toLowerCase().split('-')[0] === base);
+          if (matching) return matching;
+        }
         return tracks.find(track => track.isDefault) ?? tracks[0];
       };
       const directPlayHasSound = () => {
@@ -2546,6 +2671,10 @@ enum ServerWebMediaDetailPage {
         scheduleTransportUI();
       };
       const prepareNewSource = () => {
+        if (currentHLSClient) {
+          currentHLSClient.destroy();
+          currentHLSClient = null;
+        }
         resumeApplied = false;
         playbackStartedReported = false;
         lastProgressBucket = -1;
@@ -2718,6 +2847,70 @@ enum ServerWebMediaDetailPage {
         }).catch(() => {});
       };
 
+      const attachHLS = (mediaURL, sourceRevision) => {
+        const nativeHLS = player.canPlayType('application/vnd.apple.mpegurl') || player.canPlayType('application/x-mpegURL');
+        if (nativeHLS) {
+          player.src = mediaURL;
+          player.load();
+          return;
+        }
+        if (!window.Hls || !window.Hls.isSupported()) throw new Error('hls-unsupported');
+        hlsNetworkRecoveryCount = 0;
+        lastHLSMediaRecoveryAt = 0;
+        const client = new window.Hls({
+          enableWorker:true,
+          lowLatencyMode:false,
+          backBufferLength:30,
+          maxBufferLength:30,
+          maxMaxBufferLength:60
+        });
+        currentHLSClient = client;
+        client.on(window.Hls.Events.MEDIA_ATTACHED, () => {
+          if (sourceRevision !== playbackSourceRevision || currentHLSClient !== client) return;
+          client.loadSource(mediaURL);
+        });
+        client.on(window.Hls.Events.ERROR, (_event, data) => {
+          if (!data?.fatal || sourceRevision !== playbackSourceRevision || currentHLSClient !== client) return;
+          if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR && hlsNetworkRecoveryCount < 2) {
+            hlsNetworkRecoveryCount += 1;
+            window.setTimeout(() => {
+              if (sourceRevision === playbackSourceRevision && currentHLSClient === client) client.startLoad(-1);
+            }, hlsNetworkRecoveryCount * 500);
+            return;
+          }
+          if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+            const now = window.performance.now();
+            if (!lastHLSMediaRecoveryAt || now - lastHLSMediaRecoveryAt >= 5_000) {
+              lastHLSMediaRecoveryAt = now;
+              client.recoverMediaError();
+              return;
+            }
+          }
+          client.destroy();
+          if (currentHLSClient === client) currentHLSClient = null;
+          setBusy(false);
+          setStatus('兼容播放流恢复失败，请稍后重试。', true);
+        });
+        client.attachMedia(player);
+      };
+
+      async function waitForHLSReady(descriptor, sourceRevision) {
+        let current = descriptor;
+        const deadline = window.performance.now() + 12_000;
+        while (current?.state === 'queued' || current?.state === 'preparing') {
+          if (sourceRevision !== playbackSourceRevision) throw new DOMException('Superseded', 'AbortError');
+          if (window.performance.now() >= deadline) throw new Error('unavailable');
+          await new Promise((resolve) => window.setTimeout(resolve, 150));
+          const response = await fetch(`/api/v1/playback/sessions/${encodeURIComponent(current.sessionID)}`, {
+            credentials:'same-origin', headers:{Accept:'application/json'}
+          });
+          if (!response.ok) throw new Error(response.status === 429 ? 'busy' : 'unavailable');
+          current = await response.json();
+        }
+        if (!['ready','playing'].includes(current?.state || 'ready')) throw new Error('unavailable');
+        return current;
+      }
+
       async function startRemux(audioTrackID, startSeconds, options = {}) {
         if (!canDirectPlay || (!playbackTracks?.remuxable && options.allowUnprobed !== true && !isIOSFamily)) return;
         const wasReported = playbackStartedReported;
@@ -2725,22 +2918,30 @@ enum ServerWebMediaDetailPage {
         const requestedStart = Math.max(0, Number.isFinite(startSeconds) ? startSeconds : 0);
         setBusy(true);
         const sourceRevision = ++playbackSourceRevision;
+        let pendingHLSSessionID = '';
         sourceTransitionPending = true;
         remuxAudioTrack = Number.isInteger(audioTrackID) && audioTrackID >= 0 ? audioTrackID : 0;
         setStatus('正在准备兼容播放流…');
         try {
-          const response = await fetch(mediaPath('/api/v1/playback/sessions/'), {
+          const response = await fetch('/api/v1/playback/sessions', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'X-MediaLIB-CSRF': csrfToken },
             body: JSON.stringify({
+              itemID,
               audioTrackID: remuxAudioTrack,
               startSeconds: requestedStart,
-              durationSeconds: knownDurationSeconds > 0 ? knownDurationSeconds : null
+              durationSeconds: knownDurationSeconds > 0 ? knownDurationSeconds : null,
+              capabilities: clientPlaybackCapabilities
             })
           });
           if (response.status === 401) { window.location.assign('/login'); return; }
           if (!response.ok) throw new Error(response.status === 503 ? 'busy' : 'unavailable');
-          const descriptor = await response.json();
+          let descriptor = await response.json();
+          const provisionalSessionID = typeof descriptor?.sessionID === 'string' ? descriptor.sessionID : '';
+          const provisionalMediaURL = typeof descriptor?.mediaURL === 'string' ? descriptor.mediaURL : '';
+          if (!provisionalSessionID || !provisionalMediaURL.startsWith('/api/v1/playback/hls/')) throw new Error('invalid');
+          pendingHLSSessionID = provisionalSessionID;
+          descriptor = await waitForHLSReady(descriptor, sourceRevision);
           const sessionID = typeof descriptor?.sessionID === 'string' ? descriptor.sessionID : '';
           const mediaURL = typeof descriptor?.mediaURL === 'string' ? descriptor.mediaURL : '';
           if (!sessionID || !mediaURL.startsWith('/api/v1/playback/hls/')) throw new Error('invalid');
@@ -2766,8 +2967,7 @@ enum ServerWebMediaDetailPage {
           player.controls = false;
           playerLanding?.setAttribute('hidden', '');
           player.dataset.sourceRevision = String(sourceRevision);
-          player.src = mediaURL;
-          player.load();
+          attachHLS(mediaURL, sourceRevision);
           if (scrubState === 'seeking' && Number.isFinite(scrubTarget)) {
             const targetForRevision = scrubTarget;
             player.addEventListener('loadedmetadata', () => {
@@ -2788,6 +2988,7 @@ enum ServerWebMediaDetailPage {
           buildAudioMenu();
           if (shouldPlay) await player.play();
         } catch (error) {
+          if (pendingHLSSessionID && pendingHLSSessionID !== currentHLSSessionID) cancelHLSSession(pendingHLSSessionID);
           sourceTransitionPending = false;
           if (sourceRevision !== playbackSourceRevision || (!player.paused && player.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA)) return;
           scrubState = 'idle';
@@ -2806,6 +3007,7 @@ enum ServerWebMediaDetailPage {
       directButton.disabled = !canDirectPlay;
       if (!canDirectPlay) setStatus('这段内容现在播不了。确认存放它的硬盘或服务器已连接，然后重试。', true);
       renderPreference();
+      void loadPlaybackPreferences();
       // 轨道名单在**进入页面时**就问，不等按下播放。
       //
       // 字幕与音轨的入口属于"我打开这一集，先看看有没有中文字幕"这件事；从前它们
@@ -3056,10 +3258,12 @@ enum ServerWebMediaDetailPage {
       });
       player.addEventListener('volumechange', scheduleTransportUI);
       window.addEventListener('pagehide', () => {
+        if (currentHLSClient) { currentHLSClient.destroy(); currentHLSClient = null; }
         if (playbackStartedReported) void reportPlaybackState('stopped', true);
         if (currentHLSSessionID) cancelHLSSession(currentHLSSessionID, true);
       }, { signal: lifecycle.signal });
       document.addEventListener('medialib:pagewillunload', () => {
+        if (currentHLSClient) { currentHLSClient.destroy(); currentHLSClient = null; }
         if (transportFrame !== null) window.cancelAnimationFrame(transportFrame);
         if (playbackStartedReported) void reportPlaybackState('stopped', true);
         if (currentHLSSessionID) cancelHLSSession(currentHLSSessionID, true);

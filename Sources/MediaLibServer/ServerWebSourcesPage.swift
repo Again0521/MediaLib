@@ -6,13 +6,13 @@ enum ServerWebSourcesPage {
     static func render(serverName: String, csrfToken: String, categories: [ServerLibraryCategory] = [], sidebarExtras: ServerWebSidebarExtras) -> String {
         let sidebar = ServerWebNavigation.render(
             active: .sources, showAdministration: true, note: .security, categories: categories,
-            extras: sidebarExtras
+            extras: sidebarExtras, context: .administration
         )
         let content = """
         \(ServerWebPageHeader.render(
             icon: .sources,
             eyebrow: "Sources",
-            title: "媒体源",
+            title: "媒体库与来源",
             subtitle: "看看每个来源的情况，随时重新扫描。",
             actions: ServerWebUI.button("添加媒体源…", variant: .secondary, icon: .add, disabled: true, attributes: #" title="媒体源由本机 App 管理""#)
                 + ServerWebUI.button("刷新来源", variant: .primary, icon: .refresh, id: "refresh")
@@ -29,7 +29,7 @@ enum ServerWebSourcesPage {
         <p class="t-footnote t-tertiary sources-footnote">媒体源的路径、网络地址、账号、密码、令牌、Cookie 与连接配置不会发送到网页。</p>
         """
         return ServerWebDocument.render(
-            title: "媒体源",
+            title: "媒体库与来源",
             serverName: serverName,
             csrfToken: csrfToken,
             sidebar: sidebar,

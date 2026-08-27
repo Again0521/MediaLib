@@ -6,7 +6,7 @@ enum ServerWebStatusPage {
     static func render(serverName: String, csrfToken: String, showAdministration: Bool = false, categories: [ServerLibraryCategory] = [], sidebarExtras: ServerWebSidebarExtras) -> String {
         let sidebar = ServerWebNavigation.render(
             active: .status, showAdministration: showAdministration, note: .none, categories: categories,
-            extras: sidebarExtras
+            extras: sidebarExtras, context: .administration
         )
         let content = """
         \(ServerWebPageHeader.render(
@@ -45,7 +45,7 @@ enum ServerWebStatusPage {
             </div>
             <p class="t-footnote t-tertiary">所有网页请求均受认证、授权、CSRF、限速和同源安全策略保护。</p>
             <div class="ui-spacer"></div>
-            <a class="ui-section-more" href="/sources" data-native-navigation="true">查看媒体源\(ServerWebIcon.chevronRight.html(size: .xs))</a>
+            <a class="ui-section-more" href="/admin/libraries" data-native-navigation="true">查看媒体库\(ServerWebIcon.chevronRight.html(size: .xs))</a>
           </section>
         </div>
 

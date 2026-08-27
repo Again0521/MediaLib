@@ -35,6 +35,9 @@ struct MediaLibServer {
                 url: dataDirectories.database,
                 backupDirectory: dataDirectories.databaseBackups
             )
+            let experienceRepository = ServerExperienceRepository(database: database)
+            let operationalSettings = (try? experienceRepository.operationalSettings().value)
+                ?? ServerOperationalSettings()
             // 保险库解锁状态由这台机器上的桌面 App 发布到同一个应用支持目录里，
             // 服务端只读它，而且每次请求都重新读一次：App 一上锁（或者会话过期），
             // 下一个请求就回到锁定。这里不做缓存——保险库的可见性不值得为几微秒
@@ -49,7 +52,8 @@ struct MediaLibServer {
             let mediaTrackCatalog = ServerMediaTrackCatalog()
             let remoteAssetFetcher = ServerRemoteAssetFetcher()
             let hlsPlaybackSessions = ServerHLSPlaybackSessionManager(
-                remoteAssetFetcher: remoteAssetFetcher
+                remoteAssetFetcher: remoteAssetFetcher,
+                maximumConcurrentSessions: operationalSettings.maximumTranscodeSessions
             )
             let catalog = ServerLibraryCatalog(
                 database: database,
@@ -60,6 +64,11 @@ struct MediaLibServer {
             )
             let administrationCatalog = ServerAdministrationCatalog(database: database)
             let authentication = try ServerAuthenticationService(database: database)
+            let maintenanceService = ServerMaintenanceService(
+                database: database,
+                experienceRepository: experienceRepository,
+                backupDirectory: dataDirectories.databaseBackups
+            )
             let inspector = FFprobeMediaInspector()
             // 首屏海报会同时抵达多条 320px 缩略图请求，冷启动时它们全要 decode +
             // JPEG 编码。上游取图有 8 个槽位，派生这一侧按可用核数取值（封顶 8），
@@ -108,6 +117,8 @@ struct MediaLibServer {
                 },
                 remuxStartProvider: { try catalog.remuxStartSeconds(id: $0, at: $1, for: $2) },
                 hlsSessionProvider: { itemID, request, principal in
+                    let policy = try experienceRepository.userPolicy(userID: principal.userID).value
+                    guard policy.playbackAllowed else { return nil }
                     guard var asset = try catalog.publicAsset(
                         id: itemID,
                         for: principal,
@@ -135,7 +146,8 @@ struct MediaLibServer {
                     let normalizedRequest = ServerHLSPlaybackRequest(
                         audioTrackID: request.audioTrackID,
                         startSeconds: request.startSeconds,
-                        durationSeconds: probe?.durationSeconds ?? request.durationSeconds
+                        durationSeconds: probe?.durationSeconds ?? request.durationSeconds,
+                        capabilities: request.capabilities
                     )
                     return hlsPlaybackSessions.create(
                         asset: asset,
@@ -143,8 +155,12 @@ struct MediaLibServer {
                         actualStartSeconds: actualStart,
                         videoCodec: videoCodec,
                         audioCodec: audioCodec,
-                        principal: principal
+                        principal: principal,
+                        policy: policy
                     )
+                },
+                hlsStatusProvider: {
+                    hlsPlaybackSessions.status(sessionID: $0, principal: $1)
                 },
                 hlsResourceProvider: {
                     hlsPlaybackSessions.resource(sessionID: $0, fileName: $1, principal: $2)
@@ -168,6 +184,8 @@ struct MediaLibServer {
                 },
                 currentUserProfileProvider: { try authentication.currentUserProfile(for: $0) },
                 administrationCatalog: administrationCatalog,
+                experienceRepository: experienceRepository,
+                maintenanceService: maintenanceService,
                 authenticationService: authentication,
                 authenticationProvider: { try authentication.principal(forRequestHead: $0) }
             )

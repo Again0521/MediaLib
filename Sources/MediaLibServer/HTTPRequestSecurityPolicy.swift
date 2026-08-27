@@ -112,6 +112,7 @@ struct HTTPRequestSecurityPolicy {
         guard headers["transfer-encoding"] == nil,
               (headers["content-length"]?.count ?? 0) <= 1,
               (headers["range"]?.count ?? 0) <= 1,
+              (headers["if-match"]?.count ?? 0) <= 1,
               (headers["authorization"]?.count ?? 0) <= 1,
               (headers["cookie"]?.count ?? 0) <= 1,
               (headers["content-type"]?.count ?? 0) <= 1,
@@ -147,7 +148,7 @@ struct HTTPRequestSecurityPolicy {
         guard declaredBodyLength == bodyLength else { return .badRequest }
         if declaredBodyLength > 0 {
             guard declaredBodyLength <= 4_096 else { return .payloadTooLarge }
-            guard method == "POST",
+            guard Self.mutatingMethods.contains(method),
                   let contentType = headers["content-type"]?.first?.lowercased(),
                   (Self.isJSONBodyPath(path) &&
                     (contentType == "application/json" || contentType == "application/json; charset=utf-8")) ||
@@ -291,10 +292,10 @@ struct HTTPRequestSecurityPolicy {
             Self.isNativeMlinkMutationPath(path)
     }
 
-    // 当前 Web 写入只有登录、刷新、注销、播放状态和逐用户偏好 POST；不接受未使用的方法，
-    // 避免历史转码清理等 DELETE 请求绕过入口策略进入路由层。
-    private static let allowedMethods: Set<String> = ["GET", "HEAD", "POST"]
-    private static let mutatingMethods: Set<String> = ["POST"]
+    // v30 的设置文档使用 PATCH/PUT/DELETE；它们与 POST 一样必须通过同源、CSRF、
+    // Content-Type 和正文边界校验，不能因为方法不同而成为历史清理接口的旁路。
+    private static let allowedMethods: Set<String> = ["GET", "HEAD", "POST", "PATCH", "PUT", "DELETE"]
+    private static let mutatingMethods: Set<String> = ["POST", "PATCH", "PUT", "DELETE"]
     private static let jsonBodyPaths: Set<String> = [
         "/api/v1/auth/login",
         "/api/v1/auth/refresh"
@@ -303,12 +304,18 @@ struct HTTPRequestSecurityPolicy {
     private static func isJSONBodyPath(_ path: String) -> Bool {
         jsonBodyPaths.contains(path) ||
         path == "/api/v1/auth/password" ||
+        path == "/api/v1/me/preferences" ||
+        path == "/api/v1/me/preferences/device" ||
+        path == "/api/v1/admin/settings" ||
+        path == "/api/v1/admin/jobs" ||
+        path == "/api/v1/playback/sessions" ||
         path == "/api/v1/admin/users" ||
         isAdminMemberJSONPath(path) ||
         path == "/api/v1/queue" ||
         path.hasPrefix("/api/v1/playback/state/") ||
             path.hasPrefix("/api/v1/user-media/preferences/") ||
-            isSingleOpaqueIdentifierPath(path, prefix: "/api/v1/playback/sessions/")
+            isSingleOpaqueIdentifierPath(path, prefix: "/api/v1/playback/sessions/") ||
+            isPlaybackOverridePath(path)
     }
 
     private static func isNativeMlinkMutationPath(_ path: String) -> Bool {
@@ -318,12 +325,20 @@ struct HTTPRequestSecurityPolicy {
 
     private static func isAdminMemberJSONPath(_ path: String) -> Bool {
         let prefix = "/api/v1/admin/users/"
-        for suffix in ["/access", "/password"] {
+        for suffix in ["/access", "/password", "/policy"] {
             guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { continue }
             let identifier = path.dropFirst(prefix.count).dropLast(suffix.count)
             return !identifier.isEmpty && !identifier.contains("/") && !identifier.contains("\\")
         }
         return false
+    }
+
+    private static func isPlaybackOverridePath(_ path: String) -> Bool {
+        let prefix = "/api/v1/me/playback-overrides/"
+        guard path.hasPrefix(prefix) else { return false }
+        let pieces = path.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: false)
+        return pieces.count == 2 && ["media", "series"].contains(String(pieces[0])) &&
+            !pieces[1].isEmpty && !pieces[1].contains("\\")
     }
 
     /// 不要用前缀作为长期授权边界：未来在同一资源树增加子路由时，原生 CSRF

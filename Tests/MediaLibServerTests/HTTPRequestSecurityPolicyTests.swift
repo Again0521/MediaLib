@@ -101,7 +101,7 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
         )
         XCTAssertEqual(
             policy.validate("DELETE /api/v1/playback/state/movie-1 HTTP/1.1\r\nHost: localhost\r\nOrigin: https://attacker.example\r\nX-MediaLIB-CSRF: known-csrf-token\r\n\r\n"),
-            .badRequest
+            .forbidden
         )
     }
 

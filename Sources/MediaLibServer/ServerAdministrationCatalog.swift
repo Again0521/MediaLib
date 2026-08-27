@@ -32,11 +32,11 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
         )
     }
 
-    func users() throws -> ServerManagedUsersResponse {
-        let allUsers = try repository.users()
-        let selected = allUsers.prefix(Self.maximumUserCount)
-        let summaries = try selected.map { user in
-            let grants = try repository.libraryGrants(userID: user.id)
+    func users(limit: Int = maximumUserCount, offset: Int = 0) throws -> ServerManagedUsersResponse {
+        let boundedLimit = min(max(limit, 1), Self.maximumUserCount)
+        let page = try repository.managedUsers(limit: boundedLimit, offset: max(offset, 0))
+        let summaries = page.users.map { aggregate in
+            let user = aggregate.user
             return ServerManagedUserSummary(
                 id: user.id,
                 username: user.username,
@@ -44,37 +44,42 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
                 isBuiltInAdministrator: user.id == ServerIdentityRepository.initialAdministratorUserID,
                 isDisabled: user.isDisabled,
                 requiresInitialPassword: user.requiresInitialPassword,
-                roleIDs: try repository.roleIDs(userID: user.id),
-                libraryIDs: grants.map(\.libraryID),
-                libraryGrantCount: grants.count,
-                activeDeviceCount: try repository.devices(userID: user.id).count,
-                activeSessionCount: try repository.sessions(userID: user.id).count
+                roleIDs: aggregate.roleIDs,
+                libraryIDs: aggregate.libraryIDs,
+                libraryGrantCount: aggregate.libraryGrantCount,
+                activeDeviceCount: aggregate.activeDeviceCount,
+                activeSessionCount: aggregate.activeSessionCount
             )
         }
         return ServerManagedUsersResponse(
-            totalCount: allUsers.count,
-            isTruncated: allUsers.count > summaries.count,
+            totalCount: page.totalCount,
+            isTruncated: offset + summaries.count < page.totalCount,
             users: summaries
         )
     }
 
+    func containsUser(id: String) throws -> Bool {
+        guard Self.isSafeIdentifier(id) else { return false }
+        return try repository.user(id: id) != nil
+    }
+
+    func recordPolicyUpdate(userID: String, actor: ServerRequestPrincipal) throws {
+        try repository.revokeAllSessions(userID: userID, actorUserID: actor.userID)
+        try repository.appendSecurityEvent(ServerSecurityEvent(
+            category: .authorization,
+            action: "user.policy.updated",
+            outcome: .success,
+            actorUserID: actor.userID,
+            targetUserID: userID,
+            sessionID: actor.sessionID,
+            deviceID: actor.deviceID,
+            detailCode: "policy.versioned.sessions.revoked"
+        ))
+    }
+
     func activeSessions() throws -> ServerManagedSessionsResponse {
-        // 用户数本身也受固定上限约束，避免异常数据库让一次请求产生无界查询扇出。
-        let users = try repository.users().prefix(Self.maximumUserCount)
-        var devices: [ServerDevice] = []
-        var sessions: [ServerAuthSession] = []
-        for user in users {
-            devices.append(contentsOf: try repository.devices(userID: user.id))
-            sessions.append(contentsOf: try repository.sessions(userID: user.id))
-        }
-        devices.sort {
-            if $0.lastSeenAt != $1.lastSeenAt { return $0.lastSeenAt > $1.lastSeenAt }
-            return $0.id < $1.id
-        }
-        sessions.sort {
-            if $0.lastUsedAt != $1.lastUsedAt { return $0.lastUsedAt > $1.lastUsedAt }
-            return $0.id < $1.id
-        }
+        let devices = try repository.activeDevices(limit: Self.maximumDeviceCount + 1)
+        let sessions = try repository.activeSessions(limit: Self.maximumSessionCount + 1)
         let selectedDevices = devices.prefix(Self.maximumDeviceCount)
         let selectedSessions = sessions.prefix(Self.maximumSessionCount)
         return ServerManagedSessionsResponse(

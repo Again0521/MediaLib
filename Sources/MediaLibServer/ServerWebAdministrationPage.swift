@@ -4,10 +4,16 @@ import MediaLibServerProtocol
 /// 只读 Web 管理总览。动态数据全部由同源脚本通过受保护 API 获取，并使用
 /// `textContent` 渲染；页面本身不内嵌用户数据、令牌或数据库实体。
 enum ServerWebAdministrationPage {
-    static func render(serverName: String, csrfToken: String, categories: [ServerLibraryCategory] = [], sidebarExtras: ServerWebSidebarExtras) -> String {
+    static func render(
+        serverName: String,
+        csrfToken: String,
+        active: ServerWebNavigation.Active = .administration,
+        categories: [ServerLibraryCategory] = [],
+        sidebarExtras: ServerWebSidebarExtras
+    ) -> String {
         let sidebar = ServerWebNavigation.render(
-            active: .administration, showAdministration: true, note: .security, categories: categories,
-            extras: sidebarExtras
+            active: active, showAdministration: true, note: .security, categories: categories,
+            extras: sidebarExtras, context: .administration
         )
         let content = """
         \(ServerWebPageHeader.render(
@@ -75,6 +81,45 @@ enum ServerWebAdministrationPage {
               <legend class="ui-label">允许播放的资料库</legend>
               <p id="edit-library-selection-state" class="ui-help">请选择资料库。</p>
               <div id="edit-library-options" class="library-options" hidden></div>
+            </fieldset>
+            <fieldset class="admin-fieldset">
+              <legend class="ui-label">播放与远程策略</legend>
+              <p id="edit-policy-state" class="ui-help" role="status">选择成员后加载策略。</p>
+              <div class="admin-policy-grid">
+                <label><input id="policy-playback" type="checkbox">允许播放</label>
+                <label><input id="policy-remote" type="checkbox">允许远程访问</label>
+                <label><input id="policy-direct" type="checkbox">允许 Direct Play</label>
+                <label><input id="policy-remux" type="checkbox">允许 Remux</label>
+                <label><input id="policy-transcode" type="checkbox">允许转码</label>
+                <label><input id="policy-download" type="checkbox">允许下载</label>
+              </div>
+              <div class="admin-form-grid">
+                <div class="ui-field">
+                  <label class="ui-label" for="policy-streams">并发流上限</label>
+                  <select class="ui-input" id="policy-streams">
+                    <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+                    <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+                    <option value="7">7</option><option value="8">8</option>
+                  </select>
+                </div>
+                <div class="ui-field">
+                  <label class="ui-label" for="policy-bitrate">远程码率上限（Mbps）</label>
+                  <input class="ui-input" id="policy-bitrate" type="number" min="1" max="200" inputmode="numeric" placeholder="继承服务器默认值">
+                </div>
+                <div class="ui-field">
+                  <label class="ui-label" for="policy-start">允许访问开始时间</label>
+                  <input class="ui-input" id="policy-start" type="time">
+                </div>
+                <div class="ui-field">
+                  <label class="ui-label" for="policy-end">允许访问结束时间</label>
+                  <input class="ui-input" id="policy-end" type="time">
+                </div>
+              </div>
+              <div class="ui-field">
+                <label class="ui-label" for="policy-rating">最高内容分级</label>
+                <input class="ui-input" id="policy-rating" type="text" maxlength="32" placeholder="不限制">
+              </div>
+              <p class="ui-help">访问时间必须同时填写或同时留空。保存策略后该成员的现有会话会失效。</p>
             </fieldset>
             <div class="ui-field">
               <label class="ui-label" for="edit-password">重置密码（可选）</label>
@@ -163,6 +208,20 @@ enum ServerWebAdministrationPage {
       margin: 0;
       accent-color: var(--accent);
     }
+    .admin-policy-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-1) var(--space-4);
+    }
+    .admin-policy-grid label {
+      display: flex;
+      min-height: var(--control-height-lg);
+      align-items: center;
+      gap: var(--space-3);
+      font-size: var(--type-callout-size);
+      cursor: pointer;
+    }
+    .admin-policy-grid input { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
     .edit-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 
     /* Users and sessions sit side by side; the audit log takes the full width
@@ -212,6 +271,7 @@ enum ServerWebAdministrationPage {
 
     @media (max-width: 719px) {
       .admin-form-grid { grid-template-columns: minmax(0, 1fr); }
+      .admin-policy-grid { grid-template-columns: minmax(0, 1fr); }
       .row > * { flex: 1 1 100%; }
       .row-trail { flex: 1 1 100%; margin-left: 0; }
       .admin-form .ui-btn, .edit-actions .ui-btn { width: 100%; }
@@ -241,8 +301,25 @@ enum ServerWebAdministrationPage {
       const editPassword = byID('edit-password');
       const editLibrarySelectionState = byID('edit-library-selection-state');
       const editLibraryOptions = byID('edit-library-options');
+      const editPolicyState = byID('edit-policy-state');
+      const policyPlayback = byID('policy-playback');
+      const policyRemote = byID('policy-remote');
+      const policyDirect = byID('policy-direct');
+      const policyRemux = byID('policy-remux');
+      const policyTranscode = byID('policy-transcode');
+      const policyDownload = byID('policy-download');
+      const policyStreams = byID('policy-streams');
+      const policyBitrate = byID('policy-bitrate');
+      const policyStart = byID('policy-start');
+      const policyEnd = byID('policy-end');
+      const policyRating = byID('policy-rating');
       var availableLibraries = [];
       var editingUser = null;
+      var editingPolicy = null;
+      var editingPolicyETag = null;
+      var policyLoadRevision = 0;
+      var loadedUsers = [];
+      var loadedUserTotal = 0;
       const dateFormatter = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
       const safeDate = (value) => {
         const date = new Date(value);
@@ -387,13 +464,71 @@ enum ServerWebAdministrationPage {
           createSubmit.disabled = false;
         }
       }
+      const minutesToTime = (value) => {
+        if (!Number.isInteger(value) || value < 0 || value >= 1440) return '';
+        return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
+      };
+      const timeToMinutes = (value) => {
+        if (!value) return null;
+        const match = /^(\d{2}):(\d{2})$/.exec(value);
+        if (!match) return NaN;
+        const hours = Number(match[1]);
+        const minutes = Number(match[2]);
+        return hours < 24 && minutes < 60 ? hours * 60 + minutes : NaN;
+      };
+      async function loadUserPolicy(userID) {
+        const revision = ++policyLoadRevision;
+        editingPolicy = null;
+        editingPolicyETag = null;
+        editPolicyState.textContent = '正在加载播放策略…';
+        editPolicyState.classList.remove('error');
+        editSubmit.disabled = true;
+        try {
+          const response = await fetch(`/api/v1/admin/users/${encodeURIComponent(userID)}/policy`, {
+            credentials: 'same-origin', headers: { 'Accept': 'application/json' }
+          });
+          if (response.status === 401) { window.location.assign('/login'); return; }
+          if (response.status === 403) throw new Error('你没有查看用户播放策略的权限。');
+          if (!response.ok) throw new Error('无法读取用户播放策略。');
+          const documentValue = await response.json();
+          if (revision !== policyLoadRevision || editingUser?.id !== userID) return;
+          const policy = documentValue && documentValue.value;
+          const etag = response.headers.get('ETag');
+          if (!policy || !etag) throw new Error('播放策略响应不完整。');
+          editingPolicy = policy;
+          editingPolicyETag = etag;
+          policyPlayback.checked = policy.playbackAllowed === true;
+          policyRemote.checked = policy.remoteAccessAllowed === true;
+          policyDirect.checked = policy.directPlayAllowed === true;
+          policyRemux.checked = policy.remuxAllowed === true;
+          policyTranscode.checked = policy.transcodeAllowed === true;
+          policyDownload.checked = policy.downloadAllowed === true;
+          policyStreams.value = String(Number.isInteger(policy.maximumConcurrentStreams) ? policy.maximumConcurrentStreams : 2);
+          policyBitrate.value = Number.isInteger(policy.remoteBitrateLimitMbps) ? String(policy.remoteBitrateLimitMbps) : '';
+          policyStart.value = minutesToTime(policy.accessStartMinute);
+          policyEnd.value = minutesToTime(policy.accessEndMinute);
+          policyRating.value = typeof policy.maximumContentRating === 'string' ? policy.maximumContentRating : '';
+          editPolicyState.textContent = '策略已加载；保存后新限制立即生效。';
+        } catch (error) {
+          if (revision !== policyLoadRevision || editingUser?.id !== userID) return;
+          editPolicyState.classList.add('error');
+          editPolicyState.textContent = error && error.message ? error.message : '无法读取用户播放策略。';
+        } finally {
+          if (revision === policyLoadRevision && editingUser?.id === userID) editSubmit.disabled = false;
+        }
+      }
       function closeEditUser() {
+        policyLoadRevision += 1;
         editingUser = null;
+        editingPolicy = null;
+        editingPolicyETag = null;
         editForm.reset();
         editForm.removeAttribute('data-user-id');
         editPanel.hidden = true;
         editState.textContent = '';
         editState.classList.remove('error');
+        editPolicyState.textContent = '选择成员后加载策略。';
+        editPolicyState.classList.remove('error');
       }
       function openEditUser(user, focusPassword = false) {
         if (!user || typeof user.id !== 'string' || !user.id || user.isBuiltInAdministrator) return;
@@ -407,6 +542,7 @@ enum ServerWebAdministrationPage {
         editState.textContent = '编辑普通成员访问；保存后其现有会话会失效。';
         editPanel.hidden = false;
         editPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        loadUserPolicy(user.id);
         (focusPassword ? editPassword : editDisplayName).focus({ preventScroll: true });
       }
       async function saveMemberEdit(event) {
@@ -430,6 +566,44 @@ enum ServerWebAdministrationPage {
           editPassword.focus();
           return;
         }
+        if (!editingPolicy || !editingPolicyETag) {
+          editState.classList.add('error');
+          editState.textContent = '播放策略尚未加载，请稍后再试。';
+          return;
+        }
+        const accessStartMinute = timeToMinutes(policyStart.value);
+        const accessEndMinute = timeToMinutes(policyEnd.value);
+        if (Number.isNaN(accessStartMinute) || Number.isNaN(accessEndMinute) ||
+            ((accessStartMinute === null) !== (accessEndMinute === null))) {
+          editState.classList.add('error');
+          editState.textContent = '访问开始和结束时间必须同时填写，且使用有效时间。';
+          return;
+        }
+        const bitrateValue = policyBitrate.value.trim();
+        const remoteBitrateLimitMbps = bitrateValue ? Number(bitrateValue) : null;
+        const maximumConcurrentStreams = Number(policyStreams.value);
+        const maximumContentRating = policyRating.value.trim() || null;
+        if (!Number.isInteger(maximumConcurrentStreams) || maximumConcurrentStreams < 1 || maximumConcurrentStreams > 8 ||
+            (remoteBitrateLimitMbps !== null && (!Number.isInteger(remoteBitrateLimitMbps) || remoteBitrateLimitMbps < 1 || remoteBitrateLimitMbps > 200)) ||
+            (maximumContentRating && new TextEncoder().encode(maximumContentRating).length > 32)) {
+          editState.classList.add('error');
+          editState.textContent = '请检查并发流、远程码率和内容分级。';
+          return;
+        }
+        const policy = {
+          schemaVersion: 1,
+          playbackAllowed: policyPlayback.checked,
+          remoteAccessAllowed: policyRemote.checked,
+          directPlayAllowed: policyDirect.checked,
+          remuxAllowed: policyRemux.checked,
+          transcodeAllowed: policyTranscode.checked,
+          downloadAllowed: policyDownload.checked,
+          maximumConcurrentStreams,
+          remoteBitrateLimitMbps,
+          accessStartMinute,
+          accessEndMinute,
+          maximumContentRating
+        };
         const token = document.querySelector('meta[name="medialib-csrf-token"]')?.getAttribute('content');
         if (!token) { editState.classList.add('error'); editState.textContent = '页面安全令牌不可用，请刷新后重试。'; return; }
         editSubmit.disabled = true;
@@ -455,8 +629,24 @@ enum ServerWebAdministrationPage {
             if (passwordResponse.status === 403) throw new Error('你没有重置密码的权限。');
             if (!passwordResponse.ok) throw new Error(passwordResponse.status === 429 ? '操作过于频繁，请稍后重试。' : '访问已保存，但密码未更新。');
           }
+          const policyResponse = await fetch(`/api/v1/admin/users/${encodedID}/policy`, {
+            method: 'PATCH', credentials: 'same-origin',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-MediaLIB-CSRF': token,
+              'If-Match': editingPolicyETag
+            },
+            body: JSON.stringify(policy)
+          });
+          if (policyResponse.status === 401) { window.location.assign('/login'); return; }
+          if (policyResponse.status === 403) throw new Error('访问已保存，但你没有修改播放策略的权限。');
+          if (policyResponse.status === 409) throw new Error('访问已保存，但播放策略已在另一个页面改变，请重新打开成员后再保存。');
+          if (!policyResponse.ok) throw new Error(policyResponse.status === 429 ? '访问已保存，但操作过于频繁，请稍后重试策略。' : '访问已保存，但播放策略未更新。');
+          const savedPolicy = await policyResponse.json();
+          editingPolicy = savedPolicy.value;
+          editingPolicyETag = policyResponse.headers.get('ETag');
           editPassword.value = '';
-          editState.textContent = password ? '已更新。TA 的设备需要重新登录。' : '已更新。TA 的设备需要重新登录。';
+          editState.textContent = '已更新访问与播放策略。TA 的设备需要重新登录。';
           await load();
         } catch (error) {
           editState.classList.add('error');
@@ -466,9 +656,17 @@ enum ServerWebAdministrationPage {
           editSubmit.disabled = false;
         }
       }
-      function renderUsers(data) {
-        const users = Array.isArray(data.users) ? data.users : [];
-        byID('users-count').textContent = String(Number.isFinite(data.totalCount) ? data.totalCount : users.length);
+      function renderUsers(data, append = false) {
+        const incoming = Array.isArray(data.users) ? data.users : [];
+        if (append) {
+          const known = new Set(loadedUsers.map((user) => user && user.id));
+          incoming.forEach((user) => { if (user && !known.has(user.id)) loadedUsers.push(user); });
+        } else {
+          loadedUsers = incoming.slice(0, 200);
+        }
+        loadedUserTotal = Number.isFinite(data.totalCount) ? data.totalCount : loadedUsers.length;
+        const users = loadedUsers;
+        byID('users-count').textContent = String(loadedUserTotal);
         if (editingUser) {
           const refreshed = users.find((user) => user && user.id === editingUser.id);
           if (refreshed) {
@@ -488,24 +686,42 @@ enum ServerWebAdministrationPage {
           const role = element('div', 'secondary', Array.isArray(user.roleIDs) ? user.roleIDs.join('、') : '未分配角色');
           const libraryCount = Array.isArray(user.libraryIDs) ? user.libraryIDs.length : (user.libraryGrantCount || 0);
           const access = element('div', 'meta mono', `${libraryCount} 个资料库 · ${user.activeDeviceCount || 0} 台设备`);
-          const actions = element('div');
+          const actions = element('div', 'row-trail');
           actions.append(element('span', `pill${user.isDisabled ? ' danger' : ''}`, user.isBuiltInAdministrator ? '内置管理员' : (user.isDisabled ? '已停用' : (user.requiresInitialPassword ? '待设置密码' : '正常'))));
           if (!user.isBuiltInAdministrator) {
-            const edit = element('button', 'user-toggle', '编辑访问');
+            const edit = element('button', 'ui-btn ui-btn-ghost user-toggle', '编辑访问');
             edit.type = 'button';
             edit.addEventListener('click', () => openEditUser(user));
             actions.append(edit);
-            const resetPassword = element('button', 'user-toggle', '重置密码');
+            const resetPassword = element('button', 'ui-btn ui-btn-ghost user-toggle', '重置密码');
             resetPassword.type = 'button';
             resetPassword.addEventListener('click', () => openEditUser(user, true));
             actions.append(resetPassword);
-            const toggle = element('button', 'user-toggle', user.isDisabled ? '启用' : '停用');
+            const toggle = element('button', 'ui-btn ui-btn-ghost user-toggle', user.isDisabled ? '启用' : '停用');
             toggle.type = 'button';
             toggle.addEventListener('click', () => setUserAvailability(user.id, !user.isDisabled, toggle));
             actions.append(toggle);
           }
           rows.append(row([identity, role, access, actions]));
         });
+        if (loadedUsers.length < loadedUserTotal) {
+          const moreRow = element('div', 'row');
+          const more = element('button', 'ui-btn ui-btn-secondary', '加载更多用户');
+          more.type = 'button';
+          more.addEventListener('click', async () => {
+            more.disabled = true;
+            try {
+              const next = await fetchJSON(`/api/v1/admin/users?offset=${loadedUsers.length}&limit=100`);
+              renderUsers(next, true);
+            } catch (error) {
+              globalStatus.hidden = false;
+              globalStatusText.textContent = error && error.message ? error.message : '无法加载更多用户。';
+              more.disabled = false;
+            }
+          });
+          moreRow.append(more);
+          rows.append(moreRow);
+        }
         showContent('users', rows);
       }
       async function setUserAvailability(id, disabled, button) {
@@ -598,7 +814,7 @@ enum ServerWebAdministrationPage {
         globalStatusText.textContent = '正在加载管理数据…';
         ['users', 'sessions', 'events'].forEach((name) => setState(name, '正在加载…'));
         const results = await Promise.allSettled([
-          fetchJSON('/api/v1/admin/users'),
+          fetchJSON('/api/v1/admin/users?offset=0&limit=100'),
           fetchJSON('/api/v1/admin/sessions'),
           fetchJSON('/api/v1/admin/security-events'),
           fetchJSON('/api/v1/admin/libraries')

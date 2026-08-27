@@ -115,6 +115,193 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(response(path: "/api/v1/admin/libraries", token: "administrator").statusCode, 200)
     }
 
+    func testAdministrationPagesAreSeparatedByPathAndPermission() {
+        XCTAssertEqual(response(path: "/admin", token: "server-manager").statusCode, 200)
+        XCTAssertEqual(response(path: "/admin/users", token: "user-manager").statusCode, 200)
+        XCTAssertEqual(response(path: "/admin/sessions", token: "session-manager").statusCode, 200)
+        XCTAssertEqual(response(path: "/admin/libraries", token: "library-manager").statusCode, 200)
+        XCTAssertEqual(response(path: "/admin/playback", token: "server-manager").statusCode, 200)
+        XCTAssertEqual(response(path: "/admin/tasks", token: "library-manager").statusCode, 200)
+        XCTAssertEqual(response(path: "/admin/network", token: "member").statusCode, 403)
+
+        let legacyStatus = response(path: "/status", token: "server-manager")
+        XCTAssertEqual(legacyStatus.statusCode, 303)
+        XCTAssertTrue(legacyStatus.additionalHeaders.contains("Location: /admin"))
+        XCTAssertEqual(response(path: "/status", token: "member").statusCode, 403)
+    }
+
+    func testPreferencesAPIUsesETagAndRejectsLostUpdates() throws {
+        let initial = response(path: "/api/v1/me/preferences", token: "preferences")
+        XCTAssertEqual(initial.statusCode, 200)
+        XCTAssertTrue(initial.additionalHeaders.contains("ETag: \"0\""))
+        let head = router.response(
+            for: "HEAD /api/v1/me/preferences HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer preferences\r\n\r\n"
+        )
+        XCTAssertEqual(head.statusCode, 200)
+        XCTAssertTrue(head.body.isEmpty)
+        XCTAssertEqual(head.declaredContentLength, initial.declaredContentLength)
+
+        var preferences = ServerUserExperiencePreferences()
+        preferences.preferredAudioLanguage = "zh-Hans"
+        preferences.subtitleMode = .preferForced
+        let body = try JSONEncoder().encode(preferences)
+        let request = "PATCH /api/v1/me/preferences HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer preferences\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nIf-Match: \"0\"\r\nX-MediaLIB-CSRF: test-csrf-token\r\n\r\n"
+        let saved = router.response(for: request, body: body)
+        XCTAssertEqual(saved.statusCode, 200)
+        XCTAssertTrue(saved.additionalHeaders.contains("ETag: \"1\""))
+
+        let stale = router.response(for: request, body: body)
+        XCTAssertEqual(stale.statusCode, 409)
+        XCTAssertTrue(stale.additionalHeaders.contains("ETag: \"1\""))
+
+        let missingPrecondition = request.replacingOccurrences(of: "If-Match: \"0\"\r\n", with: "")
+        XCTAssertEqual(router.response(for: missingPrecondition, body: body).statusCode, 428)
+
+        var unknownObject = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        unknownObject["administrator"] = true
+        let unknownBody = try JSONSerialization.data(withJSONObject: unknownObject, options: [.sortedKeys])
+        let unknownRequest = request
+            .replacingOccurrences(of: "Content-Length: \(body.count)", with: "Content-Length: \(unknownBody.count)")
+            .replacingOccurrences(of: "If-Match: \"0\"", with: "If-Match: \"1\"")
+        XCTAssertEqual(router.response(for: unknownRequest, body: unknownBody).statusCode, 400)
+
+        var nestedUnknown = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        var subtitleStyle = try XCTUnwrap(nestedUnknown["subtitleStyle"] as? [String: Any])
+        subtitleStyle["unsafeCSS"] = "url(https://example.invalid)"
+        nestedUnknown["subtitleStyle"] = subtitleStyle
+        let nestedBody = try JSONSerialization.data(withJSONObject: nestedUnknown, options: [.sortedKeys])
+        let nestedRequest = request
+            .replacingOccurrences(of: "Content-Length: \(body.count)", with: "Content-Length: \(nestedBody.count)")
+            .replacingOccurrences(of: "If-Match: \"0\"", with: "If-Match: \"1\"")
+        XCTAssertEqual(router.response(for: nestedRequest, body: nestedBody).statusCode, 400)
+    }
+
+    func testUserPolicyRequiresUserManagementUsesETagAndWritesAudit() throws {
+        let path = "/api/v1/admin/users/user-bob/policy"
+        XCTAssertEqual(response(path: path, token: "member").statusCode, 403)
+        let initial = response(path: path, token: "user-manager")
+        XCTAssertEqual(initial.statusCode, 200)
+        XCTAssertTrue(initial.additionalHeaders.contains("ETag: \"0\""))
+        XCTAssertTrue(String(decoding: initial.body, as: UTF8.self).contains("\"directPlayAllowed\":true"))
+
+        var policy = ServerUserPolicy()
+        policy.directPlayAllowed = false
+        policy.maximumConcurrentStreams = 1
+        policy.remoteBitrateLimitMbps = 12
+        let body = try JSONEncoder().encode(policy)
+        let request = "PATCH \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer user-manager\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nIf-Match: \"0\"\r\nX-MediaLIB-CSRF: test-csrf-token\r\n\r\n"
+        let saved = router.response(for: request, body: body)
+        XCTAssertEqual(saved.statusCode, 200)
+        XCTAssertTrue(saved.additionalHeaders.contains("ETag: \"1\""))
+        XCTAssertEqual(router.response(for: request, body: body).statusCode, 409)
+        XCTAssertTrue(try repository.sessions(userID: "user-bob").isEmpty)
+
+        let unknown = Data(#"{"schemaVersion":1,"playbackAllowed":true,"remoteAccessAllowed":true,"directPlayAllowed":false,"remuxAllowed":true,"transcodeAllowed":true,"downloadAllowed":false,"maximumConcurrentStreams":1,"remoteBitrateLimitMbps":12,"accessStartMinute":null,"accessEndMinute":null,"maximumContentRating":null,"roleID":"server-role-admin"}"#.utf8)
+        let unknownRequest = request
+            .replacingOccurrences(of: "Content-Length: \(body.count)", with: "Content-Length: \(unknown.count)")
+            .replacingOccurrences(of: "If-Match: \"0\"", with: "If-Match: \"1\"")
+        XCTAssertEqual(router.response(for: unknownRequest, body: unknown).statusCode, 400)
+        XCTAssertEqual(response(path: "/api/v1/admin/users/no-such-user/policy", token: "user-manager").statusCode, 404)
+        XCTAssertTrue(try repository.securityEvents(limit: 20).contains {
+            $0.action == "user.policy.updated" && $0.targetUserID == "user-bob" &&
+                $0.actorUserID == "user-alice"
+        })
+    }
+
+    func testBackupMaintenanceIsPermissionedAsynchronousOpaqueAndAudited() async throws {
+        XCTAssertEqual(response(path: "/api/v1/admin/backups", token: "member").statusCode, 403)
+        XCTAssertEqual(response(path: "/api/v1/admin/logs", token: "member").statusCode, 403)
+
+        let creation = router.response(
+            for: mutationRequest("/api/v1/admin/backups", token: "server-manager", bodyLength: 0)
+        )
+        XCTAssertEqual(creation.statusCode, 201)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let job = try decoder.decode(ServerJob.self, from: creation.body)
+        XCTAssertEqual(job.kind, "database.backup")
+        XCTAssertEqual(job.state, .queued)
+
+        let experience = ServerExperienceRepository(database: database)
+        var completed: ServerJob?
+        for _ in 0..<100 {
+            completed = try experience.jobs(limit: 20).first(where: { $0.id == job.id })
+            if completed?.state == .succeeded || completed?.state == .failed { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(completed?.state, .succeeded)
+        XCTAssertEqual(completed?.resultCode, "backup.created")
+
+        let listing = response(path: "/api/v1/admin/backups", token: "server-manager")
+        XCTAssertEqual(listing.statusCode, 200)
+        let backups = try decoder.decode([ServerBackupSummary].self, from: listing.body)
+        let backup = try XCTUnwrap(backups.first)
+        XCTAssertEqual(backup.id.count, 32)
+        XCTAssertGreaterThan(backup.byteLength, 0)
+        let serialized = String(decoding: listing.body, as: UTF8.self)
+        XCTAssertFalse(serialized.contains(directory.path))
+        XCTAssertFalse(serialized.contains(".sqlite"))
+
+        let backupDirectory = directory.appendingPathComponent("backups", isDirectory: true)
+        let files = try FileManager.default.contentsOfDirectory(at: backupDirectory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "sqlite" }
+        XCTAssertEqual(files.count, 1)
+        let directoryMode = (try FileManager.default.attributesOfItem(atPath: backupDirectory.path)[.posixPermissions] as? NSNumber)?.intValue
+        let fileMode = (try FileManager.default.attributesOfItem(atPath: files[0].path)[.posixPermissions] as? NSNumber)?.intValue
+        XCTAssertEqual(directoryMode, 0o700)
+        XCTAssertEqual(fileMode, 0o600)
+
+        let download = response(
+            path: "/api/v1/admin/backups/\(backup.id)/download",
+            token: "server-manager"
+        )
+        XCTAssertEqual(download.statusCode, 200)
+        XCTAssertEqual(Int64(download.declaredContentLength), backup.byteLength)
+        XCTAssertTrue(try repository.securityEvents(limit: 20).contains {
+            $0.action == "backup.created" && $0.actorUserID == "user-alice"
+        })
+
+        let logs = response(path: "/api/v1/admin/logs", token: "server-manager")
+        XCTAssertEqual(logs.statusCode, 200)
+        XCTAssertFalse(String(decoding: logs.body, as: UTF8.self).contains(directory.path))
+    }
+
+    func testLibraryMaintenanceJobExecutesAndRejectsDecorativeUnsupportedKinds() async throws {
+        let body = Data(#"{"kind":"library.scan"}"#.utf8)
+        let denied = router.response(
+            for: mutationRequest("/api/v1/admin/jobs", token: "member", bodyLength: body.count),
+            body: body
+        )
+        XCTAssertEqual(denied.statusCode, 403)
+
+        let creation = router.response(
+            for: mutationRequest("/api/v1/admin/jobs", token: "library-manager", bodyLength: body.count),
+            body: body
+        )
+        XCTAssertEqual(creation.statusCode, 201)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let job = try decoder.decode(ServerJob.self, from: creation.body)
+        let experience = ServerExperienceRepository(database: database)
+        var completed: ServerJob?
+        for _ in 0..<100 {
+            completed = try experience.jobs(limit: 20).first(where: { $0.id == job.id })
+            if completed?.state == .succeeded || completed?.state == .failed { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(completed?.state, .succeeded)
+        XCTAssertEqual(completed?.resultCode, "scan.no-eligible-sources")
+        XCTAssertTrue(try repository.securityEvents(limit: 20).contains {
+            $0.action == "maintenance.completed" && $0.detailCode == "library.scan"
+        })
+
+        let unsupported = Data(#"{"kind":"metadata.refresh"}"#.utf8)
+        XCTAssertEqual(router.response(
+            for: mutationRequest("/api/v1/admin/jobs", token: "library-manager", bodyLength: unsupported.count),
+            body: unsupported
+        ).statusCode, 400)
+    }
+
     /// 局域网就绪度属于服务管理面，未认证与非管理员都拿不到部署形态。
     func testLanReadinessRouteRequiresServerManagementAndLeaksNoDeploymentDetail() throws {
         XCTAssertEqual(response(path: "/api/v1/admin/lan-readiness", token: nil).statusCode, 401)
@@ -194,14 +381,30 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertGreaterThan(response.totalCount, ServerAdministrationCatalog.maximumUserCount)
         XCTAssertEqual(response.users.count, ServerAdministrationCatalog.maximumUserCount)
         XCTAssertTrue(response.isTruncated)
+
+        let firstPageResponse = self.response(
+            path: "/api/v1/admin/users?offset=0&limit=100", token: "administrator"
+        )
+        let secondPageResponse = self.response(
+            path: "/api/v1/admin/users?offset=100&limit=100", token: "administrator"
+        )
+        let firstPage = try JSONDecoder().decode(ServerManagedUsersResponse.self, from: firstPageResponse.body)
+        let secondPage = try JSONDecoder().decode(ServerManagedUsersResponse.self, from: secondPageResponse.body)
+        XCTAssertEqual(firstPage.users.count, 100)
+        XCTAssertEqual(secondPage.users.count, 100)
+        XCTAssertTrue(Set(firstPage.users.map(\.id)).isDisjoint(with: secondPage.users.map(\.id)))
+        XCTAssertEqual(firstPage.totalCount, secondPage.totalCount)
+        XCTAssertEqual(self.response(
+            path: "/api/v1/admin/users?limit=100&sort=password", token: "administrator"
+        ).statusCode, 400)
     }
 
     func testAdministrationPageAndScriptKeepDynamicContentOutOfHTMLSinks() {
         let administratorPage = router.response(
-            for: "GET /admin HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer administrator\r\n\r\n"
+            for: "GET /admin/users HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer administrator\r\n\r\n"
         )
         let deniedPage = router.response(
-            for: "GET /admin HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer member\r\n\r\n"
+            for: "GET /admin/users HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer member\r\n\r\n"
         )
         let asset = router.response(for: "GET /assets/admin.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
         let stylesheet = router.response(for: "GET /assets/admin.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -219,6 +422,8 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertTrue(html.contains("href=\"/assets/admin.css?v="))
         XCTAssertFalse(html.contains("<style>"))
         XCTAssertTrue(html.contains("id=\"create-member\""))
+        XCTAssertTrue(html.contains("id=\"policy-direct\""))
+        XCTAssertTrue(html.contains("id=\"policy-streams\""))
         XCTAssertTrue(script.contains("textContent"))
         XCTAssertTrue(script.contains("replaceChildren"))
         XCTAssertTrue(script.contains("credentials: 'same-origin'"))
@@ -232,6 +437,9 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertTrue(script.contains("/api/v1/admin/users"))
         XCTAssertTrue(script.contains("/access`"))
         XCTAssertTrue(script.contains("/password`"))
+        XCTAssertTrue(script.contains("/policy`"))
+        XCTAssertTrue(script.contains("method: 'PATCH'"))
+        XCTAssertTrue(script.contains("'If-Match': editingPolicyETag"))
         XCTAssertTrue(script.contains("edit-member"))
         XCTAssertTrue(script.contains("editLibraryID"))
         XCTAssertTrue(script.contains("JSON.stringify({ username, displayName, password, libraryIDs })"))
@@ -241,16 +449,20 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertFalse(stylesheetHeaders.contains("Cache-Control: no-store"))
         XCTAssertTrue(style.contains(".admin-form"))
         XCTAssertTrue(style.contains(".library-options"))
+        XCTAssertTrue(style.contains(".admin-policy-grid"))
         XCTAssertFalse(style.contains("administrator"))
         XCTAssertFalse(style.contains("test-csrf-token"))
     }
 
-    func testSourcesPageIsServerManagerOnlyAndUsesSafeExternalScript() {
+    func testLibrariesPageUsesLibraryPermissionAndLegacyPathIsAuthorizedRedirect() {
         let page = router.response(
-            for: "GET /sources HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer server-manager\r\n\r\n"
+            for: "GET /admin/libraries HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer library-manager\r\n\r\n"
         )
         let denied = router.response(
             for: "GET /sources HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer member\r\n\r\n"
+        )
+        let legacy = router.response(
+            for: "GET /sources HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer library-manager\r\n\r\n"
         )
         let asset = router.response(for: "GET /assets/sources.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
         let stylesheet = router.response(for: "GET /assets/sources.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -261,6 +473,8 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
 
         XCTAssertEqual(page.statusCode, 200)
         XCTAssertEqual(denied.statusCode, 403)
+        XCTAssertEqual(legacy.statusCode, 303)
+        XCTAssertTrue(legacy.additionalHeaders.contains("Location: /admin/libraries"))
         XCTAssertEqual(asset.statusCode, 200)
         XCTAssertTrue(html.contains("src=\"/assets/sources.js?v="))
         XCTAssertTrue(html.contains("href=\"/assets/sources.css?v="))
@@ -490,6 +704,11 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
             serverID: "server",
             serverName: "Media & <script>alert(1)</script>",
             administrationCatalog: catalog,
+            experienceRepository: ServerExperienceRepository(database: database),
+            maintenanceService: ServerMaintenanceService(
+                database: database,
+                backupDirectory: directory.appendingPathComponent("backups", isDirectory: true)
+            ),
             authenticationProvider: { requestHead in
                 guard let token = httpHeader(named: "Authorization", in: requestHead)?
                     .replacingOccurrences(of: "Bearer ", with: "") else { return nil }
@@ -500,14 +719,15 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
                 case "user-manager": permissions = [.manageUsers]
                 case "library-manager": permissions = [.manageLibraries]
                 case "session-manager": permissions = [.manageSessions]
+                case "preferences": permissions = [.viewMedia]
                 case "member": permissions = [.viewMedia]
                 default: return nil
                 }
                 return ServerRequestPrincipal(
-                    userID: token == "administrator"
+                    userID: token == "preferences" ? "user-alice" : (token == "administrator"
                         ? ServerIdentityRepository.initialAdministratorUserID
-                        : (["session-manager", "user-manager", "library-manager"].contains(token) ? "user-alice" : token),
-                    deviceID: "device-\(token)",
+                        : (["server-manager", "session-manager", "user-manager", "library-manager"].contains(token) ? "user-alice" : token)),
+                    deviceID: token == "preferences" ? "device-alice" : "device-\(token)",
                     sessionID: "session-\(token)",
                     permissions: permissions,
                     libraryGrants: [:]

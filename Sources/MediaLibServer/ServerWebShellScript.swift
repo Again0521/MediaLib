@@ -843,8 +843,10 @@ enum ServerWebShellScript {
       const progressiveRoutes = new Set([
         '/', '/index.html', '/search', '/watching', '/history',
         '/favorites', '/watchlist', '/ratings', '/watched', '/unwatched',
-        '/people', '/collections', '/photos', '/albums', '/queue', '/status',
-        '/account', '/admin', '/sources', '/vault',
+        '/people', '/collections', '/photos', '/albums', '/queue',
+        '/account', '/vault', '/admin', '/admin/users', '/admin/sessions',
+        '/admin/libraries', '/admin/playback', '/admin/network', '/admin/tasks',
+        '/admin/storage', '/admin/security', '/admin/logs',
         '/music/songs', '/music/albums', '/music/artists', '/music/playlists', '/music/recent'
       ]);
       const supportsProgressiveRoute = pathname => catalogRoute(pathname)

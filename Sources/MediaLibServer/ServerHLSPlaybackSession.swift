@@ -1,9 +1,23 @@
 import Foundation
+import MediaLibCore
 
 struct ServerHLSPlaybackRequest: Codable, Equatable {
     let audioTrackID: Int?
     let startSeconds: Double?
     let durationSeconds: Double?
+    let capabilities: ServerWebClientCapabilities?
+
+    init(
+        audioTrackID: Int?,
+        startSeconds: Double?,
+        durationSeconds: Double?,
+        capabilities: ServerWebClientCapabilities? = nil
+    ) {
+        self.audioTrackID = audioTrackID
+        self.startSeconds = startSeconds
+        self.durationSeconds = durationSeconds
+        self.capabilities = capabilities
+    }
 
     var isValid: Bool {
         let audio = audioTrackID ?? 0
@@ -14,22 +28,110 @@ struct ServerHLSPlaybackRequest: Codable, Equatable {
                 durationSeconds?.isFinite == true &&
                 (durationSeconds ?? 0) > 0 &&
                 (durationSeconds ?? 0) < 86_400
-            ))
+            )) && (capabilities?.isValid ?? true)
+    }
+}
+
+struct ServerWebClientCapabilities: Codable, Equatable {
+    let nativeHLS: Bool
+    let mediaSource: Bool
+    let videoCodecs: [String]
+    let audioCodecs: [String]
+    let screenWidth: Int
+    let screenHeight: Int
+    let hdrDisplay: Bool
+    let measuredDownlinkMbps: Double?
+
+    var isValid: Bool {
+        videoCodecs.count <= 16 && audioCodecs.count <= 16 &&
+            (1...16_384).contains(screenWidth) && (1...16_384).contains(screenHeight) &&
+            videoCodecs.allSatisfy(Self.isSafeCodec) && audioCodecs.allSatisfy(Self.isSafeCodec) &&
+            (measuredDownlinkMbps.map { $0.isFinite && $0 > 0 && $0 <= 10_000 } ?? true)
+    }
+
+    private static func isSafeCodec(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 64 &&
+            value.allSatisfy { $0.isLetter || $0.isNumber || ".-_".contains($0) }
+    }
+}
+
+struct ServerHLSPlaybackSessionCreationRequest: Codable {
+    let itemID: String
+    let audioTrackID: Int?
+    let startSeconds: Double?
+    let durationSeconds: Double?
+    let capabilities: ServerWebClientCapabilities?
+
+    var playbackRequest: ServerHLSPlaybackRequest {
+        ServerHLSPlaybackRequest(
+            audioTrackID: audioTrackID,
+            startSeconds: startSeconds,
+            durationSeconds: durationSeconds,
+            capabilities: capabilities
+        )
+    }
+
+    var isValid: Bool {
+        !itemID.isEmpty && itemID.utf8.count <= 512 && !itemID.contains("/") && !itemID.contains("\\") &&
+            playbackRequest.isValid
     }
 }
 
 struct ServerHLSPlaybackDescriptor: Codable, Equatable {
     let sessionID: String
+    let state: ServerHLSPlaybackSessionState
     let mode: String
     let durationSeconds: Double?
     let actualStartSeconds: Double
     let reason: String
     let mediaURL: String
+
+    init(
+        sessionID: String,
+        state: ServerHLSPlaybackSessionState = .ready,
+        mode: String,
+        durationSeconds: Double?,
+        actualStartSeconds: Double,
+        reason: String,
+        mediaURL: String
+    ) {
+        self.sessionID = sessionID
+        self.state = state
+        self.mode = mode
+        self.durationSeconds = durationSeconds
+        self.actualStartSeconds = actualStartSeconds
+        self.reason = reason
+        self.mediaURL = mediaURL
+    }
+}
+
+enum ServerHLSPlaybackSessionState: String, Codable, Equatable {
+    case queued, preparing, ready, playing, finished, failed, cancelled
 }
 
 struct ServerHLSResource {
-    let data: Data
+    enum Storage {
+        case data(Data)
+        case file(url: URL, byteLength: Int64)
+    }
+
+    let storage: Storage
     let contentType: String
+
+    init(data: Data, contentType: String) {
+        storage = .data(data)
+        self.contentType = contentType
+    }
+
+    init(fileURL: URL, byteLength: Int64, contentType: String) {
+        storage = .file(url: fileURL, byteLength: byteLength)
+        self.contentType = contentType
+    }
+
+    var data: Data {
+        guard case let .data(value) = storage else { return Data() }
+        return value
+    }
 }
 
 /// Authenticated, bounded HLS session owner.
@@ -46,8 +148,12 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         let actualStartSeconds: Double
         let durationSeconds: Double?
         let mode: String
+        let reason: String
+        let mediaURL: String
         let bridge: ServerRemoteMediaBridge?
         var process: Process?
+        var state: ServerHLSPlaybackSessionState = .preparing
+        var readinessTimer: DispatchSourceTimer?
         var finishedAt: Date?
 
         init(
@@ -57,6 +163,8 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             actualStartSeconds: Double,
             durationSeconds: Double?,
             mode: String,
+            reason: String,
+            mediaURL: String,
             bridge: ServerRemoteMediaBridge?
         ) {
             self.id = id
@@ -66,7 +174,21 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             self.actualStartSeconds = actualStartSeconds
             self.durationSeconds = durationSeconds
             self.mode = mode
+            self.reason = reason
+            self.mediaURL = mediaURL
             self.bridge = bridge
+        }
+
+        var descriptor: ServerHLSPlaybackDescriptor {
+            ServerHLSPlaybackDescriptor(
+                sessionID: id,
+                state: state,
+                mode: mode,
+                durationSeconds: durationSeconds,
+                actualStartSeconds: actualStartSeconds,
+                reason: reason,
+                mediaURL: mediaURL
+            )
         }
     }
 
@@ -84,9 +206,12 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
 
     private let rootDirectory: URL
     private let remoteAssetFetcher: ServerRemoteAssetFetcher
+    private let maximumConcurrentSessions: Int
     private let lock = NSLock()
+    private let readinessQueue = DispatchQueue(label: "MediaLibServer.HLSReadiness", qos: .utility)
     private var sessions: [String: Session] = [:]
-    private static let maximumConcurrentSessions = 2
+    private var pendingSessionIDs: [String] = []
+    private static let maximumQueuedSessions = 8
     private static let activeLifetime: TimeInterval = 4 * 60 * 60
     private static let finishedRetention: TimeInterval = 5 * 60
     private static let maximumPlaylistBytes = 1 * 1_024 * 1_024
@@ -94,9 +219,11 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
 
     init(
         remoteAssetFetcher: ServerRemoteAssetFetcher,
-        rootDirectory: URL? = nil
+        rootDirectory: URL? = nil,
+        maximumConcurrentSessions: Int = 2
     ) {
         self.remoteAssetFetcher = remoteAssetFetcher
+        self.maximumConcurrentSessions = min(max(maximumConcurrentSessions, 1), 4)
         self.rootDirectory = rootDirectory ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("MediaLIB-HLS-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
         try? FileManager.default.createDirectory(
@@ -121,9 +248,11 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         actualStartSeconds: Double,
         videoCodec: String?,
         audioCodec: String?,
-        principal: ServerRequestPrincipal
+        principal: ServerRequestPrincipal,
+        policy: ServerUserPolicy = ServerUserPolicy()
     ) -> ServerHLSPlaybackDescriptor? {
-        guard request.isValid,
+        guard request.isValid, policy.isValid, policy.playbackAllowed,
+              Self.isWithinAccessWindow(policy),
               actualStartSeconds.isFinite,
               actualStartSeconds >= 0,
               actualStartSeconds < 86_400,
@@ -131,9 +260,16 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         else { return nil }
         prune()
         lock.lock()
-        let activeCount = sessions.values.filter { $0.finishedAt == nil }.count
+        let owner = Owner(principal)
+        let ownedSessionCount = sessions.values.filter {
+            $0.owner.userID == owner.userID && ![.finished, .failed, .cancelled].contains($0.state)
+        }.count
+        let hasCapacity = ownedSessionCount < policy.maximumConcurrentStreams && (
+            activeSessionCountLocked() < maximumConcurrentSessions ||
+                pendingSessionIDs.count < Self.maximumQueuedSessions
+        )
         lock.unlock()
-        guard activeCount < Self.maximumConcurrentSessions else { return nil }
+        guard hasCapacity else { return nil }
 
         let id = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let directory = rootDirectory.appendingPathComponent(id, isDirectory: true)
@@ -154,11 +290,26 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         // H.264 can be repackaged without quality loss. Other codecs take the
         // VideoToolbox path so Safari always receives an Apple-supported HLS
         // profile; this is the last compatibility tier, not the default.
-        let copiesVideo = videoCodec?.lowercased() == "h264"
+        let normalizedVideoCodec = videoCodec?.lowercased()
+        let copiesVideo = normalizedVideoCodec == "h264" || (
+            ["hevc", "h265"].contains(normalizedVideoCodec ?? "") &&
+                request.capabilities?.nativeHLS == true &&
+                request.capabilities?.videoCodecs.contains(where: { ["hevc", "h265", "hvc1"].contains($0.lowercased()) }) == true
+        )
         let copiesAudio = audioCodec?.lowercased() == "aac"
         let mode = copiesVideo
             ? (copiesAudio ? "hlsRemux" : "hlsAudioTranscode")
             : "hlsTranscode"
+        guard (mode == "hlsRemux" && policy.remuxAllowed) ||
+                (mode != "hlsRemux" && policy.transcodeAllowed)
+        else {
+            bridge?.stop()
+            try? FileManager.default.removeItem(at: directory)
+            return nil
+        }
+        let reason = copiesVideo
+            ? (copiesAudio ? "containerCompatibility" : "audioCodecCompatibility")
+            : "videoCodecCompatibility"
         let playlist = directory.appendingPathComponent("index.m3u8")
         let segmentPattern = directory.appendingPathComponent("segment-%05d.ts").path
         var arguments = [
@@ -202,6 +353,8 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             actualStartSeconds: actualStartSeconds,
             durationSeconds: request.durationSeconds,
             mode: mode,
+            reason: reason,
+            mediaURL: "/api/v1/playback/hls/\(id)/index.m3u8",
             bridge: bridge
         )
         let process = Process()
@@ -212,50 +365,35 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         process.standardError = FileHandle.nullDevice
         process.terminationHandler = { [weak self, weak session] _ in
             guard let self, let session else { return }
-            self.lock.lock()
-            session.finishedAt = Date()
-            self.lock.unlock()
-            session.bridge?.stop()
+            self.processDidTerminate(session)
         }
         session.process = process
         lock.lock()
-        // Recheck while reserving the slot so simultaneous creates cannot both
-        // pass the optimistic count above.
-        guard sessions.values.filter({ $0.finishedAt == nil }).count < Self.maximumConcurrentSessions else {
+        // Recheck while reserving so simultaneous creates cannot overrun either
+        // the active slots or the bounded waiting queue.
+        let shouldLaunch = activeSessionCountLocked() < maximumConcurrentSessions
+        guard shouldLaunch || pendingSessionIDs.count < Self.maximumQueuedSessions else {
             lock.unlock()
             stopAndRemove(session)
             return nil
         }
+        session.state = shouldLaunch ? .preparing : .queued
         sessions[id] = session
+        if !shouldLaunch { pendingSessionIDs.append(id) }
         lock.unlock()
-        do { try process.run() } catch {
-            cancel(sessionID: id, principal: principal)
-            return nil
+        if shouldLaunch, !launch(session) {
+            return session.descriptor
         }
+        return session.descriptor
+    }
 
-        // Return only when Safari can immediately load a valid manifest. HLS
-        // generation continues asynchronously with bounded on-disk segments.
-        let deadline = Date().addingTimeInterval(10)
-        while Date() < deadline {
-            if let attributes = try? FileManager.default.attributesOfItem(atPath: playlist.path),
-               let size = attributes[.size] as? NSNumber,
-               size.intValue > 0 {
-                return ServerHLSPlaybackDescriptor(
-                    sessionID: id,
-                    mode: mode,
-                    durationSeconds: request.durationSeconds,
-                    actualStartSeconds: actualStartSeconds,
-                    reason: copiesVideo
-                        ? (copiesAudio ? "containerCompatibility" : "audioCodecCompatibility")
-                        : "videoCodecCompatibility",
-                    mediaURL: "/api/v1/playback/hls/\(id)/index.m3u8"
-                )
-            }
-            if !process.isRunning { break }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        cancel(sessionID: id, principal: principal)
-        return nil
+    func status(sessionID: String, principal: ServerRequestPrincipal) -> ServerHLSPlaybackDescriptor? {
+        prune()
+        guard Self.isSafeSessionID(sessionID) else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        guard let session = sessions[sessionID], session.owner == Owner(principal) else { return nil }
+        return session.descriptor
     }
 
     func resource(
@@ -276,11 +414,14 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
               values.isRegularFile == true,
               let size = values.fileSize,
               size > 0,
-              size <= limit,
-              let data = try? Data(contentsOf: url, options: [.mappedIfSafe])
+              size <= limit
         else { return nil }
+        lock.lock()
+        if session.state == .ready { session.state = .playing }
+        lock.unlock()
         return ServerHLSResource(
-            data: data,
+            fileURL: url,
+            byteLength: Int64(size),
             contentType: fileName.hasSuffix(".m3u8")
                 ? "application/vnd.apple.mpegurl"
                 : "video/mp2t"
@@ -294,9 +435,15 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             lock.unlock()
             return
         }
+        session.state = .cancelled
+        session.finishedAt = Date()
+        session.readinessTimer?.cancel()
+        session.readinessTimer = nil
+        pendingSessionIDs.removeAll { $0 == sessionID }
         sessions.removeValue(forKey: sessionID)
         lock.unlock()
         stopAndRemove(session)
+        startNextIfPossible()
     }
 
     private func prune() {
@@ -309,18 +456,131 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             return now.timeIntervalSince(session.startedAt) > Self.activeLifetime
         }
         stale.forEach { sessions.removeValue(forKey: $0.id) }
+        let staleIDs = Set(stale.map(\.id))
+        pendingSessionIDs.removeAll { staleIDs.contains($0) }
         lock.unlock()
         stale.forEach(stopAndRemove)
+        if !stale.isEmpty { startNextIfPossible() }
     }
 
     private func stopAndRemove(_ session: Session) {
+        session.readinessTimer?.cancel()
         session.bridge?.stop()
         if session.process?.isRunning == true { session.process?.terminate() }
         try? FileManager.default.removeItem(at: session.directory)
     }
 
+    private func monitorReadiness(of session: Session, playlist: URL) {
+        let deadline = Date().addingTimeInterval(10)
+        let timer = DispatchSource.makeTimerSource(queue: readinessQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(50), leeway: .milliseconds(10))
+        timer.setEventHandler { [weak self, weak session] in
+            guard let self, let session else { return }
+            let isReady: Bool = {
+                guard let attributes = try? FileManager.default.attributesOfItem(atPath: playlist.path),
+                      let size = attributes[.size] as? NSNumber else { return false }
+                return size.intValue > 0
+            }()
+            self.lock.lock()
+            guard self.sessions[session.id] === session, session.state == .preparing else {
+                self.lock.unlock()
+                timer.cancel()
+                return
+            }
+            if isReady {
+                session.state = .ready
+                session.readinessTimer = nil
+                self.lock.unlock()
+                timer.cancel()
+                return
+            }
+            let failed = Date() >= deadline || session.process?.isRunning != true
+            if failed {
+                session.state = .failed
+                session.finishedAt = Date()
+                session.readinessTimer = nil
+            }
+            self.lock.unlock()
+            if failed {
+                timer.cancel()
+                session.bridge?.stop()
+                if session.process?.isRunning == true { session.process?.terminate() }
+            }
+        }
+        lock.lock()
+        session.readinessTimer = timer
+        lock.unlock()
+        timer.resume()
+    }
+
+    private func activeSessionCountLocked() -> Int {
+        sessions.values.filter { [.preparing, .ready, .playing].contains($0.state) }.count
+    }
+
+    @discardableResult
+    private func launch(_ session: Session) -> Bool {
+        guard let process = session.process else { return false }
+        do {
+            try process.run()
+            monitorReadiness(
+                of: session,
+                playlist: session.directory.appendingPathComponent("index.m3u8")
+            )
+            return true
+        } catch {
+            lock.lock()
+            if sessions[session.id] === session {
+                session.state = .failed
+                session.finishedAt = Date()
+            }
+            lock.unlock()
+            session.bridge?.stop()
+            startNextIfPossible()
+            return false
+        }
+    }
+
+    private func processDidTerminate(_ session: Session) {
+        lock.lock()
+        session.readinessTimer?.cancel()
+        session.readinessTimer = nil
+        if session.state == .preparing { session.state = .failed }
+        else if session.state != .cancelled && session.state != .failed { session.state = .finished }
+        session.finishedAt = Date()
+        lock.unlock()
+        session.bridge?.stop()
+        startNextIfPossible()
+    }
+
+    private func startNextIfPossible() {
+        while true {
+            lock.lock()
+            guard activeSessionCountLocked() < maximumConcurrentSessions,
+                  !pendingSessionIDs.isEmpty else {
+                lock.unlock()
+                return
+            }
+            let id = pendingSessionIDs.removeFirst()
+            guard let session = sessions[id], session.state == .queued else {
+                lock.unlock()
+                continue
+            }
+            session.state = .preparing
+            lock.unlock()
+            _ = launch(session)
+        }
+    }
+
     private static func isSafeSessionID(_ value: String) -> Bool {
         value.count == 32 && value.allSatisfy { $0.isHexDigit && !$0.isUppercase }
+    }
+
+    private static func isWithinAccessWindow(_ policy: ServerUserPolicy, at date: Date = Date()) -> Bool {
+        guard let start = policy.accessStartMinute, let end = policy.accessEndMinute else { return true }
+        let components = Calendar.current.dateComponents([.hour, .minute], from: date)
+        guard let hour = components.hour, let minute = components.minute else { return false }
+        let current = hour * 60 + minute
+        return start <= end ? (start...end).contains(current) : (current >= start || current <= end)
     }
 
     private static func isSafeResourceName(_ value: String) -> Bool {
