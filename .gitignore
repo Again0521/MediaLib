@@ -64,3 +64,5 @@ fastlane/test_output
 dist/icons/AppIcon.iconset/icon_16x16@2x.png
 /dist
 /doc
+/.agents
+/assets
