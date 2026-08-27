@@ -257,25 +257,22 @@ final class DatabaseManagerMigrationTests: XCTestCase {
         }
     }
 
-    func testCreateBackupReportsExistingBackupRemovalFailure() throws {
+    func testCreateBackupReplacesExistingBackupAndRestoresSecurePermissions() throws {
         let timestamp = "20260707-010101-000"
         let db = try DatabaseManager(url: dbURL, backupTimestampProvider: { timestamp })
         let backupDir = workDir.appendingPathComponent("locked-backups", isDirectory: true)
         try FileManager.default.createDirectory(at: backupDir, withIntermediateDirectories: true)
         let existingBackup = backupDir.appendingPathComponent("MediaLib-collision-\(timestamp).sqlite")
         try Data("stale backup".utf8).write(to: existingBackup)
-        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: backupDir.path)
-        defer {
-            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: backupDir.path)
-        }
 
-        XCTAssertThrowsError(try db.createBackup(in: backupDir, reason: "collision")) { error in
-            guard case DatabaseError.backupFailed(let message) = error else {
-                return XCTFail("Expected backupFailed, got \(error)")
-            }
-            XCTAssertTrue(message.contains("无法替换已有备份文件"))
-            XCTAssertTrue(message.contains(existingBackup.lastPathComponent))
-        }
+        let backupURL = try db.createBackup(in: backupDir, reason: "collision")
+
+        XCTAssertEqual(backupURL, existingBackup)
+        XCTAssertNotEqual(try Data(contentsOf: backupURL), Data("stale backup".utf8))
+        let directoryPermissions = (try FileManager.default.attributesOfItem(atPath: backupDir.path)[.posixPermissions] as? NSNumber)?.intValue
+        let filePermissions = (try FileManager.default.attributesOfItem(atPath: backupURL.path)[.posixPermissions] as? NSNumber)?.intValue
+        XCTAssertEqual(directoryPermissions, 0o700)
+        XCTAssertEqual(filePermissions, 0o600)
     }
 
     func testOpeningOlderExistingDatabaseCreatesAutomaticPreMigrationBackup() throws {

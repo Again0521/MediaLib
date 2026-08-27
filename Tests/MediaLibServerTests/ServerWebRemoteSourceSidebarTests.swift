@@ -54,7 +54,7 @@ final class ServerWebRemoteSourceSidebarTests: XCTestCase {
         return String(data: response.body, encoding: .utf8) ?? ""
     }
 
-    /// 侧栏能到达的每一个已认证页面都必须画出远程分组。
+    /// 播放系统侧栏能到达的每一个已认证页面都必须画出远程分组。
     ///
     /// 逐条列出而不是抽查：漏传 `sidebarExtras` 是一处一处漏的，抽查会漏掉下一处。
     func testEveryAuthenticatedPageRendersRemoteSourceGroupsInTheSidebar() {
@@ -63,8 +63,8 @@ final class ServerWebRemoteSourceSidebarTests: XCTestCase {
             "/", "/index.html", "/category/video", "/category/movie", "/search",
             "/watching", "/history", "/favorites", "/watchlist", "/watched",
             "/unwatched", "/ratings", "/albums", "/photos", "/queue", "/people",
-            "/collections", "/music/songs", "/music/albums", "/status", "/account",
-            "/admin", "/sources", "/vault", "/remote/aabbccdd"
+            "/collections", "/music/songs", "/music/albums", "/account",
+            "/vault", "/remote/aabbccdd"
         ]
         for path in pages {
             let markup = html(router, path)

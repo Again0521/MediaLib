@@ -67,7 +67,8 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         try SourceRepository(database: database).save(MediaSource(
             id: "source-private",
             name: "家庭电影 <script>",
-            path: "/private/Media/Movies",
+            // 维护任务只扫描本地普通来源；使用远程 fixture 才能稳定覆盖“无可扫描来源”。
+            path: "emby://fixture/source-private",
             mediaType: .movie,
             autoScan: true,
             includeInMetadataFetch: true,
