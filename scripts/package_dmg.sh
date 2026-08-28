@@ -43,6 +43,11 @@ SWIFTPM_CACHE_ROOT="/private/tmp/MediaLib-swiftpm-cache-$(id -u)-$ROOT_HASH-$PAC
 SWIFTPM_CONFIG_ROOT="/private/tmp/MediaLib-swiftpm-config-$(id -u)-$ROOT_HASH-$PACKAGE_INSTANCE"
 SWIFTPM_SECURITY_ROOT="/private/tmp/MediaLib-swiftpm-security-$(id -u)-$ROOT_HASH-$PACKAGE_INSTANCE"
 PACKAGE_JOBS="${MEDIALIB_PACKAGE_JOBS:-2}"
+SEED_LOCAL_REPOSITORIES="${MEDIALIB_PACKAGE_SEED_LOCAL_REPOSITORIES:-0}"
+if [[ "$SEED_LOCAL_REPOSITORIES" != "0" && "$SEED_LOCAL_REPOSITORIES" != "1" ]]; then
+  echo "error: MEDIALIB_PACKAGE_SEED_LOCAL_REPOSITORIES must be 0 or 1" >&2
+  exit 2
+fi
 
 if [[ "${MEDIALIB_PACKAGE_DMG_PRINT_PATHS_ONLY:-0}" == "1" ]]; then
   printf 'SCRIPT_DIR=%s\n' "$SCRIPT_DIR"
@@ -92,6 +97,16 @@ fi
 mkdir -p "$DIST_DIR"
 rm -rf "$APP_COPY" "$LEGACY_APP_COPY" "$DMG_PATH"
 mkdir -p "$SWIFT_MODULE_CACHE" "$SWIFT_BUILD_DIR" "$SWIFTPM_CACHE_ROOT" "$SWIFTPM_CONFIG_ROOT" "$SWIFTPM_SECURITY_ROOT"
+# CI and release machines may already have complete bare SwiftPM repositories
+# under the package's ordinary scratch directory. Opt-in seeding copies only
+# those immutable Git object stores into this isolated release scratch path;
+# products and checkouts are still rebuilt from Package.resolved. This avoids
+# restarting a large GitHub clone after a transient early EOF without turning
+# the release build into a reuse of debug or previous release binaries.
+if [[ "$SEED_LOCAL_REPOSITORIES" == "1" && -d "$ROOT_DIR/.build/repositories" ]]; then
+  mkdir -p "$SWIFT_BUILD_DIR/repositories"
+  cp -R "$ROOT_DIR/.build/repositories/." "$SWIFT_BUILD_DIR/repositories/"
+fi
 export CLANG_MODULE_CACHE_PATH="$SWIFT_MODULE_CACHE"
 export SWIFT_MODULECACHE_PATH="$SWIFT_MODULE_CACHE"
 
