@@ -329,6 +329,23 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertTrue(shell.contains(".nav-item[aria-current]"))
     }
 
+    func testAuditLogPageUsesSharedServerFilteredControlsAndPaging() {
+        let page = router.response(for: "GET /admin/logs HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let script = router.response(for: "GET /assets/operations.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let html = String(decoding: page.body, as: UTF8.self)
+        let javascript = String(decoding: script.body, as: UTF8.self)
+
+        XCTAssertEqual(page.statusCode, 200)
+        XCTAssertTrue(html.contains("<form class=\"app-page-search\" id=\"log-search-form\""))
+        XCTAssertTrue(html.contains("id=\"log-category\""))
+        XCTAssertTrue(html.contains("id=\"log-outcome\""))
+        XCTAssertTrue(html.contains("id=\"audit-load-more\""))
+        XCTAssertTrue(javascript.contains("parameters.set('category', category)"))
+        XCTAssertTrue(javascript.contains("parameters.set('outcome', outcome)"))
+        XCTAssertTrue(javascript.contains("logEvents.concat(events)"))
+        XCTAssertFalse(javascript.contains("logEvents.filter"))
+    }
+
     func testSharedWebNavigationPreservesActiveStateAndHidesManagementDestinations() {
         let member = ServerWebNavigation.render(
             active: .home, showAdministration: false, note: .library, extras: .empty
@@ -1262,6 +1279,7 @@ final class LocalHTTPRouterTests: XCTestCase {
             serverName: "客厅 <服务器>", csrfToken: "csrf", categories: categories, sidebarExtras: .empty
         )
         let administration = ServerWebAdministrationPage.render(
+            section: .users,
             serverName: "客厅 <服务器>", csrfToken: "csrf", categories: categories, sidebarExtras: .empty
         )
         let detail = ServerMediaItemDetail(
@@ -1278,7 +1296,7 @@ final class LocalHTTPRouterTests: XCTestCase {
 
         XCTAssertTrue(status.contains("<title>仪表盘 · 客厅 &lt;服务器&gt;</title>"))
         XCTAssertTrue(sources.contains("<title>媒体库与来源 · 客厅 &lt;服务器&gt;</title>"))
-        XCTAssertTrue(administration.contains("管理谁能使用 客厅 &lt;服务器&gt;"))
+        XCTAssertTrue(administration.contains("客厅 &lt;服务器&gt; 的敏感信息不会显示在网页中"))
         XCTAssertFalse(status.contains("(serverName)"))
         XCTAssertFalse(sources.contains("(serverName)"))
         XCTAssertFalse(administration.contains("(serverName)"))

@@ -14,21 +14,25 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
     private let repository: ServerIdentityRepository
     private let sourceRepository: SourceRepository?
     private let passwordHasher: ServerPasswordHasher?
+    private let experienceRepository: ServerExperienceRepository?
 
     init(
         repository: ServerIdentityRepository,
         sourceRepository: SourceRepository? = nil,
-        passwordHasher: ServerPasswordHasher? = try? ServerPasswordHasher()
+        passwordHasher: ServerPasswordHasher? = try? ServerPasswordHasher(),
+        experienceRepository: ServerExperienceRepository? = nil
     ) {
         self.repository = repository
         self.sourceRepository = sourceRepository
         self.passwordHasher = passwordHasher
+        self.experienceRepository = experienceRepository
     }
 
     convenience init(database: DatabaseManager) {
         self.init(
             repository: ServerIdentityRepository(database: database),
-            sourceRepository: SourceRepository(database: database)
+            sourceRepository: SourceRepository(database: database),
+            experienceRepository: ServerExperienceRepository(database: database)
         )
     }
 
@@ -107,42 +111,74 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
         ))
     }
 
-    func activeSessions() throws -> ServerManagedSessionsResponse {
-        let devices = try repository.activeDevices(limit: Self.maximumDeviceCount + 1)
-        let sessions = try repository.activeSessions(limit: Self.maximumSessionCount + 1)
-        let selectedDevices = devices.prefix(Self.maximumDeviceCount)
-        let selectedSessions = sessions.prefix(Self.maximumSessionCount)
+    func activeSessions(
+        limit: Int = 100,
+        offset: Int = 0,
+        searchText: String? = nil
+    ) throws -> ServerManagedSessionsResponse {
+        let boundedLimit = min(max(limit, 1), Self.maximumSessionCount)
+        let boundedOffset = min(max(offset, 0), 1_000_000)
+        let page = try repository.managedSessions(
+            limit: boundedLimit,
+            offset: boundedOffset,
+            searchText: searchText
+        )
+        var seenDeviceIDs = Set<String>()
+        let devices = page.sessions.compactMap { aggregate -> ServerManagedDeviceSummary? in
+            guard seenDeviceIDs.insert(aggregate.device.id).inserted else { return nil }
+            let device = aggregate.device
+            return ServerManagedDeviceSummary(
+                id: device.id,
+                userID: device.userID,
+                name: device.name,
+                platform: device.platform,
+                createdAt: device.createdAt,
+                lastSeenAt: device.lastSeenAt
+            )
+        }
         return ServerManagedSessionsResponse(
-            isTruncated: devices.count > selectedDevices.count || sessions.count > selectedSessions.count,
-            devices: selectedDevices.map {
-                ServerManagedDeviceSummary(
-                    id: $0.id,
-                    userID: $0.userID,
-                    name: $0.name,
-                    platform: $0.platform,
-                    createdAt: $0.createdAt,
-                    lastSeenAt: $0.lastSeenAt
-                )
-            },
-            sessions: selectedSessions.map {
-                ServerManagedSessionSummary(
-                    id: $0.id,
-                    userID: $0.userID,
-                    deviceID: $0.deviceID,
-                    accessExpiresAt: $0.accessExpiresAt,
-                    refreshExpiresAt: $0.refreshExpiresAt,
-                    createdAt: $0.createdAt,
-                    lastUsedAt: $0.lastUsedAt
+            totalCount: page.totalCount,
+            isTruncated: boundedOffset + page.sessions.count < page.totalCount,
+            devices: devices,
+            sessions: page.sessions.map {
+                let session = $0.session
+                return ServerManagedSessionSummary(
+                    id: session.id,
+                    userID: session.userID,
+                    deviceID: session.deviceID,
+                    accessExpiresAt: session.accessExpiresAt,
+                    refreshExpiresAt: session.refreshExpiresAt,
+                    createdAt: session.createdAt,
+                    lastUsedAt: session.lastUsedAt,
+                    username: $0.username,
+                    displayName: $0.displayName
                 )
             }
         )
     }
 
-    func securityEvents() throws -> ServerSecurityEventsResponse {
-        let events = try repository.securityEvents(limit: Self.maximumSecurityEventCount)
+    func securityEvents(
+        limit: Int = ServerAdministrationCatalog.maximumSecurityEventCount,
+        offset: Int = 0,
+        category: ServerSecurityEventCategory? = nil,
+        outcome: ServerSecurityEventOutcome? = nil,
+        searchText: String? = nil
+    ) throws -> ServerSecurityEventsResponse {
+        if let retentionHours = try experienceRepository?.operationalSettings().value.telemetryRetentionHours {
+            let cutoff = Date().addingTimeInterval(-Double(retentionHours) * 3_600)
+            try repository.pruneSecurityEvents(before: cutoff)
+        }
+        let page = try repository.managedSecurityEvents(
+            limit: limit,
+            offset: offset,
+            category: category,
+            outcome: outcome,
+            searchText: searchText
+        )
         return ServerSecurityEventsResponse(
-            isTruncated: events.count == Self.maximumSecurityEventCount,
-            events: events.map {
+            totalCount: page.totalCount,
+            isTruncated: offset + page.events.count < page.totalCount,
+            events: page.events.map {
                 ServerSecurityEventSummary(
                     id: $0.id,
                     occurredAt: $0.occurredAt,

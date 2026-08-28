@@ -85,6 +85,46 @@ final class ServerLibraryCatalogTests: XCTestCase {
         XCTAssertTrue(snapshot.items.items.first?.artworkAvailable == true)
     }
 
+    func testContentRatingPolicyHidesRestrictedTitlesFromSnapshotAndBrowseTotals() throws {
+        let sourcePath = "/Volumes/Family"
+        try SourceRepository(database: database).save(MediaSource(
+            id: "family", name: "Family", path: sourcePath, mediaType: .movie
+        ))
+        let media = MediaRepository(database: database)
+        let details = MediaDetailRepository(database: database)
+        for (id, title, rating) in [
+            ("family-g", "Allowed", "G"),
+            ("family-r", "Restricted", "R"),
+            ("family-unrated", "Unknown", "UNRATED")
+        ] {
+            try media.upsert(MediaItem(id: id, type: .movie, title: title, sourcePath: sourcePath))
+            try details.save(MediaDetailSnapshot(metadata: MediaDetailMetadata(
+                mediaID: id, contentRating: rating, provider: "fixture", language: "en"
+            )))
+        }
+        let principal = ServerRequestPrincipal(
+            userID: ServerIdentityRepository.initialAdministratorUserID,
+            deviceID: "rating-device", sessionID: "rating-session",
+            permissions: Set(ServerPermission.allCases), libraryGrants: [:]
+        )
+        _ = try ServerExperienceRepository(database: database).saveUserPolicy(
+            userID: principal.userID,
+            value: ServerUserPolicy(maximumContentRating: "PG-13"),
+            expectedVersion: 0
+        )
+
+        let catalog = ServerLibraryCatalog(database: database)
+        let snapshot = try catalog.snapshot(for: principal)
+        XCTAssertEqual(snapshot.summary.totalItemCount, 1)
+        XCTAssertEqual(snapshot.items.items.map(\.id), ["family-g"])
+
+        let page = try catalog.browse(ServerLibraryQuery(
+            offset: 0, limit: 100, sort: .title
+        ), for: principal)
+        XCTAssertEqual(page.totalItemCount, 1)
+        XCTAssertEqual(page.items.map(\.id), ["family-g"])
+    }
+
     func testHomeSnapshotCountsAuthorizedEpisodesButLimitsCardsToRecentTopLevelItems() throws {
         let sourceRepository = SourceRepository(database: database)
         let mediaRepository = MediaRepository(database: database)

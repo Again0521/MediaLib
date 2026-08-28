@@ -4,6 +4,37 @@ import XCTest
 @testable import MediaLibServer
 
 final class ServerHLSPlaybackSessionTests: XCTestCase {
+    func testOperationalSettingsProviderControlsNewSessionsWithoutRestart() {
+        let settings = LockedOperationalSettings(ServerOperationalSettings(
+            transcodeEngine: .software,
+            maximumTranscodeSessions: 1,
+            defaultRemoteBitrateMbps: 8,
+            sessionIdleMinutes: 5
+        ))
+        let manager = ServerHLSPlaybackSessionManager(
+            remoteAssetFetcher: ServerRemoteAssetFetcher(),
+            operationalSettingsProvider: { settings.value },
+            configurationCacheLifetime: 0
+        )
+        XCTAssertEqual(manager.operationalSettingsSnapshot().maximumTranscodeSessions, 1)
+        settings.value = ServerOperationalSettings(
+            transcodeEngine: .videoToolbox,
+            maximumTranscodeSessions: 4,
+            defaultRemoteBitrateMbps: 40,
+            sessionIdleMinutes: 30
+        )
+        XCTAssertEqual(manager.operationalSettingsSnapshot().maximumTranscodeSessions, 4)
+        XCTAssertEqual(manager.operationalSettingsSnapshot().defaultRemoteBitrateMbps, 40)
+        XCTAssertEqual(
+            ServerHLSPlaybackSessionManager.encoderArguments(for: .software),
+            ["-c:v", "libx264", "-preset", "medium"]
+        )
+        XCTAssertEqual(
+            ServerHLSPlaybackSessionManager.encoderArguments(for: .videoToolbox),
+            ["-c:v", "h264_videotoolbox", "-allow_sw", "0"]
+        )
+    }
+
     func testFFmpegHDRFilterCapabilitiesRequireACompleteChain() {
         XCTAssertEqual(
             ServerMediaToolchain.FFmpegFilterCapabilities.parse(" TS tonemap V->V\n TS zscale V->V\n"),
@@ -210,6 +241,26 @@ final class ServerHLSPlaybackSessionTests: XCTestCase {
             let message = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             XCTFail("ffmpeg fixture creation failed: \(message)")
             throw CocoaError(.fileWriteUnknown)
+        }
+    }
+}
+
+private final class LockedOperationalSettings: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: ServerOperationalSettings
+
+    init(_ value: ServerOperationalSettings) { storedValue = value }
+
+    var value: ServerOperationalSettings {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedValue
+        }
+        set {
+            lock.lock()
+            storedValue = newValue
+            lock.unlock()
         }
     }
 }

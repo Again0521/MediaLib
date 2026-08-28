@@ -202,6 +202,7 @@ final class ServerProtocolModelsTests: XCTestCase {
 
     func testAdministrationDTOsRoundTripWithoutCredentialOrNetworkFields() throws {
         let response = ServerManagedSessionsResponse(
+            totalCount: 1,
             isTruncated: false,
             devices: [ServerManagedDeviceSummary(
                 id: "device-1", userID: "user-1", name: "浏览器", platform: "Web",
@@ -213,13 +214,16 @@ final class ServerProtocolModelsTests: XCTestCase {
                 accessExpiresAt: Date(timeIntervalSince1970: 30),
                 refreshExpiresAt: Date(timeIntervalSince1970: 40),
                 createdAt: Date(timeIntervalSince1970: 10),
-                lastUsedAt: Date(timeIntervalSince1970: 20)
+                lastUsedAt: Date(timeIntervalSince1970: 20),
+                username: "member",
+                displayName: "家庭成员"
             )]
         )
         let data = try JSONEncoder().encode(response)
         let text = String(data: data, encoding: .utf8)?.lowercased() ?? ""
 
         XCTAssertEqual(try JSONDecoder().decode(ServerManagedSessionsResponse.self, from: data), response)
+        XCTAssertEqual(response.totalCount, 1)
         for forbiddenField in ["token", "digest", "passwordhash", "cookie", "address", "useragent", "path"] {
             XCTAssertFalse(text.contains(forbiddenField))
         }

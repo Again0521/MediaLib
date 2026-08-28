@@ -1176,6 +1176,9 @@ enum ServerWebMediaDetailPage {
        toggles, not radios.  The rule used to look for `aria-checked`, which the
        markup never sets, so a chosen rating never actually filled in. */
     .rating-star[aria-pressed="true"] { color: var(--warning); }
+    @media (max-width: 719px) {
+      .rating-star { width: var(--control-height-lg); height: var(--control-height-lg); }
+    }
     .technical-facts { display: flex; flex-wrap: wrap; gap: var(--space-2); }
     .technical-facts li {
       padding: 2px var(--space-2);

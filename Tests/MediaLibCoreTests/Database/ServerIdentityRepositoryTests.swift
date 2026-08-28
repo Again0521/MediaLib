@@ -189,6 +189,45 @@ final class ServerIdentityRepositoryTests: XCTestCase {
         XCTAssertEqual(try repository.sessions(userID: user.id, includeRevoked: true).count, 2)
     }
 
+    func testManagedSessionsFiltersAndPaginatesBeforeStableMapping() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let fixtures = [
+            ("alice", "Safari", "Web", "a", "b", 30.0),
+            ("bob", "Living Room", "tvOS", "c", "d", 20.0),
+            ("carol", "Tablet", "iOS", "e", "f", 10.0)
+        ]
+        for fixture in fixtures {
+            let user = try makeUser(username: fixture.0)
+            let createdAt = now.addingTimeInterval(fixture.5)
+            let device = try repository.registerDevice(
+                id: "device-\(fixture.0)", userID: user.id,
+                name: fixture.1, platform: fixture.2, at: createdAt
+            )
+            _ = try repository.createSession(
+                id: "session-\(fixture.0)", userID: user.id, deviceID: device.id,
+                accessTokenDigest: String(repeating: fixture.3, count: 64),
+                refreshTokenDigest: String(repeating: fixture.4, count: 64),
+                accessExpiresAt: createdAt.addingTimeInterval(900),
+                refreshExpiresAt: createdAt.addingTimeInterval(86_400),
+                createdAt: createdAt
+            )
+        }
+
+        let first = try repository.managedSessions(limit: 2, at: now)
+        let second = try repository.managedSessions(limit: 2, offset: 2, at: now)
+        XCTAssertEqual(first.totalCount, 3)
+        XCTAssertEqual(first.sessions.map(\.session.id), ["session-alice", "session-bob"])
+        XCTAssertEqual(second.sessions.map(\.session.id), ["session-carol"])
+        XCTAssertEqual(first.sessions.first?.device.name, "Safari")
+        XCTAssertEqual(first.sessions.first?.displayName, "Alice")
+
+        let filtered = try repository.managedSessions(limit: 10, searchText: "living", at: now)
+        XCTAssertEqual(filtered.totalCount, 1)
+        XCTAssertEqual(filtered.sessions.first?.session.id, "session-bob")
+        XCTAssertEqual(try repository.managedSessions(limit: 10, searchText: "BOB", at: now).totalCount, 1)
+        XCTAssertEqual(try repository.managedSessions(limit: 10, searchText: "%", at: now).totalCount, 0)
+    }
+
     func testRawTokenAndInvalidExpiryAreRejectedWithoutPersistence() throws {
         let user = try makeUser(username: "alice")
         let device = try repository.registerDevice(userID: user.id, name: "Browser", platform: "Web")
@@ -382,6 +421,53 @@ final class ServerIdentityRepositoryTests: XCTestCase {
             "password", "password_hash", "access_token", "refresh_token", "request_headers",
             "remote_ip", "file_path", "media_title"
         ]))
+    }
+
+    func testSecurityAuditRetentionPrunesRowsOlderThanConfiguredCutoff() throws {
+        try repository.appendSecurityEvent(ServerSecurityEvent(
+            id: "expired", occurredAt: Date(timeIntervalSince1970: 100),
+            category: .authentication, action: "login.rejected", outcome: .denied
+        ))
+        try repository.appendSecurityEvent(ServerSecurityEvent(
+            id: "retained", occurredAt: Date(timeIntervalSince1970: 300),
+            category: .authentication, action: "login.succeeded", outcome: .success
+        ))
+
+        try repository.pruneSecurityEvents(before: Date(timeIntervalSince1970: 200))
+
+        XCTAssertEqual(try repository.securityEvents(limit: 10).map(\.id), ["retained"])
+    }
+
+    func testManagedSecurityAuditFiltersCountsAndPagesWithStableOrdering() throws {
+        let occurredAt = Date(timeIntervalSince1970: 500)
+        let events: [ServerSecurityEvent] = [
+            .init(id: "event-a", occurredAt: occurredAt, category: .authentication,
+                  action: "login.succeeded", outcome: .success),
+            .init(id: "event-b", occurredAt: occurredAt, category: .authorization,
+                  action: "stream.denied", outcome: .denied,
+                  detailCode: "policy.remote-user-bob"),
+            .init(id: "event-c", occurredAt: occurredAt, category: .authorization,
+                  action: "download.denied", outcome: .denied,
+                  detailCode: "policy.download")
+        ]
+        for event in events { try repository.appendSecurityEvent(event) }
+
+        let first = try repository.managedSecurityEvents(
+            limit: 1, category: .authorization, outcome: .denied, searchText: "policy"
+        )
+        let second = try repository.managedSecurityEvents(
+            limit: 1, offset: 1, category: .authorization, outcome: .denied, searchText: "policy"
+        )
+
+        XCTAssertEqual(first.totalCount, 2)
+        XCTAssertEqual(first.events.map(\.id), ["event-c"])
+        XCTAssertEqual(second.totalCount, 2)
+        XCTAssertEqual(second.events.map(\.id), ["event-b"])
+        XCTAssertTrue(try repository.managedSecurityEvents(limit: 10, searchText: "user_bob").events.isEmpty)
+        XCTAssertEqual(
+            try repository.managedSecurityEvents(limit: 10, searchText: "user-bob").events.map(\.id),
+            ["event-b"]
+        )
     }
 
     private func makeUser(username: String) throws -> ServerUser {

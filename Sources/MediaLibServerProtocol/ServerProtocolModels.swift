@@ -1578,6 +1578,8 @@ public struct ServerManagedSessionSummary: Codable, Equatable, Sendable, Identif
     public let refreshExpiresAt: Date
     public let createdAt: Date
     public let lastUsedAt: Date
+    public let username: String?
+    public let displayName: String?
 
     public init(
         id: String,
@@ -1586,7 +1588,9 @@ public struct ServerManagedSessionSummary: Codable, Equatable, Sendable, Identif
         accessExpiresAt: Date,
         refreshExpiresAt: Date,
         createdAt: Date,
-        lastUsedAt: Date
+        lastUsedAt: Date,
+        username: String? = nil,
+        displayName: String? = nil
     ) {
         self.id = id
         self.userID = userID
@@ -1595,19 +1599,26 @@ public struct ServerManagedSessionSummary: Codable, Equatable, Sendable, Identif
         self.refreshExpiresAt = refreshExpiresAt
         self.createdAt = createdAt
         self.lastUsedAt = lastUsedAt
+        self.username = username
+        self.displayName = displayName
     }
 }
 
 public struct ServerManagedSessionsResponse: Codable, Equatable, Sendable {
+    /// New servers always include the filtered total. Optional keeps a current
+    /// client able to decode responses from the previous unpaged endpoint.
+    public let totalCount: Int?
     public let isTruncated: Bool
     public let devices: [ServerManagedDeviceSummary]
     public let sessions: [ServerManagedSessionSummary]
 
     public init(
+        totalCount: Int? = nil,
         isTruncated: Bool,
         devices: [ServerManagedDeviceSummary],
         sessions: [ServerManagedSessionSummary]
     ) {
+        self.totalCount = totalCount.map { max($0, 0) }
         self.isTruncated = isTruncated
         self.devices = devices
         self.sessions = sessions
@@ -1653,10 +1664,12 @@ public struct ServerSecurityEventSummary: Codable, Equatable, Sendable, Identifi
 }
 
 public struct ServerSecurityEventsResponse: Codable, Equatable, Sendable {
+    public let totalCount: Int?
     public let isTruncated: Bool
     public let events: [ServerSecurityEventSummary]
 
-    public init(isTruncated: Bool, events: [ServerSecurityEventSummary]) {
+    public init(totalCount: Int? = nil, isTruncated: Bool, events: [ServerSecurityEventSummary]) {
+        self.totalCount = totalCount
         self.isTruncated = isTruncated
         self.events = events
     }

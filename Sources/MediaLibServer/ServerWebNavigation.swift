@@ -104,7 +104,7 @@ enum ServerWebNavigation {
             case .unwatched: return "未看内容"
             case .sources: return "媒体源"
             case .status: return "仪表盘"
-            case .administration: return "服务管理"
+            case .administration: return "用户"
             case .account: return "设置"
             case .vault: return "保险库"
             case .adminSessions: return "会话"

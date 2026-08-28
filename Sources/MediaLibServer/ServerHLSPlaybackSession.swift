@@ -240,6 +240,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
     private let configurationLock = NSLock()
     private var cachedConfiguration: ServerOperationalSettings
     private var configurationFetchedAt = Date.distantPast
+    private let configurationCacheLifetime: TimeInterval
     private let ffmpegFilterCapabilities: ServerMediaToolchain.FFmpegFilterCapabilities
     private let lock = NSLock()
     private let readinessQueue = DispatchQueue(label: "MediaLibServer.HLSReadiness", qos: .utility)
@@ -256,7 +257,8 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         maximumConcurrentSessions: Int = 2,
         defaultRemoteBitrateMbps: Int = 20,
         ffmpegFilterCapabilities: ServerMediaToolchain.FFmpegFilterCapabilities? = nil,
-        operationalSettingsProvider: (@Sendable () -> ServerOperationalSettings)? = nil
+        operationalSettingsProvider: (@Sendable () -> ServerOperationalSettings)? = nil,
+        configurationCacheLifetime: TimeInterval = 2
     ) {
         self.remoteAssetFetcher = remoteAssetFetcher
         let initialConfiguration = ServerOperationalSettings(
@@ -265,6 +267,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         )
         self.cachedConfiguration = initialConfiguration
         self.configurationProvider = operationalSettingsProvider ?? { initialConfiguration }
+        self.configurationCacheLifetime = max(configurationCacheLifetime, 0)
         self.ffmpegFilterCapabilities = ffmpegFilterCapabilities
             ?? ServerMediaToolchain.ffmpegFilterCapabilities()
         self.rootDirectory = rootDirectory ?? FileManager.default.temporaryDirectory
@@ -435,14 +438,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
                 defaultValue: configuration.defaultRemoteBitrateMbps,
                 targetHeight: targetHeight
             )
-            let encoderArguments: [String] = switch configuration.transcodeEngine {
-            case .software:
-                ["-c:v", "libx264", "-preset", "medium"]
-            case .automatic:
-                ["-c:v", "h264_videotoolbox", "-allow_sw", "1"]
-            case .videoToolbox:
-                ["-c:v", "h264_videotoolbox", "-allow_sw", "0"]
-            }
+            let encoderArguments = Self.encoderArguments(for: configuration.transcodeEngine)
             arguments += encoderArguments + [
                 "-pix_fmt", "yuv420p", "-b:v", "\(bitrate * 1_000)k",
                 "-maxrate", "\(bitrate * 1_250)k", "-bufsize", "\(bitrate * 2_000)k",
@@ -503,6 +499,14 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
     }
 
     static let softwareHDRToneMappingFilter = "zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p"
+
+    static func encoderArguments(for engine: ServerTranscodeEngine) -> [String] {
+        switch engine {
+        case .software: ["-c:v", "libx264", "-preset", "medium"]
+        case .automatic: ["-c:v", "h264_videotoolbox", "-allow_sw", "1"]
+        case .videoToolbox: ["-c:v", "h264_videotoolbox", "-allow_sw", "0"]
+        }
+    }
 
     static func targetVideoHeight(
         quality: ServerPlaybackQuality,
@@ -800,12 +804,17 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         configurationLock.lock()
         defer { configurationLock.unlock() }
         let now = Date()
-        guard now.timeIntervalSince(configurationFetchedAt) >= 2 else { return cachedConfiguration }
+        guard now.timeIntervalSince(configurationFetchedAt) >= configurationCacheLifetime else {
+            return cachedConfiguration
+        }
         let candidate = configurationProvider()
         if candidate.isValid { cachedConfiguration = candidate }
         configurationFetchedAt = now
         return cachedConfiguration
     }
+
+    /// Internal observability for deterministic configuration regression tests.
+    func operationalSettingsSnapshot() -> ServerOperationalSettings { currentConfiguration() }
 
     private func hasStorageCapacity(for configuration: ServerOperationalSettings) -> Bool {
         let limit = Int64(configuration.temporaryStorageLimitGB) * 1_024 * 1_024 * 1_024

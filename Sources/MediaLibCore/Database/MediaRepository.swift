@@ -370,6 +370,7 @@ public final class MediaRepository {
         preferenceFilter: ServerLibraryUserPreferenceFilter? = nil,
         excludedTypes: Set<MediaType> = [],
         excludesOnlineSourceItems: Bool = false,
+        maximumContentRating: String? = nil,
         /// 保险库页面**唯一**的例外。保险库的顶层条目自己就是 `privateCollection`
         /// 类型的容器，其余每一处查询都必须继续把它们挡在外面——那条谓词是保险库
         /// 对首页、分类、搜索的兜底屏障，与逐来源授权互为两道锁。
@@ -390,7 +391,13 @@ public final class MediaRepository {
                 )
             }
 
-            var from = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
+
+            var from = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path" + ratingJoin
             var bindings: [SQLiteValue] = []
             // 排序也可能需要这两张按用户分表的连接。两处的绑定用户都写在 ON 上：
             // 移到 WHERE 会把 LEFT JOIN 静默退化成 INNER JOIN，于是"按进度排序"
@@ -467,7 +474,6 @@ public final class MediaRepository {
             let pageSQL = serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: from)
                 + whereClause + " ORDER BY " + Self.serverOrderBy(sort, sortOrder) + " LIMIT ? OFFSET ?"
             let items = try database.query(pageSQL, bindings: pageBindings, map: map(row:))
-            try database.execute("DELETE FROM server_library_allowed_source_paths")
             return ServerLibraryDatabasePage(totalItemCount: total, items: items)
         }
     }
@@ -487,6 +493,7 @@ public final class MediaRepository {
         userID: String,
         excludedTypes: Set<MediaType> = [],
         excludesOnlineSourceItems: Bool = false,
+        maximumContentRating: String? = nil,
         maximumDistinctGenreRows: Int = 500
     ) throws -> ServerLibraryDatabaseFacets {
         guard !allowedSourcePaths.isEmpty else {
@@ -494,9 +501,13 @@ public final class MediaRepository {
         }
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
 
-            let from = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let from = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path" + ratingJoin
             var predicates = ["item.type != ?"]
             var bindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
             // 题材下拉必须和它要筛的那个网格用同一套排除，否则本地分类页会列出
@@ -555,13 +566,18 @@ public final class MediaRepository {
         /// 保险库的顶层条目自己就是 `privateCollection` 类型的容器。调用方只有在
         /// 确认这个账号此刻真的能读保险库（已解锁 + 已授权）时才打开它；其余每
         /// 一次读取都继续把这类行挡在外面，与逐来源授权互为两道锁。
-        includesPrivateCollectionType: Bool = false
+        includesPrivateCollectionType: Bool = false,
+        maximumContentRating: String? = nil
     ) throws -> MediaItem? {
         guard !id.isEmpty, !allowedSourcePaths.isEmpty else { return nil }
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
-            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path" + ratingJoin
             let typePredicate = includesPrivateCollectionType ? "" : " AND item.type != ?"
             var bindings: [SQLiteValue] = [.text(id)]
             if !includesPrivateCollectionType {
@@ -581,15 +597,20 @@ public final class MediaRepository {
     /// 大规模任意查询入口。
     public func fetchServerMediaItems(
         ids: [String],
-        allowedSourcePaths: Set<String>
+        allowedSourcePaths: Set<String>,
+        maximumContentRating: String? = nil
     ) throws -> [MediaItem] {
         let uniqueIDs = Array(Set(ids.filter { !$0.isEmpty })).prefix(100)
         guard !uniqueIDs.isEmpty, !allowedSourcePaths.isEmpty else { return [] }
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
             let placeholders = Array(repeating: "?", count: uniqueIDs.count).joined(separator: ",")
-            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path" + ratingJoin
             let bindings = uniqueIDs.map(SQLiteValue.text) + [.text(MediaType.privateCollection.rawValue)]
             return try database.query(
                 serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: authorizedJoin)
@@ -605,13 +626,18 @@ public final class MediaRepository {
     /// 完整的艺术家/专辑聚合输入，但不会因此阻塞详情或媒体字节流请求。
     public func fetchServerMusicItems(
         allowedSourcePaths: Set<String>,
-        excludesOnlineSourceItems: Bool = false
+        excludesOnlineSourceItems: Bool = false,
+        maximumContentRating: String? = nil
     ) throws -> [MediaItem] {
         guard !allowedSourcePaths.isEmpty else { return [] }
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
-            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path" + ratingJoin
             return try database.query(
                 serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: authorizedJoin)
                     + " WHERE item.type = ?"
@@ -627,13 +653,18 @@ public final class MediaRepository {
     /// 大资料库中为了“上一集/下一集”重新读取每一部影片和每一首歌。
     public func fetchServerSeriesEpisodes(
         allowedSourcePaths: Set<String>,
-        seriesID: String
+        seriesID: String,
+        maximumContentRating: String? = nil
     ) throws -> [MediaItem] {
         guard !allowedSourcePaths.isEmpty, !seriesID.isEmpty else { return [] }
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
-            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path" + ratingJoin
             return try database.query(
                 serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: authorizedJoin)
                     + " WHERE item.parent_id = ? AND item.type = ? ORDER BY item.season_number IS NULL ASC, item.season_number ASC, item.episode_number IS NULL ASC, item.episode_number ASC, item.title COLLATE NOCASE ASC, item.id ASC",
@@ -648,7 +679,8 @@ public final class MediaRepository {
     public func fetchServerLibraryHome(
         allowedSourcePaths: Set<String>,
         cardLimit: Int = 60,
-        excludesOnlineSourceItems: Bool = false
+        excludesOnlineSourceItems: Bool = false,
+        maximumContentRating: String? = nil
     ) throws -> ServerLibraryDatabaseHome {
         guard !allowedSourcePaths.isEmpty else {
             return ServerLibraryDatabaseHome(totalItemCount: 0, countsByType: [:], items: [])
@@ -664,7 +696,13 @@ public final class MediaRepository {
                 )
             }
 
-            let from = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
+
+            let from = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path" + ratingJoin
             let visiblePredicate = " WHERE item.type != ?"
                 + (excludesOnlineSourceItems ? " AND \(Self.onlineSourceItemPredicate)" : "")
             let visibleBindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
@@ -688,7 +726,6 @@ public final class MediaRepository {
                 ],
                 map: map(row:)
             )
-            try database.execute("DELETE FROM server_library_allowed_source_paths")
             return ServerLibraryDatabaseHome(
                 totalItemCount: countsByType.values.reduce(0, +),
                 countsByType: countsByType,
@@ -702,13 +739,18 @@ public final class MediaRepository {
     public func fetchServerSeriesOverview(
         allowedSourcePaths: Set<String>,
         seriesID: String,
-        userID: String
+        userID: String,
+        maximumContentRating: String? = nil
     ) throws -> ServerSeriesDatabaseOverview? {
         guard !allowedSourcePaths.isEmpty, !seriesID.isEmpty else { return nil }
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
-            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path" + ratingJoin
             guard let series = try database.query(
                 serverSelectSQL.replacingOccurrences(of: "FROM media_items", with: authorizedJoin)
                     + " WHERE item.id = ? AND item.type != ? AND item.type != ? LIMIT 1",
@@ -755,7 +797,8 @@ public final class MediaRepository {
         seriesID: String,
         season: ServerSeriesSeasonSelector,
         offset: Int,
-        limit: Int
+        limit: Int,
+        maximumContentRating: String? = nil
     ) throws -> ServerSeriesDatabaseEpisodePage {
         guard !allowedSourcePaths.isEmpty, !seriesID.isEmpty else {
             return ServerSeriesDatabaseEpisodePage(totalItemCount: 0, items: [])
@@ -764,8 +807,12 @@ public final class MediaRepository {
         let safeLimit = min(max(limit, 1), 100)
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
-            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path"
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
+            let authorizedJoin = "FROM media_items AS item INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path" + ratingJoin
             var predicate = " WHERE item.parent_id = ? AND item.type = ?"
             var bindings: [SQLiteValue] = [.text(seriesID), .text(MediaType.episode.rawValue)]
             switch season {
@@ -796,7 +843,8 @@ public final class MediaRepository {
         allowedSourcePaths: Set<String>,
         searchText: String?,
         offset: Int,
-        limit: Int
+        limit: Int,
+        maximumContentRating: String? = nil
     ) throws -> ServerPeopleDatabasePage {
         guard !allowedSourcePaths.isEmpty else {
             return ServerPeopleDatabasePage(totalItemCount: 0, items: [])
@@ -807,12 +855,17 @@ public final class MediaRepository {
         let search = query?.isEmpty == false ? String(query!.prefix(128)) : nil
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
             let visibleJoin = """
             FROM media_people AS person
             INNER JOIN media_credits AS credit ON credit.person_id = person.id
             INNER JOIN media_items AS item ON item.id = credit.media_id
             INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            \(ratingJoin)
             """
             var predicate = " WHERE item.type != ?"
             var bindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
@@ -850,12 +903,17 @@ public final class MediaRepository {
     /// 防止页面把浏览者请求直接转发给第三方头像主机。
     public func fetchServerPersonProfile(
         allowedSourcePaths: Set<String>,
-        personID: String
+        personID: String,
+        maximumContentRating: String? = nil
     ) throws -> ServerPersonDatabaseProfile? {
         guard !allowedSourcePaths.isEmpty, !personID.isEmpty else { return nil }
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
             return try database.query(
                 """
                 SELECT person.id, person.name, person.biography, person.birthday, person.deathday,
@@ -867,6 +925,7 @@ public final class MediaRepository {
                     FROM media_credits AS credit
                     INNER JOIN media_items AS item ON item.id = credit.media_id
                     INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+                    \(ratingJoin)
                     WHERE credit.person_id = person.id AND item.type != ?
                   )
                 LIMIT 1
@@ -888,7 +947,8 @@ public final class MediaRepository {
         allowedSourcePaths: Set<String>,
         personID: String,
         offset: Int,
-        limit: Int
+        limit: Int,
+        maximumContentRating: String? = nil
     ) throws -> ServerPeopleDatabaseCreditsPage {
         guard !allowedSourcePaths.isEmpty, !personID.isEmpty else {
             return ServerPeopleDatabaseCreditsPage(totalItemCount: 0, items: [])
@@ -897,11 +957,16 @@ public final class MediaRepository {
         let safeLimit = min(max(limit, 1), 100)
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
             let from = """
             FROM media_credits AS credit
             INNER JOIN media_items AS item ON item.id = credit.media_id
             INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            \(ratingJoin)
             """
             let predicate = " WHERE credit.person_id = ? AND item.type != ?"
             let bindings: [SQLiteValue] = [.text(personID), .text(MediaType.privateCollection.rawValue)]
@@ -932,7 +997,8 @@ public final class MediaRepository {
     public func fetchServerManualCollectionsPage(
         allowedSourcePaths: Set<String>,
         offset: Int,
-        limit: Int
+        limit: Int,
+        maximumContentRating: String? = nil
     ) throws -> ServerCollectionsDatabasePage {
         guard !allowedSourcePaths.isEmpty else {
             return ServerCollectionsDatabasePage(totalItemCount: 0, items: [])
@@ -941,12 +1007,17 @@ public final class MediaRepository {
         let safeLimit = min(max(limit, 1), 100)
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
             let visibleJoin = """
             FROM video_manual_collections AS collection
             INNER JOIN video_manual_collection_items AS entry ON entry.collection_id = collection.id
             INNER JOIN media_items AS item ON item.id = entry.media_id
             INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            \(ratingJoin)
             """
             let predicate = " WHERE item.type != ?"
             let bindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
@@ -977,18 +1048,24 @@ public final class MediaRepository {
         allowedSourcePaths: Set<String>,
         collectionID: String,
         offset: Int,
-        limit: Int
+        limit: Int,
+        maximumContentRating: String? = nil
     ) throws -> ServerCollectionDatabaseDetail? {
         guard !allowedSourcePaths.isEmpty, !collectionID.isEmpty else { return nil }
         let safeOffset = min(max(offset, 0), 1_000_000)
         let safeLimit = min(max(limit, 1), 100)
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
             let from = """
             FROM video_manual_collection_items AS entry
             INNER JOIN media_items AS item ON item.id = entry.media_id
             INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            \(ratingJoin)
             """
             let predicate = " WHERE entry.collection_id = ? AND item.type != ?"
             let bindings: [SQLiteValue] = [.text(collectionID), .text(MediaType.privateCollection.rawValue)]
@@ -1026,7 +1103,8 @@ public final class MediaRepository {
     public func fetchServerMusicPlaylistsPage(
         allowedSourcePaths: Set<String>,
         offset: Int,
-        limit: Int
+        limit: Int,
+        maximumContentRating: String? = nil
     ) throws -> ServerPlaylistsDatabasePage {
         guard !allowedSourcePaths.isEmpty else {
             return ServerPlaylistsDatabasePage(totalItemCount: 0, items: [])
@@ -1035,12 +1113,17 @@ public final class MediaRepository {
         let safeLimit = min(max(limit, 1), 100)
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
             let visibleJoin = """
             FROM music_playlists AS playlist
             INNER JOIN music_playlist_items AS entry ON entry.playlist_id = playlist.id
             INNER JOIN media_items AS item ON item.id = entry.media_id
             INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            \(ratingJoin)
             """
             let predicate = " WHERE item.type = ?"
             let bindings: [SQLiteValue] = [.text(MediaType.music.rawValue)]
@@ -1073,18 +1156,24 @@ public final class MediaRepository {
         allowedSourcePaths: Set<String>,
         playlistID: String,
         offset: Int,
-        limit: Int
+        limit: Int,
+        maximumContentRating: String? = nil
     ) throws -> ServerPlaylistDatabaseDetail? {
         guard !allowedSourcePaths.isEmpty, !playlistID.isEmpty else { return nil }
         let safeOffset = min(max(offset, 0), 1_000_000)
         let safeLimit = min(max(limit, 1), 100)
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
             let from = """
             FROM music_playlist_items AS entry
             INNER JOIN media_items AS item ON item.id = entry.media_id
             INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            \(ratingJoin)
             """
             let predicate = " WHERE entry.playlist_id = ? AND item.type = ?"
             let bindings: [SQLiteValue] = [.text(playlistID), .text(MediaType.music.rawValue)]
@@ -1128,15 +1217,21 @@ public final class MediaRepository {
     /// 筛，也不可能筛出它本来看不到的东西。
     public func fetchServerAuthorizedCandidates(
         allowedSourcePaths: Set<String>,
-        type: MediaType?
+        type: MediaType?,
+        maximumContentRating: String? = nil
     ) throws -> [MediaItem] {
         guard !allowedSourcePaths.isEmpty else { return [] }
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
             let from = """
             FROM media_items AS item
             INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+            \(ratingJoin)
             """
             var predicate = " WHERE item.type != ?"
             var bindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
@@ -1832,12 +1927,17 @@ public final class MediaRepository {
     ///   数全部行时，一个 1200 集的 Emby 剧集库徽标写 1200、点进去只有 30 部剧。
     public func itemCountsBySourcePath(
         allowedSourcePaths: Set<String>,
-        topLevelOnly: Bool = false
+        topLevelOnly: Bool = false,
+        maximumContentRating: String? = nil
     ) throws -> [String: Int] {
         guard !allowedSourcePaths.isEmpty else { return [:] }
         return try database.transaction {
             try prepareServerAllowedSourcePaths(allowedSourcePaths)
-            defer { try? database.execute("DELETE FROM server_library_allowed_source_paths") }
+            let ratingJoin = try prepareServerAllowedContentRatings(maximum: maximumContentRating)
+            defer {
+                try? database.execute("DELETE FROM server_library_allowed_source_paths")
+                clearServerAllowedContentRatings(maximum: maximumContentRating)
+            }
             var predicates = ["item.type != ?"]
             var bindings: [SQLiteValue] = [.text(MediaType.privateCollection.rawValue)]
             if topLevelOnly {
@@ -1849,6 +1949,7 @@ public final class MediaRepository {
                 """
                 SELECT item.source_path, COUNT(*) FROM media_items AS item
                 INNER JOIN server_library_allowed_source_paths AS allowed ON allowed.path = item.source_path
+                \(ratingJoin)
                 WHERE \(predicates.joined(separator: " AND ")) GROUP BY item.source_path
                 """,
                 bindings: bindings,
@@ -1896,6 +1997,36 @@ public final class MediaRepository {
                 bindings: [.text(path)]
             )
         }
+    }
+
+    /// Builds a request-scoped allow-list from the distinct rating labels that
+    /// actually exist in metadata. The allow-list is joined by SQL callers, so
+    /// pagination, counts and aggregates are computed after parental-policy
+    /// filtering rather than leaking restricted rows and filtering cards later.
+    ///
+    /// The number of distinct labels is bounded independently from library size;
+    /// unknown and missing labels fail closed whenever a maximum is configured.
+    private func prepareServerAllowedContentRatings(maximum: String?) throws -> String {
+        guard let maximum else { return "" }
+        try database.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS server_allowed_content_ratings (value TEXT PRIMARY KEY) WITHOUT ROWID"
+        )
+        try database.execute("DELETE FROM server_allowed_content_ratings")
+        let labels = try database.query(
+            "SELECT DISTINCT content_rating FROM media_detail_metadata WHERE content_rating IS NOT NULL LIMIT 1024"
+        ) { $0.string(0) }.compactMap { $0 }
+        for label in labels where ServerContentRatingAgePolicy.allows(contentRating: label, maximum: maximum) {
+            try database.execute(
+                "INSERT OR IGNORE INTO server_allowed_content_ratings(value) VALUES (?)",
+                bindings: [.text(label)]
+            )
+        }
+        return " INNER JOIN media_detail_metadata AS rating_detail ON rating_detail.media_id = item.id INNER JOIN server_allowed_content_ratings AS allowed_rating ON allowed_rating.value = rating_detail.content_rating"
+    }
+
+    private func clearServerAllowedContentRatings(maximum: String?) {
+        guard maximum != nil else { return }
+        try? database.execute("DELETE FROM server_allowed_content_ratings")
     }
 
     private static func escapedLikeLiteral(_ value: String) -> String {

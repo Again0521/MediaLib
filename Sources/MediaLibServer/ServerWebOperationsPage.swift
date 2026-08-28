@@ -47,7 +47,7 @@ enum ServerWebOperationsPage {
             case .tasks: return "任务"
             case .storage: return "存储与维护"
             case .security: return "安全"
-            case .logs: return "日志"
+            case .logs: return "审计日志"
             }
         }
 
@@ -58,7 +58,7 @@ enum ServerWebOperationsPage {
             case .tasks: return "查看扫描、索引和元数据任务的状态与脱敏结果。"
             case .storage: return "查看缓存、备份和诊断能力，危险操作保持分级确认。"
             case .security: return "审阅认证、权限与危险操作的结构化审计。"
-            case .logs: return "查看有容量和保留期上限、且经过脱敏的服务日志。"
+            case .logs: return "筛选有容量和保留期上限、且经过脱敏的安全事件。"
             }
         }
     }
@@ -165,19 +165,50 @@ enum ServerWebOperationsPage {
               <div class="operations-button-row"><button class="ui-btn ui-btn-destructive" type="button" id="cache-clear">清理转码缓存</button><a class="ui-btn ui-btn-secondary" href="/api/v1/admin/diagnostics" download>导出脱敏诊断</a></div>
             """)
         case .security:
-            return card("安全审计", "认证、权限、会话与危险操作使用结构化事件。", id: "security-events")
+            return card(
+                "安全审计",
+                "认证、权限、会话与危险操作使用结构化事件。",
+                id: "security-events",
+                footer: auditLoadMoreButton
+            )
         case .logs:
-            return card("结构化日志", "仅显示有界、脱敏字段；不包含令牌、路径、URL 或命令行。", id: "log-events", controls: """
-              <div class="ui-field"><label class="ui-label" for="log-category">类别</label><select class="ui-select" id="log-category"><option value="">全部</option><option value="authentication">认证</option><option value="identity">身份</option><option value="authorization">授权</option><option value="session">会话</option></select></div>
-            """)
+            return card(
+                "结构化审计日志",
+                "仅显示有界、脱敏字段；不包含令牌、路径、URL 或命令行。",
+                id: "log-events",
+                controls: """
+                <div class="operations-log-filters">
+                  \(ServerWebUI.searchField(
+                    id: "log-search",
+                    label: "筛选审计日志",
+                    placeholder: "搜索操作或稳定标识",
+                    action: "/admin/logs",
+                    formID: "log-search-form"
+                  ))
+                  <div class="ui-field"><label class="ui-label" for="log-category">类别</label><select class="ui-select" id="log-category"><option value="">全部</option><option value="authentication">认证</option><option value="identity">身份</option><option value="authorization">授权</option><option value="session">会话</option></select></div>
+                  <div class="ui-field"><label class="ui-label" for="log-outcome">结果</label><select class="ui-select" id="log-outcome"><option value="">全部</option><option value="success">成功</option><option value="failure">失败</option><option value="denied">已拒绝</option></select></div>
+                </div>
+                """,
+                footer: auditLoadMoreButton
+            )
         }
     }
+
+    private static let auditLoadMoreButton = ServerWebUI.button(
+        "载入更多",
+        variant: .ghost,
+        size: .small,
+        icon: .chevronDown,
+        id: "audit-load-more",
+        attributes: " hidden"
+    )
 
     private static func card(
         _ title: String,
         _ detail: String,
         id: String,
-        controls: String = ""
+        controls: String = "",
+        footer: String = ""
     ) -> String {
         """
         <section class="ui-card operations-card" id="\(id)-card">
@@ -185,6 +216,7 @@ enum ServerWebOperationsPage {
           <p class="t-footnote t-tertiary">\(ServerWebHTML.escape(detail))</p>
           \(controls)
           <div class="operations-data" id="\(id)" aria-live="polite">等待服务数据</div>
+          \(footer)
         </section>
         """
     }
@@ -196,6 +228,9 @@ enum ServerWebOperationsPage {
     .operations-form { grid-column:1/-1; display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:var(--space-5); }
     .operations-form .operations-actions { grid-column:1/-1; display:flex; justify-content:flex-end; }
     .operations-button-row { display:flex; flex-wrap:wrap; gap:var(--space-2); }
+    .operations-log-filters { display:grid; grid-template-columns:minmax(180px,1fr) repeat(2,minmax(120px,auto)); gap:var(--space-3); align-items:end; }
+    .operations-log-filters .app-page-search { width:100%; }
+    #audit-load-more { align-self:center; min-height:44px; }
     .operations-list { display:grid; gap:var(--space-2); margin:0; padding:0; list-style:none; }
     .operations-list-item { display:flex; align-items:center; justify-content:space-between; gap:var(--space-3); min-height:44px; padding:var(--space-2) 0; border-bottom:var(--hairline) solid var(--border); }
     .operations-list-item:last-child { border-bottom:0; }
@@ -209,6 +244,8 @@ enum ServerWebOperationsPage {
       .operations-grid, .operations-form { grid-template-columns:minmax(0,1fr); }
       .operations-form .operations-actions, .operations-form .operations-actions .ui-btn { width:100%; }
       .operations-list-item { align-items:flex-start; flex-direction:column; }
+      .operations-log-filters { grid-template-columns:minmax(0,1fr); }
+      #audit-load-more { width:100%; }
     }
     """#
 
@@ -222,6 +259,9 @@ enum ServerWebOperationsPage {
       if (!refresh || !message || !content) return;
       let settingsETag = '';
       let logEvents = [];
+      let logTotal = 0;
+      let logLoading = false;
+      let logRevision = 0;
       let hostControlAvailable = false;
       const byID = id => document.getElementById(id);
       const setMessage = (text, failed = false) => {
@@ -324,12 +364,12 @@ enum ServerWebOperationsPage {
       const renderLogs = () => {
         const target = byID(content.dataset.section === 'logs' ? 'log-events' : 'security-events');
         if (!target) return;
-        const selected = byID('log-category')?.value || '';
-        const events = logEvents.filter(event => !selected || event.category === selected);
-        if (events.length === 0) { empty(target, '没有符合条件的事件。'); return; }
+        const more = byID('audit-load-more');
+        if (more) more.hidden = logEvents.length >= logTotal;
+        if (logEvents.length === 0) { empty(target, '没有符合条件的事件。'); return; }
         const list = document.createElement('ul');
         list.className = 'operations-list';
-        events.slice(0, 100).forEach(event => {
+        logEvents.forEach(event => {
           const item = document.createElement('li');
           item.className = 'operations-list-item';
           const copy = document.createElement('span');
@@ -385,11 +425,35 @@ enum ServerWebOperationsPage {
         renderBackups((await requestJSON('/api/v1/admin/backups')).value);
         facts(byID('storage-protected'), [['恢复', '密码确认 · 预检 · 自动回滚'], ['缓存清理', '后台有界任务'], ['诊断导出', '仅能力、计数与稳定结果码']]);
       };
-      const loadAudit = async () => {
-        const endpoint = content.dataset.section === 'logs' ? '/api/v1/admin/logs' : '/api/v1/admin/security-events';
-        const payload = (await requestJSON(endpoint)).value;
-        logEvents = Array.isArray(payload?.events) ? payload.events : [];
-        renderLogs();
+      const loadAudit = async (reset = true) => {
+        if (logLoading && !reset) return;
+        logLoading = true;
+        const revision = reset ? ++logRevision : logRevision;
+        const more = byID('audit-load-more');
+        if (more) more.disabled = true;
+        try {
+          const endpoint = content.dataset.section === 'logs' ? '/api/v1/admin/logs' : '/api/v1/admin/security-events';
+          const parameters = new URLSearchParams({offset:String(reset ? 0 : logEvents.length),limit:'50'});
+          if (content.dataset.section === 'logs') {
+            const category = byID('log-category')?.value || '';
+            const outcome = byID('log-outcome')?.value || '';
+            const query = (byID('log-search')?.value || '').trim();
+            if (category) parameters.set('category', category);
+            if (outcome) parameters.set('outcome', outcome);
+            if (query) parameters.set('q', query);
+          }
+          const payload = (await requestJSON(`${endpoint}?${parameters}`)).value;
+          if (revision !== logRevision) return;
+          const events = Array.isArray(payload?.events) ? payload.events : [];
+          logEvents = reset ? events : logEvents.concat(events);
+          logTotal = Math.max(logEvents.length, Number(payload?.totalCount) || 0);
+          renderLogs();
+        } finally {
+          if (revision === logRevision) {
+            logLoading = false;
+            if (more) more.disabled = false;
+          }
+        }
       };
       const loadDashboard = async () => {
         const dashboard = (await requestJSON('/api/v1/admin/dashboard')).value;
@@ -613,7 +677,11 @@ enum ServerWebOperationsPage {
         } catch (_) { setMessage('缓存清理未能提交。', true); }
         finally { button.disabled = false; button.textContent = '清理转码缓存'; }
       });
-      byID('log-category')?.addEventListener('change', renderLogs);
+      const resetAudit = () => { void loadAudit(true); };
+      byID('log-search-form')?.addEventListener('submit', event => { event.preventDefault(); resetAudit(); });
+      byID('log-category')?.addEventListener('change', resetAudit);
+      byID('log-outcome')?.addEventListener('change', resetAudit);
+      byID('audit-load-more')?.addEventListener('click', () => { void loadAudit(false); });
       refresh.addEventListener('click', load);
       load();
     })();

@@ -35,7 +35,8 @@ final class ServerWebScriptMutabilityTests: XCTestCase {
             name: "app-shell.js"
         )
         XCTAssertTrue(ServerWebShellScript.script.contains("scheduleDock"))
-        assertMutableBindings(["availableLibraries", "editingUser", "failures", "usersByID"], in: ServerWebAdministrationPage.script, name: "admin.js")
+        assertMutableBindings(["availableLibraries", "editingUser", "failures"], in: ServerWebAdministrationPage.script, name: "admin.js")
+        XCTAssertFalse(ServerWebAdministrationPage.script.contains("var usersByID ="))
     }
 
     private func assertMutableBindings(_ bindings: [String], in script: String, name: String) {

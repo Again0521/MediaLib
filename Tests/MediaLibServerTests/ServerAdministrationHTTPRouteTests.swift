@@ -111,8 +111,51 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(response(path: "/api/v1/admin/users", token: "administrator").statusCode, 200)
         XCTAssertEqual(response(path: "/api/v1/admin/sessions", token: "administrator").statusCode, 200)
         XCTAssertEqual(response(path: "/api/v1/admin/security-events", token: "administrator").statusCode, 200)
+        XCTAssertEqual(response(path: "/api/v1/admin/playback-sessions", token: "member").statusCode, 403)
+        XCTAssertEqual(response(path: "/api/v1/admin/playback-sessions", token: "session-manager").statusCode, 200)
         XCTAssertEqual(response(path: "/api/v1/admin/sources", token: "administrator").statusCode, 200)
         XCTAssertEqual(response(path: "/api/v1/admin/libraries", token: "administrator").statusCode, 200)
+    }
+
+    func testAdministratorCanListInspectAndTerminatePlaybackSessions() throws {
+        let session = ServerAdminHLSPlaybackSession(
+            sessionID: "0123456789abcdef0123456789abcdef",
+            userID: "user-alice",
+            state: .playing,
+            mode: "hlsTranscode",
+            startedAt: Date(timeIntervalSince1970: 100),
+            lastAccessedAt: Date(timeIntervalSince1970: 110),
+            durationSeconds: 3_600
+        )
+        let cancellation = LockedPlaybackCancellation()
+        router = makeRouter(
+            adminHLSSessionsProvider: { [session] },
+            adminHLSCancellationProvider: { id, principal in
+                cancellation.record(id: id, actor: principal.userID)
+                return id == session.sessionID
+            }
+        )
+
+        let list = response(path: "/api/v1/admin/playback-sessions", token: "session-manager")
+        XCTAssertEqual(list.statusCode, 200)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: list.body) as? [[String: Any]])
+        XCTAssertEqual(json.first?["sessionID"] as? String, session.sessionID)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/playback-sessions/\(session.sessionID)", token: "session-manager"
+        ).statusCode, 200)
+
+        let denied = router.response(for: mutationRequest(
+            "/api/v1/admin/playback-sessions/\(session.sessionID)",
+            token: "member", bodyLength: 0, method: "DELETE"
+        ))
+        XCTAssertEqual(denied.statusCode, 403)
+        let terminated = router.response(for: mutationRequest(
+            "/api/v1/admin/playback-sessions/\(session.sessionID)",
+            token: "session-manager", bodyLength: 0, method: "DELETE"
+        ))
+        XCTAssertEqual(terminated.statusCode, 204)
+        XCTAssertEqual(cancellation.sessionID, session.sessionID)
+        XCTAssertEqual(cancellation.actorUserID, "user-alice")
     }
 
     func testAdministrationPagesAreSeparatedByPathAndPermission() {
@@ -709,6 +752,47 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         }
     }
 
+    func testSecurityEventRoutesPageAndFilterOnTheServer() throws {
+        let timestamp = Date()
+        try repository.appendSecurityEvent(.init(
+            id: "audit-filter-a", occurredAt: timestamp, category: .authentication,
+            action: "login.succeeded", outcome: .success, actorUserID: "user-alice"
+        ))
+        try repository.appendSecurityEvent(.init(
+            id: "audit-filter-b", occurredAt: timestamp, category: .authorization,
+            action: "stream.denied", outcome: .denied, targetUserID: "user-bob",
+            detailCode: "policy.remote"
+        ))
+        try repository.appendSecurityEvent(.init(
+            id: "audit-filter-c", occurredAt: timestamp, category: .authorization,
+            action: "download.denied", outcome: .denied,
+            detailCode: "policy.download"
+        ))
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let firstResponse = response(
+            path: "/api/v1/admin/logs?offset=0&limit=1&category=authorization&outcome=denied&q=policy",
+            token: "server-manager"
+        )
+        let first = try decoder.decode(ServerSecurityEventsResponse.self, from: firstResponse.body)
+        let secondResponse = response(
+            path: "/api/v1/admin/logs?offset=1&limit=1&category=authorization&outcome=denied&q=policy",
+            token: "server-manager"
+        )
+        let second = try decoder.decode(ServerSecurityEventsResponse.self, from: secondResponse.body)
+
+        XCTAssertEqual(firstResponse.statusCode, 200)
+        XCTAssertEqual(first.totalCount, 2)
+        XCTAssertEqual(first.events.map(\.id), ["audit-filter-c"])
+        XCTAssertTrue(first.isTruncated)
+        XCTAssertEqual(second.events.map(\.id), ["audit-filter-b"])
+        XCTAssertFalse(second.isTruncated)
+        XCTAssertEqual(response(path: "/api/v1/admin/logs?category=unknown", token: "server-manager").statusCode, 400)
+        XCTAssertEqual(response(path: "/api/v1/admin/logs?limit=101", token: "server-manager").statusCode, 400)
+        XCTAssertEqual(response(path: "/api/v1/admin/logs?q=a&q=b", token: "server-manager").statusCode, 400)
+    }
+
     func testUsersCatalogHasHardResponseLimit() throws {
         for index in 0...ServerAdministrationCatalog.maximumUserCount {
             _ = try repository.createUser(
@@ -740,9 +824,50 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         ).statusCode, 400)
     }
 
+    func testSessionsEndpointUsesFilteredStablePagesAndRejectsUnknownQueryKeys() throws {
+        let firstResponse = response(
+            path: "/api/v1/admin/sessions?offset=0&limit=1", token: "administrator"
+        )
+        let secondResponse = response(
+            path: "/api/v1/admin/sessions?offset=1&limit=1", token: "administrator"
+        )
+        XCTAssertEqual(firstResponse.statusCode, 200)
+        XCTAssertEqual(secondResponse.statusCode, 200)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let first = try decoder.decode(ServerManagedSessionsResponse.self, from: firstResponse.body)
+        let second = try decoder.decode(ServerManagedSessionsResponse.self, from: secondResponse.body)
+        XCTAssertEqual(first.totalCount, 2)
+        XCTAssertEqual(second.totalCount, 2)
+        XCTAssertEqual(first.sessions.count, 1)
+        XCTAssertEqual(second.sessions.count, 1)
+        XCTAssertTrue(Set(first.sessions.map(\.id)).isDisjoint(with: second.sessions.map(\.id)))
+        XCTAssertTrue(first.isTruncated)
+        XCTAssertFalse(second.isTruncated)
+        XCTAssertEqual(first.devices.map(\.id), first.sessions.map(\.deviceID))
+
+        let filteredResponse = response(
+            path: "/api/v1/admin/sessions?offset=0&limit=50&q=bob", token: "administrator"
+        )
+        let filtered = try decoder.decode(ServerManagedSessionsResponse.self, from: filteredResponse.body)
+        XCTAssertEqual(filtered.totalCount, 1)
+        XCTAssertEqual(filtered.sessions.first?.id, "session-bob")
+        XCTAssertEqual(filtered.sessions.first?.username, "bob")
+        XCTAssertEqual(filtered.sessions.first?.displayName, "Bob")
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/sessions?limit=50&sort=token", token: "administrator"
+        ).statusCode, 400)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/sessions?limit=0", token: "administrator"
+        ).statusCode, 400)
+    }
+
     func testAdministrationPageAndScriptKeepDynamicContentOutOfHTMLSinks() {
         let administratorPage = router.response(
             for: "GET /admin/users HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer administrator\r\n\r\n"
+        )
+        let sessionsPage = router.response(
+            for: "GET /admin/sessions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer session-manager\r\n\r\n"
         )
         let deniedPage = router.response(
             for: "GET /admin/users HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer member\r\n\r\n"
@@ -750,11 +875,13 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         let asset = router.response(for: "GET /assets/admin.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
         let stylesheet = router.response(for: "GET /assets/admin.css HTTP/1.1\r\nHost: localhost\r\n\r\n")
         let html = String(data: administratorPage.body, encoding: .utf8) ?? ""
+        let sessionsHTML = String(data: sessionsPage.body, encoding: .utf8) ?? ""
         let script = String(data: asset.body, encoding: .utf8) ?? ""
         let stylesheetHeaders = String(data: stylesheet.serializedHeaders(), encoding: .utf8) ?? ""
         let style = String(data: stylesheet.body, encoding: .utf8) ?? ""
 
         XCTAssertEqual(administratorPage.statusCode, 200)
+        XCTAssertEqual(sessionsPage.statusCode, 200)
         XCTAssertEqual(deniedPage.statusCode, 403)
         XCTAssertEqual(asset.statusCode, 200)
         XCTAssertTrue(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"))
@@ -765,9 +892,26 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertTrue(html.contains("id=\"create-member\""))
         XCTAssertTrue(html.contains("id=\"policy-direct\""))
         XCTAssertTrue(html.contains("id=\"policy-streams\""))
+        XCTAssertTrue(html.contains("data-section=\"users\""))
+        XCTAssertTrue(html.contains("用户与访问"))
+        XCTAssertFalse(html.contains("id=\"sessions-search-form\""))
+        XCTAssertFalse(html.contains("id=\"playback-sessions-content\""))
+        XCTAssertTrue(sessionsHTML.contains("data-section=\"sessions\""))
+        XCTAssertTrue(sessionsHTML.contains("会话与播放"))
+        XCTAssertTrue(sessionsHTML.contains("id=\"sessions-search-form\""))
+        XCTAssertTrue(sessionsHTML.contains("class=\"app-page-search\""))
+        XCTAssertTrue(sessionsHTML.contains("id=\"sessions-load-more\""))
+        XCTAssertTrue(sessionsHTML.contains("id=\"playback-sessions-content\""))
+        XCTAssertFalse(sessionsHTML.contains("id=\"create-member\""))
+        XCTAssertFalse(sessionsHTML.contains("id=\"policy-direct\""))
+        XCTAssertFalse(sessionsHTML.contains("id=\"users-content\""))
         XCTAssertTrue(script.contains("textContent"))
         XCTAssertTrue(script.contains("replaceChildren"))
         XCTAssertTrue(script.contains("credentials: 'same-origin'"))
+        XCTAssertTrue(script.contains("/api/v1/admin/sessions?${params.toString()}"))
+        XCTAssertTrue(script.contains("pageSection === 'users'"))
+        XCTAssertTrue(script.contains("pageSection === 'sessions'"))
+        XCTAssertTrue(script.contains("loadedSessions.length"))
         XCTAssertTrue(script.contains("AbortController"))
         XCTAssertFalse(script.contains("innerHTML"))
         XCTAssertFalse(script.contains("document.cookie"))
@@ -1044,12 +1188,16 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         runtimeConfigurationApplyProvider: @escaping (ServerRuntimeConfigurationMutationRequest) throws -> Bool = { _ in false },
         authenticationService: ServerAuthenticationService? = nil,
         transcodeCacheCleanup: @escaping @Sendable () -> Int = { 0 },
-        playbackTracksProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerWebPlaybackTrackSet? = { _, _ in nil }
+        playbackTracksProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerWebPlaybackTrackSet? = { _, _ in nil },
+        adminHLSSessionsProvider: @escaping () -> [ServerAdminHLSPlaybackSession] = { [] },
+        adminHLSCancellationProvider: @escaping (String, ServerRequestPrincipal) -> Bool = { _, _ in false }
     ) -> LocalHTTPRouter {
         LocalHTTPRouter(
             serverID: "server",
             serverName: "Media & <script>alert(1)</script>",
             playbackTracksProvider: playbackTracksProvider,
+            adminHLSSessionsProvider: adminHLSSessionsProvider,
+            adminHLSCancellationProvider: adminHLSCancellationProvider,
             administrationCatalog: catalog,
             experienceRepository: ServerExperienceRepository(database: database),
             maintenanceService: ServerMaintenanceService(
@@ -1120,5 +1268,30 @@ private final class LockedCleanupCounter: @unchecked Sendable {
         storedCallCount += 1
         lock.unlock()
         return 2
+    }
+}
+
+private final class LockedPlaybackCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedSessionID: String?
+    private var storedActorUserID: String?
+
+    var sessionID: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedSessionID
+    }
+
+    var actorUserID: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedActorUserID
+    }
+
+    func record(id: String, actor: String) {
+        lock.lock()
+        storedSessionID = id
+        storedActorUserID = actor
+        lock.unlock()
     }
 }

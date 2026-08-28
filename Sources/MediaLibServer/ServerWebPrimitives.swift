@@ -1997,6 +1997,9 @@ enum ServerWebPrimitives {
         .ui-media-grid { --grid-min: 132px; --grid-gap: var(--space-3); }
         .ui-media-grid-tight { --grid-min: 104px; }
         .ui-shelf { --grid-min: 136px; }
+        .ui-segmented > label,
+        .ui-segmented > a,
+        .ui-segmented > button { height: var(--control-height-lg); }
       }
       @media (max-width: 419px) {
         .ui-media-grid { --grid-min: 118px; }

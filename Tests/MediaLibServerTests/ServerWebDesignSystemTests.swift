@@ -908,4 +908,23 @@ final class ServerWebDesignSystemTests: XCTestCase {
         // 后退回来时连滚动位置一起带回来。
         XCTAssertTrue(script.contains("medialibScroll"))
     }
+
+    func testPhoneViewportUsesFortyFourPointSharedControlsWithoutDependingOnPointerEmulation() {
+        let tokens = asset("/assets/tokens.css")
+        XCTAssertTrue(tokens.contains("@media (max-width: 719px)"))
+        XCTAssertTrue(tokens.contains("--control-height-xs: 44px"))
+        XCTAssertTrue(tokens.contains("--control-height-sm: 44px"))
+        XCTAssertTrue(tokens.contains("--control-height-md: 44px"))
+        XCTAssertTrue(tokens.contains("--field-height: 44px"))
+        XCTAssertTrue(tokens.contains("--nav-item-height: 44px"))
+
+        let primitives = asset("/assets/primitives.css")
+        XCTAssertTrue(primitives.contains(".ui-segmented > button { height: var(--control-height-lg); }"))
+        XCTAssertTrue(ServerWebMediaDetailPage.style.contains(
+            ".rating-star { width: var(--control-height-lg); height: var(--control-height-lg); }"
+        ))
+        XCTAssertTrue(ServerWebAdministrationPage.script.contains(
+            "ui-btn ui-btn-sm ui-btn-ghost revoke-session"
+        ))
+    }
 }

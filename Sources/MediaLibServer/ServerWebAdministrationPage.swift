@@ -1,30 +1,74 @@
 import Foundation
 import MediaLibServerProtocol
 
-/// 只读 Web 管理总览。动态数据全部由同源脚本通过受保护 API 获取，并使用
-/// `textContent` 渲染；页面本身不内嵌用户数据、令牌或数据库实体。
+/// 用户与会话各自拥有独立的管理页面。动态数据全部由同源脚本通过受保护 API 获取，
+/// 并使用 `textContent` 渲染；页面本身不内嵌用户数据、令牌或数据库实体。
 enum ServerWebAdministrationPage {
+    enum Section: String {
+        case users
+        case sessions
+
+        var activeNavigation: ServerWebNavigation.Active {
+            switch self {
+            case .users: .administration
+            case .sessions: .adminSessions
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .users: "用户与访问"
+            case .sessions: "会话与播放"
+            }
+        }
+
+        var subtitle: String {
+            switch self {
+            case .users: "创建成员，并控制资料库、播放和远程访问权限。"
+            case .sessions: "查看登录设备和当前播放，并撤销不再需要的会话。"
+            }
+        }
+    }
+
     static func render(
+        section: Section,
         serverName: String,
         csrfToken: String,
-        active: ServerWebNavigation.Active = .administration,
         categories: [ServerLibraryCategory] = [],
         sidebarExtras: ServerWebSidebarExtras
     ) -> String {
         let sidebar = ServerWebNavigation.render(
-            active: active, showAdministration: true, note: .security, categories: categories,
+            active: section.activeNavigation, showAdministration: true, note: .security, categories: categories,
             extras: sidebarExtras, context: .administration
         )
         let content = """
+        <div id="administration-page" data-section="\(section.rawValue)">
         \(ServerWebPageHeader.render(
             icon: .administration,
             eyebrow: "Administration",
-            title: "服务管理",
-            subtitle: "管理谁能使用 \(serverName)，以及他们能看到什么。",
+            title: section.title,
+            subtitle: "\(section.subtitle) \(serverName) 的敏感信息不会显示在网页中。",
             actions: ServerWebUI.button("刷新数据", variant: .secondary, icon: .refresh, id: "refresh")
         ))
-        \(ServerWebUI.alert(.info, message: "正在加载管理数据…", id: "global-status", messageID: "global-status-text", role: "status"))
+        \(ServerWebUI.alert(.info, message: "正在加载\(section.title)…", id: "global-status", messageID: "global-status-text", role: "status"))
 
+        \(section == .users ? userManagementContent : sessionManagementContent)
+        <p class="t-footnote t-tertiary admin-footnote">管理操作受角色、资料库授权、CSRF、限速和审计保护 · 响应不包含密码、Cookie、token、摘要、媒体路径、请求头或客户端地址。</p>
+        </div>
+        """
+        return ServerWebDocument.render(
+            title: section.title,
+            serverName: serverName,
+            csrfToken: csrfToken,
+            sidebar: sidebar,
+            content: content,
+            pageStylesheets: ["/assets/admin.css"],
+            pageScripts: ["/assets/overlays.js", "/assets/admin.js"],
+            tint: .admin
+        )
+    }
+
+    private static let userManagementContent = """
         <section class="ui-card admin-panel" aria-labelledby="create-user-title">
           <div class="ui-card-head">
             <div>
@@ -133,29 +177,47 @@ enum ServerWebAdministrationPage {
           </form>
         </section>
 
-        <div class="admin-dashboard">
+        <div class="admin-dashboard admin-dashboard-users">
           \(dataPanel(id: "users", title: "用户", note: "谁可以使用这台服务器"))
-          \(dataPanel(id: "sessions", title: "已登录的设备", note: "最近登录过的设备"))
-          \(dataPanel(id: "playback-sessions", title: "当前播放", note: "正在准备、排队或播放的 HLS 会话"))
-          \(dataPanel(id: "events", title: "安全记录", note: "最近 100 条登录与权限变更", extraClass: "admin-panel-wide"))
         </div>
-        <p class="t-footnote t-tertiary admin-footnote">管理操作受角色、资料库授权、CSRF、限速和审计保护 · 响应不包含密码、Cookie、token、摘要、媒体路径、请求头或客户端地址。</p>
         """
-        return ServerWebDocument.render(
-            title: "服务管理",
-            serverName: serverName,
-            csrfToken: csrfToken,
-            sidebar: sidebar,
-            content: content,
-            pageStylesheets: ["/assets/admin.css"],
-            pageScripts: ["/assets/overlays.js", "/assets/admin.js"],
-            tint: .admin
-        )
-    }
 
-    /// The three read-only panels share one shape, so they share one builder;
-    /// their ids remain the contract `admin.js` fills in.
-    private static func dataPanel(id: String, title: String, note: String, extraClass: String = "") -> String {
+    private static let sessionManagementContent = """
+        <div class="admin-dashboard admin-dashboard-sessions">
+          \(dataPanel(
+            id: "sessions",
+            title: "已登录的设备",
+            note: "按最近使用时间稳定排序",
+            tools: ServerWebUI.searchField(
+                id: "sessions-search",
+                label: "筛选登录设备",
+                placeholder: "搜索用户、设备或平台",
+                action: "/admin/sessions",
+                formID: "sessions-search-form"
+            ),
+            footer: ServerWebUI.button(
+                "载入更多",
+                variant: .ghost,
+                size: .small,
+                icon: .chevronDown,
+                id: "sessions-load-more",
+                attributes: " hidden"
+            )
+          ))
+          \(dataPanel(id: "playback-sessions", title: "当前播放", note: "正在准备、排队或播放的 HLS 会话"))
+        </div>
+        """
+
+    /// Read-only list panels share one shape; their ids remain the contract
+    /// `admin.js` fills in for the currently rendered route only.
+    private static func dataPanel(
+        id: String,
+        title: String,
+        note: String,
+        extraClass: String = "",
+        tools: String = "",
+        footer: String = ""
+    ) -> String {
         """
         <section class="ui-card admin-panel \(extraClass)" aria-labelledby="\(id)-title">
           <div class="ui-card-head">
@@ -165,8 +227,10 @@ enum ServerWebAdministrationPage {
             </div>
             <span id="\(id)-count" class="ui-badge ui-badge-neutral">—</span>
           </div>
+          \(tools.isEmpty ? "" : #"<div class="admin-list-tools">\#(tools)</div>"#)
           <p id="\(id)-state" class="ui-state-line admin-state t-callout t-tertiary">正在加载…</p>
           <div id="\(id)-content" class="content" hidden></div>
+          \(footer.isEmpty ? "" : #"<div class="admin-list-footer">\#(footer)</div>"#)
         </section>
         """
     }
@@ -179,6 +243,9 @@ enum ServerWebAdministrationPage {
     #global-status { margin-bottom: var(--space-5); }
     .admin-panel + .admin-panel, .admin-dashboard { margin-top: var(--space-5); }
     .admin-panel .ui-card-head { align-items: flex-start; }
+    .admin-list-tools { margin: var(--space-3) 0; }
+    .admin-list-tools .app-page-search { width: min(100%, 420px); }
+    .admin-list-footer { display: flex; justify-content: center; padding-top: var(--space-3); }
     .content[hidden], .admin-state[hidden] { display: none; }
 
     .admin-form { display: grid; gap: var(--space-4); max-width: 620px; }
@@ -283,6 +350,8 @@ enum ServerWebAdministrationPage {
     (() => {
       'use strict';
       const byID = (id) => document.getElementById(id);
+      const administrationPage = byID('administration-page');
+      const pageSection = administrationPage?.dataset.section;
       const globalStatus = byID('global-status');
       // 文案写进内层节点：往外层写会把提示图标一起抹掉。
       const globalStatusText = byID('global-status-text');
@@ -314,6 +383,9 @@ enum ServerWebAdministrationPage {
       const policyStart = byID('policy-start');
       const policyEnd = byID('policy-end');
       const policyRating = byID('policy-rating');
+      const sessionsSearchForm = byID('sessions-search-form');
+      const sessionsSearch = byID('sessions-search');
+      const sessionsLoadMore = byID('sessions-load-more');
       var availableLibraries = [];
       var editingUser = null;
       var editingPolicy = null;
@@ -321,6 +393,15 @@ enum ServerWebAdministrationPage {
       var policyLoadRevision = 0;
       var loadedUsers = [];
       var loadedUserTotal = 0;
+      var loadedSessions = [];
+      var loadedSessionDevices = new Map();
+      var loadedSessionTotal = 0;
+      var sessionsLoading = false;
+      var sessionsRevision = 0;
+      const initialSessionQuery = window.location.pathname === '/admin/sessions'
+        ? new URLSearchParams(window.location.search).get('q') || ''
+        : '';
+      if (sessionsSearch) sessionsSearch.value = initialSessionQuery.slice(0, 128);
       const dateFormatter = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
       const safeDate = (value) => {
         const date = new Date(value);
@@ -336,6 +417,7 @@ enum ServerWebAdministrationPage {
       const setState = (section, message, isError = false) => {
         const state = byID(`${section}-state`);
         const content = byID(`${section}-content`);
+        if (!state || !content) return;
         state.textContent = message;
         state.classList.toggle('error', isError);
         state.hidden = false;
@@ -345,6 +427,7 @@ enum ServerWebAdministrationPage {
       const showContent = (section, node) => {
         const state = byID(`${section}-state`);
         const content = byID(`${section}-content`);
+        if (!state || !content) return;
         state.hidden = true;
         content.replaceChildren(node);
         content.hidden = false;
@@ -748,29 +831,75 @@ enum ServerWebAdministrationPage {
           button.disabled = false;
         }
       }
-      function renderSessions(data, usersByID) {
+      function renderSessions(data, usersByID, append = false) {
         const devices = Array.isArray(data.devices) ? data.devices : [];
         const sessions = Array.isArray(data.sessions) ? data.sessions : [];
-        byID('sessions-count').textContent = String(sessions.length);
-        if (!devices.length && !sessions.length) { setState('sessions', '目前没有设备登录。'); return; }
-        const deviceByID = new Map(devices.map((device) => [device.id, device]));
-        const rows = element('div', 'rows');
+        if (!append) {
+          loadedSessions = [];
+          loadedSessionDevices = new Map();
+        }
+        devices.forEach((device) => loadedSessionDevices.set(device.id, device));
+        const knownSessionIDs = new Set(loadedSessions.map((session) => session.id));
         sessions.forEach((session) => {
+          if (!knownSessionIDs.has(session.id)) loadedSessions.push(session);
+        });
+        loadedSessionTotal = Math.max(0, Number(data.totalCount) || loadedSessions.length);
+        byID('sessions-count').textContent = String(loadedSessionTotal);
+        sessionsLoadMore.hidden = !data.isTruncated || loadedSessions.length >= loadedSessionTotal;
+        sessionsLoadMore.disabled = false;
+        if (!loadedSessions.length) { setState('sessions', sessionsSearch?.value.trim() ? '没有匹配的登录设备。' : '目前没有设备登录。'); return; }
+        const rows = element('div', 'rows');
+        loadedSessions.forEach((session) => {
           const user = usersByID.get(session.userID);
-          const device = deviceByID.get(session.deviceID);
-          const revoke = element('button', 'revoke-session', '撤销');
+          const device = loadedSessionDevices.get(session.deviceID);
+          const revoke = element('button', 'ui-btn ui-btn-sm ui-btn-ghost revoke-session', '撤销');
           revoke.type = 'button';
           revoke.addEventListener('click', () => revokeSession(session.id, revoke));
           const actions = element('div', 'row-trail');
           actions.append(element('span', 'ui-badge ui-badge-neutral', `至 ${safeDate(session.refreshExpiresAt)}`), revoke);
           rows.append(row([
-            element('div', 'primary', user ? (user.displayName || user.username) : shortID(session.userID)),
+            element('div', 'primary', session.displayName || session.username || (user ? (user.displayName || user.username) : shortID(session.userID))),
             element('div', 'secondary', device ? `${device.name} · ${device.platform}` : shortID(session.deviceID)),
             element('div', 'meta mono', `最近使用 ${safeDate(session.lastUsedAt)}`),
             actions
           ]));
         });
         showContent('sessions', rows);
+      }
+      function sessionListPath(offset) {
+        const params = new URLSearchParams({ offset: String(offset), limit: '50' });
+        const query = sessionsSearch?.value.trim().slice(0, 128) || '';
+        if (query) params.set('q', query);
+        return `/api/v1/admin/sessions?${params.toString()}`;
+      }
+      async function loadMoreSessions(reset = false) {
+        if (sessionsLoading) return;
+        sessionsLoading = true;
+        const revision = reset ? ++sessionsRevision : sessionsRevision;
+        if (reset) {
+          setState('sessions', '正在筛选登录设备…');
+          sessionsLoadMore.hidden = true;
+        } else {
+          sessionsLoadMore.disabled = true;
+          sessionsLoadMore.dataset.busy = 'true';
+        }
+        try {
+          const data = await fetchJSON(sessionListPath(reset ? 0 : loadedSessions.length));
+          if (revision !== sessionsRevision) return;
+          renderSessions(data, new Map(), !reset);
+        } catch (error) {
+          if (revision !== sessionsRevision) return;
+          if (reset) setState('sessions', error && error.message ? error.message : '读不到登录设备。', true);
+          else {
+            sessionsLoadMore.hidden = false;
+            globalStatus.hidden = false;
+            globalStatusText.textContent = error && error.message ? error.message : '无法载入更多登录设备。';
+          }
+        } finally {
+          sessionsLoading = false;
+          sessionsLoadMore.disabled = false;
+          delete sessionsLoadMore.dataset.busy;
+        }
       }
       async function revokeSession(id, button) {
         if (typeof id !== 'string' || !id || !window.confirm('这台设备将需要重新登录。要继续吗？')) return;
@@ -793,19 +922,18 @@ enum ServerWebAdministrationPage {
           button.disabled = false;
         }
       }
-      function renderPlaybackSessions(data, usersByID) {
+      function renderPlaybackSessions(data) {
         const sessions = Array.isArray(data) ? data : [];
         byID('playback-sessions-count').textContent = String(sessions.length);
         if (!sessions.length) { setState('playback-sessions', '目前没有活动播放。'); return; }
         const stateLabel = { queued:'排队', preparing:'准备', ready:'就绪', playing:'播放', finished:'完成', failed:'失败', cancelled:'取消' };
         const rows = element('div', 'rows');
         sessions.forEach((session) => {
-          const user = usersByID.get(session.userID);
           const terminate = element('button', 'ui-btn ui-btn-secondary', '终止');
           terminate.type = 'button';
           terminate.addEventListener('click', () => terminatePlaybackSession(session.sessionID, terminate));
           rows.append(row([
-            element('div', 'primary', user ? (user.displayName || user.username) : shortID(session.userID)),
+            element('div', 'primary', shortID(session.userID)),
             element('div', 'secondary', `${session.mode || 'HLS'} · ${stateLabel[session.state] || session.state || '未知'}`),
             element('div', 'meta mono', `开始 ${safeDate(session.startedAt)}`),
             terminate
@@ -832,55 +960,57 @@ enum ServerWebAdministrationPage {
           button.disabled = false;
         }
       }
-      function renderEvents(data) {
-        const events = Array.isArray(data.events) ? data.events : [];
-        byID('events-count').textContent = String(events.length);
-        if (!events.length) { setState('events', '当前没有安全事件。'); return; }
-        const rows = element('div', 'rows');
-        events.forEach((event) => {
-          const outcome = event.outcome === 'success' ? '成功' : (event.outcome === 'denied' ? '已拒绝' : '失败');
-          rows.append(row([
-            element('div', 'meta mono', safeDate(event.occurredAt)),
-            element('div', 'primary', event.action || 'unknown'),
-            element('span', `pill${event.outcome === 'success' ? '' : ' danger'}`, outcome),
-            element('div', 'secondary', `${event.category || 'unknown'} · ${event.detailCode || '无详情代码'}`)
-          ]));
-        });
-        showContent('events', rows);
-      }
       async function load() {
         refreshButton.disabled = true;
         globalStatus.hidden = false;
-        globalStatusText.textContent = '正在加载管理数据…';
-        ['users', 'sessions', 'playback-sessions', 'events'].forEach((name) => setState(name, '正在加载…'));
-        const results = await Promise.allSettled([
-          fetchJSON('/api/v1/admin/users?offset=0&limit=100'),
-          fetchJSON('/api/v1/admin/sessions'),
-          fetchJSON('/api/v1/admin/security-events'),
-          fetchJSON('/api/v1/admin/libraries'),
-          fetchJSON('/api/v1/admin/playback-sessions')
-        ]);
+        if (pageSection !== 'users' && pageSection !== 'sessions') {
+          globalStatusText.textContent = '页面配置无效，请刷新后重试。';
+          refreshButton.disabled = false;
+          return;
+        }
+        globalStatusText.textContent = pageSection === 'sessions' ? '正在加载会话与播放…' : '正在加载用户与访问…';
         var failures = 0;
-        var usersByID = new Map();
-        if (results[0].status === 'fulfilled') {
-          renderUsers(results[0].value);
-          usersByID = new Map((results[0].value.users || []).map((user) => [user.id, user]));
-        } else { failures += 1; setState('users', results[0].reason.message || '无法读取用户。', true); }
-        if (results[1].status === 'fulfilled') renderSessions(results[1].value, usersByID);
-        else { failures += 1; setState('sessions', results[1].reason.message || '读不到登录设备。', true); }
-        if (results[2].status === 'fulfilled') renderEvents(results[2].value);
-        else { failures += 1; setState('events', results[2].reason.message || '无法读取安全事件。', true); }
-        if (results[3].status === 'fulfilled') renderLibraries(results[3].value);
-        else setLibraryLoadFailure('看不到可分配的资料库，不过仍然可以先把人加进来。');
-        if (results[4].status === 'fulfilled') renderPlaybackSessions(results[4].value, usersByID);
-        else { failures += 1; setState('playback-sessions', results[4].reason.message || '无法读取当前播放。', true); }
+        if (pageSection === 'users') {
+          setState('users', '正在加载…');
+          const results = await Promise.allSettled([
+            fetchJSON('/api/v1/admin/users?offset=0&limit=100'),
+            fetchJSON('/api/v1/admin/libraries')
+          ]);
+          if (results[0].status === 'fulfilled') {
+            renderUsers(results[0].value);
+          } else { failures += 1; setState('users', results[0].reason.message || '无法读取用户。', true); }
+          if (results[1].status === 'fulfilled') renderLibraries(results[1].value);
+          else setLibraryLoadFailure('看不到可分配的资料库，不过仍然可以先把人加进来。');
+        } else if (pageSection === 'sessions') {
+          const sessionPageRevision = ++sessionsRevision;
+          setState('sessions', '正在加载…');
+          setState('playback-sessions', '正在加载…');
+          const results = await Promise.allSettled([
+            fetchJSON(sessionListPath(0)),
+            fetchJSON('/api/v1/admin/playback-sessions')
+          ]);
+          if (sessionPageRevision === sessionsRevision) {
+            if (results[0].status === 'fulfilled') renderSessions(results[0].value, new Map(), false);
+            else { failures += 1; setState('sessions', results[0].reason.message || '读不到登录设备。', true); }
+          }
+          if (results[1].status === 'fulfilled') renderPlaybackSessions(results[1].value);
+          else { failures += 1; setState('playback-sessions', results[1].reason.message || '无法读取当前播放。', true); }
+        }
         globalStatusText.textContent = failures ? `已加载，其中 ${failures} 个区域不可用。可检查账号权限后重试。` : '管理数据已更新。';
         refreshButton.disabled = false;
       }
       refreshButton.addEventListener('click', load);
-      createForm.addEventListener('submit', createMember);
-      editForm.addEventListener('submit', saveMemberEdit);
-      editCancel.addEventListener('click', closeEditUser);
+      sessionsLoadMore?.addEventListener('click', () => loadMoreSessions(false));
+      sessionsSearchForm?.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const query = sessionsSearch.value.trim().slice(0, 128);
+        const nextURL = query ? `/admin/sessions?q=${encodeURIComponent(query)}` : '/admin/sessions';
+        window.history.replaceState(window.history.state, '', nextURL);
+        loadMoreSessions(true);
+      });
+      createForm?.addEventListener('submit', createMember);
+      editForm?.addEventListener('submit', saveMemberEdit);
+      editCancel?.addEventListener('click', closeEditUser);
       load().catch(() => {
         globalStatusText.textContent = '加载失败，请稍后重试。';
         refreshButton.disabled = false;

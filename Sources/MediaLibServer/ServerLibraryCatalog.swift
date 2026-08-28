@@ -20,6 +20,7 @@ final class ServerLibraryCatalog {
     private let userQueueRepository: ServerUserQueueRepository
     private let smartCollectionRepository: VideoSmartCollectionRepository
     private let smartPlaylistRepository: MusicSmartPlaylistRepository
+    private let experienceRepository: ServerExperienceRepository
     private let categoryCacheLock = NSLock()
     private var categoryCache: [String: CategoryCacheEntry] = [:]
     // The authenticated shell asks for these counts on every route render.
@@ -56,6 +57,7 @@ final class ServerLibraryCatalog {
         self.userQueueRepository = ServerUserQueueRepository(database: database)
         self.smartCollectionRepository = VideoSmartCollectionRepository(database: database)
         self.smartPlaylistRepository = MusicSmartPlaylistRepository(database: database)
+        self.experienceRepository = ServerExperienceRepository(database: database)
     }
 
     /// 侧栏只需一个廉价修订键，而不是在每次页面导航重新扫描整库。键覆盖会影响
@@ -127,10 +129,12 @@ final class ServerLibraryCatalog {
         //
         // 两次有界查询而不是一次：本地那次必须继续排除"看着就来自在线服务器"的
         // 条目（`excludesOnlineSourceItems`），远程那次要的正是它们。
+        let maximumContentRating = try maximumContentRating(for: principal)
         let localHome = try mediaRepository.fetchServerLibraryHome(
             allowedSourcePaths: try localPublicSourcePaths(for: principal, requiring: .viewMedia),
             cardLimit: Self.homeLocalCardLimit,
-            excludesOnlineSourceItems: true
+            excludesOnlineSourceItems: true,
+            maximumContentRating: maximumContentRating
         )
         let remotePaths = try allowedPublicSourcePaths(for: principal, requiring: .viewMedia)
             .filter { RemoteLibraryPathPolicy.isMediaServerSourcePath($0) }
@@ -139,7 +143,8 @@ final class ServerLibraryCatalog {
             : try mediaRepository.fetchServerLibraryHome(
                 allowedSourcePaths: remotePaths,
                 cardLimit: Self.homeRemoteCardLimit,
-                excludesOnlineSourceItems: false
+                excludesOnlineSourceItems: false,
+                maximumContentRating: maximumContentRating
             )
         // 远程音乐不进首页：客户端的看板同样把它滤掉（音乐栏目讲的是本地曲库），
         // 远程曲目在侧栏各自来源的音乐页里。
@@ -173,7 +178,8 @@ final class ServerLibraryCatalog {
 
     func categories(for principal: ServerRequestPrincipal) throws -> ServerLibraryCategoriesResponse {
         guard principal.permissions.contains(.viewMedia) else { return ServerLibraryCategoriesResponse(categories: []) }
-        let cacheKey = Self.categoryCacheKey(for: principal)
+        let maximumContentRating = try maximumContentRating(for: principal)
+        let cacheKey = Self.categoryCacheKey(for: principal) + "|rating:\(maximumContentRating ?? "none")"
         let now = Date()
         categoryCacheLock.lock()
         if let cached = categoryCache[cacheKey], cached.expiresAt > now {
@@ -188,7 +194,8 @@ final class ServerLibraryCatalog {
         let summary = try mediaRepository.fetchServerLibraryHome(
             allowedSourcePaths: try localPublicSourcePaths(for: principal, requiring: .viewMedia),
             cardLimit: 1,
-            excludesOnlineSourceItems: true
+            excludesOnlineSourceItems: true,
+            maximumContentRating: maximumContentRating
         )
         let categories = MediaType.allCases.compactMap { type -> ServerLibraryCategory? in
             guard type != .privateCollection,
@@ -212,7 +219,8 @@ final class ServerLibraryCatalog {
             userID: principal.userID,
             playbackFilter: nil,
             excludedTypes: [.music, .photo, .episode, .homeVideo],
-            excludesOnlineSourceItems: true
+            excludesOnlineSourceItems: true,
+            maximumContentRating: maximumContentRating
         ).totalItemCount
         let response = ServerLibraryCategoriesResponse(
             categories: categories, videoGroupItemCount: videoGroupTotal
@@ -288,6 +296,7 @@ final class ServerLibraryCatalog {
             // 浏览的正是那些条目，排除掉会让远程分组变成空页，首页看板同理。
             excludesOnlineSourceItems: query.remoteScopeID == nil
                 && !query.includesRemoteSources && !query.vaultScope,
+            maximumContentRating: try maximumContentRating(for: principal),
             // 保险库的顶层条目本身就是 `privateCollection` 类型的容器（客户端的
             // `privateTopLevelItems` 就是它们）。默认那条 `type != privateCollection`
             // 是保险库对其它所有页面的兜底屏障，唯独保险库自己这一页要看见它们。
@@ -345,7 +354,8 @@ final class ServerLibraryCatalog {
 
         let items = try mediaRepository.fetchServerMediaItems(
             ids: Array(requestedIDs.prefix(100)),
-            allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia)
+            allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
+            maximumContentRating: try maximumContentRating(for: principal)
         )
         guard !items.isEmpty else { return .empty }
         let cards = try libraryItems(items, for: principal)
@@ -379,7 +389,8 @@ final class ServerLibraryCatalog {
         // 混进来会让同一批曲目在侧栏出现两次。
         let tracks = try mediaRepository.fetchServerMusicItems(
             allowedSourcePaths: try localPublicSourcePaths(for: principal, requiring: .viewMedia),
-            excludesOnlineSourceItems: true
+            excludesOnlineSourceItems: true,
+            maximumContentRating: try maximumContentRating(for: principal)
         )
         // 音乐页的痕迹同样是**这个账号自己的**。
         //
@@ -669,7 +680,8 @@ final class ServerLibraryCatalog {
               let overview = try mediaRepository.fetchServerSeriesOverview(
                 allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
                 seriesID: id,
-                userID: principal.userID
+                userID: principal.userID,
+                maximumContentRating: try maximumContentRating(for: principal)
               )
         else { return nil }
         let item = overview.series
@@ -719,11 +731,13 @@ final class ServerLibraryCatalog {
     ) throws -> ServerSeriesEpisodesPage? {
         guard principal.permissions.contains(.viewMedia) else { return nil }
         let allowedSourcePaths = try allowedPublicSourcePaths(for: principal, requiring: .viewMedia)
+        let maximumContentRating = try maximumContentRating(for: principal)
         guard
               try mediaRepository.fetchServerSeriesOverview(
                 allowedSourcePaths: allowedSourcePaths,
                 seriesID: id,
-                userID: principal.userID
+                userID: principal.userID,
+                maximumContentRating: maximumContentRating
               ) != nil
         else { return nil }
         let page = try mediaRepository.fetchServerSeriesEpisodePage(
@@ -731,7 +745,8 @@ final class ServerLibraryCatalog {
             seriesID: id,
             season: season,
             offset: offset,
-            limit: limit
+            limit: limit,
+            maximumContentRating: maximumContentRating
         )
         let states = try userMediaStateRepository.fetch(userID: principal.userID, mediaIDs: page.items.map(\.id))
         let items = page.items.map { item in
@@ -767,7 +782,8 @@ final class ServerLibraryCatalog {
             allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
             searchText: searchText,
             offset: offset,
-            limit: limit
+            limit: limit,
+            maximumContentRating: try maximumContentRating(for: principal)
         )
         return ServerPeoplePage(
             totalItemCount: page.totalItemCount,
@@ -787,15 +803,18 @@ final class ServerLibraryCatalog {
     func personDetail(id: String, offset: Int, limit: Int, for principal: ServerRequestPrincipal) throws -> ServerPersonDetail? {
         guard principal.permissions.contains(.viewMedia) else { return nil }
         let allowedSourcePaths = try allowedPublicSourcePaths(for: principal, requiring: .viewMedia)
+        let maximumContentRating = try maximumContentRating(for: principal)
         guard let profile = try mediaRepository.fetchServerPersonProfile(
             allowedSourcePaths: allowedSourcePaths,
-            personID: id
+            personID: id,
+            maximumContentRating: maximumContentRating
         ) else { return nil }
         let credits = try mediaRepository.fetchServerPersonCreditsPage(
             allowedSourcePaths: allowedSourcePaths,
             personID: id,
             offset: offset,
-            limit: limit
+            limit: limit,
+            maximumContentRating: maximumContentRating
         )
         return ServerPersonDetail(
             id: profile.id,
@@ -833,7 +852,8 @@ final class ServerLibraryCatalog {
         }
         let page = try mediaRepository.fetchServerManualCollectionsPage(
             allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
-            offset: offset, limit: limit
+            offset: offset, limit: limit,
+            maximumContentRating: try maximumContentRating(for: principal)
         )
         return ServerCollectionsPage(
             totalItemCount: page.totalItemCount, offset: offset, limit: min(max(limit, 1), 100),
@@ -847,7 +867,8 @@ final class ServerLibraryCatalog {
         guard principal.permissions.contains(.viewMedia),
               let detail = try mediaRepository.fetchServerManualCollectionDetail(
                 allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
-                collectionID: id, offset: offset, limit: limit
+                collectionID: id, offset: offset, limit: limit,
+                maximumContentRating: try maximumContentRating(for: principal)
               ) else { return nil }
         return ServerCollectionDetail(
             id: detail.id, name: Self.boundedText(detail.name, maximumLength: 512) ?? "未命名合集",
@@ -930,7 +951,8 @@ final class ServerLibraryCatalog {
         }
         let allowed = try allowedPublicSourcePaths(for: principal, requiring: .viewMedia)
         let manual = try mediaRepository.fetchServerMusicPlaylistsPage(
-            allowedSourcePaths: allowed, offset: 0, limit: 100
+            allowedSourcePaths: allowed, offset: 0, limit: 100,
+            maximumContentRating: try maximumContentRating(for: principal)
         ).items.map {
             ServerMusicPlaylistCard(
                 id: $0.id,
@@ -983,7 +1005,8 @@ final class ServerLibraryCatalog {
         }
         guard let detail = try mediaRepository.fetchServerMusicPlaylistDetail(
             allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
-            playlistID: id, offset: offset, limit: limit
+            playlistID: id, offset: offset, limit: limit,
+            maximumContentRating: try maximumContentRating(for: principal)
         ) else { return nil }
         return ServerMusicPlaylistDetail(
             id: detail.id,
@@ -1001,7 +1024,8 @@ final class ServerLibraryCatalog {
     private func authorizedSmartCollectionCandidates(for principal: ServerRequestPrincipal) throws -> [MediaItem] {
         let items = try mediaRepository.fetchServerAuthorizedCandidates(
             allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
-            type: nil
+            type: nil,
+            maximumContentRating: try maximumContentRating(for: principal)
         )
         return try overlayingPrincipalState(items, for: principal)
     }
@@ -1009,7 +1033,8 @@ final class ServerLibraryCatalog {
     private func authorizedMusicCandidates(for principal: ServerRequestPrincipal) throws -> [MediaItem] {
         let items = try mediaRepository.fetchServerAuthorizedCandidates(
             allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
-            type: .music
+            type: .music,
+            maximumContentRating: try maximumContentRating(for: principal)
         )
         return try overlayingPrincipalState(items, for: principal)
     }
@@ -1114,7 +1139,8 @@ final class ServerLibraryCatalog {
         let snapshot = try userQueueRepository.fetch(userID: principal.userID)
         let authorized = try mediaRepository.fetchServerMediaItems(
             ids: snapshot.itemIDs,
-            allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia)
+            allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .viewMedia),
+            maximumContentRating: try maximumContentRating(for: principal)
         )
         let byID = Dictionary(uniqueKeysWithValues: authorized.map { ($0.id, $0) })
         let items = snapshot.itemIDs.compactMap { id -> ServerQueueItem? in
@@ -1467,25 +1493,9 @@ final class ServerLibraryCatalog {
             // 通过——保险库的顶层条目正是这类行。它拿不到授权路径时这个开关毫无
             // 作用（授权集合里没有保险库路径），但把两件事绑在一起，日后谁也无法
             // 只放开其中一件。
-            includesPrivateCollectionType: !vaultPaths.isEmpty
+            includesPrivateCollectionType: !vaultPaths.isEmpty,
+            maximumContentRating: try maximumContentRating(for: principal)
         )
-    }
-
-    private func publicItems(
-        for principal: ServerRequestPrincipal,
-        requiring permission: ServerPermission
-    ) throws -> [MediaItem] {
-        guard principal.permissions.contains(permission) else { return [] }
-        let allowedSourcePaths = try allowedPublicSourcePaths(for: principal, requiring: permission)
-        return try mediaRepository.fetchAll().filter { item in
-            guard item.type != .privateCollection,
-                  let sourcePath = item.sourcePath,
-                  !sourcePath.isEmpty
-            else {
-                return false
-            }
-            return allowedSourcePaths.contains(sourcePath)
-        }
     }
 
     /// 授权集合 = 授权来源自身的路径 + 远程来源根下真实存在的逐资料库子路径。
@@ -1561,6 +1571,13 @@ final class ServerLibraryCatalog {
         case unlocked
     }
 
+    /// A policy lookup is cheap (one keyed row) and deliberately happens for
+    /// every request so an administrator's change takes effect without a stale
+    /// catalog cache. Repository queries consume this value before COUNT/LIMIT.
+    private func maximumContentRating(for principal: ServerRequestPrincipal) throws -> String? {
+        try experienceRepository.userPolicy(userID: principal.userID).value.maximumContentRating
+    }
+
     func vaultAccess(for principal: ServerRequestPrincipal) throws -> VaultAccess {
         guard principal.permissions.contains(.viewMedia) else { return .notGranted }
         let vaultSources = try sourceRepository.fetchAll()
@@ -1626,7 +1643,8 @@ final class ServerLibraryCatalog {
         // 徽标必须和点进去看到的条数相等：作用域浏览页只列顶层非分集条目，所以
         // 这里也只数它们。数全部行时，一个 1200 集的剧集库徽标写 1200、页面 30 部剧。
         let counts = try mediaRepository.itemCountsBySourcePath(
-            allowedSourcePaths: authorized, topLevelOnly: true
+            allowedSourcePaths: authorized, topLevelOnly: true,
+            maximumContentRating: try maximumContentRating(for: principal)
         )
 
         var groups: [String: (root: String, name: String, kind: ServerRemoteSourceKind, libraries: [ServerRemoteLibraryEntry], total: Int)] = [:]
@@ -1709,7 +1727,8 @@ final class ServerLibraryCatalog {
         }
         let episodes = try mediaRepository.fetchServerSeriesEpisodes(
             allowedSourcePaths: try allowedPublicSourcePaths(for: principal, requiring: .playMedia),
-            seriesID: parentID
+            seriesID: parentID,
+            maximumContentRating: try maximumContentRating(for: principal)
         ).filter(Self.hasPlayableAsset)
         guard let index = episodes.firstIndex(where: { $0.id == item.id }) else { return (nil, nil) }
         func navigation(_ episode: MediaItem?) -> ServerEpisodeNavigation? {
@@ -1772,7 +1791,8 @@ final class ServerLibraryCatalog {
             topLevelOnly: mediaType == nil,
             userID: principal.userID,
             excludedTypes: excludedTypes,
-            excludesOnlineSourceItems: true
+            excludesOnlineSourceItems: true,
+            maximumContentRating: try maximumContentRating(for: principal)
         )
         var seen = Set<String>()
         var genres: [String] = []

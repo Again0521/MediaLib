@@ -43,6 +43,16 @@ public struct ServerManagedUserAggregate: Sendable {
     public let activeSessionCount: Int
 }
 
+/// One administration row keeps the active session, its device and its user-facing
+/// owner label together. This prevents the Web layer from loading two unrelated
+/// 500-row arrays and joining them in memory.
+public struct ServerManagedSessionAggregate: Sendable {
+    public let session: ServerAuthSession
+    public let device: ServerDevice
+    public let username: String
+    public let displayName: String
+}
+
 /// 服务端身份数据边界。调用方只能提交 Argon2id 编码结果与 BLAKE2b-256 十六进制摘要，
 /// 此类型没有接收明文密码或原始令牌的 API。
 public final class ServerIdentityRepository: @unchecked Sendable {
@@ -859,6 +869,96 @@ public final class ServerIdentityRepository: @unchecked Sendable {
         )
     }
 
+    /// Stable, filtered administration page for active login sessions.
+    ///
+    /// Filtering and pagination happen inside SQLite before DTO mapping. The
+    /// device and user labels are joined in the same page query, so a large
+    /// installation no longer needs full device/session scans for every refresh.
+    public func managedSessions(
+        limit: Int,
+        offset: Int = 0,
+        searchText: String? = nil,
+        at date: Date = Date()
+    ) throws -> (totalCount: Int, sessions: [ServerManagedSessionAggregate]) {
+        guard (1...500).contains(limit), (0...1_000_000).contains(offset) else {
+            throw ServerIdentityRepositoryError.invalidIdentifier
+        }
+        let trimmedSearch = searchText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (trimmedSearch?.utf8.count ?? 0) <= 128,
+              trimmedSearch?.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) != true
+        else { throw ServerIdentityRepositoryError.invalidIdentifier }
+
+        let searchPredicate: String
+        var predicateBindings: [SQLiteValue] = [.optionalDate(date)]
+        if let trimmedSearch, !trimmedSearch.isEmpty {
+            searchPredicate = """
+              AND (
+                user.normalized_username LIKE ? ESCAPE '\\'
+                OR lower(user.display_name) LIKE ? ESCAPE '\\'
+                OR lower(device.name) LIKE ? ESCAPE '\\'
+                OR lower(device.platform) LIKE ? ESCAPE '\\'
+                OR lower(session.id) LIKE ? ESCAPE '\\'
+                OR lower(device.id) LIKE ? ESCAPE '\\'
+              )
+            """
+            let pattern = "%\(Self.escapedLikePattern(trimmedSearch.lowercased()))%"
+            predicateBindings.append(contentsOf: Array(repeating: .text(pattern), count: 6))
+        } else {
+            searchPredicate = ""
+        }
+
+        let fromAndWhere = """
+            FROM server_auth_sessions AS session
+            JOIN server_devices AS device ON device.id = session.device_id
+            JOIN server_users AS user ON user.id = session.user_id
+            WHERE session.revoked_at IS NULL AND device.revoked_at IS NULL
+              AND user.is_disabled = 0 AND session.refresh_expires_at > ?
+            \(searchPredicate)
+            """
+        let total = try database.query(
+            "SELECT COUNT(*) \(fromAndWhere)",
+            bindings: predicateBindings
+        ) { Int($0.int(0) ?? 0) }.first ?? 0
+        let rows = try database.query(
+            """
+            SELECT session.id, session.user_id, session.device_id, session.access_expires_at,
+                   session.refresh_expires_at, session.created_at, session.last_used_at, session.revoked_at,
+                   device.id, device.user_id, device.name, device.platform,
+                   device.created_at, device.last_seen_at, device.revoked_at,
+                   user.username, user.display_name
+            \(fromAndWhere)
+            ORDER BY session.last_used_at DESC, session.created_at DESC, session.id
+            LIMIT ? OFFSET ?
+            """,
+            bindings: predicateBindings + [.int(Int64(limit)), .int(Int64(offset))]
+        ) { row in
+            ServerManagedSessionAggregate(
+                session: ServerAuthSession(
+                    id: row.string(0) ?? "",
+                    userID: row.string(1) ?? "",
+                    deviceID: row.string(2) ?? "",
+                    accessExpiresAt: row.date(3) ?? Date(),
+                    refreshExpiresAt: row.date(4) ?? Date(),
+                    createdAt: row.date(5) ?? Date(),
+                    lastUsedAt: row.date(6) ?? Date(),
+                    revokedAt: row.date(7)
+                ),
+                device: ServerDevice(
+                    id: row.string(8) ?? "",
+                    userID: row.string(9) ?? "",
+                    name: row.string(10) ?? "",
+                    platform: row.string(11) ?? "",
+                    createdAt: row.date(12) ?? Date(),
+                    lastSeenAt: row.date(13) ?? Date(),
+                    revokedAt: row.date(14)
+                ),
+                username: row.string(15) ?? "",
+                displayName: row.string(16) ?? ""
+            )
+        }
+        return (total, rows)
+    }
+
     public func revokeAllSessions(
         userID: String,
         actorUserID: String? = nil,
@@ -990,16 +1090,67 @@ public final class ServerIdentityRepository: @unchecked Sendable {
     }
 
     public func securityEvents(limit: Int = 100) throws -> [ServerSecurityEvent] {
-        guard (1...500).contains(limit) else { throw ServerIdentityRepositoryError.invalidIdentifier }
-        return try database.query(
+        try managedSecurityEvents(limit: limit).events
+    }
+
+    /// Stable, filtered administration page for bounded security audit events.
+    ///
+    /// Count and rows share the same SQLite predicate so the web console can
+    /// page without first loading the retained event set into memory.
+    public func managedSecurityEvents(
+        limit: Int,
+        offset: Int = 0,
+        category: ServerSecurityEventCategory? = nil,
+        outcome: ServerSecurityEventOutcome? = nil,
+        searchText: String? = nil
+    ) throws -> (totalCount: Int, events: [ServerSecurityEvent]) {
+        guard (1...500).contains(limit), (0...1_000_000).contains(offset) else {
+            throw ServerIdentityRepositoryError.invalidIdentifier
+        }
+        let trimmedSearch = searchText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (trimmedSearch?.utf8.count ?? 0) <= 128,
+              trimmedSearch?.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) != true
+        else { throw ServerIdentityRepositoryError.invalidIdentifier }
+
+        var predicates: [String] = []
+        var predicateBindings: [SQLiteValue] = []
+        if let category {
+            predicates.append("category = ?")
+            predicateBindings.append(.text(category.rawValue))
+        }
+        if let outcome {
+            predicates.append("outcome = ?")
+            predicateBindings.append(.text(outcome.rawValue))
+        }
+        if let trimmedSearch, !trimmedSearch.isEmpty {
+            predicates.append(
+                """
+                (lower(action) LIKE ? ESCAPE '\\'
+                  OR lower(COALESCE(detail_code, '')) LIKE ? ESCAPE '\\'
+                  OR lower(COALESCE(actor_user_id, '')) LIKE ? ESCAPE '\\'
+                  OR lower(COALESCE(target_user_id, '')) LIKE ? ESCAPE '\\'
+                  OR lower(COALESCE(session_id, '')) LIKE ? ESCAPE '\\'
+                  OR lower(COALESCE(device_id, '')) LIKE ? ESCAPE '\\')
+                """
+            )
+            let pattern = "%\(Self.escapedLikePattern(trimmedSearch.lowercased()))%"
+            predicateBindings.append(contentsOf: Array(repeating: .text(pattern), count: 6))
+        }
+        let whereClause = predicates.isEmpty ? "" : "WHERE \(predicates.joined(separator: " AND "))"
+        let total = try database.query(
+            "SELECT COUNT(*) FROM server_security_events \(whereClause)",
+            bindings: predicateBindings
+        ) { Int($0.int(0) ?? 0) }.first ?? 0
+        let events = try database.query(
             """
             SELECT id, occurred_at, category, action, outcome, actor_user_id,
                    target_user_id, session_id, device_id, detail_code
             FROM server_security_events
+            \(whereClause)
             ORDER BY occurred_at DESC, id DESC
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            bindings: [.int(Int64(limit))]
+            bindings: predicateBindings + [.int(Int64(limit)), .int(Int64(offset))]
         ) { row in
             ServerSecurityEvent(
                 id: row.string(0) ?? "",
@@ -1014,6 +1165,17 @@ public final class ServerIdentityRepository: @unchecked Sendable {
                 detailCode: row.string(9)
             )
         }
+        return (total, events)
+    }
+
+    /// Removes audit rows older than the configured operational retention
+    /// window. Capacity pruning in `appendSecurityEvent` remains an independent
+    /// hard ceiling, so both time and volume are bounded.
+    public func pruneSecurityEvents(before cutoff: Date) throws {
+        try database.execute(
+            "DELETE FROM server_security_events WHERE occurred_at < ?",
+            bindings: [.optionalDate(cutoff)]
+        )
     }
 
     private func roleExists(id: String) throws -> Bool {
@@ -1044,6 +1206,13 @@ public final class ServerIdentityRepository: @unchecked Sendable {
     public static func normalizeUsername(_ value: String) -> String {
         value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
             .lowercased(with: Locale(identifier: "en_US_POSIX"))
+    }
+
+    private static func escapedLikePattern(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
     }
 
     private func validatedDisplayValue(_ value: String) throws -> String {

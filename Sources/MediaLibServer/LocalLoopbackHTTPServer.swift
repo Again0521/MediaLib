@@ -1769,6 +1769,7 @@ struct LocalHTTPRouter {
             return .html(
                 body: Data(
                     ServerWebAdministrationPage.render(
+                        section: .users,
                         serverName: serverName,
                         csrfToken: csrfToken,
                         categories: categories, sidebarExtras: sidebarExtras(for: principal)
@@ -1785,9 +1786,9 @@ struct LocalHTTPRouter {
             return .html(
                 body: Data(
                     ServerWebAdministrationPage.render(
+                        section: .sessions,
                         serverName: serverName,
                         csrfToken: csrfToken,
-                        active: .adminSessions,
                         categories: categories, sidebarExtras: sidebarExtras(for: principal)
                     ).utf8
                 ),
@@ -2865,8 +2866,13 @@ struct LocalHTTPRouter {
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             guard principal.permissions.contains(.manageSessions) else { return .forbidden() }
+            guard let query = administrationSessionsQuery(from: target) else { return .badRequest() }
             guard let administrationCatalog,
-                  let encoded = try? administrationCatalog.activeSessions(),
+                  let encoded = try? administrationCatalog.activeSessions(
+                    limit: query.limit,
+                    offset: query.offset,
+                    searchText: query.searchText
+                  ),
                   let data = ServerCommandOutput.jsonData(encoded)
             else {
                 return .serviceUnavailable()
@@ -2877,8 +2883,17 @@ struct LocalHTTPRouter {
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+            guard let query = administrationSecurityEventsQuery(from: target, path: path) else {
+                return .badRequest()
+            }
             guard let administrationCatalog,
-                  let encoded = try? administrationCatalog.securityEvents(),
+                  let encoded = try? administrationCatalog.securityEvents(
+                    limit: query.limit,
+                    offset: query.offset,
+                    category: query.category,
+                    outcome: query.outcome,
+                    searchText: query.searchText
+                  ),
                   let data = ServerCommandOutput.jsonData(encoded)
             else {
                 return .serviceUnavailable()
@@ -3542,6 +3557,53 @@ struct LocalHTTPRouter {
 
     private func collectionsQuery(from target: String) -> (offset: Int, limit: Int)? {
         pagingQuery(from: target, path: "/api/v1/collections")
+    }
+
+    private func administrationSessionsQuery(
+        from target: String
+    ) -> (offset: Int, limit: Int, searchText: String?)? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.first.map(String.init) == "/api/v1/admin/sessions",
+              let values = boundedQuery(from: target, allowedKeys: ["offset", "limit", "q"]),
+              let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
+              let limit = strictNonnegativeInteger(values["limit"] ?? "50"), (1...100).contains(limit)
+        else { return nil }
+        let trimmed = values["q"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (trimmed?.utf8.count ?? 0) <= 128,
+              trimmed?.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) != true
+        else { return nil }
+        return (offset, limit, trimmed?.isEmpty == false ? trimmed : nil)
+    }
+
+    private func administrationSecurityEventsQuery(
+        from target: String,
+        path expectedPath: String
+    ) -> (
+        offset: Int,
+        limit: Int,
+        category: ServerSecurityEventCategory?,
+        outcome: ServerSecurityEventOutcome?,
+        searchText: String?
+    )? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.first.map(String.init) == expectedPath,
+              let values = boundedQuery(
+                from: target,
+                allowedKeys: ["offset", "limit", "category", "outcome", "q"]
+              ),
+              let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
+              let limit = strictNonnegativeInteger(values["limit"] ?? "50"), (1...100).contains(limit)
+        else { return nil }
+        let category = values["category"].flatMap(ServerSecurityEventCategory.init(rawValue:))
+        let outcome = values["outcome"].flatMap(ServerSecurityEventOutcome.init(rawValue:))
+        guard values["category"] == nil || category != nil,
+              values["outcome"] == nil || outcome != nil
+        else { return nil }
+        let trimmed = values["q"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (trimmed?.utf8.count ?? 0) <= 128,
+              trimmed?.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) != true
+        else { return nil }
+        return (offset, limit, category, outcome, trimmed?.isEmpty == false ? trimmed : nil)
     }
 
     private func pagingQuery(from target: String, path expectedPath: String) -> (offset: Int, limit: Int)? {

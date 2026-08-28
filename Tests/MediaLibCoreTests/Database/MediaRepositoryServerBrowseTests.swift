@@ -156,6 +156,41 @@ final class MediaRepositoryServerBrowseTests: XCTestCase {
         XCTAssertEqual(try page(sort: .title, genre: "%").items.map(\.id), [])
     }
 
+    func testContentRatingRestrictionAppliesBeforeCountAndPaginationAndFailsClosed() throws {
+        try insert("general", title: "General")
+        try insert("teen", title: "Teen")
+        try insert("adult", title: "Adult")
+        try insert("unknown", title: "Unknown")
+        let details = MediaDetailRepository(database: database)
+        for (id, rating) in [("general", "G"), ("teen", "PG-13"), ("adult", "R"), ("unknown", "UNRATED")] {
+            try details.save(MediaDetailSnapshot(
+                metadata: MediaDetailMetadata(mediaID: id, contentRating: rating, provider: "fixture", language: "en")
+            ))
+        }
+
+        let restricted = try repository.fetchServerLibraryPage(
+            allowedSourcePaths: [sourcePath], type: nil, topLevelOnly: true,
+            searchText: nil, offset: 0, limit: 1, sort: .title,
+            userID: admin, playbackFilter: nil, maximumContentRating: "PG-13"
+        )
+        XCTAssertEqual(restricted.totalItemCount, 2, "受限条目不能进入分页总数")
+        XCTAssertEqual(restricted.items.map(\.id), ["general"], "LIMIT 应在内容策略过滤之后执行")
+
+        let secondPage = try repository.fetchServerLibraryPage(
+            allowedSourcePaths: [sourcePath], type: nil, topLevelOnly: true,
+            searchText: nil, offset: 1, limit: 1, sort: .title,
+            userID: admin, playbackFilter: nil, maximumContentRating: "PG-13"
+        )
+        XCTAssertEqual(secondPage.items.map(\.id), ["teen"])
+
+        let invalidMaximum = try repository.fetchServerLibraryPage(
+            allowedSourcePaths: [sourcePath], type: nil, topLevelOnly: true,
+            searchText: nil, offset: 0, limit: 100, sort: .title,
+            userID: admin, playbackFilter: nil, maximumContentRating: "custom"
+        )
+        XCTAssertEqual(invalidMaximum.totalItemCount, 0, "无法识别的策略上限必须失败即关闭")
+    }
+
     // MARK: - Facets
 
     func testFacetsAreAuthorizedBoundedAndScopedToTheCurrentUser() throws {

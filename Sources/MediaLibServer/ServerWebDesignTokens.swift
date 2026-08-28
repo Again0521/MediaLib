@@ -750,6 +750,21 @@ enum ServerWebDesignTokens {
         --row-height: 48px;
         --row-radius: var(--radius-sm);
       }
+
+      /* Width is an additional phone signal, not a replacement for pointer
+         capability. Responsive browser automation and desktop touch emulation
+         can report a fine pointer even at a phone viewport; keeping compact
+         desktop geometry there would violate the same 44pt target the real
+         iPhone layout is designed around. */
+      @media (max-width: 719px) {
+        :root {
+          --control-height-xs: 44px;
+          --control-height-sm: 44px;
+          --control-height-md: 44px;
+          --field-height: 44px;
+          --nav-item-height: 44px;
+        }
+      }
     """#
 
     /// Bridge for the previous token namespace.
