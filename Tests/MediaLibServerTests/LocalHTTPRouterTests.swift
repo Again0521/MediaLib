@@ -346,6 +346,35 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertFalse(javascript.contains("logEvents.filter"))
     }
 
+    func testTaskAndStoragePagesUseSharedServerPagedControlsAndPersistentProgress() {
+        let taskPage = router.response(for: "GET /admin/tasks HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let storagePage = router.response(for: "GET /admin/storage HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let script = router.response(for: "GET /assets/operations.js HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        let taskHTML = String(decoding: taskPage.body, as: UTF8.self)
+        let storageHTML = String(decoding: storagePage.body, as: UTF8.self)
+        let javascript = String(decoding: script.body, as: UTF8.self)
+
+        XCTAssertEqual(taskPage.statusCode, 200)
+        XCTAssertTrue(taskHTML.contains("<form class=\"app-page-search\" id=\"task-search-form\""))
+        XCTAssertTrue(taskHTML.contains("id=\"task-kind\""))
+        XCTAssertTrue(taskHTML.contains("id=\"task-state\""))
+        XCTAssertTrue(taskHTML.contains("id=\"task-load-more\""))
+
+        XCTAssertEqual(storagePage.statusCode, 200)
+        XCTAssertTrue(storageHTML.contains("id=\"backup-kind\""))
+        XCTAssertTrue(storageHTML.contains("id=\"backup-load-more\""))
+        XCTAssertTrue(storageHTML.contains("id=\"storage-job-list\""))
+        XCTAssertTrue(storageHTML.contains("id=\"storage-job-load-more\""))
+
+        XCTAssertTrue(javascript.contains("scope:isStorage ? 'server' : 'library'"))
+        XCTAssertTrue(javascript.contains("X-MediaLIB-Total-Count"))
+        XCTAssertTrue(javascript.contains("ui-progress operations-job-progress"))
+        XCTAssertTrue(javascript.contains("jobRows.concat(rows)"))
+        XCTAssertTrue(javascript.contains("backupRows.concat(rows)"))
+        XCTAssertFalse(javascript.contains("jobs.slice(0, 50)"))
+        XCTAssertFalse(javascript.contains("backups.slice(0, 100)"))
+    }
+
     func testSharedWebNavigationPreservesActiveStateAndHidesManagementDestinations() {
         let member = ServerWebNavigation.render(
             active: .home, showAdministration: false, note: .library, extras: .empty

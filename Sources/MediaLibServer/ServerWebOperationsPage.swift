@@ -156,14 +156,49 @@ enum ServerWebOperationsPage {
         case .tasks:
             return card("资料库任务", "只触发已有本地普通媒体库，不提供来源增删改。", id: "task-actions", controls: """
               <div class="operations-button-row"><button class="ui-btn ui-btn-primary" type="button" id="task-scan">扫描资料库</button><button class="ui-btn ui-btn-secondary" type="button" id="task-reindex">重建索引</button><button class="ui-btn ui-btn-secondary" type="button" id="task-metadata">刷新本地元数据</button></div>
-            """) + card("任务队列", "显示持久化进度与稳定结果代码。", id: "task-list")
+            """) + card(
+              "任务队列",
+              "显示持久化进度与稳定结果代码；筛选与计数均在数据库内完成。",
+              id: "task-list",
+              controls: """
+              <div class="operations-list-filters">
+                \(ServerWebUI.searchField(
+                  id: "task-search",
+                  label: "筛选任务",
+                  placeholder: "搜索任务或结果代码",
+                  action: "/admin/tasks",
+                  formID: "task-search-form"
+                ))
+                <div class="ui-field"><label class="ui-label" for="task-kind">类型</label><select class="ui-select" id="task-kind"><option value="">全部</option><option value="library.scan">资料库扫描</option><option value="library.reindex">重建索引</option><option value="metadata.refresh">刷新元数据</option></select></div>
+                <div class="ui-field"><label class="ui-label" for="task-state">状态</label><select class="ui-select" id="task-state"><option value="">全部</option><option value="queued">排队中</option><option value="running">进行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select></div>
+              </div>
+              """,
+              footer: taskLoadMoreButton
+            )
         case .storage:
-            return card("数据库备份", "创建与恢复均需再次确认；下载和恢复只使用不透明 ID。", id: "backup-list", controls: """
-              <div class="operations-button-row"><button class="ui-btn ui-btn-primary" type="button" id="backup-create">创建备份</button></div>
-            """) + card("恢复与清理", "恢复要求当前密码、完整性预检、审计和失败自动回滚；清理转码缓存会终止当前转码会话。", id: "storage-protected", controls: """
+            return card(
+              "数据库备份",
+              "创建与恢复均需再次确认；下载和恢复只使用不透明 ID。",
+              id: "backup-list",
+              controls: """
+              <div class="operations-list-toolbar">
+                <div class="ui-field"><label class="ui-label" for="backup-kind">备份类型</label><select class="ui-select" id="backup-kind"><option value="">全部</option><option value="manual">手动备份</option><option value="automatic">升级前备份</option><option value="safety">恢复前安全快照</option><option value="other">其它</option></select></div>
+                <button class="ui-btn ui-btn-primary" type="button" id="backup-create">创建备份</button>
+              </div>
+              """,
+              footer: backupLoadMoreButton
+            ) + card("恢复与清理", "恢复要求当前密码、完整性预检、审计和失败自动回滚；清理转码缓存会终止当前转码会话。", id: "storage-protected", controls: """
               <div class="ui-field"><label class="ui-label" for="restore-password">当前管理员密码</label><input class="ui-input" id="restore-password" type="password" maxlength="1024" autocomplete="current-password"></div>
               <div class="operations-button-row"><button class="ui-btn ui-btn-destructive" type="button" id="cache-clear">清理转码缓存</button><a class="ui-btn ui-btn-secondary" href="/api/v1/admin/diagnostics" download>导出脱敏诊断</a></div>
-            """)
+            """) + card(
+              "维护任务",
+              "备份、恢复和缓存清理在有界后台队列执行。",
+              id: "storage-job-list",
+              controls: """
+              <div class="ui-field operations-compact-filter"><label class="ui-label" for="storage-job-state">状态</label><select class="ui-select" id="storage-job-state"><option value="">全部</option><option value="queued">排队中</option><option value="running">进行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select></div>
+              """,
+              footer: storageJobLoadMoreButton
+            )
         case .security:
             return card(
                 "安全审计",
@@ -203,6 +238,33 @@ enum ServerWebOperationsPage {
         attributes: " hidden"
     )
 
+    private static let taskLoadMoreButton = ServerWebUI.button(
+        "载入更多任务",
+        variant: .ghost,
+        size: .small,
+        icon: .chevronDown,
+        id: "task-load-more",
+        attributes: " hidden"
+    )
+
+    private static let backupLoadMoreButton = ServerWebUI.button(
+        "载入更多备份",
+        variant: .ghost,
+        size: .small,
+        icon: .chevronDown,
+        id: "backup-load-more",
+        attributes: " hidden"
+    )
+
+    private static let storageJobLoadMoreButton = ServerWebUI.button(
+        "载入更多维护任务",
+        variant: .ghost,
+        size: .small,
+        icon: .chevronDown,
+        id: "storage-job-load-more",
+        attributes: " hidden"
+    )
+
     private static func card(
         _ title: String,
         _ detail: String,
@@ -228,14 +290,17 @@ enum ServerWebOperationsPage {
     .operations-form { grid-column:1/-1; display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:var(--space-5); }
     .operations-form .operations-actions { grid-column:1/-1; display:flex; justify-content:flex-end; }
     .operations-button-row { display:flex; flex-wrap:wrap; gap:var(--space-2); }
-    .operations-log-filters { display:grid; grid-template-columns:minmax(180px,1fr) repeat(2,minmax(120px,auto)); gap:var(--space-3); align-items:end; }
-    .operations-log-filters .app-page-search { width:100%; }
-    #audit-load-more { align-self:center; min-height:44px; }
+    .operations-log-filters, .operations-list-filters { display:grid; grid-template-columns:minmax(180px,1fr) repeat(2,minmax(120px,auto)); gap:var(--space-3); align-items:end; }
+    .operations-log-filters .app-page-search, .operations-list-filters .app-page-search { width:100%; }
+    .operations-list-toolbar { display:flex; flex-wrap:wrap; align-items:end; justify-content:space-between; gap:var(--space-3); }
+    .operations-compact-filter { max-width:220px; }
+    #audit-load-more, #task-load-more, #backup-load-more, #storage-job-load-more { align-self:center; min-height:44px; }
     .operations-list { display:grid; gap:var(--space-2); margin:0; padding:0; list-style:none; }
     .operations-list-item { display:flex; align-items:center; justify-content:space-between; gap:var(--space-3); min-height:44px; padding:var(--space-2) 0; border-bottom:var(--hairline) solid var(--border); }
     .operations-list-item:last-child { border-bottom:0; }
     .operations-list-copy { min-width:0; display:grid; gap:2px; }
     .operations-list-copy strong, .operations-list-copy span { overflow-wrap:anywhere; }
+    .operations-job-progress { width:min(260px,100%); height:4px; margin-top:var(--space-1); }
     .operations-facts { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:var(--space-2) var(--space-4); margin:0; }
     .operations-facts dt { color:var(--text-secondary); }
     .operations-facts dd { margin:0; color:var(--text-primary); text-align:right; }
@@ -244,8 +309,10 @@ enum ServerWebOperationsPage {
       .operations-grid, .operations-form { grid-template-columns:minmax(0,1fr); }
       .operations-form .operations-actions, .operations-form .operations-actions .ui-btn { width:100%; }
       .operations-list-item { align-items:flex-start; flex-direction:column; }
-      .operations-log-filters { grid-template-columns:minmax(0,1fr); }
-      #audit-load-more { width:100%; }
+      .operations-log-filters, .operations-list-filters { grid-template-columns:minmax(0,1fr); }
+      .operations-list-toolbar, .operations-list-toolbar > * { width:100%; }
+      .operations-compact-filter { max-width:none; }
+      #audit-load-more, #task-load-more, #backup-load-more, #storage-job-load-more { width:100%; }
     }
     """#
 
@@ -262,6 +329,15 @@ enum ServerWebOperationsPage {
       let logTotal = 0;
       let logLoading = false;
       let logRevision = 0;
+      let jobRows = [];
+      let jobTotal = 0;
+      let jobLoading = false;
+      let jobRevision = 0;
+      let jobPollTimer = null;
+      let backupRows = [];
+      let backupTotal = 0;
+      let backupLoading = false;
+      let backupRevision = 0;
       let hostControlAvailable = false;
       const byID = id => document.getElementById(id);
       const setMessage = (text, failed = false) => {
@@ -301,23 +377,45 @@ enum ServerWebOperationsPage {
         target.replaceChildren(list);
       };
       const stateLabel = value => ({queued:'排队中',running:'进行中',succeeded:'已完成',failed:'失败',cancelled:'已取消'})[value] || '未知';
-      const renderJobs = jobs => {
-        const target = byID('task-list');
+      const jobTitle = kind => ({
+        'library.scan':'资料库扫描',
+        'library.reindex':'重建索引',
+        'metadata.refresh':'刷新本地元数据',
+        'database.backup':'创建数据库备份',
+        'database.restore':'恢复数据库',
+        'transcode-cache.clear':'清理转码缓存'
+      })[kind] || '维护任务';
+      const renderJobs = () => {
+        const isStorage = content.dataset.section === 'storage';
+        const target = byID(isStorage ? 'storage-job-list' : 'task-list');
         if (!target) return;
-        if (!Array.isArray(jobs) || jobs.length === 0) { empty(target, '暂无任务。'); return; }
+        const more = byID(isStorage ? 'storage-job-load-more' : 'task-load-more');
+        if (more) more.hidden = jobRows.length >= jobTotal;
+        if (jobRows.length === 0) { empty(target, '没有符合条件的任务。'); return; }
         const list = document.createElement('ul');
         list.className = 'operations-list';
-        jobs.slice(0, 50).forEach(job => {
+        jobRows.forEach(job => {
           const item = document.createElement('li');
           item.className = 'operations-list-item';
           const copy = document.createElement('span');
           copy.className = 'operations-list-copy';
           const title = document.createElement('strong');
           const detail = document.createElement('span');
-          title.textContent = job.kind === 'library.scan' ? '资料库扫描' : job.kind === 'library.reindex' ? '重建索引' : job.kind === 'metadata.refresh' ? '刷新本地元数据' : job.kind === 'database.restore' ? '恢复数据库' : String(job.kind || '维护任务');
+          title.textContent = jobTitle(String(job.kind || ''));
           const progress = Math.round(Math.min(1, Math.max(0, Number(job.progress) || 0)) * 100);
-          detail.textContent = `${stateLabel(job.state)} · ${progress}%${job.resultCode ? ` · ${String(job.resultCode)}` : ''}`;
-          copy.append(title, detail);
+          const created = new Date(job.createdAt);
+          detail.textContent = `${Number.isNaN(created.valueOf()) ? '时间未知' : created.toLocaleString()} · ${stateLabel(job.state)} · ${progress}%${job.resultCode ? ` · ${String(job.resultCode)}` : ''}`;
+          const progressTrack = document.createElement('span');
+          progressTrack.className = 'ui-progress operations-job-progress';
+          progressTrack.setAttribute('role', 'progressbar');
+          progressTrack.setAttribute('aria-label', `${title.textContent}：${stateLabel(job.state)}`);
+          progressTrack.setAttribute('aria-valuemin', '0');
+          progressTrack.setAttribute('aria-valuemax', '100');
+          progressTrack.setAttribute('aria-valuenow', String(progress));
+          const progressFill = document.createElement('span');
+          progressFill.style.width = `${progress}%`;
+          progressTrack.append(progressFill);
+          copy.append(title, detail, progressTrack);
           const badge = document.createElement('span');
           badge.className = `ui-status ${job.state === 'failed' ? 'ui-status-error' : job.state === 'succeeded' ? 'ui-status-success' : 'ui-status-idle'}`;
           badge.textContent = stateLabel(job.state);
@@ -326,13 +424,16 @@ enum ServerWebOperationsPage {
         });
         target.replaceChildren(list);
       };
-      const renderBackups = backups => {
+      const backupKindLabel = kind => ({manual:'手动备份',automatic:'升级前备份',safety:'恢复前安全快照',other:'其它备份'})[kind] || '数据库备份';
+      const renderBackups = () => {
         const target = byID('backup-list');
         if (!target) return;
-        if (!Array.isArray(backups) || backups.length === 0) { empty(target, '尚未创建可下载备份。'); return; }
+        const more = byID('backup-load-more');
+        if (more) more.hidden = backupRows.length >= backupTotal;
+        if (backupRows.length === 0) { empty(target, '没有符合条件的可下载备份。'); return; }
         const list = document.createElement('ul');
         list.className = 'operations-list';
-        backups.slice(0, 100).forEach(backup => {
+        backupRows.forEach(backup => {
           if (!/^[0-9a-f]{32}$/.test(String(backup.id || ''))) return;
           const item = document.createElement('li');
           item.className = 'operations-list-item';
@@ -340,7 +441,7 @@ enum ServerWebOperationsPage {
           copy.className = 'operations-list-copy';
           const title = document.createElement('strong');
           const detail = document.createElement('span');
-          title.textContent = '数据库备份';
+          title.textContent = backupKindLabel(String(backup.kind || 'other'));
           const bytes = Math.max(0, Number(backup.byteLength) || 0);
           detail.textContent = `${new Date(backup.createdAt).toLocaleString()} · ${(bytes / 1048576).toFixed(1)} MB`;
           copy.append(title, detail);
@@ -420,9 +521,87 @@ enum ServerWebOperationsPage {
         facts(byID('playback-session'), [['最大并发', settings.maximumTranscodeSessions], ['空闲回收', `${settings.sessionIdleMinutes} 分钟`]]);
         facts(byID('playback-storage'), [['临时空间', `${settings.temporaryStorageLimitGB} GB`], ['磁盘保留', `${settings.minimumFreeDiskGB} GB`]]);
       };
-      const loadTasks = async () => renderJobs((await requestJSON('/api/v1/admin/jobs?limit=50')).value);
+      const scheduleJobPoll = () => {
+        if (jobPollTimer !== null) window.clearTimeout(jobPollTimer);
+        jobPollTimer = null;
+        if (!jobRows.some(job => job.state === 'queued' || job.state === 'running')) return;
+        jobPollTimer = window.setTimeout(() => {
+          if (document.body.contains(content)) void loadJobs(true, true);
+        }, 2000);
+      };
+      const loadJobs = async (reset = true, preserveLoadedRows = false) => {
+        if (jobLoading && !reset) return;
+        jobLoading = true;
+        const revision = reset ? ++jobRevision : jobRevision;
+        const previousRows = jobRows;
+        const isStorage = content.dataset.section === 'storage';
+        const more = byID(isStorage ? 'storage-job-load-more' : 'task-load-more');
+        if (more) more.disabled = true;
+        try {
+          const parameters = new URLSearchParams({
+            offset:String(reset ? 0 : jobRows.length),
+            limit:'50',
+            scope:isStorage ? 'server' : 'library'
+          });
+          const state = byID(isStorage ? 'storage-job-state' : 'task-state')?.value || '';
+          if (state) parameters.set('state', state);
+          if (!isStorage) {
+            const kind = byID('task-kind')?.value || '';
+            const query = (byID('task-search')?.value || '').trim();
+            if (kind) parameters.set('kind', kind);
+            if (query) parameters.set('q', query);
+          }
+          const result = await requestJSON(`/api/v1/admin/jobs?${parameters}`);
+          if (revision !== jobRevision) return;
+          const rows = Array.isArray(result.value) ? result.value : [];
+          const total = Number(result.response.headers.get('X-MediaLIB-Total-Count'));
+          jobTotal = Number.isFinite(total) ? Math.max(rows.length, total) : rows.length;
+          if (reset && preserveLoadedRows && previousRows.length > rows.length) {
+            const refreshedIDs = new Set(rows.map(job => String(job.id || '')));
+            jobRows = rows.concat(previousRows.filter(job => !refreshedIDs.has(String(job.id || ''))));
+            jobRows = jobRows.slice(0, Math.min(jobTotal, previousRows.length));
+          } else {
+            jobRows = reset ? rows : jobRows.concat(rows);
+          }
+          jobTotal = Math.max(jobRows.length, jobTotal);
+          renderJobs();
+          scheduleJobPoll();
+        } finally {
+          if (revision === jobRevision) {
+            jobLoading = false;
+            if (more) more.disabled = false;
+          }
+        }
+      };
+      const loadBackups = async (reset = true) => {
+        if (backupLoading && !reset) return;
+        backupLoading = true;
+        const revision = reset ? ++backupRevision : backupRevision;
+        const more = byID('backup-load-more');
+        if (more) more.disabled = true;
+        try {
+          const parameters = new URLSearchParams({
+            offset:String(reset ? 0 : backupRows.length),
+            limit:'50'
+          });
+          const kind = byID('backup-kind')?.value || '';
+          if (kind) parameters.set('kind', kind);
+          const result = await requestJSON(`/api/v1/admin/backups?${parameters}`);
+          if (revision !== backupRevision) return;
+          const rows = Array.isArray(result.value) ? result.value : [];
+          backupRows = reset ? rows : backupRows.concat(rows);
+          const total = Number(result.response.headers.get('X-MediaLIB-Total-Count'));
+          backupTotal = Number.isFinite(total) ? Math.max(backupRows.length, total) : backupRows.length;
+          renderBackups();
+        } finally {
+          if (revision === backupRevision) {
+            backupLoading = false;
+            if (more) more.disabled = false;
+          }
+        }
+      };
       const loadStorage = async () => {
-        renderBackups((await requestJSON('/api/v1/admin/backups')).value);
+        await Promise.all([loadBackups(true), loadJobs(true)]);
         facts(byID('storage-protected'), [['恢复', '密码确认 · 预检 · 自动回滚'], ['缓存清理', '后台有界任务'], ['诊断导出', '仅能力、计数与稳定结果码']]);
       };
       const loadAudit = async (reset = true) => {
@@ -510,7 +689,7 @@ enum ServerWebOperationsPage {
         const section = content.dataset.section || '';
         try {
           if (section === 'playback') await loadPlayback();
-          else if (section === 'jobs') await loadTasks();
+          else if (section === 'jobs') await loadJobs(true);
           else if (section === 'storage') await loadStorage();
           else if (section === 'security' || section === 'logs') await loadAudit();
           else await loadDashboard();
@@ -586,7 +765,7 @@ enum ServerWebOperationsPage {
             body:JSON.stringify({kind})
           });
           setMessage('任务已进入有界队列。');
-          await loadTasks();
+          await loadJobs(true);
         } catch (_) { setMessage('任务未能入队，请检查权限或稍后重试。', true); }
       };
       byID('task-scan')?.addEventListener('click', () => void createTask('library.scan'));
@@ -624,6 +803,7 @@ enum ServerWebOperationsPage {
           });
           password.value = '';
           setMessage('恢复任务已提交；完成后现有登录可能失效。失败时服务会自动恢复操作前数据库。');
+          window.setTimeout(() => { void loadJobs(true); }, 250);
         } catch (_) { setMessage('恢复未提交：密码、备份预检或服务状态未通过。', true); }
         finally { button.disabled = false; button.textContent = '恢复'; }
       };
@@ -674,6 +854,7 @@ enum ServerWebOperationsPage {
             method:'DELETE', headers:{'X-MediaLIB-CSRF':csrf}
           });
           setMessage('缓存清理已进入后台队列；受影响的转码会话将安全终止。');
+          window.setTimeout(() => { void loadJobs(true); }, 250);
         } catch (_) { setMessage('缓存清理未能提交。', true); }
         finally { button.disabled = false; button.textContent = '清理转码缓存'; }
       });
@@ -682,6 +863,15 @@ enum ServerWebOperationsPage {
       byID('log-category')?.addEventListener('change', resetAudit);
       byID('log-outcome')?.addEventListener('change', resetAudit);
       byID('audit-load-more')?.addEventListener('click', () => { void loadAudit(false); });
+      const resetJobs = () => { void loadJobs(true); };
+      byID('task-search-form')?.addEventListener('submit', event => { event.preventDefault(); resetJobs(); });
+      byID('task-kind')?.addEventListener('change', resetJobs);
+      byID('task-state')?.addEventListener('change', resetJobs);
+      byID('storage-job-state')?.addEventListener('change', resetJobs);
+      byID('task-load-more')?.addEventListener('click', () => { void loadJobs(false); });
+      byID('storage-job-load-more')?.addEventListener('click', () => { void loadJobs(false); });
+      byID('backup-kind')?.addEventListener('change', () => { void loadBackups(true); });
+      byID('backup-load-more')?.addEventListener('click', () => { void loadBackups(false); });
       refresh.addEventListener('click', load);
       load();
     })();

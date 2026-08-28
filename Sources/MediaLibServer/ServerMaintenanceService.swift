@@ -3,8 +3,16 @@ import MediaLibCore
 
 struct ServerBackupSummary: Codable, Equatable, Sendable {
     let id: String
+    let kind: ServerBackupKind
     let createdAt: Date
     let byteLength: Int64
+}
+
+enum ServerBackupKind: String, Codable, CaseIterable, Sendable {
+    case manual
+    case automatic
+    case safety
+    case other
 }
 
 /// 执行不会改变媒体源配置的本机维护操作。
@@ -42,30 +50,45 @@ final class ServerMaintenanceService: @unchecked Sendable {
     }
 
     func backups(limit: Int = 100) throws -> [ServerBackupSummary] {
-        let boundedLimit = min(max(limit, 1), 100)
+        try managedBackups(limit: limit).backups
+    }
+
+    func managedBackups(
+        limit: Int,
+        offset: Int = 0,
+        kind: ServerBackupKind? = nil
+    ) throws -> (totalCount: Int, backups: [ServerBackupSummary]) {
+        guard (1...100).contains(limit), (0...1_000_000).contains(offset) else {
+            throw ServerMaintenanceError.invalidQuery
+        }
         try secureBackupDirectory()
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey, .creationDateKey, .contentModificationDateKey]
-        let candidates = try fileManager.contentsOfDirectory(
+        let directoryEntries = try fileManager.contentsOfDirectory(
             at: backupDirectory,
             includingPropertiesForKeys: Array(keys),
             options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants]
         )
-        return try candidates.compactMap { url -> ServerBackupSummary? in
+        let candidates = try directoryEntries.compactMap { url -> ServerBackupSummary? in
             guard isManagedBackup(url) else { return nil }
             let values = try url.resourceValues(forKeys: keys)
             guard values.isRegularFile == true else { return nil }
             return ServerBackupSummary(
                 id: opaqueIdentifier(for: url.lastPathComponent),
+                kind: backupKind(for: url.lastPathComponent),
                 createdAt: values.creationDate ?? values.contentModificationDate ?? .distantPast,
                 byteLength: Int64(values.fileSize ?? 0)
             )
         }
+        .filter { kind == nil || $0.kind == kind }
         .sorted {
             if $0.createdAt != $1.createdAt { return $0.createdAt > $1.createdAt }
-            return $0.id < $1.id
+            return $0.id > $1.id
         }
-        .prefix(boundedLimit)
-        .map { $0 }
+        let totalCount = candidates.count
+        return (
+            totalCount,
+            Array(candidates.dropFirst(offset).prefix(limit))
+        )
     }
 
     func backupFile(id: String) throws -> (url: URL, byteLength: Int64)? {
@@ -85,6 +108,9 @@ final class ServerMaintenanceService: @unchecked Sendable {
     }
 
     func enqueueBackup(requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
+        let counts = try experienceRepository.jobStateCounts()
+        let activeCount = counts[.queued, default: 0] + counts[.running, default: 0]
+        guard activeCount < 8 else { throw ServerMaintenanceError.queueFull }
         let job = try experienceRepository.saveJob(ServerJob(
             kind: "database.backup",
             requestedByUserID: principal.userID
@@ -138,10 +164,22 @@ final class ServerMaintenanceService: @unchecked Sendable {
     }
 
     func enqueueRestore(backupID: String, requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
-        let activeCount = try experienceRepository.jobs(limit: 200, state: .queued).count
-            + experienceRepository.jobs(limit: 200, state: .running).count
+        let counts = try experienceRepository.jobStateCounts()
+        let activeCount = counts[.queued, default: 0] + counts[.running, default: 0]
         guard activeCount < 8 else { throw ServerMaintenanceError.queueFull }
         guard let backup = try backupFile(id: backupID) else { throw ServerMaintenanceError.backupNotFound }
+        do {
+            try database.validateBackupForRestore(at: backup.url)
+        } catch {
+            try? appendAudit(
+                category: .authorization,
+                action: "restore.preflight",
+                outcome: .failure,
+                principal: principal,
+                detailCode: "backup.invalid"
+            )
+            throw ServerMaintenanceError.invalidBackup
+        }
         let job = try experienceRepository.saveJob(ServerJob(
             kind: "database.restore",
             requestedByUserID: principal.userID
@@ -199,8 +237,8 @@ final class ServerMaintenanceService: @unchecked Sendable {
         guard ["library.scan", "library.reindex", "metadata.refresh"].contains(kind) else {
             throw ServerMaintenanceError.unsupportedJob
         }
-        let activeCount = try experienceRepository.jobs(limit: 200, state: .queued).count
-            + experienceRepository.jobs(limit: 200, state: .running).count
+        let counts = try experienceRepository.jobStateCounts()
+        let activeCount = counts[.queued, default: 0] + counts[.running, default: 0]
         guard activeCount < 8 else { throw ServerMaintenanceError.queueFull }
         let job = try experienceRepository.saveJob(ServerJob(
             kind: kind,
@@ -220,8 +258,8 @@ final class ServerMaintenanceService: @unchecked Sendable {
     }
 
     func enqueueTranscodeCacheCleanup(requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
-        let activeCount = try experienceRepository.jobs(limit: 200, state: .queued).count
-            + experienceRepository.jobs(limit: 200, state: .running).count
+        let counts = try experienceRepository.jobStateCounts()
+        let activeCount = counts[.queued, default: 0] + counts[.running, default: 0]
         guard activeCount < 8 else { throw ServerMaintenanceError.queueFull }
         let job = try experienceRepository.saveJob(ServerJob(
             kind: "transcode-cache.clear",
@@ -380,6 +418,13 @@ final class ServerMaintenanceService: @unchecked Sendable {
             && url.lastPathComponent.hasPrefix("MediaLib-")
     }
 
+    private func backupKind(for fileName: String) -> ServerBackupKind {
+        if fileName.contains("-manual-") { return .manual }
+        if fileName.contains("-auto-pre-restore-") { return .safety }
+        if fileName.contains("-auto-pre-migration-") { return .automatic }
+        return .other
+    }
+
     private func isOpaqueIdentifier(_ value: String) -> Bool {
         value.utf8.count == 32 && value.utf8.allSatisfy {
             (48...57).contains($0) || (97...102).contains($0)
@@ -402,4 +447,6 @@ enum ServerMaintenanceError: Error, Equatable {
     case unsupportedJob
     case queueFull
     case backupNotFound
+    case invalidBackup
+    case invalidQuery
 }

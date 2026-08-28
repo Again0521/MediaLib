@@ -1489,6 +1489,8 @@ struct LocalHTTPRouter {
                     ])
                 } catch ServerMaintenanceError.backupNotFound {
                     return .notFound()
+                } catch ServerMaintenanceError.invalidBackup {
+                    return .conflict()
                 } catch {
                     return .serviceUnavailable()
                 }
@@ -1621,14 +1623,23 @@ struct LocalHTTPRouter {
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             guard principal.permissions.contains(.manageServer) else { return .forbidden() }
+            guard let query = administrationBackupsQuery(from: target) else { return .badRequest() }
             guard let maintenanceService else { return .serviceUnavailable() }
             do {
-                let backups = try maintenanceService.backups()
-                guard let encoded = ServerCommandOutput.jsonData(backups) else { return .serviceUnavailable() }
+                let page = try maintenanceService.managedBackups(
+                    limit: query.limit,
+                    offset: query.offset,
+                    kind: query.kind
+                )
+                guard let encoded = ServerCommandOutput.jsonData(page.backups) else { return .serviceUnavailable() }
                 return .json(
                     body: encoded,
                     omitBody: isHeadRequest,
-                    additionalHeaders: ["Cache-Control: no-store"]
+                    additionalHeaders: administrationPaginationHeaders(
+                        totalCount: page.totalCount,
+                        offset: query.offset,
+                        itemCount: page.backups.count
+                    )
                 )
             } catch { return .serviceUnavailable() }
         }
@@ -2789,15 +2800,15 @@ struct LocalHTTPRouter {
             guard let experienceRepository else { return .serviceUnavailable() }
             do {
                 let settings = try experienceRepository.operationalSettings()
-                let jobs = try experienceRepository.jobs(limit: 50)
+                let jobCounts = try experienceRepository.jobStateCounts()
                 let response = ServerAdminDashboardResponse(
                     serverName: serverName,
                     apiVersion: MlinkProtocol.currentAPIVersion,
                     settingsVersion: settings.version,
                     maximumTranscodeSessions: settings.value.maximumTranscodeSessions,
-                    queuedJobCount: jobs.filter { $0.state == .queued }.count,
-                    runningJobCount: jobs.filter { $0.state == .running }.count,
-                    failedJobCount: jobs.filter { $0.state == .failed }.count,
+                    queuedJobCount: jobCounts[.queued, default: 0],
+                    runningJobCount: jobCounts[.running, default: 0],
+                    failedJobCount: jobCounts[.failed, default: 0],
                     recentSecurityEventCount: (try? administrationCatalog?.securityEvents().events.count) ?? 0,
                     playback: playbackTelemetry.snapshot(),
                     lan: remoteAccessPolicy.lanAccessReadiness(),
@@ -2825,14 +2836,38 @@ struct LocalHTTPRouter {
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
-            guard principal.permissions.contains(.manageLibraries) else { return .forbidden() }
-            guard let query = pagingQuery(from: target, path: "/api/v1/admin/jobs"),
-                  let experienceRepository
-            else { return .badRequest() }
+            guard principal.permissions.contains(.manageLibraries) ||
+                    principal.permissions.contains(.manageServer)
+            else { return .forbidden() }
+            guard let query = administrationJobsQuery(from: target) else { return .badRequest() }
+            guard let experienceRepository else { return .serviceUnavailable() }
+            let libraryKinds: Set<String> = ["library.scan", "library.reindex", "metadata.refresh"]
+            let serverKinds: Set<String> = ["database.backup", "database.restore", "transcode-cache.clear"]
+            var allowedKinds: Set<String> = []
+            if principal.permissions.contains(.manageLibraries) { allowedKinds.formUnion(libraryKinds) }
+            if principal.permissions.contains(.manageServer) { allowedKinds.formUnion(serverKinds) }
+            if query.scope == "library" { allowedKinds.formIntersection(libraryKinds) }
+            if query.scope == "server" { allowedKinds.formIntersection(serverKinds) }
+            guard query.kind.map({ allowedKinds.contains($0) }) ?? true else { return .forbidden() }
             do {
-                let jobs = try experienceRepository.jobs(limit: query.limit, offset: query.offset)
-                guard let encoded = ServerCommandOutput.jsonData(jobs) else { return .serviceUnavailable() }
-                body = encoded
+                let page = try experienceRepository.managedJobs(
+                    limit: query.limit,
+                    offset: query.offset,
+                    state: query.state,
+                    kind: query.kind,
+                    searchText: query.searchText,
+                    allowedKinds: allowedKinds
+                )
+                guard let encoded = ServerCommandOutput.jsonData(page.jobs) else { return .serviceUnavailable() }
+                return .json(
+                    body: encoded,
+                    omitBody: isHeadRequest,
+                    additionalHeaders: administrationPaginationHeaders(
+                        totalCount: page.totalCount,
+                        offset: query.offset,
+                        itemCount: page.jobs.count
+                    )
+                )
             } catch { return .serviceUnavailable() }
         case "/api/v1/admin/users":
             if let limited = limitedResponse(
@@ -3604,6 +3639,72 @@ struct LocalHTTPRouter {
               trimmed?.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) != true
         else { return nil }
         return (offset, limit, category, outcome, trimmed?.isEmpty == false ? trimmed : nil)
+    }
+
+    private func administrationJobsQuery(
+        from target: String
+    ) -> (
+        offset: Int,
+        limit: Int,
+        state: ServerJobState?,
+        kind: String?,
+        scope: String?,
+        searchText: String?
+    )? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.first.map(String.init) == "/api/v1/admin/jobs",
+              let values = boundedQuery(
+                from: target,
+                allowedKeys: ["offset", "limit", "state", "kind", "scope", "q"]
+              ),
+              let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
+              let limit = strictNonnegativeInteger(values["limit"] ?? "50"), (1...100).contains(limit)
+        else { return nil }
+        let state = values["state"].flatMap(ServerJobState.init(rawValue:))
+        let knownKinds: Set<String> = [
+            "library.scan", "library.reindex", "metadata.refresh",
+            "database.backup", "database.restore", "transcode-cache.clear"
+        ]
+        let kind = values["kind"]
+        let scope = values["scope"]
+        guard values["state"] == nil || state != nil,
+              kind.map({ knownKinds.contains($0) }) ?? true,
+              scope.map({ ["library", "server"].contains($0) }) ?? true
+        else { return nil }
+        let trimmed = values["q"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (trimmed?.utf8.count ?? 0) <= 128,
+              trimmed?.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) != true
+        else { return nil }
+        return (offset, limit, state, kind, scope, trimmed?.isEmpty == false ? trimmed : nil)
+    }
+
+    private func administrationBackupsQuery(
+        from target: String
+    ) -> (offset: Int, limit: Int, kind: ServerBackupKind?)? {
+        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard pieces.first.map(String.init) == "/api/v1/admin/backups",
+              let values = boundedQuery(from: target, allowedKeys: ["offset", "limit", "kind"]),
+              let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
+              let limit = strictNonnegativeInteger(values["limit"] ?? "100"), (1...100).contains(limit)
+        else { return nil }
+        let kind = values["kind"].flatMap(ServerBackupKind.init(rawValue:))
+        guard values["kind"] == nil || kind != nil else { return nil }
+        return (offset, limit, kind)
+    }
+
+    private func administrationPaginationHeaders(
+        totalCount: Int,
+        offset: Int,
+        itemCount: Int
+    ) -> [String] {
+        let boundedTotal = max(totalCount, 0)
+        let boundedOffset = max(offset, 0)
+        let boundedItemCount = max(itemCount, 0)
+        return [
+            "Cache-Control: no-store",
+            "X-MediaLIB-Total-Count: \(boundedTotal)",
+            "X-MediaLIB-Is-Truncated: \(boundedOffset + boundedItemCount < boundedTotal ? "true" : "false")"
+        ]
     }
 
     private func pagingQuery(from target: String, path expectedPath: String) -> (offset: Int, limit: Int)? {

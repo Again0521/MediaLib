@@ -69,6 +69,16 @@ final class PackageDMGScriptPathTests: XCTestCase {
         XCTAssertTrue(script.contains("ffprobe was not found"))
     }
 
+    func testPackageScriptCanSeedRepositoriesWithoutReusingBuildProducts() throws {
+        let script = try String(contentsOf: repositoryPackageScriptURL(), encoding: .utf8)
+
+        XCTAssertTrue(script.contains("MEDIALIB_PACKAGE_SEED_LOCAL_REPOSITORIES"))
+        XCTAssertTrue(script.contains("$ROOT_DIR/.build/repositories/."))
+        XCTAssertTrue(script.contains("$SWIFT_BUILD_DIR/repositories/"))
+        XCTAssertTrue(script.contains("swift build \"${swift_package_args[@]}\" --product \"$APP_NAME\""))
+        XCTAssertTrue(script.contains("swift build \"${swift_package_args[@]}\" --product \"$SERVER_NAME\""))
+    }
+
     private func makeTemporaryPackageRoot(name: String) throws -> URL {
         let root = try makeTemporaryDirectory(name: name)
         let scriptsDirectory = root.appendingPathComponent("scripts", isDirectory: true)

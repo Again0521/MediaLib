@@ -102,4 +102,44 @@ final class ServerExperienceRepositoryTests: XCTestCase {
         XCTAssertEqual(try repository.jobs(limit: 1).count, 1)
         XCTAssertEqual(try repository.jobs(state: .running).map(\.id), ["job-2"])
     }
+
+    func testManagedJobsFiltersCountsAndPagesInsidePermissionKindsWithStableOrdering() throws {
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let jobs = [
+            ServerJob(id: "job-a", kind: "library.scan", state: .succeeded, progress: 1, resultCode: "scan_100%", createdAt: createdAt),
+            ServerJob(id: "job-b", kind: "metadata.refresh", state: .failed, progress: 1, resultCode: "metadata.failed", createdAt: createdAt),
+            ServerJob(id: "job-c", kind: "library.reindex", state: .running, progress: 0.5, createdAt: createdAt),
+            ServerJob(id: "job-d", kind: "database.backup", state: .queued, createdAt: createdAt)
+        ]
+        for job in jobs { _ = try repository.saveJob(job) }
+
+        let libraryKinds: Set<String> = ["library.scan", "library.reindex", "metadata.refresh"]
+        let page = try repository.managedJobs(
+            limit: 2,
+            offset: 1,
+            allowedKinds: libraryKinds
+        )
+        XCTAssertEqual(page.totalCount, 3)
+        XCTAssertEqual(page.jobs.map(\.id), ["job-b", "job-a"])
+
+        let failed = try repository.managedJobs(
+            limit: 10,
+            state: .failed,
+            searchText: "metadata",
+            allowedKinds: libraryKinds
+        )
+        XCTAssertEqual(failed.totalCount, 1)
+        XCTAssertEqual(failed.jobs.map(\.id), ["job-b"])
+
+        let escapedSearch = try repository.managedJobs(limit: 10, searchText: "_100%")
+        XCTAssertEqual(escapedSearch.jobs.map(\.id), ["job-a"])
+
+        let counts = try repository.jobStateCounts()
+        XCTAssertEqual(counts[.queued], 1)
+        XCTAssertEqual(counts[.running], 1)
+        XCTAssertEqual(counts[.succeeded], 1)
+        XCTAssertEqual(counts[.failed], 1)
+
+        XCTAssertThrowsError(try repository.managedJobs(limit: 10, searchText: "bad\u{0001}"))
+    }
 }

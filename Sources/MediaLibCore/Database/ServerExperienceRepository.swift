@@ -194,21 +194,73 @@ public final class ServerExperienceRepository: @unchecked Sendable {
     }
 
     public func jobs(limit: Int = 50, offset: Int = 0, state: ServerJobState? = nil) throws -> [ServerJob] {
-        let boundedLimit = min(max(limit, 1), 200)
-        let boundedOffset = max(offset, 0)
-        let predicate = state == nil ? "" : "WHERE state = ?"
-        var bindings = state.map { [SQLiteValue.text($0.rawValue)] } ?? []
-        bindings.append(.int(Int64(boundedLimit)))
-        bindings.append(.int(Int64(boundedOffset)))
-        return try database.query(
+        try managedJobs(limit: limit, offset: offset, state: state).jobs
+    }
+
+    /// Returns one stable, filtered administration page and its filtered total.
+    ///
+    /// The allowed-kind predicate is applied in SQLite, not after loading rows,
+    /// so a caller can enforce the permission boundary before pagination.
+    public func managedJobs(
+        limit: Int,
+        offset: Int = 0,
+        state: ServerJobState? = nil,
+        kind: String? = nil,
+        searchText: String? = nil,
+        allowedKinds: Set<String>? = nil
+    ) throws -> (totalCount: Int, jobs: [ServerJob]) {
+        guard (1...500).contains(limit), (0...1_000_000).contains(offset) else {
+            throw ServerExperienceRepositoryError.invalidValue
+        }
+        let trimmedKind = kind?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedSearch = searchText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidJobQueryText(trimmedKind, maximumByteCount: 64),
+              Self.isValidJobQueryText(trimmedSearch, maximumByteCount: 128)
+        else { throw ServerExperienceRepositoryError.invalidValue }
+
+        var predicates: [String] = []
+        var predicateBindings: [SQLiteValue] = []
+        if let state {
+            predicates.append("state = ?")
+            predicateBindings.append(.text(state.rawValue))
+        }
+        if let trimmedKind, !trimmedKind.isEmpty {
+            predicates.append("kind = ?")
+            predicateBindings.append(.text(trimmedKind))
+        }
+        if let allowedKinds {
+            let kinds = allowedKinds.sorted()
+            guard !kinds.isEmpty, kinds.allSatisfy({ Self.isValidJobQueryText($0, maximumByteCount: 64) }) else {
+                return (0, [])
+            }
+            predicates.append("kind IN (\(Array(repeating: "?", count: kinds.count).joined(separator: ", ")))")
+            predicateBindings.append(contentsOf: kinds.map(SQLiteValue.text))
+        }
+        if let trimmedSearch, !trimmedSearch.isEmpty {
+            predicates.append(
+                """
+                (lower(id) LIKE ? ESCAPE '\\'
+                  OR lower(kind) LIKE ? ESCAPE '\\'
+                  OR lower(COALESCE(result_code, '')) LIKE ? ESCAPE '\\')
+                """
+            )
+            let pattern = "%\(Self.escapedLikePattern(trimmedSearch.lowercased()))%"
+            predicateBindings.append(contentsOf: Array(repeating: .text(pattern), count: 3))
+        }
+        let whereClause = predicates.isEmpty ? "" : "WHERE \(predicates.joined(separator: " AND "))"
+        let total = try database.query(
+            "SELECT COUNT(*) FROM server_jobs \(whereClause)",
+            bindings: predicateBindings
+        ) { Int($0.int(0) ?? 0) }.first ?? 0
+        let jobs = try database.query(
             """
             SELECT id, kind, state, progress, result_code, created_at, started_at, finished_at, requested_by_user_id
             FROM server_jobs
-            \(predicate)
-            ORDER BY created_at DESC, id ASC
+            \(whereClause)
+            ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             """,
-            bindings: bindings
+            bindings: predicateBindings + [.int(Int64(limit)), .int(Int64(offset))]
         ) { row in
             ServerJob(
                 id: row.string(0) ?? UUID().uuidString,
@@ -222,6 +274,20 @@ public final class ServerExperienceRepository: @unchecked Sendable {
                 requestedByUserID: row.string(8)
             )
         }
+        return (total, jobs)
+    }
+
+    /// One aggregate query keeps queue admission and dashboard counters exact,
+    /// instead of inferring totals from an arbitrary recent page.
+    public func jobStateCounts() throws -> [ServerJobState: Int] {
+        let rows = try database.query(
+            "SELECT state, COUNT(*) FROM server_jobs GROUP BY state"
+        ) { row in
+            (ServerJobState(rawValue: row.string(0) ?? ""), Int(row.int(1) ?? 0))
+        }
+        return Dictionary(uniqueKeysWithValues: rows.compactMap { state, count in
+            state.map { ($0, max(count, 0)) }
+        })
     }
 
     @discardableResult
@@ -246,6 +312,18 @@ public final class ServerExperienceRepository: @unchecked Sendable {
             ]
         )
         return job
+    }
+
+    private static func isValidJobQueryText(_ value: String?, maximumByteCount: Int) -> Bool {
+        (value?.utf8.count ?? 0) <= maximumByteCount &&
+            value?.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) != true
+    }
+
+    private static func escapedLikePattern(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
     }
 
     private func document<Value: Codable & Equatable & Sendable>(

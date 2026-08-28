@@ -193,6 +193,13 @@ public final class DatabaseManager: @unchecked Sendable {
         }
     }
 
+    /// Read-only integrity and schema preflight used before a dangerous restore
+    /// is admitted to the maintenance queue. Restore repeats this validation so
+    /// the execution boundary remains safe even if the file changes afterward.
+    public func validateBackupForRestore(at backupURL: URL) throws {
+        try validateBackup(at: backupURL)
+    }
+
     private func replaceCurrentDatabase(with backupURL: URL) throws {
         try queue.sync {
             try self.unsafeExecute("PRAGMA wal_checkpoint(TRUNCATE)")

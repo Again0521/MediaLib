@@ -173,6 +173,99 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(response(path: "/status", token: "member").statusCode, 403)
     }
 
+    func testJobListingFiltersPagesAndEnforcesKindPermissionBeforePagination() throws {
+        let experience = ServerExperienceRepository(database: database)
+        let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        for job in [
+            ServerJob(id: "job-library-a", kind: "library.scan", state: .succeeded, progress: 1, resultCode: "scan.completed", createdAt: createdAt),
+            ServerJob(id: "job-library-b", kind: "metadata.refresh", state: .failed, progress: 1, resultCode: "metadata.failed", createdAt: createdAt),
+            ServerJob(id: "job-server-a", kind: "database.backup", state: .running, progress: 0.5, createdAt: createdAt)
+        ] { _ = try experience.saveJob(job) }
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let first = response(
+            path: "/api/v1/admin/jobs?scope=library&offset=0&limit=1",
+            token: "library-manager"
+        )
+        XCTAssertEqual(first.statusCode, 200)
+        XCTAssertTrue(first.additionalHeaders.contains("X-MediaLIB-Total-Count: 2"))
+        XCTAssertTrue(first.additionalHeaders.contains("X-MediaLIB-Is-Truncated: true"))
+        XCTAssertEqual(try decoder.decode([ServerJob].self, from: first.body).map(\.id), ["job-library-b"])
+
+        let filtered = response(
+            path: "/api/v1/admin/jobs?scope=library&state=failed&q=metadata&limit=50",
+            token: "library-manager"
+        )
+        XCTAssertEqual(try decoder.decode([ServerJob].self, from: filtered.body).map(\.id), ["job-library-b"])
+        XCTAssertTrue(filtered.additionalHeaders.contains("X-MediaLIB-Total-Count: 1"))
+
+        let serverOnly = response(path: "/api/v1/admin/jobs?limit=50", token: "server-manager")
+        XCTAssertEqual(try decoder.decode([ServerJob].self, from: serverOnly.body).map(\.id), ["job-server-a"])
+        XCTAssertEqual(
+            response(path: "/api/v1/admin/jobs?kind=database.backup", token: "library-manager").statusCode,
+            403
+        )
+        XCTAssertEqual(response(path: "/api/v1/admin/jobs?state=unknown", token: "library-manager").statusCode, 400)
+        XCTAssertEqual(response(path: "/api/v1/admin/jobs?limit=1&limit=2", token: "library-manager").statusCode, 400)
+        XCTAssertEqual(response(path: "/api/v1/admin/jobs?unexpected=1", token: "library-manager").statusCode, 400)
+    }
+
+    func testBackupListingFiltersAndPagesWithoutExposingManagedFileNames() throws {
+        let backupDirectory = directory.appendingPathComponent("backups", isDirectory: true)
+        try FileManager.default.createDirectory(at: backupDirectory, withIntermediateDirectories: true)
+        let names = [
+            "MediaLib-manual-20260828-120000.sqlite",
+            "MediaLib-auto-pre-migration-v29-to-v30-20260828-110000.sqlite",
+            "MediaLib-auto-pre-restore-20260828-100000.sqlite"
+        ]
+        for (index, name) in names.enumerated() {
+            let url = backupDirectory.appendingPathComponent(name)
+            try Data(repeating: UInt8(index + 1), count: index + 1).write(to: url)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date(timeIntervalSince1970: 1_700_000_000 + Double(index))],
+                ofItemAtPath: url.path
+            )
+        }
+
+        let first = response(path: "/api/v1/admin/backups?offset=0&limit=1", token: "server-manager")
+        XCTAssertEqual(first.statusCode, 200)
+        XCTAssertTrue(first.additionalHeaders.contains("X-MediaLIB-Total-Count: 3"))
+        XCTAssertTrue(first.additionalHeaders.contains("X-MediaLIB-Is-Truncated: true"))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        XCTAssertEqual(try decoder.decode([ServerBackupSummary].self, from: first.body).count, 1)
+
+        let safety = response(path: "/api/v1/admin/backups?kind=safety&limit=50", token: "server-manager")
+        let safetyRows = try decoder.decode([ServerBackupSummary].self, from: safety.body)
+        XCTAssertEqual(safetyRows.map(\.kind), [.safety])
+        XCTAssertTrue(safety.additionalHeaders.contains("X-MediaLIB-Total-Count: 1"))
+        let serialized = String(decoding: safety.body, as: UTF8.self)
+        XCTAssertFalse(serialized.contains("auto-pre-restore"))
+        XCTAssertFalse(serialized.contains(backupDirectory.path))
+
+        XCTAssertEqual(response(path: "/api/v1/admin/backups?kind=invalid", token: "server-manager").statusCode, 400)
+        XCTAssertEqual(response(path: "/api/v1/admin/backups?limit=1&limit=2", token: "server-manager").statusCode, 400)
+        XCTAssertEqual(response(path: "/api/v1/admin/backups?unexpected=1", token: "server-manager").statusCode, 400)
+    }
+
+    func testBackupCreationUsesExactAggregateQueueLimit() throws {
+        let experience = ServerExperienceRepository(database: database)
+        for index in 0..<8 {
+            _ = try experience.saveJob(ServerJob(
+                id: "active-job-\(index)",
+                kind: index.isMultiple(of: 2) ? "database.backup" : "library.scan",
+                state: index.isMultiple(of: 3) ? .running : .queued
+            ))
+        }
+        let before = try experience.jobStateCounts()
+        let response = router.response(
+            for: mutationRequest("/api/v1/admin/backups", token: "server-manager", bodyLength: 0)
+        )
+        XCTAssertEqual(response.statusCode, 503)
+        XCTAssertEqual(try experience.jobStateCounts(), before)
+    }
+
     func testPreferencesAPIUsesETagAndRejectsLostUpdates() throws {
         let initial = response(path: "/api/v1/me/preferences", token: "preferences")
         XCTAssertEqual(initial.statusCode, 200)
@@ -386,6 +479,37 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(try repository.user(id: "user-alice")?.displayName, "Changed after backup")
 
         let body = try JSONEncoder().encode(["currentPassword": password])
+        let invalidURL = directory.appendingPathComponent("backups/MediaLib-manual-invalid.sqlite")
+        try Data("not-a-sqlite-database".utf8).write(to: invalidURL)
+        let withInvalid = response(path: "/api/v1/admin/backups", token: "server-manager")
+        let invalidBackup = try XCTUnwrap(
+            try decoder.decode([ServerBackupSummary].self, from: withInvalid.body)
+                .first(where: { $0.byteLength == Int64(Data("not-a-sqlite-database".utf8).count) })
+        )
+        let restoreCountBeforePreflight = try experience.managedJobs(
+            limit: 100, kind: "database.restore"
+        ).totalCount
+        let rejectedPreflight = router.response(
+            for: mutationRequest(
+                "/api/v1/admin/backups/\(invalidBackup.id)/restore",
+                token: "server-manager",
+                bodyLength: body.count
+            ),
+            body: body
+        )
+        XCTAssertEqual(rejectedPreflight.statusCode, 409)
+        XCTAssertEqual(
+            try experience.managedJobs(limit: 100, kind: "database.restore").totalCount,
+            restoreCountBeforePreflight
+        )
+        XCTAssertTrue(try repository.securityEvents(limit: 30).contains {
+            $0.action == "restore.preflight" && $0.outcome == .failure && $0.detailCode == "backup.invalid"
+        })
+
+        // The three high-cost attempts above intentionally consume the
+        // production management bucket. Use a fresh process-local limiter for
+        // the independent successful-restore assertion; product limits stay unchanged.
+        router = makeRouter(authenticationService: try ServerAuthenticationService(database: database))
         let accepted = router.response(
             for: mutationRequest(
                 "/api/v1/admin/backups/\(backup.id)/restore",
