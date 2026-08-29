@@ -4043,10 +4043,21 @@ struct LocalHTTPRouter {
             else { return .notFound() }
             return Self.webVTTResponse(payload: payload, omitBody: omitBody)
         case let .embedded(asset, streamIndex):
-            guard let payload = mediaTrackCatalog.embeddedSubtitleWebVTT(
-                for: asset, streamIndex: streamIndex
-            ) else { return .notFound() }
-            return Self.webVTTResponse(payload: payload, omitBody: omitBody)
+            switch mediaTrackCatalog.embeddedSubtitleWebVTT(
+                for: asset,
+                streamIndex: streamIndex,
+                startIfNeeded: !omitBody
+            ) {
+            case let .ready(payload):
+                return Self.webVTTResponse(payload: payload, omitBody: omitBody)
+            case .pending:
+                return .accepted(
+                    body: Data(),
+                    additionalHeaders: ["Cache-Control: no-store", "Retry-After: 1"]
+                )
+            case .failed:
+                return .notFound()
+            }
         case let .remote(remoteTrack):
             guard !omitBody else {
                 // HEAD 不该为了报一个长度就去 Emby 拉一份字幕回来。

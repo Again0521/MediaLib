@@ -690,6 +690,9 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         let script = ServerWebMediaDetailPage.script
 
         XCTAssertTrue(script.contains("credentials: 'same-origin', headers: { 'Accept': 'text/vtt' }"))
+        XCTAssertTrue(script.contains("while (response.status === 202)"))
+        XCTAssertTrue(script.contains("performance.now() + 305000"))
+        XCTAssertTrue(script.contains("signal:lifecycle.signal"))
         XCTAssertTrue(script.contains("activeSubtitleCues = parseWebVTT(payload)"))
         XCTAssertTrue(script.contains("source.startsWith('WEBVTT')"))
         XCTAssertTrue(script.contains("line.textContent = cue.text"))

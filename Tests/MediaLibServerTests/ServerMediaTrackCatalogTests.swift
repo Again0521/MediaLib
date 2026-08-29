@@ -220,6 +220,119 @@ final class ServerMediaTrackCatalogTests: XCTestCase {
         XCTAssertEqual(probe.callCount, 2)
     }
 
+    func testConcurrentEmbeddedSubtitleRequestsShareOneAsynchronousExport() throws {
+        let payload = Data("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n你好\n".utf8)
+        let exporter = ConcurrentSubtitleExporter(outcomes: [payload], blockedCallCount: 1)
+        let catalog = subtitleCatalog(exporter: exporter)
+        let media = try asset()
+        let start = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+        let results = LockedSubtitleStateCounter()
+
+        for _ in 0..<12 {
+            group.enter()
+            DispatchQueue.global().async {
+                start.wait()
+                results.record(catalog.embeddedSubtitleWebVTT(for: media, streamIndex: 17))
+                group.leave()
+            }
+        }
+        for _ in 0..<12 { start.signal() }
+
+        XCTAssertEqual(exporter.entered.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(group.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(results.pendingCount, 12)
+        XCTAssertEqual(exporter.callCount, 1)
+        exporter.release.signal()
+        XCTAssertEqual(waitForSubtitle(catalog, asset: media, streamIndex: 17), payload)
+        XCTAssertEqual(exporter.callCount, 1)
+    }
+
+    func testEmbeddedSubtitleFailureIsSharedThenExplicitRetryCanStartNewExport() throws {
+        let payload = Data("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n重试成功\n".utf8)
+        let clock = LockedUptime()
+        let exporter = ConcurrentSubtitleExporter(outcomes: [nil, payload])
+        let catalog = subtitleCatalog(exporter: exporter, uptimeProvider: { clock.value })
+        let media = try asset()
+
+        guard case .pending = catalog.embeddedSubtitleWebVTT(for: media, streamIndex: 3) else {
+            return XCTFail("首个请求应异步排队")
+        }
+        XCTAssertTrue(waitForSubtitleFailure(catalog, asset: media, streamIndex: 3))
+        XCTAssertEqual(exporter.callCount, 1)
+        guard case .failed = catalog.embeddedSubtitleWebVTT(for: media, streamIndex: 3) else {
+            return XCTFail("短暂失败窗口内的轮询必须共享失败")
+        }
+
+        clock.advance(by: 2)
+        guard case .pending = catalog.embeddedSubtitleWebVTT(for: media, streamIndex: 3) else {
+            return XCTFail("失败窗口结束后的明确重试应启动新任务")
+        }
+        XCTAssertEqual(waitForSubtitle(catalog, asset: media, streamIndex: 3), payload)
+        XCTAssertEqual(exporter.callCount, 2)
+    }
+
+    func testFileRevisionChangingDuringSubtitleExportDiscardsStalePayload() throws {
+        let stale = Data("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n旧字幕\n".utf8)
+        let current = Data("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n新字幕\n".utf8)
+        let exporter = ConcurrentSubtitleExporter(outcomes: [stale, current], blockedCallCount: 1)
+        let catalog = subtitleCatalog(exporter: exporter)
+        let media = try asset()
+
+        guard case .pending = catalog.embeddedSubtitleWebVTT(for: media, streamIndex: 5) else {
+            return XCTFail("首个请求应异步排队")
+        }
+        XCTAssertEqual(exporter.entered.wait(timeout: .now() + 2), .success)
+        let handle = try FileHandle(forWritingTo: media.fileURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("+".utf8))
+        try handle.close()
+        exporter.release.signal()
+
+        XCTAssertEqual(waitForSubtitle(catalog, asset: media, streamIndex: 5), current)
+        XCTAssertEqual(exporter.callCount, 2)
+    }
+
+    func testSubtitleWorkerPoolAllowsOnlyTwoFFmpegExportsAtOnce() throws {
+        let payload = Data("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n字幕\n".utf8)
+        let exporter = ConcurrentSubtitleExporter(
+            outcomes: [payload, payload, payload],
+            blockedCallCount: 3
+        )
+        let catalog = subtitleCatalog(exporter: exporter)
+        let media = try asset()
+
+        for streamIndex in 0..<3 {
+            guard case .pending = catalog.embeddedSubtitleWebVTT(
+                for: media, streamIndex: streamIndex
+            ) else { return XCTFail("每条冷字幕都应异步排队") }
+        }
+        XCTAssertEqual(exporter.entered.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(exporter.entered.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(exporter.callCount, 2)
+        XCTAssertEqual(exporter.peakConcurrentCount, 2)
+        exporter.release.signal()
+        XCTAssertEqual(exporter.entered.wait(timeout: .now() + 2), .success)
+        exporter.release.signal()
+        exporter.release.signal()
+
+        for streamIndex in 0..<3 {
+            XCTAssertEqual(waitForSubtitle(catalog, asset: media, streamIndex: streamIndex), payload)
+        }
+        XCTAssertEqual(exporter.callCount, 3)
+        XCTAssertEqual(exporter.peakConcurrentCount, 2)
+    }
+
+    func testEmbeddedSubtitleHeadDoesNotStartExpensiveExport() throws {
+        let exporter = ConcurrentSubtitleExporter(outcomes: [Data("unused".utf8)])
+        let catalog = subtitleCatalog(exporter: exporter)
+
+        guard case .pending = catalog.embeddedSubtitleWebVTT(
+            for: try asset(), streamIndex: 0, startIfNeeded: false
+        ) else { return XCTFail("未缓存的 HEAD 应报告尚未就绪") }
+        XCTAssertEqual(exporter.callCount, 0)
+    }
+
     /// 远程条目的字节在别人家的服务器上，ffprobe 够不着。这里返回 nil 而不是空
     /// 名单——空名单的语义是"这个文件确实没有音轨"。
     func testRemoteAssetsAreNotProbed() {
@@ -231,6 +344,133 @@ final class ServerMediaTrackCatalogTests: XCTestCase {
         )
         XCTAssertNil(catalog.audioTracks(for: remote))
         XCTAssertTrue(catalog.embeddedSubtitleStreams(for: remote).isEmpty)
+    }
+
+    private func subtitleCatalog(
+        exporter: ConcurrentSubtitleExporter,
+        uptimeProvider: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) -> ServerMediaTrackCatalog {
+        ServerMediaTrackCatalog(
+            ffmpegURLProvider: { URL(fileURLWithPath: "/usr/bin/ffmpeg-test-double") },
+            subtitleExporter: { exporter.run($0, $1, $2, $3) },
+            uptimeProvider: uptimeProvider
+        )
+    }
+
+    private func waitForSubtitle(
+        _ catalog: ServerMediaTrackCatalog,
+        asset: ServerMediaAsset,
+        streamIndex: Int,
+        timeout: TimeInterval = 2
+    ) -> Data? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            switch catalog.embeddedSubtitleWebVTT(for: asset, streamIndex: streamIndex) {
+            case let .ready(payload): return payload
+            case .failed: return nil
+            case .pending: Thread.sleep(forTimeInterval: 0.005)
+            }
+        }
+        return nil
+    }
+
+    private func waitForSubtitleFailure(
+        _ catalog: ServerMediaTrackCatalog,
+        asset: ServerMediaAsset,
+        streamIndex: Int
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            switch catalog.embeddedSubtitleWebVTT(for: asset, streamIndex: streamIndex) {
+            case .failed: return true
+            case .ready: return false
+            case .pending: Thread.sleep(forTimeInterval: 0.005)
+            }
+        }
+        return false
+    }
+}
+
+private final class LockedSubtitleStateCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedPendingCount = 0
+
+    var pendingCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedPendingCount
+    }
+
+    func record(_ state: ServerMediaTrackCatalog.EmbeddedSubtitleExportState) {
+        guard case .pending = state else { return }
+        lock.lock()
+        storedPendingCount += 1
+        lock.unlock()
+    }
+}
+
+private final class LockedUptime: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: TimeInterval = 100
+
+    var value: TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.lock()
+        storedValue += interval
+        lock.unlock()
+    }
+}
+
+private final class ConcurrentSubtitleExporter: @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private let outcomes: [Data?]
+    private let blockedCallCount: Int
+    private var storedCallCount = 0
+    private var activeCount = 0
+    private var storedPeakConcurrentCount = 0
+
+    init(outcomes: [Data?], blockedCallCount: Int = 0) {
+        self.outcomes = outcomes
+        self.blockedCallCount = blockedCallCount
+    }
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCallCount
+    }
+
+    var peakConcurrentCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedPeakConcurrentCount
+    }
+
+    func run(_ executableURL: URL, _ arguments: [String], _ maximumBytes: Int, _ timeout: TimeInterval) -> Data? {
+        XCTAssertEqual(executableURL.path, "/usr/bin/ffmpeg-test-double")
+        XCTAssertTrue(arguments.contains("webvtt"))
+        XCTAssertEqual(maximumBytes, ServerWebVTTSubtitleTrack.maximumByteLength)
+        XCTAssertGreaterThanOrEqual(timeout, 45)
+        lock.lock()
+        let index = storedCallCount
+        storedCallCount += 1
+        activeCount += 1
+        storedPeakConcurrentCount = max(storedPeakConcurrentCount, activeCount)
+        let outcome = outcomes[min(index, outcomes.count - 1)]
+        lock.unlock()
+        entered.signal()
+        if index < blockedCallCount { release.wait() }
+        lock.lock()
+        activeCount -= 1
+        lock.unlock()
+        return outcome
     }
 }
 

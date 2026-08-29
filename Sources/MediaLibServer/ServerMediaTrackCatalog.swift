@@ -16,6 +16,12 @@ import MediaLibServerProtocol
 /// 名单交给网页，菜单据此渲染；选中一条非默认音轨时，播放改走
 /// `ServerAudioRemuxStream`（浏览器无法在一条流里切音轨）。
 final class ServerMediaTrackCatalog {
+    enum EmbeddedSubtitleExportState {
+        case ready(Data)
+        case pending
+        case failed
+    }
+
     /// 探测一次的代价是一次 ffprobe 进程；同一部片子在详情页、选集切换与重封装
     /// 决策里会被问好几次，因此按「路径 + 大小 + 修改时间」缓存。文件一变，键就变。
     private struct CacheKey: Hashable {
@@ -40,6 +46,10 @@ final class ServerMediaTrackCatalog {
         }
     }
 
+    /// 字幕导出最长会顺序扫描 8 GiB 容器，不能占住 HTTP 客户连接执行队列。
+    /// 请求只登记 flight 并立即返回 pending；真正的进程等待发生在专用工作队列。
+    private final class SubtitleFlight {}
+
     private let inspector: FFprobeMediaInspector
     private let lock = NSLock()
     private var cache: [CacheKey: FFprobeMediaInspector.ProbedMedia] = [:]
@@ -49,11 +59,42 @@ final class ServerMediaTrackCatalog {
     private var subtitleCache: [SubtitleCacheKey: Data] = [:]
     private var subtitleCacheOrder: [SubtitleCacheKey] = []
     private var subtitleCacheByteLength = 0
+    private var subtitleFlights: [SubtitleCacheKey: SubtitleFlight] = [:]
+    private var subtitleFailures: [SubtitleCacheKey: TimeInterval] = [:]
     private static let maximumSubtitleCacheEntries = 64
     private static let maximumSubtitleCacheByteLength = 32 * 1024 * 1024
+    private static let maximumPendingSubtitleExports = 8
+    private static let subtitleFailureVisibility: TimeInterval = 1
+    private let ffmpegURLProvider: () -> URL?
+    private let subtitleExporter: (URL, [String], Int, TimeInterval) -> Data?
+    private let subtitleExportQueue: DispatchQueue
+    private let subtitleExportSlots = DispatchSemaphore(value: 2)
+    private let uptimeProvider: () -> TimeInterval
 
-    init(inspector: FFprobeMediaInspector = FFprobeMediaInspector()) {
+    init(
+        inspector: FFprobeMediaInspector = FFprobeMediaInspector(),
+        ffmpegURLProvider: @escaping () -> URL? = { ServerMediaToolchain.ffmpegURL() },
+        subtitleExporter: @escaping (URL, [String], Int, TimeInterval) -> Data? = {
+            executableURL, arguments, maximumOutputByteLength, timeout in
+            ServerBoundedProcess.run(
+                executableURL: executableURL,
+                arguments: arguments,
+                maximumOutputByteLength: maximumOutputByteLength,
+                timeout: timeout
+            )
+        },
+        subtitleExportQueue: DispatchQueue = DispatchQueue(
+            label: "MediaLibServer.SubtitleExports",
+            qos: .utility,
+            attributes: .concurrent
+        ),
+        uptimeProvider: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) {
         self.inspector = inspector
+        self.ffmpegURLProvider = ffmpegURLProvider
+        self.subtitleExporter = subtitleExporter
+        self.subtitleExportQueue = subtitleExportQueue
+        self.uptimeProvider = uptimeProvider
     }
 
     /// 本地文件的探测结果。远程资产没有本地文件可探，一律 nil——它们的轨道由
@@ -251,7 +292,7 @@ final class ServerMediaTrackCatalog {
     func embeddedSubtitleStreams(
         for asset: ServerMediaAsset
     ) -> [FFprobeMediaInspector.ProbedStream] {
-        guard ServerMediaToolchain.ffmpegURL() != nil, let probed = probe(asset: asset) else { return [] }
+        guard ffmpegURLProvider() != nil, let probed = probe(asset: asset) else { return [] }
         return probed.subtitles.filter { stream in
             stream.codec.map { Self.textSubtitleCodecs.contains($0) } ?? false
         }
@@ -260,7 +301,7 @@ final class ServerMediaTrackCatalog {
     func embeddedBitmapSubtitleStreams(
         for asset: ServerMediaAsset
     ) -> [FFprobeMediaInspector.ProbedStream] {
-        guard ServerMediaToolchain.ffmpegURL() != nil, let probed = probe(asset: asset) else { return [] }
+        guard ffmpegURLProvider() != nil, let probed = probe(asset: asset) else { return [] }
         return probed.subtitles.filter { stream in
             stream.codec.map { Self.bitmapSubtitleCodecs.contains($0) } ?? false
         }
@@ -271,22 +312,44 @@ final class ServerMediaTrackCatalog {
     /// 交给 ffmpeg 的是 `-f webvtt`，不是"先导出 ASS 再自己转"：ffmpeg 的 ASS→VTT
     /// 已经处理好时间轴与换行。它丢掉 ASS 的定位信息，所以 ASS 内封轨在网页上是
     /// 一份朴素但正确的字幕；外挂 `.ass` 走 `ServerASSSubtitle`，那条路径保留定位。
-    func embeddedSubtitleWebVTT(for asset: ServerMediaAsset, streamIndex: Int) -> Data? {
+    func embeddedSubtitleWebVTT(
+        for asset: ServerMediaAsset,
+        streamIndex: Int,
+        startIfNeeded: Bool = true
+    ) -> EmbeddedSubtitleExportState {
         guard asset.remoteURL == nil,
-              let ffmpeg = ServerMediaToolchain.ffmpegURL(),
+              let ffmpeg = ffmpegURLProvider(),
               streamIndex >= 0,
               let mediaKey = cacheKey(for: asset)
-        else { return nil }
+        else { return .failed }
         let subtitleKey = SubtitleCacheKey(media: mediaKey, streamIndex: streamIndex)
+        let now = uptimeProvider()
         lock.lock()
         if let cached = subtitleCache[subtitleKey] {
             lock.unlock()
-            return cached
+            return .ready(cached)
         }
+        if let failureUntil = subtitleFailures[subtitleKey] {
+            if now < failureUntil {
+                lock.unlock()
+                return .failed
+            }
+            subtitleFailures.removeValue(forKey: subtitleKey)
+        }
+        if subtitleFlights[subtitleKey] != nil {
+            lock.unlock()
+            return .pending
+        }
+        guard startIfNeeded,
+              subtitleFlights.count < Self.maximumPendingSubtitleExports
+        else {
+            lock.unlock()
+            return startIfNeeded ? .failed : .pending
+        }
+        subtitleFlights[subtitleKey] = SubtitleFlight()
         lock.unlock()
-        let output = ServerBoundedProcess.run(
-            executableURL: ffmpeg,
-            arguments: [
+
+        let arguments = [
                 "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-i", ServerMediaToolchain.inputArgument(for: asset.fileURL),
                 "-map", "0:\(streamIndex)",
@@ -294,17 +357,51 @@ final class ServerMediaTrackCatalog {
                 "-c:s", "webvtt",
                 "-f", "webvtt",
                 "-"
-            ],
-            maximumOutputByteLength: ServerWebVTTSubtitleTrack.maximumByteLength,
-            timeout: Self.embeddedSubtitleExtractionTimeout(byteLength: mediaKey.byteLength)
-        )
-        guard let output, let text = ServerSubtitleSidecar.decodeText(output) else { return nil }
-        // ffmpeg 偶尔会在没有可导出 cue 时仍然写出一个只有头部的文件。那种"有轨道
-        // 但一句话都没有"的字幕在画面上和坏掉没有区别，宁可 404。
-        guard text.contains("-->") else { return nil }
-        let payload = Data(text.utf8)
+        ]
+        let timeout = Self.embeddedSubtitleExtractionTimeout(byteLength: mediaKey.byteLength)
+        subtitleExportQueue.async { [self] in
+            subtitleExportSlots.wait()
+            defer { subtitleExportSlots.signal() }
+            let output = subtitleExporter(
+                ffmpeg,
+                arguments,
+                ServerWebVTTSubtitleTrack.maximumByteLength,
+                timeout
+            )
+            let payload = output
+                .flatMap(ServerSubtitleSidecar.decodeText)
+                .flatMap { text in text.contains("-->") ? Data(text.utf8) : nil }
+            finishSubtitleExport(payload, asset: asset, key: subtitleKey)
+        }
+        return .pending
+    }
+
+    private func finishSubtitleExport(
+        _ payload: Data?,
+        asset: ServerMediaAsset,
+        key subtitleKey: SubtitleCacheKey
+    ) {
         lock.lock()
+        defer { lock.unlock() }
+        subtitleFlights.removeValue(forKey: subtitleKey)
+        // 文件在长时间扫描中被继续写入或替换时，旧结果不得进入新修订缓存。
+        guard cacheKey(for: asset) == subtitleKey.media else { return }
+        guard let payload else {
+            subtitleFailures[subtitleKey] = uptimeProvider() + Self.subtitleFailureVisibility
+            return
+        }
+        subtitleFailures.removeValue(forKey: subtitleKey)
         if subtitleCache[subtitleKey] == nil {
+            let superseded = subtitleCacheOrder.filter {
+                $0.media.path == subtitleKey.media.path && $0.media != subtitleKey.media
+            }
+            for oldKey in superseded {
+                if let removed = subtitleCache.removeValue(forKey: oldKey) {
+                    subtitleCacheByteLength -= removed.count
+                }
+                subtitleFailures.removeValue(forKey: oldKey)
+            }
+            subtitleCacheOrder.removeAll { superseded.contains($0) }
             subtitleCache[subtitleKey] = payload
             subtitleCacheOrder.append(subtitleKey)
             subtitleCacheByteLength += payload.count
@@ -316,9 +413,6 @@ final class ServerMediaTrackCatalog {
                 }
             }
         }
-        let cached = subtitleCache[subtitleKey] ?? payload
-        lock.unlock()
-        return cached
     }
 
     /// Matroska 的字幕包与视频包交错存放。导出 20 KiB 字幕仍可能需要扫过整部

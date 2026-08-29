@@ -2126,9 +2126,25 @@ enum ServerWebMediaDetailPage {
         buildSubtitleMenu();
         setStatus('正在加载字幕…');
         try {
-          const response = await fetch(subtitlePath(trackID), {
-            credentials: 'same-origin', headers: { 'Accept': 'text/vtt' }
-          });
+          const deadline = performance.now() + 305000;
+          let response;
+          do {
+            response = await fetch(subtitlePath(trackID), {
+              credentials: 'same-origin', headers: { 'Accept': 'text/vtt' }, signal:lifecycle.signal
+            });
+            while (response.status === 202) {
+              if (revision !== subtitleLoadRevision) return;
+              if (performance.now() >= deadline) throw new Error('subtitle-timeout');
+              await new Promise(resolve => window.setTimeout(resolve, 750));
+              if (lifecycle.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+              response = await fetch(subtitlePath(trackID), {
+                credentials: 'same-origin', headers: { 'Accept': 'text/vtt' }, signal:lifecycle.signal
+              });
+            }
+          } catch (error) {
+            if (error?.name === 'AbortError') return;
+            throw error;
+          }
           if (!response.ok) throw new Error('subtitle-unavailable');
           const payload = await response.text();
           if (revision !== subtitleLoadRevision) return;
