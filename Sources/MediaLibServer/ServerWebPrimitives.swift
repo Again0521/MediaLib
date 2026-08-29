@@ -113,6 +113,7 @@ enum ServerWebPrimitives {
          自己拆开。`flex: none` 是为了在 flex 容器里不被压缩到收缩点。 */
       .ui-section-more {
         display: inline-flex;
+        min-height: var(--control-height-lg);
         align-items: center;
         flex: none;
         gap: 2px;

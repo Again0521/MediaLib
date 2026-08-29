@@ -920,6 +920,10 @@ final class ServerWebDesignSystemTests: XCTestCase {
 
         let primitives = asset("/assets/primitives.css")
         XCTAssertTrue(primitives.contains(".ui-segmented > button { height: var(--control-height-lg); }"))
+        XCTAssertTrue(primitives.contains(".ui-section-more {"))
+        XCTAssertTrue(primitives.contains("min-height: var(--control-height-lg)"))
+        let shell = asset("/assets/app-shell.css")
+        XCTAssertTrue(shell.contains(".nav-subitem { min-height: var(--nav-item-height); }"))
         XCTAssertTrue(ServerWebMediaDetailPage.style.contains(
             ".rating-star { width: var(--control-height-lg); height: var(--control-height-lg); }"
         ))

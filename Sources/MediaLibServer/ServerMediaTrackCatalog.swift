@@ -1,5 +1,6 @@
 import Foundation
 import MediaLibCore
+import MediaLibServerProtocol
 
 /// 网页播放器的音轨 / 字幕轨事实源。
 ///
@@ -28,10 +29,22 @@ final class ServerMediaTrackCatalog {
         let streamIndex: Int
     }
 
+    /// 一个媒体修订只有一个冷探测。失败结果只共享给已经等在这一班上的请求；
+    /// flight 完成后立即移除，因此稍后的页面请求仍能重试临时离线的 NAS 文件。
+    private final class ProbeFlight {
+        let completion = DispatchGroup()
+        var result: FFprobeMediaInspector.ProbedMedia?
+
+        init() {
+            completion.enter()
+        }
+    }
+
     private let inspector: FFprobeMediaInspector
     private let lock = NSLock()
     private var cache: [CacheKey: FFprobeMediaInspector.ProbedMedia] = [:]
     private var cacheOrder: [CacheKey] = []
+    private var probeFlights: [CacheKey: ProbeFlight] = [:]
     private static let maximumCacheEntries = 256
     private var subtitleCache: [SubtitleCacheKey: Data] = [:]
     private var subtitleCacheOrder: [SubtitleCacheKey] = []
@@ -53,28 +66,59 @@ final class ServerMediaTrackCatalog {
             lock.unlock()
             return cached
         }
+        if let flight = probeFlights[key] {
+            lock.unlock()
+            flight.completion.wait()
+            lock.lock()
+            let result = cache[key] ?? flight.result
+            lock.unlock()
+            return result
+        }
+        let flight = ProbeFlight()
+        probeFlights[key] = flight
         lock.unlock()
-        guard let probed = try? inspector.probe(asset: asset) else { return nil }
+        let probed = try? inspector.probe(asset: asset)
         lock.lock()
-        if cache[key] == nil {
+        if let probed, cache[key] == nil {
+            // 同一路径的新大小/mtime 已经是新的媒体修订；旧修订不再可能命中，
+            // 立即移除可避免频繁覆盖同一文件把 256 项缓存挤满。
+            let superseded = cacheOrder.filter { $0.path == key.path && $0 != key }
+            for oldKey in superseded {
+                cache.removeValue(forKey: oldKey)
+            }
+            cacheOrder.removeAll { superseded.contains($0) }
             cache[key] = probed
             cacheOrder.append(key)
             while cacheOrder.count > Self.maximumCacheEntries {
                 cache.removeValue(forKey: cacheOrder.removeFirst())
             }
         }
+        flight.result = probed
+        probeFlights.removeValue(forKey: key)
         lock.unlock()
+        flight.completion.leave()
         return probed
     }
 
+    /// `/api/v1/playback/info/*` 与轨道/HLS 路径共用上面的探测和修订缓存，不能另建
+    /// 一个 inspector 绕开 single-flight。
+    func playbackInfo(for asset: ServerMediaAsset) -> ServerMediaPlaybackInfo? {
+        guard let probed = probe(asset: asset) else { return nil }
+        return FFprobeMediaInspector.playbackInfo(asset: asset, probed: probed)
+    }
+
     private func cacheKey(for asset: ServerMediaAsset) -> CacheKey? {
-        guard let values = try? asset.fileURL.resourceValues(
-            forKeys: [.fileSizeKey, .contentModificationDateKey]
-        ) else { return nil }
+        // `URL.resourceValues` 会把同一个 NSURL 的属性缓存在对象上；文件刚被替换或
+        // 继续写入时可能仍返回旧大小，结果是新的媒体修订误命中旧 ffprobe。直接
+        // 向 FileManager 读取当前目录项属性，失效判断才与磁盘事实一致。
+        guard let attributes = try? FileManager.default.attributesOfItem(
+            atPath: asset.fileURL.path
+        ), let fileSize = (attributes[.size] as? NSNumber)?.int64Value
+        else { return nil }
         return CacheKey(
             path: asset.fileURL.path,
-            byteLength: Int64(values.fileSize ?? 0),
-            modifiedAt: values.contentModificationDate?.timeIntervalSince1970 ?? 0
+            byteLength: fileSize,
+            modifiedAt: (attributes[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
         )
     }
 

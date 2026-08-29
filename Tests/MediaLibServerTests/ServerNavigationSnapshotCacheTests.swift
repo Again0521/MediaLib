@@ -1,10 +1,11 @@
 import Dispatch
 import XCTest
+@testable import MediaLibCore
 @testable import MediaLibServer
 @testable import MediaLibServerProtocol
 
 final class ServerNavigationSnapshotCacheTests: XCTestCase {
-    func testSidebarSnapshotReusesLocalNavigationUntilRevisionChangesButAlwaysRefreshesRemoteGroups() {
+    func testSidebarSnapshotReusesAllNavigationUntilRevisionChanges() {
         let calls = NavigationProviderCounter()
         let router = LocalHTTPRouter(
             serverID: "server",
@@ -65,7 +66,9 @@ final class ServerNavigationSnapshotCacheTests: XCTestCase {
                 calls.recordCollections()
                 return ServerSmartCollectionsPage(totalItemCount: 0, offset: offset, limit: limit, items: [])
             },
-            authenticationProvider: { token in token == "first" ? first : second }
+            authenticationProvider: { requestHead in
+                requestHead.contains("Authorization: Bearer first") ? first : second
+            }
         )
 
         XCTAssertEqual(response(router, path: "/account", token: "first").statusCode, 200)

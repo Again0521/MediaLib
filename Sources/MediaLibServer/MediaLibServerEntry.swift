@@ -85,7 +85,6 @@ struct MediaLibServer {
                 trustedProxyAddresses: Array(configuration.trustedProxyAddresses),
                 hostControlAvailable: { hostControlClient?.isAvailable == true }
             )
-            let inspector = FFprobeMediaInspector()
             // 首屏海报会同时抵达多条 320px 缩略图请求，冷启动时它们全要 decode +
             // JPEG 编码。上游取图有 8 个槽位，派生这一侧按可用核数取值（封顶 8），
             // 免得八路取回来的图排在四路解码后面；轻量服务仍只保留一路，以不牺牲
@@ -234,7 +233,7 @@ struct MediaLibServer {
                         for: principal,
                         requiring: ServerPermission.playMedia
                     ), asset.remoteURL == nil else { return nil }
-                    return try inspector.inspect(asset: asset)
+                    return mediaTrackCatalog.playbackInfo(for: asset)
                 },
                 currentUserProfileProvider: { try authentication.currentUserProfile(for: $0) },
                 administrationCatalog: administrationCatalog,

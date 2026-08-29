@@ -19,6 +19,17 @@ final class FFprobeMediaInspector {
 
     func inspect(asset: ServerMediaAsset) throws -> ServerMediaPlaybackInfo {
         let probed = try probe(asset: asset)
+        return Self.playbackInfo(asset: asset, probed: probed)
+    }
+
+    /// 把已经探测过的完整事实投影成公开 DTO。
+    ///
+    /// 播放信息端点、轨道菜单与 HLS 协商必须复用同一份 ffprobe 结果；如果这里再
+    /// 调一次 `probe`，详情页冷启动会为同一个文件并发拉起两到三个进程。
+    static func playbackInfo(
+        asset: ServerMediaAsset,
+        probed: ProbedMedia
+    ) -> ServerMediaPlaybackInfo {
         return ServerMediaPlaybackInfo(
             itemID: asset.id,
             durationSeconds: probed.durationSeconds,

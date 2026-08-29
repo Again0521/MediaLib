@@ -445,6 +445,7 @@ enum ServerWebShellStyle {
       }
 
       @media (max-width: 719px) {
+        .nav-subitem { min-height: var(--nav-item-height); }
         .app-page-head-main { align-items: flex-start; }
         .app-page-icon { width: 44px; height: 48px; }
         .app-page-actions { width: 100%; flex-wrap: wrap; }

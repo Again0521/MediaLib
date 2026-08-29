@@ -129,6 +129,97 @@ final class ServerMediaTrackCatalogTests: XCTestCase {
         XCTAssertEqual(calls, 1)
     }
 
+    func testPlaybackInfoAndTrackMenusShareTheSameProbe() throws {
+        var calls = 0
+        let catalog = withUnsafeMutablePointer(to: &calls) { pointer in
+            self.catalog(
+                streams: #"{"index":0,"codec_type":"video","codec_name":"h264","width":1920,"height":1080},{"index":1,"codec_type":"audio","codec_name":"aac"}"#,
+                callCount: pointer
+            )
+        }
+        let media = try asset()
+
+        XCTAssertEqual(catalog.audioTracks(for: media)?.tracks.count, 1)
+        XCTAssertEqual(catalog.playbackInfo(for: media)?.streams.count, 2)
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testConcurrentColdRequestsSingleFlightOneSuccessfulProbe() throws {
+        let probe = ConcurrentProbeRunner(outcomes: [.success(duration: 120)])
+        let catalog = ServerMediaTrackCatalog(inspector: probe.inspector())
+        let media = try asset()
+        let start = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+        let results = LockedProbeResultCounter()
+
+        for index in 0..<12 {
+            group.enter()
+            DispatchQueue.global().async {
+                start.wait()
+                let succeeded = index.isMultiple(of: 2)
+                    ? catalog.playbackInfo(for: media) != nil
+                    : catalog.audioTracks(for: media) != nil
+                results.record(succeeded)
+                group.leave()
+            }
+        }
+        for _ in 0..<12 { start.signal() }
+
+        XCTAssertEqual(probe.firstCallEntered.wait(timeout: .now() + 2), .success)
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertEqual(probe.callCount, 1)
+        probe.releaseFirstCall.signal()
+        XCTAssertEqual(group.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(results.successCount, 12)
+        XCTAssertEqual(probe.callCount, 1)
+    }
+
+    func testConcurrentFailureIsSharedButLaterRequestCanRetry() throws {
+        let probe = ConcurrentProbeRunner(outcomes: [.failure, .success(duration: 240)])
+        let catalog = ServerMediaTrackCatalog(inspector: probe.inspector())
+        let media = try asset()
+        let start = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+        let results = LockedProbeResultCounter()
+
+        for _ in 0..<8 {
+            group.enter()
+            DispatchQueue.global().async {
+                start.wait()
+                results.record(catalog.probe(asset: media) != nil)
+                group.leave()
+            }
+        }
+        for _ in 0..<8 { start.signal() }
+
+        XCTAssertEqual(probe.firstCallEntered.wait(timeout: .now() + 2), .success)
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertEqual(probe.callCount, 1)
+        probe.releaseFirstCall.signal()
+        XCTAssertEqual(group.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(results.successCount, 0)
+        XCTAssertEqual(probe.callCount, 1)
+
+        XCTAssertEqual(catalog.probe(asset: media)?.durationSeconds, 240)
+        XCTAssertEqual(probe.callCount, 2)
+    }
+
+    func testFileRevisionChangeInvalidatesCachedProbe() throws {
+        let probe = ConcurrentProbeRunner(outcomes: [
+            .success(duration: 120), .success(duration: 180)
+        ], blockFirstCall: false)
+        let catalog = ServerMediaTrackCatalog(inspector: probe.inspector())
+        let media = try asset()
+
+        XCTAssertEqual(catalog.probe(asset: media)?.durationSeconds, 120)
+        let handle = try FileHandle(forWritingTo: media.fileURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("+".utf8))
+        try handle.close()
+        XCTAssertEqual(catalog.probe(asset: media)?.durationSeconds, 180)
+        XCTAssertEqual(probe.callCount, 2)
+    }
+
     /// 远程条目的字节在别人家的服务器上，ffprobe 够不着。这里返回 nil 而不是空
     /// 名单——空名单的语义是"这个文件确实没有音轨"。
     func testRemoteAssetsAreNotProbed() {
@@ -140,6 +231,77 @@ final class ServerMediaTrackCatalogTests: XCTestCase {
         )
         XCTAssertNil(catalog.audioTracks(for: remote))
         XCTAssertTrue(catalog.embeddedSubtitleStreams(for: remote).isEmpty)
+    }
+}
+
+private final class LockedProbeResultCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedSuccessCount = 0
+
+    var successCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedSuccessCount
+    }
+
+    func record(_ succeeded: Bool) {
+        guard succeeded else { return }
+        lock.lock()
+        storedSuccessCount += 1
+        lock.unlock()
+    }
+}
+
+private final class ConcurrentProbeRunner: @unchecked Sendable {
+    enum Outcome {
+        case success(duration: Double)
+        case failure
+    }
+
+    let firstCallEntered = DispatchSemaphore(value: 0)
+    let releaseFirstCall = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private let outcomes: [Outcome]
+    private let blockFirstCall: Bool
+    private var storedCallCount = 0
+
+    init(outcomes: [Outcome], blockFirstCall: Bool = true) {
+        self.outcomes = outcomes
+        self.blockFirstCall = blockFirstCall
+    }
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCallCount
+    }
+
+    func inspector() -> FFprobeMediaInspector {
+        FFprobeMediaInspector(
+            executableURLProvider: { URL(fileURLWithPath: "/usr/bin/ffprobe-test-double") },
+            runner: { [self] _, _ in run() }
+        )
+    }
+
+    private func run() -> FFprobeProcessOutput {
+        lock.lock()
+        let index = storedCallCount
+        storedCallCount += 1
+        let outcome = outcomes[min(index, outcomes.count - 1)]
+        lock.unlock()
+        if index == 0, blockFirstCall {
+            firstCallEntered.signal()
+            releaseFirstCall.wait()
+        }
+        switch outcome {
+        case let .success(duration):
+            let json = #"{"format":{"duration":"\#(duration)"},"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac"}]}"#
+            return FFprobeProcessOutput(
+                exitCode: 0, standardOutput: Data(json.utf8), standardError: Data()
+            )
+        case .failure:
+            return FFprobeProcessOutput(exitCode: 1, standardOutput: Data(), standardError: Data())
+        }
     }
 }
 
