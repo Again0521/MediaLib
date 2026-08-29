@@ -161,13 +161,15 @@ public final class ServerExperienceRepository: @unchecked Sendable {
         expectedVersion: Int
     ) throws -> ServerVersionedDocument<ServerUserPolicy> {
         guard value.isValid else { throw ServerExperienceRepositoryError.invalidValue }
-        return try saveDocument(
+        let document = try saveDocument(
             table: "server_user_policies",
             keyColumns: ["user_id"],
             keyBindings: [.text(userID)],
             value: value,
             expectedVersion: expectedVersion
         )
+        database.recordChange(namespace: .serverNavigationPolicy, identifier: userID)
+        return document
     }
 
     public func operationalSettings() throws -> ServerVersionedDocument<ServerOperationalSettings> {

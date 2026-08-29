@@ -108,7 +108,7 @@ public final class ServerUserMediaStateRepository: @unchecked Sendable {
         let storedProgress = event == .reset ? 0 : (event == .completed ? 1 : progress)
         let timestamp = DateCoding.string(from: date) ?? ""
 
-        return try database.transaction {
+        let state = try database.transaction {
             let mediaExists = try database.query(
                 "SELECT COUNT(*) FROM media_items WHERE id = ?",
                 bindings: [.text(mediaID)]
@@ -150,6 +150,8 @@ public final class ServerUserMediaStateRepository: @unchecked Sendable {
             }
             return state
         }
+        database.recordChange(namespace: .serverNavigationState, identifier: userID)
+        return state
     }
 
     private func validatedIdentifier(_ value: String) throws -> String {

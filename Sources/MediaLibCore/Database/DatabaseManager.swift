@@ -1,6 +1,72 @@
 import Foundation
 import SQLite3
 
+public enum DatabaseChangeNamespace: String, Sendable {
+    case serverNavigationState = "server-navigation-state"
+    case serverNavigationAuthorization = "server-navigation-authorization"
+    case serverNavigationPolicy = "server-navigation-policy"
+}
+
+private final class DatabaseChangeRevisionTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sequence: UInt64 = 0
+    private var epoch: UInt64 = 0
+    private var tableRevisions: [String: UInt64] = [:]
+    private var scopedRevisions: [String: UInt64] = [:]
+
+    func record(tableName: String) {
+        lock.lock()
+        sequence &+= 1
+        tableRevisions[tableName] = sequence
+        lock.unlock()
+    }
+
+    func record(namespace: DatabaseChangeNamespace, identifier: String) {
+        lock.lock()
+        sequence &+= 1
+        scopedRevisions[Self.scopedKey(namespace: namespace, identifier: identifier)] = sequence
+        lock.unlock()
+    }
+
+    func revision(tableNames: Set<String>) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        let values = tableNames.sorted().map { "\($0):\(tableRevisions[$0, default: 0])" }
+        return "epoch:\(epoch)|\(values.joined(separator: ","))"
+    }
+
+    func revision(namespace: DatabaseChangeNamespace, identifier: String) -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return scopedRevisions[Self.scopedKey(namespace: namespace, identifier: identifier), default: 0]
+    }
+
+    func invalidateAll() {
+        lock.lock()
+        sequence &+= 1
+        epoch = sequence
+        tableRevisions.removeAll(keepingCapacity: true)
+        scopedRevisions.removeAll(keepingCapacity: true)
+        lock.unlock()
+    }
+
+    private static func scopedKey(namespace: DatabaseChangeNamespace, identifier: String) -> String {
+        "\(namespace.rawValue)|\(identifier)"
+    }
+}
+
+private func databaseChangeUpdateHook(
+    context: UnsafeMutableRawPointer?,
+    _: Int32,
+    _: UnsafePointer<CChar>?,
+    tableName: UnsafePointer<CChar>?,
+    _: sqlite3_int64
+) {
+    guard let context, let tableName else { return }
+    let tracker = Unmanaged<DatabaseChangeRevisionTracker>.fromOpaque(context).takeUnretainedValue()
+    tracker.record(tableName: String(cString: tableName))
+}
+
 // 内部所有可变状态（db 句柄）只通过私有串行 queue 访问，线程安全由队列约束保证，
 // 编译器无法静态验证这一点，因此显式标注 @unchecked Sendable（而非让调用处到处 @Sendable 警告）。
 public final class DatabaseManager: @unchecked Sendable {
@@ -10,6 +76,7 @@ public final class DatabaseManager: @unchecked Sendable {
     private let queue = DispatchQueue(label: "MediaLib.DatabaseManager")
     private let queueKey = DispatchSpecificKey<Bool>()
     private let backupTimestampProvider: () -> String
+    private let changeRevisionTracker = DatabaseChangeRevisionTracker()
     public let url: URL
 
     private var isOnQueue: Bool {
@@ -34,6 +101,11 @@ public final class DatabaseManager: @unchecked Sendable {
         guard result == SQLITE_OK else {
             throw DatabaseError.openFailed(Self.message(for: db))
         }
+        sqlite3_update_hook(
+            db,
+            databaseChangeUpdateHook,
+            Unmanaged.passUnretained(changeRevisionTracker).toOpaque()
+        )
         try execute("PRAGMA foreign_keys = ON")
         try execute("PRAGMA journal_mode = WAL")
         let storedVersion = try schemaVersion()
@@ -48,7 +120,24 @@ public final class DatabaseManager: @unchecked Sendable {
     }
 
     deinit {
+        sqlite3_update_hook(db, nil, nil)
         sqlite3_close(db)
+    }
+
+    /// O(1) revision vector for cache invalidation. The update hook covers writes
+    /// through this connection; `data_version` also changes when the desktop host
+    /// commits through its own SQLite connection.
+    public func changeRevision(forTables tableNames: Set<String>) throws -> String {
+        let dataVersion = try query("PRAGMA data_version") { $0.int64(0) ?? 0 }.first ?? 0
+        return "data:\(dataVersion)|\(changeRevisionTracker.revision(tableNames: tableNames))"
+    }
+
+    public func recordChange(namespace: DatabaseChangeNamespace, identifier: String) {
+        changeRevisionTracker.record(namespace: namespace, identifier: identifier)
+    }
+
+    public func changeRevision(namespace: DatabaseChangeNamespace, identifier: String) -> UInt64 {
+        changeRevisionTracker.revision(namespace: namespace, identifier: identifier)
     }
 
     public func execute(_ sql: String, bindings: [SQLiteValue] = []) throws {
@@ -204,6 +293,7 @@ public final class DatabaseManager: @unchecked Sendable {
         try queue.sync {
             try self.unsafeExecute("PRAGMA wal_checkpoint(TRUNCATE)")
             try self.unsafeRestore(from: backupURL)
+            self.changeRevisionTracker.invalidateAll()
             try self.unsafeExecute("PRAGMA foreign_keys = ON")
             try self.unsafeExecute("PRAGMA journal_mode = WAL")
         }

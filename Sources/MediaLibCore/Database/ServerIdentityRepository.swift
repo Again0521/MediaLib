@@ -496,6 +496,7 @@ public final class ServerIdentityRepository: @unchecked Sendable {
                 .bool(updated.canDeleteItems), .optionalDate(updated.updatedAt)
             ]
         )
+        database.recordChange(namespace: .serverNavigationAuthorization, identifier: userID)
         return updated
     }
 
@@ -552,6 +553,7 @@ public final class ServerIdentityRepository: @unchecked Sendable {
                 )
             }
         }
+        database.recordChange(namespace: .serverNavigationAuthorization, identifier: userID)
     }
 
     /// 修改成员显示名、单一角色、媒体库授权与启用状态。任何管理修改都会撤销该

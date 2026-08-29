@@ -53,6 +53,64 @@ final class ServerLibraryCatalogTests: XCTestCase {
         XCTAssertNotEqual(mediaChanged, try catalog.navigationRevision(for: principal))
     }
 
+    func testNavigationRevisionUsesExactSameTimestampWritesAndUserScopedState() throws {
+        let sourcePath = "/Volumes/RevisionScope"
+        let identity = ServerIdentityRepository(database: database)
+        let source = SourceRepository(database: database)
+        let media = MediaRepository(database: database)
+        try source.save(MediaSource(
+            id: "scope-source", name: "Scope", path: sourcePath, mediaType: .movie
+        ))
+        let fixedDate = Date(timeIntervalSince1970: 1_000)
+        try media.upsert(MediaItem(
+            id: "scope-movie", type: .movie, title: "First", sourcePath: sourcePath,
+            filePath: "\(sourcePath)/movie.mp4", updatedAt: fixedDate
+        ))
+        let firstUser = try identity.createUser(
+            id: "scope-member-a", username: "scope-member-a", displayName: "A"
+        )
+        let secondUser = try identity.createUser(
+            id: "scope-member-b", username: "scope-member-b", displayName: "B"
+        )
+        func principal(_ userID: String) -> ServerRequestPrincipal {
+            ServerRequestPrincipal(
+                userID: userID, deviceID: "device", sessionID: "session",
+                permissions: [.viewMedia], libraryGrants: [:]
+            )
+        }
+        let firstPrincipal = principal(firstUser.id)
+        let secondPrincipal = principal(secondUser.id)
+        let catalog = ServerLibraryCatalog(database: database)
+
+        let beforeSameTimestampWrite = try catalog.navigationRevision(for: firstPrincipal)
+        try media.upsert(MediaItem(
+            id: "scope-movie", type: .movie, title: "Second", sourcePath: sourcePath,
+            filePath: "\(sourcePath)/movie.mp4", updatedAt: fixedDate
+        ))
+        XCTAssertNotEqual(beforeSameTimestampWrite, try catalog.navigationRevision(for: firstPrincipal))
+
+        let firstBeforeState = try catalog.navigationRevision(for: firstPrincipal)
+        let secondBeforeState = try catalog.navigationRevision(for: secondPrincipal)
+        _ = try ServerUserMediaStateRepository(database: database).update(
+            userID: firstUser.id,
+            mediaID: "scope-movie",
+            event: .progress,
+            position: 30,
+            duration: 100,
+            at: fixedDate
+        )
+        XCTAssertNotEqual(firstBeforeState, try catalog.navigationRevision(for: firstPrincipal))
+        XCTAssertEqual(secondBeforeState, try catalog.navigationRevision(for: secondPrincipal))
+
+        let secondBeforePolicy = try catalog.navigationRevision(for: secondPrincipal)
+        _ = try ServerExperienceRepository(database: database).saveUserPolicy(
+            userID: secondUser.id,
+            value: ServerUserPolicy(maximumContentRating: "PG"),
+            expectedVersion: 0
+        )
+        XCTAssertNotEqual(secondBeforePolicy, try catalog.navigationRevision(for: secondPrincipal))
+    }
+
     func testSnapshotExcludesPrivateSourcesAndPathFields() throws {
         let sourceRepository = SourceRepository(database: database)
         let mediaRepository = MediaRepository(database: database)

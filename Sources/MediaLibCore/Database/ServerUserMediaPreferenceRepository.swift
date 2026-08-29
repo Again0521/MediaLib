@@ -109,7 +109,7 @@ public final class ServerUserMediaPreferenceRepository: @unchecked Sendable {
             rating = nil
         }
 
-        return try database.transaction {
+        let record = try database.transaction {
             let mediaExists = try database.query(
                 "SELECT COUNT(*) FROM media_items WHERE id = ?",
                 bindings: [.text(mediaID)]
@@ -147,6 +147,8 @@ public final class ServerUserMediaPreferenceRepository: @unchecked Sendable {
             }
             return record
         }
+        database.recordChange(namespace: .serverNavigationState, identifier: userID)
+        return record
     }
 
     private func validatedIdentifier(_ value: String) throws -> String {

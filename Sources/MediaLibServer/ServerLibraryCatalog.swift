@@ -6,6 +6,16 @@ import MediaLibServerProtocol
 /// 服务端资料库读取边界。它在映射安全 DTO 或文件引用之前同时执行保险库排除、
 /// 用户角色与逐资料库授权，路由层永远不会接触未授权的 `MediaItem` 或本地路径。
 final class ServerLibraryCatalog {
+    private static let navigationTables: Set<String> = [
+        "media_items",
+        "media_details",
+        "media_sources",
+        "video_smart_collections",
+        "music_smart_playlists",
+        "music_playlists",
+        "music_playlist_items"
+    ]
+
     private struct CategoryCacheEntry {
         let response: ServerLibraryCategoriesResponse
         let expiresAt: Date
@@ -60,27 +70,19 @@ final class ServerLibraryCatalog {
         self.experienceRepository = ServerExperienceRepository(database: database)
     }
 
-    /// 侧栏只需一个廉价修订键，而不是在每次页面导航重新扫描整库。键覆盖会影响
-    /// 导航内容的媒体、来源、集合、歌单、逐用户状态/收藏与资料库授权。
+    /// 侧栏只需一个 O(1) 修订向量，而不是在每次页面导航对大表执行 COUNT/MAX。
+    /// SQLite update hook 覆盖本连接写入，data_version 覆盖桌面宿主的外部连接；
+    /// 高频用户状态与授权/策略则按 user ID 独立计数，避免一个人的播放进度让所有
+    /// 家庭成员的导航快照同时失效。
     func navigationRevision(for principal: ServerRequestPrincipal) throws -> String {
-        let row = try database.query(
-            """
-            SELECT
-              (SELECT COUNT(*) FROM media_items), COALESCE((SELECT MAX(updated_at) FROM media_items), ''),
-              (SELECT COUNT(*) FROM media_sources), COALESCE((SELECT MAX(updated_at) FROM media_sources), ''),
-              (SELECT COUNT(*) FROM video_smart_collections), COALESCE((SELECT MAX(updated_at) FROM video_smart_collections), ''),
-              (SELECT COUNT(*) FROM music_smart_playlists), COALESCE((SELECT MAX(updated_at) FROM music_smart_playlists), ''),
-              (SELECT COUNT(*) FROM music_playlists), COALESCE((SELECT MAX(updated_at) FROM music_playlists), ''),
-              (SELECT COUNT(*) FROM server_library_grants WHERE user_id = ?),
-              COALESCE((SELECT MAX(updated_at) FROM server_library_grants WHERE user_id = ?), ''),
-              COALESCE((SELECT MAX(updated_at) FROM server_user_media_state WHERE user_id = ?), ''),
-              COALESCE((SELECT MAX(updated_at) FROM server_user_media_preferences WHERE user_id = ?), '')
-            """,
-            bindings: [.text(principal.userID), .text(principal.userID), .text(principal.userID), .text(principal.userID)]
-        ) { row in
-            (0..<14).map { index in row.string(index) ?? String(row.int(index) ?? 0) }.joined(separator: "|")
-        }.first ?? "empty"
-        return "\(principal.userID)|\(row)"
+        let library = try database.changeRevision(forTables: Self.navigationTables)
+        let state = database.changeRevision(namespace: .serverNavigationState, identifier: principal.userID)
+        let authorization = database.changeRevision(
+            namespace: .serverNavigationAuthorization,
+            identifier: principal.userID
+        )
+        let policy = database.changeRevision(namespace: .serverNavigationPolicy, identifier: principal.userID)
+        return "\(principal.userID)|\(library)|state:\(state)|authorization:\(authorization)|policy:\(policy)"
     }
 
     /// 保险库当前是否在这台机器上解锁。
@@ -179,7 +181,9 @@ final class ServerLibraryCatalog {
     func categories(for principal: ServerRequestPrincipal) throws -> ServerLibraryCategoriesResponse {
         guard principal.permissions.contains(.viewMedia) else { return ServerLibraryCategoriesResponse(categories: []) }
         let maximumContentRating = try maximumContentRating(for: principal)
-        let cacheKey = Self.categoryCacheKey(for: principal) + "|rating:\(maximumContentRating ?? "none")"
+        let revision = try navigationRevision(for: principal)
+        let cacheKey = Self.categoryCacheKey(for: principal)
+            + "|rating:\(maximumContentRating ?? "none")|revision:\(revision)"
         let now = Date()
         categoryCacheLock.lock()
         if let cached = categoryCache[cacheKey], cached.expiresAt > now {

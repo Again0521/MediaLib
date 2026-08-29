@@ -695,24 +695,37 @@ private final class ServerNavigationSnapshotCache: @unchecked Sendable {
         let createdAt: Date
     }
 
-    private let lock = NSLock()
+    private let condition = NSCondition()
     private var entries: [String: Entry] = [:]
+    private var inFlightKeys: Set<String> = []
     private static let maximumEntries = 32
 
-    func value(for key: String) -> ServerWebSidebarExtras? {
-        lock.lock()
-        defer { lock.unlock() }
-        return entries[key]?.value
-    }
+    func value(for key: String, create: () -> ServerWebSidebarExtras) -> ServerWebSidebarExtras {
+        condition.lock()
+        while true {
+            if let cached = entries[key]?.value {
+                condition.unlock()
+                return cached
+            }
+            if !inFlightKeys.contains(key) {
+                inFlightKeys.insert(key)
+                condition.unlock()
+                break
+            }
+            condition.wait()
+        }
 
-    func store(_ value: ServerWebSidebarExtras, for key: String) {
-        lock.lock()
+        let value = create()
+        condition.lock()
         entries[key] = Entry(value: value, createdAt: Date())
         if entries.count > Self.maximumEntries,
            let oldest = entries.min(by: { $0.value.createdAt < $1.value.createdAt })?.key {
             entries.removeValue(forKey: oldest)
         }
-        lock.unlock()
+        inFlightKeys.remove(key)
+        condition.broadcast()
+        condition.unlock()
+        return value
     }
 }
 
@@ -3566,25 +3579,27 @@ struct LocalHTTPRouter {
     ) -> ServerWebSidebarExtras {
         let revision = (try? navigationRevisionProvider(principal)) ?? UUID().uuidString
         let permissionKey = principal.permissions.map(\.rawValue).sorted().joined(separator: ",")
-        let key = "\(revision)|\(permissionKey)"
-        var base = navigationCache.value(for: key)
-        if base == nil {
-            base = ServerWebSidebarExtras(
+        let grantKey = principal.libraryGrants.values
+            .sorted { $0.libraryID < $1.libraryID }
+            .map {
+                "\($0.libraryID):\($0.canView ? 1 : 0):\($0.canPlay ? 1 : 0):\($0.canDownload ? 1 : 0)"
+            }
+            .joined(separator: ",")
+        let key = "\(revision)|\(permissionKey)|\(grantKey)"
+        let resolved = navigationCache.value(for: key) {
+            ServerWebSidebarExtras(
                 smartCollections: (try? smartCollectionsProvider(0, 24, principal))?.items ?? [],
                 smartPlaylists: (try? musicPlaylistsProvider(0, 100, principal))?.items ?? [],
-                remoteSources: [],
+                remoteSources: (try? remoteSourceGroupsProvider(principal)) ?? [],
                 videoGroupItemCount: (try? libraryCategoriesProvider(principal))?.videoGroupItemCount ?? 0
             )
-            if let base {
-                navigationCache.store(base, for: key)
-            }
         }
-        let resolved = base ?? .empty
         return ServerWebSidebarExtras(
             smartCollections: resolved.smartCollections,
             smartPlaylists: resolved.smartPlaylists,
-            // 远程来源可能由桌面宿主断开或重新认证，不进入数据库导航快照。
-            remoteSources: (try? remoteSourceGroupsProvider(principal)) ?? [],
+            // 远程分组和徽标同样只由数据库媒体/来源/授权生成，必须与其它导航内容
+            // 共用修订快照；实际连接状态不在这个 DTO 中，不需要每页重新聚合。
+            remoteSources: resolved.remoteSources,
             videoGroupItemCount: resolved.videoGroupItemCount,
             activeRemoteScopeID: activeRemoteScopeID
         )
