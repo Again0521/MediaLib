@@ -683,6 +683,11 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertTrue(script.contains("setOverlayPinnedByTap(!overlayPinnedByTap)"))
         XCTAssertTrue(script.contains("if (!coarsePointer.matches) hideOverlayControls()"))
         XCTAssertTrue(style.contains(".player-shortcut-hint { display: none !important; }"))
+        XCTAssertTrue(style.contains(".player-control-row { flex-wrap: wrap; gap: var(--space-1); }"))
+        XCTAssertTrue(style.contains("flex: 0 0 var(--control-height-lg)"))
+        XCTAssertTrue(style.contains(".speed-range { min-height: var(--control-height-lg); }"))
+        XCTAssertTrue(style.contains(".player-settings-panel { animation: none; }"))
+        XCTAssertTrue(style.contains(".player-track-panel .player-track-item"))
         XCTAssertTrue(script.contains("!coarsePointer.matches && !mobileViewport.matches"))
     }
 

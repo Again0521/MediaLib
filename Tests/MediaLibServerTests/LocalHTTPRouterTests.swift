@@ -1956,6 +1956,60 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertEqual(malformed.statusCode, 404)
     }
 
+    func testEmbeddedSubtitleRouteQueuesWithoutBlockingThenReturnsCachedWebVTT() throws {
+        let media = try makeFixtureFile(contents: Data("container".utf8), pathExtension: "mkv")
+        let payload = Data("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n异步字幕\n".utf8)
+        let exportEntered = DispatchSemaphore(value: 0)
+        let releaseExport = DispatchSemaphore(value: 0)
+        let catalog = ServerMediaTrackCatalog(
+            ffmpegURLProvider: { URL(fileURLWithPath: "/usr/bin/ffmpeg-test-double") },
+            subtitleExporter: { _, _, _, _, _ in
+                exportEntered.signal()
+                releaseExport.wait()
+                return payload
+            }
+        )
+        let router = LocalHTTPRouter(
+            serverID: "server-001",
+            serverName: "客厅服务器",
+            subtitleTrackProvider: { itemID, trackID, _ in
+                guard itemID == "movie-1", trackID == 0 else { return nil }
+                return ServerSubtitleTrackReference(
+                    label: "简体中文",
+                    language: "zh-Hans",
+                    origin: .embedded,
+                    source: .embedded(
+                        asset: ServerMediaAsset(id: itemID, fileURL: media, byteLength: 9),
+                        streamIndex: 2
+                    )
+                )
+            },
+            mediaTrackCatalog: catalog,
+            authenticationProvider: { _ in .testAdministrator() }
+        )
+
+        let queued = router.response(for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n")
+        XCTAssertEqual(queued.statusCode, 202)
+        XCTAssertTrue(queued.additionalHeaders.contains("Retry-After: 1"))
+        XCTAssertTrue(queued.body.isEmpty)
+        XCTAssertEqual(exportEntered.wait(timeout: .now() + 2), .success)
+
+        let stillQueued = router.response(for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n")
+        XCTAssertEqual(stillQueued.statusCode, 202)
+        releaseExport.signal()
+
+        let deadline = Date().addingTimeInterval(2)
+        var ready = router.response(for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n")
+        while ready.statusCode == 202, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.005)
+            ready = router.response(for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n")
+        }
+        XCTAssertEqual(ready.statusCode, 200)
+        XCTAssertEqual(ready.contentType, "text/vtt; charset=utf-8")
+        XCTAssertEqual(ready.body, payload)
+        XCTAssertFalse((String(data: ready.body, encoding: .utf8) ?? "").contains(media.path))
+    }
+
     /// 轨道名单是"网页上有没有字幕/音轨入口"的唯一来源。它必须逐条目授权，
     /// 而且既不能泄露文件名，也不能泄露上游地址。
     func testPlaybackTrackRouteIsAuthorizedAndOpaque() throws {

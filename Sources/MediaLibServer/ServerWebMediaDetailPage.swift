@@ -1369,8 +1369,33 @@ enum ServerWebMediaDetailPage {
       .synopsis { grid-template-columns: minmax(0, 1fr); }
       .synopsis .poster { max-width: 168px; }
       .player-overlay-controls { padding: var(--space-6) var(--space-1) var(--space-2); }
-      .player-control-row { gap: var(--space-1); }
-      .player-control-group-end { gap: var(--space-1); }
+      .player-control-row { flex-wrap: wrap; gap: var(--space-1); }
+      .player-control-group-end {
+        width: 100%;
+        margin-left: 0;
+        justify-content: flex-end;
+        gap: var(--space-1);
+      }
+      /* 手机触控目标不能沿用桌面 36px 图标密度。分成两行后每颗按钮都能保留
+         44×44，而不必靠缩小命中区把九个动作硬塞进一行。 */
+      .player-overlay-controls button,
+      .player-settings > summary {
+        flex: 0 0 var(--control-height-lg);
+        width: var(--control-height-lg);
+        min-width: var(--control-height-lg);
+        height: var(--control-height-lg);
+        min-height: var(--control-height-lg);
+      }
+      .player-track-panel .player-track-item {
+        width: auto;
+        min-width: 0;
+        min-height: var(--control-height-lg);
+      }
+      /* 触摸时面板要立即可操作；缩放整个面板会连同 44px 命中区一起缩小。
+         桌面仍保留从触发点 materialize 的材质动效。 */
+      .player-settings-panel { animation: none; }
+      .player-progress,
+      .speed-range { min-height: var(--control-height-lg); }
       /* 手机上收掉的是整簇音量，而不是音量和倍速一起。
          音量归系统音量键管，iOS Safari 的原生播放器同样不画这条滑杆；倍速没有
          任何系统入口，收掉就等于没有了，所以它留下——它本来就只是一个很窄的
@@ -2128,22 +2153,17 @@ enum ServerWebMediaDetailPage {
         try {
           const deadline = performance.now() + 305000;
           let response;
-          do {
+          response = await fetch(subtitlePath(trackID), {
+            credentials: 'same-origin', headers: { 'Accept': 'text/vtt' }, signal:lifecycle.signal
+          });
+          while (response.status === 202) {
+            if (revision !== subtitleLoadRevision) return;
+            if (performance.now() >= deadline) throw new Error('subtitle-timeout');
+            await new Promise(resolve => window.setTimeout(resolve, 750));
+            if (lifecycle.signal.aborted) throw new DOMException('Aborted', 'AbortError');
             response = await fetch(subtitlePath(trackID), {
               credentials: 'same-origin', headers: { 'Accept': 'text/vtt' }, signal:lifecycle.signal
             });
-            while (response.status === 202) {
-              if (revision !== subtitleLoadRevision) return;
-              if (performance.now() >= deadline) throw new Error('subtitle-timeout');
-              await new Promise(resolve => window.setTimeout(resolve, 750));
-              if (lifecycle.signal.aborted) throw new DOMException('Aborted', 'AbortError');
-              response = await fetch(subtitlePath(trackID), {
-                credentials: 'same-origin', headers: { 'Accept': 'text/vtt' }, signal:lifecycle.signal
-              });
-            }
-          } catch (error) {
-            if (error?.name === 'AbortError') return;
-            throw error;
           }
           if (!response.ok) throw new Error('subtitle-unavailable');
           const payload = await response.text();
@@ -2157,7 +2177,8 @@ enum ServerWebMediaDetailPage {
           setStatus('字幕已加载。');
           buildSubtitleMenu();
           if (lockChoice) void persistPlaybackTrackOverride({subtitleFingerprint:track.fingerprint || null, subtitleDisabled:false});
-        } catch (_) {
+        } catch (error) {
+          if (error?.name === 'AbortError') return;
           if (revision !== subtitleLoadRevision) return;
           failedSubtitleTrackIDs.add(trackID);
           selectedSubtitleTrackID = null;

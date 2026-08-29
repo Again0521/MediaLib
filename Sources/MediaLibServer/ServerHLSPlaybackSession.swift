@@ -173,7 +173,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         let owner: Owner
         let directory: URL
         let startedAt: Date
-        let actualStartSeconds: Double
+        var actualStartSeconds: Double
         let durationSeconds: Double?
         let mode: String
         let reason: String
@@ -181,6 +181,9 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         let bridge: ServerRemoteMediaBridge?
         var lastAccessedAt: Date
         var process: Process?
+        let preparationCancellation = ServerBoundedProcess.Cancellation()
+        let startResolver: ((ServerBoundedProcess.Cancellation) -> Double)?
+        let processBuilder: (Double) -> Process
         var state: ServerHLSPlaybackSessionState = .preparing
         var readinessTimer: DispatchSourceTimer?
         var finishedAt: Date?
@@ -194,7 +197,9 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             mode: String,
             reason: String,
             mediaURL: String,
-            bridge: ServerRemoteMediaBridge?
+            bridge: ServerRemoteMediaBridge?,
+            startResolver: ((ServerBoundedProcess.Cancellation) -> Double)?,
+            processBuilder: @escaping (Double) -> Process
         ) {
             self.id = id
             self.owner = owner
@@ -206,6 +211,8 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             self.reason = reason
             self.mediaURL = mediaURL
             self.bridge = bridge
+            self.startResolver = startResolver
+            self.processBuilder = processBuilder
             self.lastAccessedAt = Date()
         }
 
@@ -242,8 +249,14 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
     private var configurationFetchedAt = Date.distantPast
     private let configurationCacheLifetime: TimeInterval
     private let ffmpegFilterCapabilities: ServerMediaToolchain.FFmpegFilterCapabilities
+    private let ffmpegURLProvider: () -> URL?
     private let lock = NSLock()
     private let readinessQueue = DispatchQueue(label: "MediaLibServer.HLSReadiness", qos: .utility)
+    private let preparationQueue = DispatchQueue(
+        label: "MediaLibServer.HLSPreparation",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
     private var sessions: [String: Session] = [:]
     private var pendingSessionIDs: [String] = []
     private static let maximumQueuedSessions = 8
@@ -257,6 +270,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         maximumConcurrentSessions: Int = 2,
         defaultRemoteBitrateMbps: Int = 20,
         ffmpegFilterCapabilities: ServerMediaToolchain.FFmpegFilterCapabilities? = nil,
+        ffmpegURLProvider: @escaping () -> URL? = { ServerMediaToolchain.ffmpegURL() },
         operationalSettingsProvider: (@Sendable () -> ServerOperationalSettings)? = nil,
         configurationCacheLifetime: TimeInterval = 2
     ) {
@@ -270,6 +284,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         self.configurationCacheLifetime = max(configurationCacheLifetime, 0)
         self.ffmpegFilterCapabilities = ffmpegFilterCapabilities
             ?? ServerMediaToolchain.ffmpegFilterCapabilities()
+        self.ffmpegURLProvider = ffmpegURLProvider
         self.rootDirectory = rootDirectory ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("MediaLIB-HLS-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
         try? FileManager.default.createDirectory(
@@ -292,6 +307,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         asset: ServerMediaAsset,
         request: ServerHLSPlaybackRequest,
         actualStartSeconds: Double,
+        startResolver: ((ServerBoundedProcess.Cancellation) -> Double)? = nil,
         videoCodec: String?,
         videoHeight: Int? = nil,
         sourceIsHDR: Bool = false,
@@ -305,7 +321,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
               actualStartSeconds.isFinite,
               actualStartSeconds >= 0,
               actualStartSeconds < 86_400,
-              let executable = ServerMediaToolchain.ffmpegURL()
+              let executable = ffmpegURLProvider()
         else { return nil }
         prune()
         let configuration = currentConfiguration()
@@ -385,77 +401,86 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             : "videoCodecCompatibility"
         let playlist = directory.appendingPathComponent("index.m3u8")
         let segmentPattern = directory.appendingPathComponent("segment-%05d.ts").path
-        var arguments = [
-            "-nostdin", "-hide_banner", "-loglevel", "error",
-            "-ss", String(format: "%.3f", actualStartSeconds),
-            // Keep generation near playback speed. Combined with the sliding
-            // playlist below this bounds temporary storage instead of racing
-            // through a multi-hour movie and materializing gigabytes of HLS.
-            "-re",
-            "-i", input
-        ]
         let hdrFilter = toneMapsHDR ? Self.softwareHDRToneMappingFilter : nil
-        if let burnInSubtitleStreamIndex {
-            let graph: String
-            let inputVideo = hdrFilter.map { "[0:v:0]\($0)[toned]" }
-            let videoLabel = hdrFilter == nil ? "[0:v:0]" : "[toned]"
-            if let targetHeight {
-                graph = [
-                    inputVideo,
-                    "\(videoLabel)[0:\(burnInSubtitleStreamIndex)]overlay=eof_action=pass[burned]",
-                    "[burned]scale=-2:min(\(targetHeight)\\,ih)[vout]"
-                ].compactMap { $0 }.joined(separator: ";")
+        let bitrate = Self.effectiveBitrateMbps(
+            request: request,
+            policy: policy,
+            defaultValue: configuration.defaultRemoteBitrateMbps,
+            targetHeight: targetHeight
+        )
+        let encoderArguments = Self.encoderArguments(for: configuration.transcodeEngine)
+        let processBuilder: (Double) -> Process = { resolvedStartSeconds in
+            var arguments = [
+                "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-ss", String(format: "%.3f", resolvedStartSeconds),
+                // Keep generation near playback speed. Combined with the sliding
+                // playlist below this bounds temporary storage instead of racing
+                // through a multi-hour movie and materializing gigabytes of HLS.
+                "-re",
+                "-i", input
+            ]
+            if let burnInSubtitleStreamIndex {
+                let graph: String
+                let inputVideo = hdrFilter.map { "[0:v:0]\($0)[toned]" }
+                let videoLabel = hdrFilter == nil ? "[0:v:0]" : "[toned]"
+                if let targetHeight {
+                    graph = [
+                        inputVideo,
+                        "\(videoLabel)[0:\(burnInSubtitleStreamIndex)]overlay=eof_action=pass[burned]",
+                        "[burned]scale=-2:min(\(targetHeight)\\,ih)[vout]"
+                    ].compactMap { $0 }.joined(separator: ";")
+                } else {
+                    graph = [
+                        inputVideo,
+                        "\(videoLabel)[0:\(burnInSubtitleStreamIndex)]overlay=eof_action=pass[vout]"
+                    ].compactMap { $0 }.joined(separator: ";")
+                }
+                arguments += [
+                    "-filter_complex", graph,
+                    "-map", "[vout]"
+                ]
             } else {
-                graph = [
-                    inputVideo,
-                    "\(videoLabel)[0:\(burnInSubtitleStreamIndex)]overlay=eof_action=pass[vout]"
-                ].compactMap { $0 }.joined(separator: ";")
+                arguments += ["-map", "0:v:0?"]
+                let filters = [
+                    hdrFilter,
+                    targetHeight.map { "scale=-2:min(\($0)\\,ih)" }
+                ].compactMap { $0 }.joined(separator: ",")
+                if !filters.isEmpty {
+                    arguments += ["-vf", filters]
+                }
             }
             arguments += [
-                "-filter_complex", graph,
-                "-map", "[vout]"
+                "-map", "0:a:\(request.audioTrackID ?? 0)?",
+                "-sn", "-dn", "-map_chapters", "-1"
             ]
-        } else {
-            arguments += ["-map", "0:v:0?"]
-            let filters = [
-                hdrFilter,
-                targetHeight.map { "scale=-2:min(\($0)\\,ih)" }
-            ].compactMap { $0 }
-            if !filters.isEmpty {
-                arguments += ["-vf", filters.joined(separator: ",")]
+            if copiesVideo {
+                arguments += ["-c:v", "copy"]
+            } else {
+                arguments += encoderArguments + [
+                    "-pix_fmt", "yuv420p", "-b:v", "\(bitrate * 1_000)k",
+                    "-maxrate", "\(bitrate * 1_250)k", "-bufsize", "\(bitrate * 2_000)k",
+                    "-force_key_frames", "expr:gte(t,n_forced*6)"
+                ]
             }
-        }
-        arguments += [
-            "-map", "0:a:\(request.audioTrackID ?? 0)?",
-            "-sn", "-dn", "-map_chapters", "-1"
-        ]
-        if copiesVideo {
-            arguments += ["-c:v", "copy"]
-        } else {
-            let bitrate = Self.effectiveBitrateMbps(
-                request: request,
-                policy: policy,
-                defaultValue: configuration.defaultRemoteBitrateMbps,
-                targetHeight: targetHeight
-            )
-            let encoderArguments = Self.encoderArguments(for: configuration.transcodeEngine)
-            arguments += encoderArguments + [
-                "-pix_fmt", "yuv420p", "-b:v", "\(bitrate * 1_000)k",
-                "-maxrate", "\(bitrate * 1_250)k", "-bufsize", "\(bitrate * 2_000)k",
-                "-force_key_frames", "expr:gte(t,n_forced*6)"
+            arguments += copiesAudio
+                ? ["-c:a", "copy"]
+                : ["-c:a", "aac", "-ac", "2", "-b:a", "256k"]
+            arguments += [
+                "-avoid_negative_ts", "make_zero",
+                "-f", "hls", "-hls_init_time", "1", "-hls_time", "6",
+                "-hls_list_size", "30", "-hls_delete_threshold", "2",
+                "-hls_flags", "delete_segments+independent_segments+temp_file",
+                "-hls_segment_filename", segmentPattern,
+                playlist.path
             ]
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = arguments
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            return process
         }
-        arguments += copiesAudio
-            ? ["-c:a", "copy"]
-            : ["-c:a", "aac", "-ac", "2", "-b:a", "256k"]
-        arguments += [
-            "-avoid_negative_ts", "make_zero",
-            "-f", "hls", "-hls_init_time", "1", "-hls_time", "6",
-            "-hls_list_size", "30", "-hls_delete_threshold", "2",
-            "-hls_flags", "delete_segments+independent_segments+temp_file",
-            "-hls_segment_filename", segmentPattern,
-            playlist.path
-        ]
 
         let session = Session(
             id: id,
@@ -466,19 +491,10 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             mode: mode,
             reason: reason,
             mediaURL: "/api/v1/playback/hls/\(id)/index.m3u8",
-            bridge: bridge
+            bridge: bridge,
+            startResolver: startResolver,
+            processBuilder: processBuilder
         )
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        process.terminationHandler = { [weak self, weak session] _ in
-            guard let self, let session else { return }
-            self.processDidTerminate(session)
-        }
-        session.process = process
         lock.lock()
         // Recheck while reserving so simultaneous creates cannot overrun either
         // the active slots or the bounded waiting queue.
@@ -491,11 +507,10 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         session.state = shouldLaunch ? .preparing : .queued
         sessions[id] = session
         if !shouldLaunch { pendingSessionIDs.append(id) }
+        let initialDescriptor = session.descriptor
         lock.unlock()
-        if shouldLaunch, !launch(session) {
-            return session.descriptor
-        }
-        return session.descriptor
+        if shouldLaunch { _ = launch(session) }
+        return initialDescriptor
     }
 
     static let softwareHDRToneMappingFilter = "zscale=t=linear:npl=100,format=gbrpf32le,tonemap=tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=bt709:r=tv,format=yuv420p"
@@ -693,8 +708,11 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
 
     private func stopAndRemove(_ session: Session) {
         session.readinessTimer?.cancel()
+        session.preparationCancellation.cancel()
         session.bridge?.stop()
-        if session.process?.isRunning == true { session.process?.terminate() }
+        if let process = session.process, process.isRunning {
+            ServerBoundedProcess.terminate(process)
+        }
         try? FileManager.default.removeItem(at: session.directory)
     }
 
@@ -732,7 +750,9 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             if failed {
                 timer.cancel()
                 session.bridge?.stop()
-                if session.process?.isRunning == true { session.process?.terminate() }
+                if let process = session.process, process.isRunning {
+                    ServerBoundedProcess.terminate(process)
+                }
             }
         }
         lock.lock()
@@ -747,9 +767,53 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
 
     @discardableResult
     private func launch(_ session: Session) -> Bool {
-        guard let process = session.process else { return false }
+        preparationQueue.async { [weak self, weak session] in
+            guard let self, let session else { return }
+            self.prepareAndLaunch(session)
+        }
+        return true
+    }
+
+    private func prepareAndLaunch(_ session: Session) {
+        lock.lock()
+        guard sessions[session.id] === session, session.state == .preparing else {
+            lock.unlock()
+            return
+        }
+        let requestedStartSeconds = session.actualStartSeconds
+        lock.unlock()
+
+        let resolvedStartSeconds = session.startResolver?(session.preparationCancellation)
+            ?? requestedStartSeconds
+        guard resolvedStartSeconds.isFinite,
+              resolvedStartSeconds >= 0,
+              resolvedStartSeconds < 86_400,
+              !session.preparationCancellation.isCancelled
+        else { return }
+
+        let process = session.processBuilder(resolvedStartSeconds)
+        process.terminationHandler = { [weak self, weak session] _ in
+            guard let self, let session else { return }
+            self.processDidTerminate(session)
+        }
+        lock.lock()
+        guard sessions[session.id] === session, session.state == .preparing else {
+            lock.unlock()
+            return
+        }
+        session.actualStartSeconds = resolvedStartSeconds
+        session.process = process
+        lock.unlock()
+
         do {
             try process.run()
+            lock.lock()
+            let stillActive = sessions[session.id] === session && session.state == .preparing
+            lock.unlock()
+            guard stillActive else {
+                ServerBoundedProcess.terminate(process, forceAfter: 0)
+                return
+            }
             monitorReadiness(
                 of: session,
                 playlist: session.directory.appendingPathComponent("index.m3u8")
@@ -764,7 +828,6 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             lock.unlock()
             session.bridge?.stop()
             startNextIfPossible()
-            return false
         }
     }
 

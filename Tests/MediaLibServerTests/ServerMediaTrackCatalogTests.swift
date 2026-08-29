@@ -352,7 +352,9 @@ final class ServerMediaTrackCatalogTests: XCTestCase {
     ) -> ServerMediaTrackCatalog {
         ServerMediaTrackCatalog(
             ffmpegURLProvider: { URL(fileURLWithPath: "/usr/bin/ffmpeg-test-double") },
-            subtitleExporter: { exporter.run($0, $1, $2, $3) },
+            subtitleExporter: { executable, arguments, maximumBytes, timeout, _ in
+                exporter.run(executable, arguments, maximumBytes, timeout)
+            },
             uptimeProvider: uptimeProvider
         )
     }

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// 服务端可用的 ffmpeg / ffprobe 可执行文件解析。
@@ -101,12 +102,72 @@ enum ServerMediaToolchain {
 /// 一次有界的子进程调用：把标准输出整份读回来。用于内嵌字幕导出这类**小而有限**
 /// 的输出；流式播放走 `ServerAudioRemuxStream`，不经过这里。
 enum ServerBoundedProcess {
+    /// A caller-owned cancellation handle for one bounded child process.
+    ///
+    /// Cancellation is sticky: cancelling before `run` binds its `Process`
+    /// prevents the process from starting; cancelling after launch requests a
+    /// graceful exit and escalates to SIGKILL after a short grace period. The
+    /// handle contains no command line or path, so it is safe to retain in a
+    /// server-side session without widening the logging surface.
+    final class Cancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var process: Process?
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            let current = process
+            lock.unlock()
+            if let current {
+                ServerBoundedProcess.terminate(current, forceAfter: 0.25)
+            }
+        }
+
+        fileprivate func bind(_ process: Process) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !cancelled else { return false }
+            self.process = process
+            return true
+        }
+
+        fileprivate func unbind(_ process: Process) {
+            lock.lock()
+            if self.process === process { self.process = nil }
+            lock.unlock()
+        }
+    }
+
+    /// Requests a normal exit and guarantees a force-stop fallback without
+    /// blocking the caller. HLS cancellation and bounded probes share this
+    /// helper so an ffmpeg process that ignores SIGTERM cannot survive a
+    /// cancelled playback session indefinitely.
+    static func terminate(_ process: Process, forceAfter gracePeriod: TimeInterval = 0.5) {
+        guard process.isRunning else { return }
+        let processIdentifier = process.processIdentifier
+        process.terminate()
+        let delay = max(0, min(gracePeriod, 2))
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+            guard process.isRunning, process.processIdentifier == processIdentifier else { return }
+            _ = Darwin.kill(processIdentifier, SIGKILL)
+        }
+    }
+
     static func run(
         executableURL: URL,
         arguments: [String],
         maximumOutputByteLength: Int,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        cancellation: Cancellation? = nil
     ) -> Data? {
+        guard maximumOutputByteLength > 0, timeout.isFinite, timeout > 0 else { return nil }
         let process = Process()
         let outputPipe = Pipe()
         let errorPipe = Pipe()
@@ -122,10 +183,19 @@ enum ServerBoundedProcess {
         let finished = DispatchGroup()
         finished.enter()
         process.terminationHandler = { _ in finished.leave() }
+        guard cancellation?.bind(process) != false else {
+            process.terminationHandler = nil
+            finished.leave()
+            return nil
+        }
+        defer { cancellation?.unbind(process) }
         do { try process.run() } catch {
             process.terminationHandler = nil
             finished.leave()
             return nil
+        }
+        if cancellation?.isCancelled == true {
+            terminate(process, forceAfter: 0)
         }
 
         let lock = NSLock()
@@ -144,7 +214,7 @@ enum ServerBoundedProcess {
                     lock.unlock()
                     // 超限就地掐断：让 ffmpeg 自己因为管道关闭而退出，而不是把
                     // 一份没有上限的输出继续读进内存。
-                    process.terminate()
+                    terminate(process, forceAfter: 0)
                     return
                 }
                 output.append(chunk)
@@ -160,12 +230,19 @@ enum ServerBoundedProcess {
         }
 
         if finished.wait(timeout: .now() + timeout) == .timedOut {
-            if process.isRunning { process.terminate() }
+            terminate(process, forceAfter: 0.25)
             _ = finished.wait(timeout: .now() + 2)
-            readers.wait()
+            try? outputPipe.fileHandleForReading.close()
+            try? errorPipe.fileHandleForReading.close()
+            _ = readers.wait(timeout: .now() + 2)
             return nil
         }
-        readers.wait()
+        guard readers.wait(timeout: .now() + 2) == .success else {
+            terminate(process, forceAfter: 0)
+            try? outputPipe.fileHandleForReading.close()
+            try? errorPipe.fileHandleForReading.close()
+            return nil
+        }
         lock.lock()
         defer { lock.unlock() }
         guard !overflowed, process.terminationStatus == 0, !output.isEmpty else { return nil }

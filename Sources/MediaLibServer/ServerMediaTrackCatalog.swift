@@ -48,7 +48,9 @@ final class ServerMediaTrackCatalog {
 
     /// 字幕导出最长会顺序扫描 8 GiB 容器，不能占住 HTTP 客户连接执行队列。
     /// 请求只登记 flight 并立即返回 pending；真正的进程等待发生在专用工作队列。
-    private final class SubtitleFlight {}
+    private final class SubtitleFlight {
+        let cancellation = ServerBoundedProcess.Cancellation()
+    }
 
     private let inspector: FFprobeMediaInspector
     private let lock = NSLock()
@@ -61,12 +63,15 @@ final class ServerMediaTrackCatalog {
     private var subtitleCacheByteLength = 0
     private var subtitleFlights: [SubtitleCacheKey: SubtitleFlight] = [:]
     private var subtitleFailures: [SubtitleCacheKey: TimeInterval] = [:]
+    private var subtitleFailureOrder: [SubtitleCacheKey] = []
     private static let maximumSubtitleCacheEntries = 64
     private static let maximumSubtitleCacheByteLength = 32 * 1024 * 1024
     private static let maximumPendingSubtitleExports = 8
     private static let subtitleFailureVisibility: TimeInterval = 1
     private let ffmpegURLProvider: () -> URL?
-    private let subtitleExporter: (URL, [String], Int, TimeInterval) -> Data?
+    private let subtitleExporter: (
+        URL, [String], Int, TimeInterval, ServerBoundedProcess.Cancellation
+    ) -> Data?
     private let subtitleExportQueue: DispatchQueue
     private let subtitleExportSlots = DispatchSemaphore(value: 2)
     private let uptimeProvider: () -> TimeInterval
@@ -74,13 +79,16 @@ final class ServerMediaTrackCatalog {
     init(
         inspector: FFprobeMediaInspector = FFprobeMediaInspector(),
         ffmpegURLProvider: @escaping () -> URL? = { ServerMediaToolchain.ffmpegURL() },
-        subtitleExporter: @escaping (URL, [String], Int, TimeInterval) -> Data? = {
-            executableURL, arguments, maximumOutputByteLength, timeout in
+        subtitleExporter: @escaping (
+            URL, [String], Int, TimeInterval, ServerBoundedProcess.Cancellation
+        ) -> Data? = {
+            executableURL, arguments, maximumOutputByteLength, timeout, cancellation in
             ServerBoundedProcess.run(
                 executableURL: executableURL,
                 arguments: arguments,
                 maximumOutputByteLength: maximumOutputByteLength,
-                timeout: timeout
+                timeout: timeout,
+                cancellation: cancellation
             )
         },
         subtitleExportQueue: DispatchQueue = DispatchQueue(
@@ -243,7 +251,11 @@ final class ServerMediaTrackCatalog {
     /// 这里先把落点问清楚，播放器再拿这个**已经对齐过的**秒数去起流，于是
     /// ffmpeg 的吸附成了空操作，时间轴与画面从第一帧起就是对上的。
     /// 一次查询约几十毫秒，而它只发生在起流/跳转时，不在播放过程中。
-    func keyframeStart(for asset: ServerMediaAsset, at seconds: Double) -> Double? {
+    func keyframeStart(
+        for asset: ServerMediaAsset,
+        at seconds: Double,
+        cancellation: ServerBoundedProcess.Cancellation? = nil
+    ) -> Double? {
         guard asset.remoteURL == nil,
               seconds.isFinite, seconds >= 0, seconds < 86_400,
               let ffprobe = ServerMediaToolchain.ffprobeURL()
@@ -262,7 +274,8 @@ final class ServerMediaTrackCatalog {
                 "-i", ServerMediaToolchain.inputArgument(for: asset.fileURL)
             ],
             maximumOutputByteLength: 64 * 1024,
-            timeout: 15
+            timeout: 15,
+            cancellation: cancellation
         )
         guard let output, let text = String(data: output, encoding: .utf8) else { return nil }
         // ffprobe 从"目标点之前最近的那个关键帧"开始读，所以第一行就是落点。
@@ -335,19 +348,31 @@ final class ServerMediaTrackCatalog {
                 return .failed
             }
             subtitleFailures.removeValue(forKey: subtitleKey)
+            subtitleFailureOrder.removeAll { $0 == subtitleKey }
         }
         if subtitleFlights[subtitleKey] != nil {
             lock.unlock()
             return .pending
         }
+        // A file replacement changes the media revision key. Any export still
+        // scanning the previous bytes can never be published, so cancel it now
+        // instead of letting it occupy an ffmpeg slot for the remainder of its
+        // five-minute budget.
+        let supersededFlights = subtitleFlights.filter {
+            $0.key.media.path == mediaKey.path && $0.key.media != mediaKey
+        }
+        for key in supersededFlights.keys { subtitleFlights.removeValue(forKey: key) }
         guard startIfNeeded,
               subtitleFlights.count < Self.maximumPendingSubtitleExports
         else {
             lock.unlock()
+            supersededFlights.values.forEach { $0.cancellation.cancel() }
             return startIfNeeded ? .failed : .pending
         }
-        subtitleFlights[subtitleKey] = SubtitleFlight()
+        let flight = SubtitleFlight()
+        subtitleFlights[subtitleKey] = flight
         lock.unlock()
+        supersededFlights.values.forEach { $0.cancellation.cancel() }
 
         let arguments = [
                 "-nostdin", "-hide_banner", "-loglevel", "error",
@@ -362,11 +387,13 @@ final class ServerMediaTrackCatalog {
         subtitleExportQueue.async { [self] in
             subtitleExportSlots.wait()
             defer { subtitleExportSlots.signal() }
+            guard !flight.cancellation.isCancelled else { return }
             let output = subtitleExporter(
                 ffmpeg,
                 arguments,
                 ServerWebVTTSubtitleTrack.maximumByteLength,
-                timeout
+                timeout,
+                flight.cancellation
             )
             let payload = output
                 .flatMap(ServerSubtitleSidecar.decodeText)
@@ -383,14 +410,20 @@ final class ServerMediaTrackCatalog {
     ) {
         lock.lock()
         defer { lock.unlock() }
-        subtitleFlights.removeValue(forKey: subtitleKey)
+        guard subtitleFlights.removeValue(forKey: subtitleKey) != nil else { return }
         // 文件在长时间扫描中被继续写入或替换时，旧结果不得进入新修订缓存。
         guard cacheKey(for: asset) == subtitleKey.media else { return }
         guard let payload else {
             subtitleFailures[subtitleKey] = uptimeProvider() + Self.subtitleFailureVisibility
+            subtitleFailureOrder.removeAll { $0 == subtitleKey }
+            subtitleFailureOrder.append(subtitleKey)
+            while subtitleFailureOrder.count > Self.maximumSubtitleCacheEntries {
+                subtitleFailures.removeValue(forKey: subtitleFailureOrder.removeFirst())
+            }
             return
         }
         subtitleFailures.removeValue(forKey: subtitleKey)
+        subtitleFailureOrder.removeAll { $0 == subtitleKey }
         if subtitleCache[subtitleKey] == nil {
             let superseded = subtitleCacheOrder.filter {
                 $0.media.path == subtitleKey.media.path && $0.media != subtitleKey.media
@@ -400,6 +433,7 @@ final class ServerMediaTrackCatalog {
                     subtitleCacheByteLength -= removed.count
                 }
                 subtitleFailures.removeValue(forKey: oldKey)
+                subtitleFailureOrder.removeAll { $0 == oldKey }
             }
             subtitleCacheOrder.removeAll { superseded.contains($0) }
             subtitleCache[subtitleKey] = payload

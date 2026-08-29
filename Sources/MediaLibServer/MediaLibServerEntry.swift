@@ -171,9 +171,16 @@ struct MediaLibServer {
                     }()
                     guard request.subtitleTrackID == nil || burnInSubtitleStreamIndex != nil else { return nil }
                     let requestedStart = request.startSeconds ?? 0
-                    let actualStart = videoCodec?.lowercased() == "h264"
-                        ? (try catalog.remuxStartSeconds(id: itemID, at: requestedStart, for: principal) ?? requestedStart)
-                        : requestedStart
+                    let startResolver: ((ServerBoundedProcess.Cancellation) -> Double)? =
+                        videoCodec?.lowercased() == "h264" && requestedStart > 0
+                        ? { cancellation in
+                            mediaTrackCatalog.keyframeStart(
+                                for: asset,
+                                at: requestedStart,
+                                cancellation: cancellation
+                            ) ?? requestedStart
+                        }
+                        : nil
                     let normalizedRequest = ServerHLSPlaybackRequest(
                         audioTrackID: request.audioTrackID,
                         subtitleTrackID: request.subtitleTrackID,
@@ -186,7 +193,8 @@ struct MediaLibServer {
                     return hlsPlaybackSessions.create(
                         asset: asset,
                         request: normalizedRequest,
-                        actualStartSeconds: actualStart,
+                        actualStartSeconds: requestedStart,
+                        startResolver: startResolver,
                         videoCodec: videoCodec,
                         videoHeight: videoHeight,
                         sourceIsHDR: sourceIsHDR,
