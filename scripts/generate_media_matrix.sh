@@ -97,7 +97,14 @@ render "matrix-06-4k-hdr-hevc.mp4" \
   -x265-params "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc" \
   -c:a aac -b:a 128k -movflags +faststart
 
-# 7. 外挂字幕样本 —— 与 01 同名的 WebVTT sidecar，覆盖"字幕不得抢占首帧"这条
+# 7. MKV H.264/TrueHD —— 视频明确可直接复制，因而能严格验证 Audio Transcode
+#    层只把 TrueHD 转为 AAC，而不会顺手重编码视频。
+render "matrix-07-h264-truehd.mkv" \
+  $(video_source "$SMALL_SIZE" "$DURATION") $(audio_source "$DURATION") \
+  -c:v libx264 -preset veryfast -pix_fmt yuv420p -g 48 \
+  -c:a truehd -ac 2 -strict -2
+
+# 8. 外挂字幕样本 —— 与 01 同名的 WebVTT sidecar，覆盖"字幕不得抢占首帧"这条
 #    时序约束的可观察面。
 VTT_TARGET="$OUTPUT_DIR/matrix-01-h264-aac.vtt"
 if [ ! -f "$VTT_TARGET" ]; then

@@ -922,13 +922,33 @@ final class ServerWebDesignSystemTests: XCTestCase {
         XCTAssertTrue(primitives.contains(".ui-segmented > button { height: var(--control-height-lg); }"))
         XCTAssertTrue(primitives.contains(".ui-section-more {"))
         XCTAssertTrue(primitives.contains("min-height: var(--control-height-lg)"))
+        XCTAssertTrue(primitives.contains("(max-width: 719px)"))
+        XCTAssertTrue(primitives.contains(".ui-breadcrumb a {"))
+        XCTAssertTrue(primitives.contains(".ui-rail-step { display: none; }"))
         let shell = asset("/assets/app-shell.css")
         XCTAssertTrue(shell.contains(".nav-subitem { min-height: var(--nav-item-height); }"))
-        XCTAssertTrue(ServerWebMediaDetailPage.style.contains(
-            ".rating-star { width: var(--control-height-lg); height: var(--control-height-lg); }"
-        ))
+        let player = ServerWebMediaDetailPage.style
+        let ratingRule = player.range(of: ".rating-star {").map {
+            String(player[$0.upperBound...].prefix(while: { $0 != "}" }))
+        }
+        XCTAssertEqual(ratingRule?.contains("width: var(--control-height-lg)"), true)
+        XCTAssertEqual(ratingRule?.contains("height: var(--control-height-lg)"), true)
         XCTAssertTrue(ServerWebAdministrationPage.script.contains(
             "ui-btn ui-btn-sm ui-btn-ghost revoke-session"
         ))
+    }
+
+    func testMobileDrawerRemovesClosedSidebarFromKeyboardAndAccessibilityTrees() {
+        let style = asset("/assets/app-shell.css")
+        let script = asset("/assets/app-shell.js")
+
+        XCTAssertTrue(style.contains("visibility: hidden;"))
+        XCTAssertTrue(style.contains(".app-drawer-state:checked ~ .app-sidebar"))
+        XCTAssertTrue(style.contains("visibility: visible;"))
+        XCTAssertTrue(script.contains("sidebar.toggleAttribute('inert', !isOpen)"))
+        XCTAssertTrue(script.contains("sidebar.setAttribute('aria-hidden', 'true')"))
+        XCTAssertTrue(script.contains("toggle.setAttribute('aria-expanded', state.checked ? 'true' : 'false')"))
+        XCTAssertTrue(script.contains("event.key !== 'Escape'"))
+        XCTAssertTrue(script.contains("synchronizeDrawerAccessibility();"))
     }
 }

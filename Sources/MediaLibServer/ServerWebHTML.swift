@@ -48,7 +48,7 @@ enum ServerWebHTML {
 enum ServerWebAssets {
     /// Bumped by `bump_versions.py` whenever any web asset changes. The query
     /// is a cache identity, so static CSS/JS may safely be immutable for a year.
-    static let version = 231
+    static let version = 236
 
     /// Loaded by every authenticated page, in this order.  Cascade layers make the
     /// order meaningful without a single `!important`: tokens define values, base

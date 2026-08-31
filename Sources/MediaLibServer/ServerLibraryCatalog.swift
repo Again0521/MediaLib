@@ -52,13 +52,15 @@ final class ServerLibraryCatalog {
         vaultUnlockProvider: @escaping () -> Bool = { false },
         homeRecommendationProvider: @escaping () -> HomeRecommendationSnapshot? = { nil },
         trackCatalog: ServerMediaTrackCatalog = ServerMediaTrackCatalog(),
-        remoteAssetFetcher: ServerRemoteAssetFetcher = ServerRemoteAssetFetcher()
+        remoteAssetFetcher: ServerRemoteAssetFetcher = ServerRemoteAssetFetcher(),
+        remoteSubtitleTrackCatalog: ServerRemoteSubtitleTrackCatalog? = nil
     ) {
         self.database = database
         self.vaultUnlockProvider = vaultUnlockProvider
         self.homeRecommendationProvider = homeRecommendationProvider
         self.trackCatalog = trackCatalog
-        self.remoteAssetFetcher = remoteAssetFetcher
+        self.remoteSubtitleTrackCatalog = remoteSubtitleTrackCatalog
+            ?? ServerRemoteSubtitleTrackCatalog(fetcher: remoteAssetFetcher)
         self.mediaRepository = MediaRepository(database: database)
         self.mediaDetailRepository = MediaDetailRepository(database: database)
         self.sourceRepository = SourceRepository(database: database)
@@ -98,8 +100,9 @@ final class ServerLibraryCatalog {
     /// 容器内部的音轨与内嵌字幕轨事实源（ffprobe）。
     private let trackCatalog: ServerMediaTrackCatalog
 
-    /// 远程来源的字幕轨要向 Emby/Jellyfin/Plex 现问，用的是与封面同一组受限上游读取。
-    private let remoteAssetFetcher: ServerRemoteAssetFetcher
+    /// 远程来源的字幕轨在后台向 Emby/Jellyfin/Plex 查询；冷请求只把 pending
+    /// 状态交给路由，不能占住 HTTP 执行线程。
+    private let remoteSubtitleTrackCatalog: ServerRemoteSubtitleTrackCatalog
 
     /// 首页卡片样本的三个上限。
     ///
@@ -1294,9 +1297,13 @@ final class ServerLibraryCatalog {
         }
         if let remoteURL = asset.remoteURL,
            let item = try publicItem(id: id, for: principal, requiring: .playMedia) {
-            for track in ServerRemoteSubtitleCatalog.tracks(
-                for: item, streamURL: remoteURL, fetcher: remoteAssetFetcher
-            ) {
+            let remoteTracks: [ServerRemoteSubtitleCatalog.Track]
+            switch remoteSubtitleTrackCatalog.tracks(for: item, streamURL: remoteURL) {
+            case let .ready(tracks): remoteTracks = tracks
+            case .pending: throw ServerRemoteSubtitleTracksPending()
+            case .failed: remoteTracks = []
+            }
+            for track in remoteTracks {
                 references.append(
                     ServerSubtitleTrackReference(
                         label: track.label,

@@ -174,6 +174,74 @@ final class ServerMediaTrackCatalogTests: XCTestCase {
         XCTAssertEqual(probe.callCount, 1)
     }
 
+    func testConcurrentRemoteBridgeProbesShareOneFlightAndCache() throws {
+        let probe = ConcurrentProbeRunner(outcomes: [.success(duration: 321)])
+        let catalog = ServerMediaTrackCatalog(inspector: probe.inspector())
+        let remote = ServerMediaAsset(
+            id: "remote-probe",
+            remoteURL: URL(string: "https://media.example/stream.mkv?api_key=SECRET")!,
+            byteLength: 5_000_000
+        )
+        let bridgeURL = URL(
+            string: "http://127.0.0.1:54321/0123456789abcdef0123456789abcdef/media"
+        )!
+        let start = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+        let results = LockedProbeResultCounter()
+
+        for _ in 0..<12 {
+            group.enter()
+            DispatchQueue.global().async {
+                start.wait()
+                let cancellation = ServerBoundedProcess.Cancellation()
+                results.record(catalog.probeRemote(
+                    asset: remote,
+                    through: bridgeURL,
+                    cancellation: cancellation
+                )?.durationSeconds == 321)
+                group.leave()
+            }
+        }
+        for _ in 0..<12 { start.signal() }
+
+        XCTAssertEqual(probe.firstCallEntered.wait(timeout: .now() + 2), .success)
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertEqual(probe.callCount, 1)
+        probe.releaseFirstCall.signal()
+        XCTAssertEqual(group.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(results.successCount, 12)
+        XCTAssertEqual(probe.callCount, 1)
+        XCTAssertEqual(catalog.probeRemote(
+            asset: remote,
+            through: bridgeURL,
+            cancellation: ServerBoundedProcess.Cancellation()
+        )?.durationSeconds, 321)
+        XCTAssertEqual(probe.callCount, 1)
+    }
+
+    func testRemoteProbeRejectsNonLoopbackBridge() {
+        let probe = ConcurrentProbeRunner(outcomes: [.success(duration: 10)], blockFirstCall: false)
+        let catalog = ServerMediaTrackCatalog(inspector: probe.inspector())
+        let remote = ServerMediaAsset(
+            id: "remote-probe",
+            remoteURL: URL(string: "https://media.example/stream.mkv?token=SECRET")!,
+            byteLength: 1_024
+        )
+
+        XCTAssertNil(catalog.probeRemote(
+            asset: remote,
+            through: URL(string: "http://192.168.1.2:54321/media")!,
+            cancellation: ServerBoundedProcess.Cancellation()
+        ))
+        XCTAssertEqual(probe.callCount, 0)
+        XCTAssertNil(catalog.probeRemote(
+            asset: remote,
+            through: URL(string: "http://127.0.0.1:54321/media")!,
+            cancellation: ServerBoundedProcess.Cancellation()
+        ))
+        XCTAssertEqual(probe.callCount, 0)
+    }
+
     func testConcurrentFailureIsSharedButLaterRequestCanRetry() throws {
         let probe = ConcurrentProbeRunner(outcomes: [.failure, .success(duration: 240)])
         let catalog = ServerMediaTrackCatalog(inspector: probe.inspector())
@@ -287,6 +355,10 @@ final class ServerMediaTrackCatalogTests: XCTestCase {
         try handle.seekToEnd()
         try handle.write(contentsOf: Data("+".utf8))
         try handle.close()
+        guard case .pending = catalog.embeddedSubtitleWebVTT(for: media, streamIndex: 5) else {
+            return XCTFail("新文件修订应立即启动自己的导出")
+        }
+        XCTAssertTrue(exporter.cancellations.first?.isCancelled == true)
         exporter.release.signal()
 
         XCTAssertEqual(waitForSubtitle(catalog, asset: media, streamIndex: 5), current)
@@ -352,8 +424,8 @@ final class ServerMediaTrackCatalogTests: XCTestCase {
     ) -> ServerMediaTrackCatalog {
         ServerMediaTrackCatalog(
             ffmpegURLProvider: { URL(fileURLWithPath: "/usr/bin/ffmpeg-test-double") },
-            subtitleExporter: { executable, arguments, maximumBytes, timeout, _ in
-                exporter.run(executable, arguments, maximumBytes, timeout)
+            subtitleExporter: { executable, arguments, maximumBytes, timeout, cancellation in
+                exporter.run(executable, arguments, maximumBytes, timeout, cancellation)
             },
             uptimeProvider: uptimeProvider
         )
@@ -437,6 +509,7 @@ private final class ConcurrentSubtitleExporter: @unchecked Sendable {
     private var storedCallCount = 0
     private var activeCount = 0
     private var storedPeakConcurrentCount = 0
+    private var storedCancellations: [ServerBoundedProcess.Cancellation] = []
 
     init(outcomes: [Data?], blockedCallCount: Int = 0) {
         self.outcomes = outcomes
@@ -455,7 +528,19 @@ private final class ConcurrentSubtitleExporter: @unchecked Sendable {
         return storedPeakConcurrentCount
     }
 
-    func run(_ executableURL: URL, _ arguments: [String], _ maximumBytes: Int, _ timeout: TimeInterval) -> Data? {
+    var cancellations: [ServerBoundedProcess.Cancellation] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedCancellations
+    }
+
+    func run(
+        _ executableURL: URL,
+        _ arguments: [String],
+        _ maximumBytes: Int,
+        _ timeout: TimeInterval,
+        _ cancellation: ServerBoundedProcess.Cancellation
+    ) -> Data? {
         XCTAssertEqual(executableURL.path, "/usr/bin/ffmpeg-test-double")
         XCTAssertTrue(arguments.contains("webvtt"))
         XCTAssertEqual(maximumBytes, ServerWebVTTSubtitleTrack.maximumByteLength)
@@ -465,6 +550,7 @@ private final class ConcurrentSubtitleExporter: @unchecked Sendable {
         storedCallCount += 1
         activeCount += 1
         storedPeakConcurrentCount = max(storedPeakConcurrentCount, activeCount)
+        storedCancellations.append(cancellation)
         let outcome = outcomes[min(index, outcomes.count - 1)]
         lock.unlock()
         entered.signal()

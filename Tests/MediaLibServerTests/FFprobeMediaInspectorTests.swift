@@ -73,6 +73,37 @@ final class FFprobeMediaInspectorTests: XCTestCase {
         )
     }
 
+    func testInputArgumentPreservesEphemeralLoopbackBridgeURL() {
+        let bridge = "http://127.0.0.1:54321/0123456789abcdef0123456789abcdef/media"
+        XCTAssertEqual(
+            ServerMediaToolchain.inputArgument(
+                for: URL(string: bridge)!
+            ),
+            bridge
+        )
+    }
+
+    func testInputArgumentRejectsExternalAndPredictableNetworkURLs() {
+        XCTAssertEqual(
+            ServerMediaToolchain.inputArgument(
+                for: URL(string: "https://media.example/video.mkv?api_key=SECRET")!
+            ),
+            "file:/dev/null"
+        )
+        XCTAssertEqual(
+            ServerMediaToolchain.inputArgument(
+                for: URL(string: "http://127.0.0.1:54321/media")!
+            ),
+            "file:/dev/null"
+        )
+        XCTAssertEqual(
+            ServerMediaToolchain.inputArgument(
+                for: URL(string: "http://127.0.0.1:54321/0123456789abcdef0123456789abcdef/media?token=x")!
+            ),
+            "file:/dev/null"
+        )
+    }
+
     func testDefaultInspectorCanProbeBundledImageWhenFFprobeIsInstalled() throws {
         let repositoryRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

@@ -151,7 +151,7 @@ struct MediaLibServer {
                             contentType: asset.contentType
                         )
                     }
-                    let probe = mediaTrackCatalog.probe(asset: asset)
+                    let probe = asset.remoteURL == nil ? mediaTrackCatalog.probe(asset: asset) : nil
                     let videoCodec = probe?.video.first?.codec
                     let videoHeight = probe?.video.first?.height
                     let sourceIsHDR = probe?.video.first?.isHDR == true
@@ -172,7 +172,9 @@ struct MediaLibServer {
                     guard request.subtitleTrackID == nil || burnInSubtitleStreamIndex != nil else { return nil }
                     let requestedStart = request.startSeconds ?? 0
                     let startResolver: ((ServerBoundedProcess.Cancellation) -> Double)? =
-                        videoCodec?.lowercased() == "h264" && requestedStart > 0
+                        ServerHLSPlaybackSessionManager.supportsKeyframeAlignedSeek(
+                            videoCodec: videoCodec
+                        ) && requestedStart > 0
                         ? { cancellation in
                             mediaTrackCatalog.keyframeStart(
                                 for: asset,
@@ -190,6 +192,49 @@ struct MediaLibServer {
                         quality: request.quality,
                         maximumBitrateMbps: request.maximumBitrateMbps
                     )
+                    let preparationResolver: ((
+                        URL, ServerBoundedProcess.Cancellation
+                    ) -> ServerHLSPreparedMedia?)? = asset.remoteURL == nil ? nil : {
+                        bridgeURL, cancellation in
+                        let remoteProbe = mediaTrackCatalog.probeRemote(
+                            asset: asset,
+                            through: bridgeURL,
+                            cancellation: cancellation
+                        )
+                        guard !cancellation.isCancelled else { return nil }
+                        let prepared = ServerHLSPreparedMedia(
+                            remoteProbe: remoteProbe,
+                            selectedAudioID: selectedAudioID,
+                            fallbackDurationSeconds: request.durationSeconds,
+                            actualStartSeconds: requestedStart
+                        )
+                        let remoteStart: Double
+                        if ServerHLSPlaybackSessionManager.supportsKeyframeAlignedSeek(
+                            videoCodec: prepared.videoCodec
+                        ), requestedStart > 0 {
+                            let bridgeAsset = ServerMediaAsset(
+                                id: asset.id,
+                                fileURL: bridgeURL,
+                                byteLength: asset.byteLength
+                            )
+                            remoteStart = mediaTrackCatalog.keyframeStart(
+                                for: bridgeAsset,
+                                at: requestedStart,
+                                cancellation: cancellation
+                            ) ?? requestedStart
+                        } else {
+                            remoteStart = requestedStart
+                        }
+                        guard !cancellation.isCancelled else { return nil }
+                        return ServerHLSPreparedMedia(
+                            videoCodec: prepared.videoCodec,
+                            videoHeight: prepared.videoHeight,
+                            sourceIsHDR: prepared.sourceIsHDR,
+                            audioCodec: prepared.audioCodec,
+                            durationSeconds: prepared.durationSeconds,
+                            actualStartSeconds: remoteStart
+                        )
+                    }
                     return hlsPlaybackSessions.create(
                         asset: asset,
                         request: normalizedRequest,
@@ -200,6 +245,7 @@ struct MediaLibServer {
                         sourceIsHDR: sourceIsHDR,
                         audioCodec: audioCodec,
                         burnInSubtitleStreamIndex: burnInSubtitleStreamIndex,
+                        preparationResolver: preparationResolver,
                         principal: principal,
                         policy: policy
                     )

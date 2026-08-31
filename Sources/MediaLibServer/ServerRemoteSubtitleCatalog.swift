@@ -23,53 +23,37 @@ enum ServerRemoteSubtitleCatalog {
 
     static let maximumMetadataByteLength = 2 * 1_024 * 1_024
 
-    /// 轨道清单的短缓存。
-    ///
-    /// 选一条字幕会重新走一遍枚举（序号的含义只由那一次枚举定义），不缓存的话
-    /// 每次切换字幕都要多一次上游元数据往返。60 秒足够覆盖一次观看会话里的反复
-    /// 切换，又短到用户在 Emby 那边加了一条字幕后很快就能看到。
-    private static let cacheLifetime: TimeInterval = 60
-    private static let cacheLock = NSLock()
-    private static var cache: [String: (tracks: [Track], expiresAt: Date)] = [:]
-    private static var cacheOrder: [String] = []
-    private static let maximumCacheEntries = 128
-
-    /// 这个条目的远程字幕轨。不是远程条目、来源不认识、或者上游没答复都返回空数组。
+    /// 同步入口只供直接单元测试和兼容调用使用。生产路由使用下面的
+    /// `ServerRemoteSubtitleTrackCatalog`，不会在 HTTP 执行队列等待这次读取。
     static func tracks(
         for item: MediaItem,
         streamURL: URL,
         fetcher: ServerRemoteAssetFetcher
     ) -> [Track] {
-        let cacheKey = item.id
-        cacheLock.lock()
-        if let cached = cache[cacheKey], cached.expiresAt > Date() {
-            cacheLock.unlock()
-            return cached.tracks
-        }
-        cacheLock.unlock()
-        let resolved = resolvedTracks(for: item, streamURL: streamURL, fetcher: fetcher)
-        cacheLock.lock()
-        cache[cacheKey] = (resolved, Date().addingTimeInterval(cacheLifetime))
-        cacheOrder.removeAll { $0 == cacheKey }
-        cacheOrder.append(cacheKey)
-        while cacheOrder.count > maximumCacheEntries {
-            cache.removeValue(forKey: cacheOrder.removeFirst())
-        }
-        cacheLock.unlock()
-        return resolved
+        resolvedTracks(for: item, streamURL: streamURL, fetcher: fetcher) ?? []
     }
 
-    private static func resolvedTracks(
+    static func resolvedTracks(
         for item: MediaItem,
         streamURL: URL,
-        fetcher: ServerRemoteAssetFetcher
-    ) -> [Track] {
+        fetcher: ServerRemoteAssetFetcher,
+        cancellation: ServerRemoteAssetFetcher.Cancellation? = nil
+    ) -> [Track]? {
         guard RemoteLibraryPathPolicy.isMediaServerSourcePath(item.sourcePath) else { return [] }
         if RemoteLibraryPathPolicy.isEmbyCompatibleSourcePath(item.sourcePath) {
-            return embyTracks(streamURL: streamURL, fetcher: fetcher)
+            return embyTracks(
+                streamURL: streamURL,
+                fetcher: fetcher,
+                cancellation: cancellation
+            )
         }
         if item.sourcePath?.lowercased().hasPrefix("plex://") == true {
-            return plexTracks(streamURL: streamURL, ratingKey: item.externalID, fetcher: fetcher)
+            return plexTracks(
+                streamURL: streamURL,
+                ratingKey: item.externalID,
+                fetcher: fetcher,
+                cancellation: cancellation
+            )
         }
         // Mlink 条目在本地索引里**没有** `file_path`（见 `MlinkLibrarySynchronizer`），
         // 因此根本走不到这里；留一个空数组而不是猜一个端点。
@@ -77,11 +61,16 @@ enum ServerRemoteSubtitleCatalog {
     }
 
     /// 取回一条远程字幕并归一成 WebVTT。
-    static func webVTT(for track: Track, fetcher: ServerRemoteAssetFetcher) -> Data? {
+    static func webVTT(
+        for track: Track,
+        fetcher: ServerRemoteAssetFetcher,
+        cancellation: ServerRemoteAssetFetcher.Cancellation? = nil
+    ) -> Data? {
         guard let raw = fetcher.metadataBytes(
             url: track.downloadURL,
             maximumByteLength: ServerWebVTTSubtitleTrack.maximumByteLength,
-            accept: "text/vtt, text/plain, */*"
+            accept: "text/vtt, text/plain, */*",
+            cancellation: cancellation
         ) else { return nil }
         return ServerSubtitleSidecar.webVTTPayload(from: raw, pathExtension: track.format)
     }
@@ -92,8 +81,9 @@ enum ServerRemoteSubtitleCatalog {
     /// 从它拆出 base、条目 ID、媒体源 ID 与 token。
     private static func embyTracks(
         streamURL: URL,
-        fetcher: ServerRemoteAssetFetcher
-    ) -> [Track] {
+        fetcher: ServerRemoteAssetFetcher,
+        cancellation: ServerRemoteAssetFetcher.Cancellation?
+    ) -> [Track]? {
         guard let components = URLComponents(url: streamURL, resolvingAgainstBaseURL: false),
               let queryItems = components.queryItems,
               let token = queryItems.first(where: { $0.name.caseInsensitiveCompare("api_key") == .orderedSame })?.value,
@@ -123,12 +113,14 @@ enum ServerRemoteSubtitleCatalog {
             URLQueryItem(name: "Fields", value: "MediaSources,MediaStreams"),
             URLQueryItem(name: "api_key", value: token)
         ]
-        guard let listingURL = listing.url,
-              let data = fetcher.metadataBytes(
-                  url: listingURL,
-                  maximumByteLength: maximumMetadataByteLength,
-                  accept: "application/json"
-              ),
+        guard let listingURL = listing.url else { return [] }
+        guard let data = fetcher.metadataBytes(
+            url: listingURL,
+            maximumByteLength: maximumMetadataByteLength,
+            accept: "application/json",
+            cancellation: cancellation
+        ) else { return nil }
+        guard
               let document = try? JSONDecoder().decode(EmbyItemsDocument.self, from: data),
               let source = document.Items?.first?.MediaSources?.first(where: { candidate in
                   mediaSourceID.map { $0 == candidate.Id } ?? true
@@ -191,8 +183,9 @@ enum ServerRemoteSubtitleCatalog {
     private static func plexTracks(
         streamURL: URL,
         ratingKey: String?,
-        fetcher: ServerRemoteAssetFetcher
-    ) -> [Track] {
+        fetcher: ServerRemoteAssetFetcher,
+        cancellation: ServerRemoteAssetFetcher.Cancellation?
+    ) -> [Track]? {
         guard let ratingKey, !ratingKey.isEmpty,
               ratingKey.allSatisfy({ $0.isNumber }),
               var components = URLComponents(url: streamURL, resolvingAgainstBaseURL: false),
@@ -213,14 +206,13 @@ enum ServerRemoteSubtitleCatalog {
             resolvingAgainstBaseURL: false
         ) else { return [] }
         metadata.queryItems = [URLQueryItem(name: "X-Plex-Token", value: token)]
-        guard let metadataURL = metadata.url,
-              let data = fetcher.metadataBytes(
-                  url: metadataURL,
-                  maximumByteLength: maximumMetadataByteLength,
-                  accept: "application/xml"
-              ),
-              let text = String(data: data, encoding: .utf8)
-        else { return [] }
+        guard let metadataURL = metadata.url else { return [] }
+        guard let data = fetcher.metadataBytes(
+            url: metadataURL,
+            maximumByteLength: maximumMetadataByteLength,
+            accept: "application/xml",
+            cancellation: cancellation
+        ), let text = String(data: data, encoding: .utf8) else { return nil }
 
         return ServerXMLAttributeScanner.elements(named: "Stream", in: text).compactMap { attributes -> Track? in
             // Plex 的 streamType：1 视频、2 音频、3 字幕。
@@ -303,6 +295,391 @@ enum ServerRemoteSubtitleCatalog {
               url.user == nil, url.password == nil
         else { return false }
         return url.host?.lowercased() == base.host?.lowercased() && url.port == base.port
+    }
+}
+
+struct ServerRemoteSubtitleTracksPending: Error {}
+
+/// Asynchronous, revision-aware discovery for Emby/Jellyfin/Plex subtitle
+/// metadata. The track list is part of playback preparation, not page rendering:
+/// a cold upstream must therefore produce 202 instead of occupying an HTTP
+/// connection thread for the fetcher's full timeout.
+final class ServerRemoteSubtitleTrackCatalog {
+    enum State {
+        case ready([ServerRemoteSubtitleCatalog.Track])
+        case pending
+        case failed
+    }
+
+    private struct Key: Hashable {
+        let ownerID: String
+        let revision: String
+    }
+
+    private final class Flight {
+        let cancellation = ServerRemoteAssetFetcher.Cancellation()
+    }
+
+    private let lock = NSLock()
+    private var cache: [Key: (tracks: [ServerRemoteSubtitleCatalog.Track], expiresAt: TimeInterval)] = [:]
+    private var cacheOrder: [Key] = []
+    private var flights: [Key: Flight] = [:]
+    private var failures: [Key: TimeInterval] = [:]
+    private var failureOrder: [Key] = []
+    private let fetchTracks: (
+        MediaItem,
+        URL,
+        ServerRemoteAssetFetcher.Cancellation
+    ) -> [ServerRemoteSubtitleCatalog.Track]?
+    private let queue: DispatchQueue
+    private let slots: DispatchSemaphore
+    private let uptimeProvider: () -> TimeInterval
+
+    private static let cacheLifetime: TimeInterval = 60
+    private static let failureVisibility: TimeInterval = 1
+    private static let maximumCacheEntries = 128
+    private static let maximumPendingFetches = 8
+
+    init(
+        fetcher: ServerRemoteAssetFetcher = ServerRemoteAssetFetcher(),
+        fetchTracks: ((
+            MediaItem,
+            URL,
+            ServerRemoteAssetFetcher.Cancellation
+        ) -> [ServerRemoteSubtitleCatalog.Track]?)? = nil,
+        queue: DispatchQueue = DispatchQueue(
+            label: "MediaLibServer.RemoteSubtitleTracks",
+            qos: .utility,
+            attributes: .concurrent
+        ),
+        maximumConcurrentFetches: Int = 2,
+        uptimeProvider: @escaping () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        }
+    ) {
+        self.fetchTracks = fetchTracks ?? { item, streamURL, cancellation in
+            ServerRemoteSubtitleCatalog.resolvedTracks(
+                for: item,
+                streamURL: streamURL,
+                fetcher: fetcher,
+                cancellation: cancellation
+            )
+        }
+        self.queue = queue
+        self.slots = DispatchSemaphore(value: min(4, max(1, maximumConcurrentFetches)))
+        self.uptimeProvider = uptimeProvider
+    }
+
+    deinit {
+        cancelAll()
+    }
+
+    func tracks(for item: MediaItem, streamURL: URL, startIfNeeded: Bool = true) -> State {
+        let key = Key(ownerID: item.id, revision: Self.revision(for: item, streamURL: streamURL))
+        let now = uptimeProvider()
+        lock.lock()
+        if let cached = cache[key] {
+            if cached.expiresAt > now {
+                lock.unlock()
+                return .ready(cached.tracks)
+            }
+            cache.removeValue(forKey: key)
+            cacheOrder.removeAll { $0 == key }
+        }
+        if let failureUntil = failures[key] {
+            if failureUntil > now {
+                lock.unlock()
+                return .failed
+            }
+            failures.removeValue(forKey: key)
+            failureOrder.removeAll { $0 == key }
+        }
+        if flights[key] != nil {
+            lock.unlock()
+            return .pending
+        }
+
+        let superseded = flights.filter { $0.key.ownerID == item.id && $0.key != key }
+        for oldKey in superseded.keys { flights.removeValue(forKey: oldKey) }
+        let staleCache = cacheOrder.filter { $0.ownerID == item.id && $0 != key }
+        for oldKey in staleCache { cache.removeValue(forKey: oldKey) }
+        cacheOrder.removeAll { staleCache.contains($0) }
+        let staleFailures = failureOrder.filter { $0.ownerID == item.id && $0 != key }
+        for oldKey in staleFailures { failures.removeValue(forKey: oldKey) }
+        failureOrder.removeAll { staleFailures.contains($0) }
+
+        guard startIfNeeded, flights.count < Self.maximumPendingFetches else {
+            lock.unlock()
+            superseded.values.forEach { $0.cancellation.cancel() }
+            return startIfNeeded ? .failed : .pending
+        }
+        let flight = Flight()
+        flights[key] = flight
+        lock.unlock()
+        superseded.values.forEach { $0.cancellation.cancel() }
+
+        queue.async { [self] in
+            slots.wait()
+            defer { slots.signal() }
+            guard !flight.cancellation.isCancelled else { return }
+            let tracks = fetchTracks(item, streamURL, flight.cancellation)
+            finish(tracks, key: key)
+        }
+        return .pending
+    }
+
+    func cancel(ownerID: String) {
+        lock.lock()
+        let cancelled = flights.filter { $0.key.ownerID == ownerID }
+        for key in cancelled.keys { flights.removeValue(forKey: key) }
+        lock.unlock()
+        cancelled.values.forEach { $0.cancellation.cancel() }
+    }
+
+    private func cancelAll() {
+        lock.lock()
+        let cancelled = Array(flights.values)
+        flights.removeAll()
+        lock.unlock()
+        cancelled.forEach { $0.cancellation.cancel() }
+    }
+
+    private func finish(_ tracks: [ServerRemoteSubtitleCatalog.Track]?, key: Key) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard flights.removeValue(forKey: key) != nil else { return }
+        let now = uptimeProvider()
+        guard let tracks else {
+            failures[key] = now + Self.failureVisibility
+            failureOrder.removeAll { $0 == key }
+            failureOrder.append(key)
+            while failureOrder.count > Self.maximumCacheEntries {
+                failures.removeValue(forKey: failureOrder.removeFirst())
+            }
+            return
+        }
+        failures.removeValue(forKey: key)
+        failureOrder.removeAll { $0 == key }
+        cache[key] = (Array(tracks.prefix(ServerWebVTTSubtitleTrack.maximumTrackCount)), now + Self.cacheLifetime)
+        cacheOrder.removeAll { $0 == key }
+        cacheOrder.append(key)
+        while cacheOrder.count > Self.maximumCacheEntries {
+            cache.removeValue(forKey: cacheOrder.removeFirst())
+        }
+    }
+
+    private static func revision(for item: MediaItem, streamURL: URL) -> String {
+        ServerTokenSecurity.digest([
+            item.sourcePath ?? "",
+            item.externalID ?? "",
+            streamURL.absoluteString
+        ].joined(separator: "|")) ?? "remote-track-\(streamURL.absoluteString.hashValue)"
+    }
+}
+
+/// Remote subtitle bodies have the same cold-start shape as embedded subtitle
+/// exports: the work can take a full upstream timeout, while the browser only
+/// needs a small state response that it can retry. This catalog keeps that
+/// wait off the HTTP connection queue, coalesces identical requests, and owns
+/// cancellation when an item's track revision changes.
+final class ServerRemoteSubtitleBodyCatalog {
+    enum State {
+        case ready(Data)
+        case pending
+        case failed
+    }
+
+    private struct Key: Hashable {
+        let ownerID: String
+        let revision: String
+    }
+
+    private struct CacheEntry {
+        let payload: Data
+        let expiresAt: TimeInterval
+    }
+
+    private final class Flight {
+        let cancellation = ServerRemoteAssetFetcher.Cancellation()
+    }
+
+    private let lock = NSLock()
+    private var cache: [Key: CacheEntry] = [:]
+    private var cacheOrder: [Key] = []
+    private var cacheByteLength = 0
+    private var flights: [Key: Flight] = [:]
+    private var failures: [Key: TimeInterval] = [:]
+    private var failureOrder: [Key] = []
+    private let fetchBody: (
+        ServerRemoteSubtitleCatalog.Track,
+        ServerRemoteAssetFetcher.Cancellation
+    ) -> Data?
+    private let queue: DispatchQueue
+    private let slots: DispatchSemaphore
+    private let uptimeProvider: () -> TimeInterval
+
+    private static let cacheLifetime: TimeInterval = 300
+    private static let failureVisibility: TimeInterval = 1
+    private static let maximumCacheEntries = 64
+    private static let maximumCacheByteLength = 32 * 1_024 * 1_024
+    private static let maximumPendingFetches = 8
+
+    init(
+        fetcher: ServerRemoteAssetFetcher = ServerRemoteAssetFetcher(),
+        fetchBody: ((
+            ServerRemoteSubtitleCatalog.Track,
+            ServerRemoteAssetFetcher.Cancellation
+        ) -> Data?)? = nil,
+        queue: DispatchQueue = DispatchQueue(
+            label: "MediaLibServer.RemoteSubtitleBodies",
+            qos: .utility,
+            attributes: .concurrent
+        ),
+        maximumConcurrentFetches: Int = 2,
+        uptimeProvider: @escaping () -> TimeInterval = {
+            ProcessInfo.processInfo.systemUptime
+        }
+    ) {
+        self.fetchBody = fetchBody ?? { track, cancellation in
+            ServerRemoteSubtitleCatalog.webVTT(
+                for: track,
+                fetcher: fetcher,
+                cancellation: cancellation
+            )
+        }
+        self.queue = queue
+        self.slots = DispatchSemaphore(value: min(4, max(1, maximumConcurrentFetches)))
+        self.uptimeProvider = uptimeProvider
+    }
+
+    deinit {
+        cancelAll()
+    }
+
+    /// `ownerID` is an opaque local item/track identity, never an upstream URL.
+    /// A changed URL/format creates a new revision and immediately cancels any
+    /// queued or active request for the previous revision of that owner.
+    func webVTT(
+        ownerID: String,
+        track: ServerRemoteSubtitleCatalog.Track,
+        startIfNeeded: Bool = true
+    ) -> State {
+        guard !ownerID.isEmpty else { return .failed }
+        let key = Key(ownerID: ownerID, revision: Self.revision(for: track))
+        let now = uptimeProvider()
+        lock.lock()
+        if let cached = cache[key] {
+            if cached.expiresAt > now {
+                lock.unlock()
+                return .ready(cached.payload)
+            }
+            removeCached(key)
+        }
+        if let failureUntil = failures[key] {
+            if failureUntil > now {
+                lock.unlock()
+                return .failed
+            }
+            failures.removeValue(forKey: key)
+            failureOrder.removeAll { $0 == key }
+        }
+        if flights[key] != nil {
+            lock.unlock()
+            return .pending
+        }
+
+        let superseded = flights.filter { $0.key.ownerID == ownerID && $0.key != key }
+        for oldKey in superseded.keys { flights.removeValue(forKey: oldKey) }
+        let supersededCache = cacheOrder.filter { $0.ownerID == ownerID && $0 != key }
+        for oldKey in supersededCache { removeCached(oldKey) }
+        let supersededFailures = failureOrder.filter { $0.ownerID == ownerID && $0 != key }
+        for oldKey in supersededFailures { failures.removeValue(forKey: oldKey) }
+        failureOrder.removeAll { supersededFailures.contains($0) }
+
+        guard startIfNeeded, flights.count < Self.maximumPendingFetches else {
+            lock.unlock()
+            superseded.values.forEach { $0.cancellation.cancel() }
+            return startIfNeeded ? .failed : .pending
+        }
+        let flight = Flight()
+        flights[key] = flight
+        lock.unlock()
+        superseded.values.forEach { $0.cancellation.cancel() }
+
+        queue.async { [self] in
+            slots.wait()
+            defer { slots.signal() }
+            guard !flight.cancellation.isCancelled else { return }
+            let payload = fetchBody(track, flight.cancellation)
+            finish(payload, key: key)
+        }
+        return .pending
+    }
+
+    func cancel(ownerID: String) {
+        lock.lock()
+        let cancelled = flights.filter { $0.key.ownerID == ownerID }
+        for key in cancelled.keys { flights.removeValue(forKey: key) }
+        lock.unlock()
+        cancelled.values.forEach { $0.cancellation.cancel() }
+    }
+
+    private func cancelAll() {
+        lock.lock()
+        let cancelled = Array(flights.values)
+        flights.removeAll()
+        lock.unlock()
+        cancelled.forEach { $0.cancellation.cancel() }
+    }
+
+    private func finish(_ payload: Data?, key: Key) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard flights.removeValue(forKey: key) != nil else { return }
+        let now = uptimeProvider()
+        guard let payload,
+              !payload.isEmpty,
+              payload.count <= ServerWebVTTSubtitleTrack.maximumByteLength
+        else {
+            failures[key] = now + Self.failureVisibility
+            failureOrder.removeAll { $0 == key }
+            failureOrder.append(key)
+            trimFailures()
+            return
+        }
+        failures.removeValue(forKey: key)
+        failureOrder.removeAll { $0 == key }
+        if cache[key] == nil {
+            cache[key] = CacheEntry(
+                payload: payload,
+                expiresAt: now + Self.cacheLifetime
+            )
+            cacheOrder.append(key)
+            cacheByteLength += payload.count
+            while cacheOrder.count > Self.maximumCacheEntries
+                || cacheByteLength > Self.maximumCacheByteLength {
+                removeCached(cacheOrder[0])
+            }
+        }
+    }
+
+    private func removeCached(_ key: Key) {
+        if let removed = cache.removeValue(forKey: key) {
+            cacheByteLength -= removed.payload.count
+        }
+        cacheOrder.removeAll { $0 == key }
+    }
+
+    private func trimFailures() {
+        while failureOrder.count > Self.maximumCacheEntries {
+            failures.removeValue(forKey: failureOrder.removeFirst())
+        }
+    }
+
+    private static func revision(for track: ServerRemoteSubtitleCatalog.Track) -> String {
+        ServerTokenSecurity.digest(
+            "\(track.format.lowercased())|\(track.downloadURL.absoluteString)"
+        ) ?? "remote-subtitle-\(track.downloadURL.absoluteString.hashValue)"
     }
 }
 

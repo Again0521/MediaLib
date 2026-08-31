@@ -6,6 +6,44 @@ import MediaLibServerProtocol
 /// 路由层绝不把 URL、查询串中的上游 token 或响应头交给浏览器。每次请求都禁用
 /// 重定向，避免凭据随 30x 跳转泄露到另一个 origin。
 final class ServerRemoteAssetFetcher {
+    /// Sticky cancellation for one bounded metadata/body request. The handle
+    /// deliberately retains only the URLSession task, never the authorized
+    /// URL, so keeping it in a subtitle flight cannot widen the credential
+    /// logging surface.
+    final class Cancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var task: URLSessionTask?
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            let current = task
+            lock.unlock()
+            current?.cancel()
+        }
+
+        fileprivate func bind(_ task: URLSessionTask) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !cancelled else { return false }
+            self.task = task
+            return true
+        }
+
+        fileprivate func unbind(_ task: URLSessionTask) {
+            lock.lock()
+            if self.task === task { self.task = nil }
+            lock.unlock()
+        }
+    }
+
     static let maximumMediaRangeByteLength = 16 * 1_024 * 1_024
     private static let mediaTransferChunkLength = 256 * 1_024
     static let maximumArtworkByteLength = 8 * 1_024 * 1_024
@@ -74,9 +112,22 @@ final class ServerRemoteAssetFetcher {
         url: URL,
         offset: Int64,
         length: Int64,
+        cancellation: Cancellation? = nil,
         consume: @escaping (Data) -> Bool
     ) -> Bool {
-        guard offset >= 0, length > 0, length <= Int64(Self.maximumMediaRangeByteLength) else {
+        // Keep the complete Range arithmetic representable before interpolating
+        // it into a header. Callers normally resolve against a known entity
+        // length, but this boundary must still fail closed for direct/internal
+        // calls near Int64.max instead of trapping on `offset + length - 1`.
+        guard cancellation?.isCancelled != true,
+              offset >= 0,
+              length > 0,
+              length <= Int64(Self.maximumMediaRangeByteLength),
+              // A representable entity length must be at least
+              // `offset + length`; reject even a one-byte range starting at
+              // Int64.max because no Int64 total can contain that byte.
+              offset <= Int64.max - length
+        else {
             return false
         }
         if let responseOverride {
@@ -85,6 +136,7 @@ final class ServerRemoteAssetFetcher {
             }
             var start = 0
             while start < data.count {
+                guard cancellation?.isCancelled != true else { return false }
                 let end = min(start + Self.mediaTransferChunkLength, data.count)
                 guard consume(data.subdata(in: start..<end)) else { return false }
                 start = end
@@ -101,6 +153,7 @@ final class ServerRemoteAssetFetcher {
             expectedOrigin: url,
             expectedOffset: offset,
             expectedLength: length,
+            cancellation: cancellation,
             consume: consume
         )
     }
@@ -223,10 +276,15 @@ final class ServerRemoteAssetFetcher {
 
     /// 一次有界的远程**元数据/文本**读取：字幕轨清单与字幕正文走这里。
     ///
-    /// 它不缓存也不合并——字幕是逐条目一次性的读取，不像海报那样一屏几十张；
-    /// 但它共用封面那组并发槽位，所以再多的字幕请求也挤不掉播放用的 4 路媒体槽。
-    /// 上限单独给，因为一份 ASS 字幕可以比一张封面大得多。
-    func metadataBytes(url: URL, maximumByteLength: Int, accept: String? = nil) -> Data? {
+    /// 合并、缓存与队列由上层按资源修订处理；这里负责上游读取的严格大小、origin、
+    /// 超时与主动取消。它共用封面槽位，因此字幕不会挤掉播放用的 4 路媒体槽。
+    func metadataBytes(
+        url: URL,
+        maximumByteLength: Int,
+        accept: String? = nil,
+        cancellation: Cancellation? = nil
+    ) -> Data? {
+        guard cancellation?.isCancelled != true else { return nil }
         if let responseOverride { return responseOverride(url, nil, nil) }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
@@ -237,7 +295,8 @@ final class ServerRemoteAssetFetcher {
             expectedOrigin: url,
             maximumByteLength: maximumByteLength,
             expectedLength: nil,
-            requestClass: .artwork
+            requestClass: .artwork,
+            cancellation: cancellation
         )
     }
 
@@ -246,14 +305,16 @@ final class ServerRemoteAssetFetcher {
         expectedOrigin: URL,
         maximumByteLength: Int,
         expectedLength: Int?,
-        requestClass: RequestClass
+        requestClass: RequestClass,
+        cancellation: Cancellation? = nil
     ) -> Data? {
         performResponse(
             request,
             expectedOrigin: expectedOrigin,
             maximumByteLength: maximumByteLength,
             expectedLength: expectedLength,
-            requestClass: requestClass
+            requestClass: requestClass,
+            cancellation: cancellation
         )?.data
     }
 
@@ -262,28 +323,37 @@ final class ServerRemoteAssetFetcher {
         expectedOrigin: URL,
         maximumByteLength: Int,
         expectedLength: Int?,
-        requestClass: RequestClass
+        requestClass: RequestClass,
+        cancellation: Cancellation? = nil
     ) -> (data: Data, http: HTTPURLResponse)? {
         // 所有浏览器可见图片和媒体块共享小型全局并发上限：不能让一页几十张
         // 海报同时淹没上游服务器，也避免占满本地服务线程。
         let slots = Self.slots(for: requestClass)
-        guard slots.wait(timeout: .now() + request.timeoutInterval) == .success else { return nil }
+        guard Self.waitForSlot(
+            slots,
+            timeout: request.timeoutInterval,
+            cancellation: cancellation
+        ) else { return nil }
         defer { slots.signal() }
         // 会话按 origin 复用：连续的封面或长度探测不再各自重做一次 TCP/TLS 握手。
         let session = sessionPool.session(for: expectedOrigin).session
 
-        let semaphore = DispatchSemaphore(value: 0)
-        var result: (Data, URLResponse)?
-        var failed = false
+        let completion = DispatchSemaphore(value: 0)
+        let result = ServerRemoteResponseBox()
         let task = session.dataTask(with: request) { data, response, error in
-            defer { semaphore.signal() }
-            guard error == nil, let data, let response else { failed = true; return }
-            result = (data, response)
+            result.store(data: data, response: response, error: error)
+            completion.signal()
         }
+        guard cancellation?.bind(task) ?? true else { return nil }
+        defer { cancellation?.unbind(task) }
         task.resume()
-        guard semaphore.wait(timeout: .now() + request.timeoutInterval + 1) == .success,
-              !failed,
-              let (data, response) = result,
+        guard Self.waitForCompletion(
+            completion,
+            task: task,
+            timeout: request.timeoutInterval + 1,
+            cancellation: cancellation
+        ),
+              let (data, response) = result.value,
               let http = response as? HTTPURLResponse,
               Self.sameOrigin(http.url, expectedOrigin),
               (200...299).contains(http.statusCode),
@@ -294,11 +364,45 @@ final class ServerRemoteAssetFetcher {
         return (data, http)
     }
 
+    private static func waitForSlot(
+        _ slots: DispatchSemaphore,
+        timeout: TimeInterval,
+        cancellation: Cancellation?
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        repeat {
+            guard cancellation?.isCancelled != true else { return false }
+            if slots.wait(timeout: .now() + 0.05) == .success { return true }
+        } while Date() < deadline
+        return false
+    }
+
+    private static func waitForCompletion(
+        _ completion: DispatchSemaphore,
+        task: URLSessionTask,
+        timeout: TimeInterval,
+        cancellation: Cancellation?
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(max(0, timeout))
+        repeat {
+            if completion.wait(timeout: .now() + 0.05) == .success {
+                return cancellation?.isCancelled != true
+            }
+            if cancellation?.isCancelled == true {
+                task.cancel()
+                return false
+            }
+        } while Date() < deadline
+        task.cancel()
+        return false
+    }
+
     private func stream(
         _ request: URLRequest,
         expectedOrigin: URL,
         expectedOffset: Int64,
         expectedLength: Int64,
+        cancellation: Cancellation?,
         consume: @escaping (Data) -> Bool
     ) -> Bool {
         let telemetry = self.telemetry
@@ -307,12 +411,19 @@ final class ServerRemoteAssetFetcher {
         defer { telemetry.rangeEnded() }
 
         let slots = Self.mediaRequestSlots
-        guard slots.wait(timeout: .now() + request.timeoutInterval) == .success else {
+        guard Self.waitForSlot(
+            slots,
+            timeout: request.timeoutInterval,
+            cancellation: cancellation
+        ) else {
+            let outcome: ServerRangeOutcome = cancellation?.isCancelled == true
+                ? .clientDisconnected
+                : .upstreamStalled
             telemetry.recordRange(
                 source: .remoteUpstream,
                 requestedByteLength: expectedLength,
                 deliveredByteLength: 0,
-                outcome: .upstreamStalled,
+                outcome: outcome,
                 upstreamTimeToFirstByte: nil,
                 totalDuration: Date().timeIntervalSince(startedAt)
             )
@@ -337,14 +448,33 @@ final class ServerRemoteAssetFetcher {
         // 先登记再 resume：委托回调按 taskIdentifier 派发，晚一步登记会丢首个分块。
         pooled.delegate.register(handler, for: task.taskIdentifier)
         defer { pooled.delegate.unregister(task.taskIdentifier) }
+        guard cancellation?.bind(task) ?? true else {
+            telemetry.recordRange(
+                source: .remoteUpstream,
+                requestedByteLength: expectedLength,
+                deliveredByteLength: 0,
+                outcome: .clientDisconnected,
+                upstreamTimeToFirstByte: nil,
+                totalDuration: Date().timeIntervalSince(startedAt)
+            )
+            return false
+        }
+        defer { cancellation?.unbind(task) }
         task.resume()
-        let finished = Self.waitForStreamCompletion(handler: handler, task: task)
+        let finished = Self.waitForStreamCompletion(
+            handler: handler,
+            task: task,
+            cancellation: cancellation
+        )
         let succeeded = finished && handler.succeeded
+        let wasCancelled = cancellation?.isCancelled == true
         telemetry.recordRange(
             source: .remoteUpstream,
             requestedByteLength: expectedLength,
             deliveredByteLength: handler.deliveredByteLength,
-            outcome: finished ? handler.outcome : .upstreamStalled,
+            outcome: handler.succeeded
+                ? .completed
+                : (wasCancelled ? .clientDisconnected : (finished ? handler.outcome : .upstreamStalled)),
             upstreamTimeToFirstByte: handler.timeToFirstByte,
             totalDuration: Date().timeIntervalSince(startedAt)
         )
@@ -355,11 +485,22 @@ final class ServerRemoteAssetFetcher {
     /// 慢但健康的大 Range 判成失败，浏览器随后只能整段重试，反而更慢。
     private static func waitForStreamCompletion(
         handler: StreamingMediaHandler,
-        task: URLSessionDataTask
+        task: URLSessionDataTask,
+        cancellation: Cancellation?
     ) -> Bool {
         let startedAt = Date()
         while true {
-            if handler.completed.wait(timeout: .now() + 1) == .success { return true }
+            if handler.completed.wait(timeout: .now() + 0.05) == .success {
+                return cancellation?.isCancelled != true
+            }
+            if cancellation?.isCancelled == true {
+                task.cancel()
+                // The delegate owns callbacks until completion. Wait briefly
+                // after cancellation so unregistering cannot release a handler
+                // while URLSession is still delivering its terminal callback.
+                _ = handler.completed.wait(timeout: .now() + 5)
+                return false
+            }
             let now = Date()
             guard handler.secondsSinceProgress(now: now) <= upstreamIdleTimeout,
                   now.timeIntervalSince(startedAt) <= maximumSingleRangeDuration
@@ -520,6 +661,30 @@ final class RemoteUpstreamSessionPool: @unchecked Sendable {
 
 /// 池化会话的共享委托。它按 `taskIdentifier` 把数据回调派发给登记的流式处理器，
 /// 并对**所有**任务（含带 completion handler 的图片与探测请求）拒绝重定向。
+/// URLSession completes on a delegate queue. Keeping its result behind a lock
+/// avoids publishing callback-owned values through unsynchronised stack vars
+/// when a timeout/cancellation races completion.
+private final class ServerRemoteResponseBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: (Data, URLResponse)?
+
+    var value: (Data, URLResponse)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func store(data: Data?, response: URLResponse?, error: Error?) {
+        lock.lock()
+        if error == nil, let data, let response {
+            stored = (data, response)
+        } else {
+            stored = nil
+        }
+        lock.unlock()
+    }
+}
+
 final class UpstreamSessionDelegate: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate {
     private let lock = NSLock()
     private var handlers: [Int: StreamingMediaHandler] = [:]

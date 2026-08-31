@@ -2010,6 +2010,120 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertFalse((String(data: ready.body, encoding: .utf8) ?? "").contains(media.path))
     }
 
+    func testRemoteSubtitleRouteDoesNotBlockAndHeadDoesNotStartFetch() throws {
+        let payload = Data("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n远程字幕\n".utf8)
+        let fetchEntered = DispatchSemaphore(value: 0)
+        let releaseFetch = DispatchSemaphore(value: 0)
+        let fetchCount = LockedTestCounter()
+        let bodyCatalog = ServerRemoteSubtitleBodyCatalog(fetchBody: { _, _ in
+            fetchCount.increment()
+            fetchEntered.signal()
+            releaseFetch.wait()
+            return payload
+        })
+        let remoteTrack = ServerRemoteSubtitleCatalog.Track(
+            label: "简体中文",
+            language: "zh-Hans",
+            format: "vtt",
+            downloadURL: URL(string: "https://media.example/subtitles/7.vtt?token=SECRET")!
+        )
+        let router = LocalHTTPRouter(
+            serverID: "server-001",
+            serverName: "客厅服务器",
+            subtitleTrackProvider: { itemID, trackID, _ in
+                guard itemID == "movie-1", trackID == 0 else { return nil }
+                return ServerSubtitleTrackReference(
+                    label: remoteTrack.label,
+                    language: remoteTrack.language,
+                    origin: .remote,
+                    source: .remote(remoteTrack)
+                )
+            },
+            remoteSubtitleBodyCatalog: bodyCatalog,
+            authenticationProvider: { _ in .testAdministrator() }
+        )
+
+        let head = router.response(
+            for: "HEAD /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n"
+        )
+        XCTAssertEqual(head.statusCode, 200)
+        XCTAssertEqual(head.declaredContentLength, 0)
+        XCTAssertEqual(fetchCount.value, 0)
+
+        let startedAt = Date()
+        let queued = router.response(
+            for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n"
+        )
+        XCTAssertEqual(queued.statusCode, 202)
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.1)
+        XCTAssertTrue(queued.additionalHeaders.contains("Cache-Control: no-store"))
+        XCTAssertTrue(queued.additionalHeaders.contains("Retry-After: 1"))
+        XCTAssertEqual(fetchEntered.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(
+            router.response(for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n").statusCode,
+            202
+        )
+        XCTAssertEqual(fetchCount.value, 1)
+        releaseFetch.signal()
+
+        let deadline = Date().addingTimeInterval(2)
+        var ready = router.response(
+            for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n"
+        )
+        while ready.statusCode == 202, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.005)
+            ready = router.response(
+                for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n"
+            )
+        }
+        XCTAssertEqual(ready.statusCode, 200)
+        XCTAssertEqual(ready.contentType, "text/vtt; charset=utf-8")
+        XCTAssertEqual(ready.body, payload)
+        XCTAssertFalse((String(data: ready.body, encoding: .utf8) ?? "").contains("SECRET"))
+    }
+
+    func testPlaybackTrackRoutePublishesRemoteMetadataPreparationAsAccepted() throws {
+        let calls = LockedTestCounter()
+        let tracks = ServerWebPlaybackTrackSet(
+            audio: [],
+            subtitles: [ServerWebVTTSubtitleTrack(
+                id: 0,
+                label: "远程字幕",
+                language: "zh-Hans",
+                origin: .remote
+            )],
+            remuxable: false,
+            remuxUnavailableReason: nil,
+            durationSeconds: 90
+        )
+        let router = LocalHTTPRouter(
+            serverID: "server-001",
+            serverName: "客厅服务器",
+            playbackTracksProvider: { _, _ in
+                calls.increment()
+                if calls.value == 1 { throw ServerRemoteSubtitleTracksPending() }
+                return tracks
+            },
+            authenticationProvider: { _ in .testAdministrator() }
+        )
+
+        let preparing = router.response(
+            for: "GET /api/v1/playback/tracks/movie-1 HTTP/1.1\r\n\r\n"
+        )
+        XCTAssertEqual(preparing.statusCode, 202)
+        XCTAssertTrue(preparing.additionalHeaders.contains("Cache-Control: no-store"))
+        XCTAssertTrue(preparing.additionalHeaders.contains("Retry-After: 2"))
+
+        let ready = router.response(
+            for: "GET /api/v1/playback/tracks/movie-1 HTTP/1.1\r\n\r\n"
+        )
+        XCTAssertEqual(ready.statusCode, 200)
+        XCTAssertEqual(
+            try JSONDecoder().decode(ServerWebPlaybackTrackSet.self, from: ready.body),
+            tracks
+        )
+    }
+
     /// 轨道名单是"网页上有没有字幕/音轨入口"的唯一来源。它必须逐条目授权，
     /// 而且既不能泄露文件名，也不能泄露上游地址。
     func testPlaybackTrackRouteIsAuthorizedAndOpaque() throws {
@@ -2191,6 +2305,23 @@ private enum ProbeFailure: LocalizedError {
 
 private enum CatalogFailure: Error {
     case unavailable
+}
+
+private final class LockedTestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
+
+    func increment() {
+        lock.lock()
+        storedValue += 1
+        lock.unlock()
+    }
 }
 
 /// The reduced-motion policy lives in the shared base sheet rather than being

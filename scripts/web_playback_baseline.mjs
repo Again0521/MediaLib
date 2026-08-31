@@ -38,7 +38,8 @@ function parseArguments(argv) {
     manifest: '',
     out: '',
     headless: true,
-    seekCount: 6
+    seekCount: 6,
+    samplesOnly: false
   };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -50,6 +51,7 @@ function parseArguments(argv) {
       case '--manifest': options.manifest = value; index += 1; break;
       case '--out': options.out = value; index += 1; break;
       case '--seeks': options.seekCount = Number(value); index += 1; break;
+      case '--samples-only': options.samplesOnly = true; break;
       case '--headed': options.headless = false; break;
       default: break;
     }
@@ -294,6 +296,45 @@ async function measureSample(session, options, item) {
     (() => {
       const media = document.querySelector('video, audio');
       if (media && window.__medialibBaseline) window.__medialibBaseline.attach(media);
+      // Capture only HLS.js's documented enum-like error fields. They contain
+      // no media URL, token, path, response body, or stack trace, but explain
+      // why a stream that ffprobe accepts may still fail in MSE.
+      if (window.Hls && !window.__medialibHLSInstrumented) {
+        window.__medialibHLSInstrumented = true;
+        window.__medialibHLSErrors = [];
+        const originalTrigger = window.Hls.prototype.trigger;
+        window.Hls.prototype.trigger = function(event, data) {
+          if (event === window.Hls.Events.ERROR) {
+            window.__medialibHLSErrors.push({
+              type:typeof data?.type === 'string' ? data.type.slice(0, 80) : null,
+              details:typeof data?.details === 'string' ? data.details.slice(0, 120) : null,
+              fatal:data?.fatal === true
+            });
+          }
+          return originalTrigger.call(this, event, data);
+        };
+      }
+      if (!window.__medialibPlaybackFetchInstrumented) {
+        window.__medialibPlaybackFetchInstrumented = true;
+        window.__medialibPlaybackSessionRequests = [];
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async (...args) => {
+          const request = args[0];
+          const url = typeof request === 'string' ? request : String(request?.url || '');
+          const method = String(args[1]?.method || request?.method || 'GET').toUpperCase();
+          const response = await originalFetch(...args);
+          if (url === '/api/v1/playback/sessions' && method === 'POST') {
+            const entry = { status:response.status, mode:null, state:null };
+            try {
+              const payload = await response.clone().json();
+              entry.mode = typeof payload?.mode === 'string' ? payload.mode.slice(0, 80) : null;
+              entry.state = typeof payload?.state === 'string' ? payload.state.slice(0, 80) : null;
+            } catch (_) { /* status alone remains useful */ }
+            window.__medialibPlaybackSessionRequests.push(entry);
+          }
+          return response;
+        };
+      }
       return !!media;
     })();
   `, { awaitPromise: false });
@@ -342,6 +383,26 @@ async function measureSample(session, options, item) {
   `);
 
   const firstFrame = playing.ok ? await session.evaluate(FIRST_FRAME_SOURCE) : null;
+  // `playing` alone is not proof of usable playback: browsers may decode the
+  // video while silently rejecting TrueHD/DTS. Wait for the page's bounded
+  // negotiation marker and record the actual authenticated HLS mode.
+  const negotiatedPlayback = playing.ok ? await session.evaluate(`
+    new Promise(resolve => {
+      const media = document.querySelector('video, audio');
+      const startedAt = performance.now();
+      const read = () => ({
+        playbackMode: media?.dataset.playbackMode || null,
+        serverPlaybackMode: media?.dataset.serverPlaybackMode || null,
+        sourceRevision: Number(media?.dataset.sourceRevision || 0) || 0
+      });
+      const poll = () => {
+        const value = read();
+        if (value.serverPlaybackMode || performance.now() - startedAt >= 1500) return resolve(value);
+        setTimeout(poll, 50);
+      };
+      poll();
+    });
+  `) : null;
   const events = await session.evaluate('window.__medialibBaseline?.events ?? []', { awaitPromise: false });
 
   let pauseResumeOK = null;
@@ -363,29 +424,126 @@ async function measureSample(session, options, item) {
     seekSummary = await session.evaluate(`
       new Promise(async resolve => {
         const media = document.querySelector('video, audio');
+        const seekControl = document.getElementById('playback-seek');
         const durations = [];
-        const total = Number.isFinite(media.duration) && media.duration > 0 ? media.duration : 4;
+        const attempts = [];
+        const controlMaximum = Number(seekControl?.max || 0);
+        const total = Number.isFinite(controlMaximum) && controlMaximum > 0
+          ? controlMaximum
+          : (Number.isFinite(media.duration) && media.duration > 0 ? media.duration : 4);
         for (let index = 0; index < ${options.seekCount}; index += 1) {
           // 在片长内均匀取点并错开，避免每次都落在同一个已缓冲区间上。
           const target = ((index + 1) / (${options.seekCount} + 1)) * total;
           const startedAt = performance.now();
+          const initialRevision = Number(media.dataset.sourceRevision || 0) || 0;
+          const hlsMode = media.dataset.playbackMode === 'hls';
           const settled = await new Promise(done => {
-            const onSeeked = () => { media.removeEventListener('seeked', onSeeked); done(true); };
+            let finished = false;
+            const finish = value => {
+              if (finished) return;
+              finished = true;
+              media.removeEventListener('seeked', onSeeked);
+              media.removeEventListener('playing', onPlaying);
+              done(value);
+            };
+            const onSeeked = () => { if (!hlsMode) finish(true); };
+            const onPlaying = () => {
+              const revision = Number(media.dataset.sourceRevision || 0) || 0;
+              if (hlsMode && revision > initialRevision) finish(true);
+            };
             media.addEventListener('seeked', onSeeked);
-            media.currentTime = target;
-            setTimeout(() => { media.removeEventListener('seeked', onSeeked); done(false); }, 8000);
+            media.addEventListener('playing', onPlaying);
+            if (seekControl) {
+              seekControl.value = String(target);
+              seekControl.dispatchEvent(new Event('input', { bubbles:true }));
+              seekControl.dispatchEvent(new Event('change', { bubbles:true }));
+            } else {
+              media.currentTime = target;
+            }
+            const poll = () => {
+              if (finished) return;
+              const revision = Number(media.dataset.sourceRevision || 0) || 0;
+              if (hlsMode && revision > initialRevision && media.readyState >= 2) return finish(true);
+              setTimeout(poll, 50);
+            };
+            poll();
+            setTimeout(() => finish(false), 12000);
           });
-          if (settled) durations.push(performance.now() - startedAt);
+          const elapsed = performance.now() - startedAt;
+          attempts.push({
+            target:Number(target.toFixed(3)),
+            settled,
+            elapsedMs:Math.round(elapsed),
+            initialRevision,
+            finalRevision:Number(media.dataset.sourceRevision || 0) || 0,
+            readyState:media.readyState,
+            paused:media.paused,
+            statusText:(document.getElementById('player-status')?.textContent || '').trim().slice(0, 160),
+            sessionRequests:Array.isArray(window.__medialibPlaybackSessionRequests)
+              ? window.__medialibPlaybackSessionRequests.slice(-4) : []
+          });
+          if (settled) durations.push(elapsed);
           await new Promise(r => setTimeout(r, 120));
         }
         durations.sort((a, b) => a - b);
         const at = ratio => durations.length
           ? Math.round(durations[Math.min(durations.length - 1, Math.floor(durations.length * ratio))])
           : null;
-        resolve({ completed: durations.length, attempted: ${options.seekCount}, p50Ms: at(0.5), p95Ms: at(0.95) });
+        resolve({ completed: durations.length, attempted: ${options.seekCount}, p50Ms: at(0.5), p95Ms: at(0.95), attempts });
       });
     `);
   }
+
+  // A newly swapped HLS source can deliver its first video frame before the
+  // browser updates the audio decoded-byte counter. Give the decoder one small
+  // observation window so a successful seek is not mislabeled as silent.
+  if (playing.ok) await sleep(750);
+
+  // Chromium's non-standard webkitAudioDecodedByteCount can reset to zero
+  // after an MSE source replacement. Sample the actual media-element PCM as a
+  // second, independent signal: a sine-wave fixture must produce measurable
+  // deviation from digital silence. No samples leave the page.
+  const audioSignal = playing.ok ? await session.evaluate(`
+    (async () => {
+      const media = document.querySelector('video, audio');
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!media || !AudioContextClass) return { supported:false, reason:'audio-context-unavailable' };
+      try {
+        const context = new AudioContextClass();
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 2048;
+        const source = context.createMediaElementSource(media);
+        source.connect(analyser);
+        analyser.connect(context.destination);
+        await context.resume();
+        if (media.paused) await media.play();
+        const values = new Uint8Array(analyser.fftSize);
+        let peakDeviation = 0;
+        let rmsMaximum = 0;
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+          analyser.getByteTimeDomainData(values);
+          let squared = 0;
+          for (const value of values) {
+            const deviation = value - 128;
+            peakDeviation = Math.max(peakDeviation, Math.abs(deviation));
+            squared += deviation * deviation;
+          }
+          rmsMaximum = Math.max(rmsMaximum, Math.sqrt(squared / values.length));
+          if (peakDeviation > 2 && rmsMaximum > 0.5) break;
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        await context.close();
+        return {
+          supported:true,
+          audible:peakDeviation > 2 && rmsMaximum > 0.5,
+          peakDeviation,
+          rmsMaximum:Number(rmsMaximum.toFixed(2))
+        };
+      } catch (error) {
+        return { supported:false, reason:String(error?.name || 'audio-probe-failed').slice(0, 80) };
+      }
+    })();
+  `) : null;
 
   // 解码字节数把"视频能解、音频不能解"这类部分成功区分出来。只看 `playing`
   // 会把一个没有声音的播放当成完全成功——那恰好是"仅转音频"那一层要处理的场景。
@@ -419,7 +577,10 @@ async function measureSample(session, options, item) {
         },
         heapBytes: performance.memory ? performance.memory.usedJSHeapSize : null,
         mediaError: media?.error ? media.error.code : null,
-        readyState: media?.readyState ?? null
+        readyState: media?.readyState ?? null,
+        finalStatusText:(document.getElementById('player-status')?.textContent || '').trim().slice(0, 160),
+        hlsErrors:Array.isArray(window.__medialibHLSErrors)
+          ? window.__medialibHLSErrors.slice(-12) : []
       };
     })();
   `, { awaitPromise: false });
@@ -440,6 +601,8 @@ async function measureSample(session, options, item) {
     clickToPlayingMs: eventTime('playing'),
     firstFrameMs: firstFrame ? Math.round(firstFrame.ms) : null,
     firstFrameSource: firstFrame ? firstFrame.source : null,
+    negotiatedPlayback,
+    audioSignal,
     pauseResumeOK,
     seek: seekSummary,
     quality,
@@ -583,7 +746,7 @@ async function main() {
         const measurement = await measureSample(session, options, item);
         samples.push(measurement);
         console.log(measurement.directPlayed
-          ? `直放成功 首帧 ${measurement.firstFrameMs ?? '-'}ms`
+          ? `${measurement.negotiatedPlayback?.serverPlaybackMode || measurement.negotiatedPlayback?.playbackMode || '播放'}成功 首帧 ${measurement.firstFrameMs ?? '-'}ms`
           : `未直放（${measurement.failureReason}）`);
       } catch (error) {
         samples.push({ file: item.file, itemID: item.itemID, harnessError: String(error.message ?? error) });
@@ -591,10 +754,12 @@ async function main() {
       }
     }
 
-    const autoNext = await measureAutoNext(session, options, manifest.episodeItemIDs ?? []);
-    const resume = await measureResumeAcrossNavigation(
-      session, options, manifest.items[0]?.itemID ?? ''
-    );
+    const autoNext = options.samplesOnly
+      ? { supported: false, reason: 'samples-only' }
+      : await measureAutoNext(session, options, manifest.episodeItemIDs ?? []);
+    const resume = options.samplesOnly
+      ? { supported: false, reason: 'samples-only' }
+      : await measureResumeAcrossNavigation(session, options, manifest.items[0]?.itemID ?? '');
     const telemetry = await fetchTelemetry(session, options);
 
     const report = {
@@ -619,7 +784,7 @@ async function main() {
       }
       const seek = sample.seek ? `seek p50=${sample.seek.p50Ms}ms p95=${sample.seek.p95Ms}ms` : 'seek 未执行';
       console.log(
-        `  ${sample.file.padEnd(28)} ${sample.directPlayed ? '直放' : '未直放'} ` +
+        `  ${sample.file.padEnd(28)} ${sample.directPlayed ? (sample.negotiatedPlayback?.serverPlaybackMode || sample.negotiatedPlayback?.playbackMode || '播放') : '未播放'} ` +
         `metadata=${sample.clickToLoadedMetadataMs ?? '-'}ms playing=${sample.clickToPlayingMs ?? '-'}ms ` +
         `firstFrame=${sample.firstFrameMs ?? '-'}ms waiting=${sample.waiting?.count ?? '-'}/${sample.waiting?.totalMs ?? '-'}ms ` +
         `dropped=${sample.quality ? sample.quality.droppedVideoFrames : '-'} ${seek}`
@@ -629,7 +794,8 @@ async function main() {
     // 只看 `playing` 会把"画面在动但一点声音都没有"记成完全成功。把它单独点出来，
     // 因为这正是四级策略里"仅转音频"那一层要解决的场景。
     const silentVideo = samples.filter(sample =>
-      sample.directPlayed && sample.quality?.audioDecodedBytes === 0 && sample.quality?.videoDecodedBytes > 0
+      sample.directPlayed && sample.negotiatedPlayback?.playbackMode === 'direct' &&
+        sample.quality?.audioDecodedBytes === 0 && sample.quality?.videoDecodedBytes > 0
     );
     if (silentVideo.length > 0) {
       console.log('\n视频已解码但音频完全未解码（直放看似成功，实际无声）：');

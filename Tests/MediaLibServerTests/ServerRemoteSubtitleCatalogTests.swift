@@ -131,6 +131,224 @@ final class ServerRemoteSubtitleCatalogTests: XCTestCase {
         XCTAssertTrue(text.contains("远程字幕"))
     }
 
+    func testRemoteBodyCatalogReturnsPendingImmediatelyAndSingleFlights() throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let calls = LockedRemoteSubtitleCounter()
+        let payload = Data("WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n远程\n".utf8)
+        let catalog = ServerRemoteSubtitleBodyCatalog(fetchBody: { _, _ in
+            calls.increment()
+            entered.signal()
+            release.wait()
+            return payload
+        })
+        let track = remoteTrack(path: "/subtitle/1.vtt")
+
+        let startedAt = Date()
+        guard case .pending = catalog.webVTT(ownerID: "movie/0", track: track) else {
+            return XCTFail("冷请求必须立即进入 pending")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.1)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        for _ in 0..<12 {
+            guard case .pending = catalog.webVTT(ownerID: "movie/0", track: track) else {
+                return XCTFail("相同远程字幕必须共享同一 flight")
+            }
+        }
+        XCTAssertEqual(calls.value, 1)
+        release.signal()
+
+        let ready = waitForRemoteSubtitle(catalog, ownerID: "movie/0", track: track)
+        guard case let .ready(result) = ready else { return XCTFail("异步正文未发布") }
+        XCTAssertEqual(result, payload)
+        guard case let .ready(cached) = catalog.webVTT(ownerID: "movie/0", track: track) else {
+            return XCTFail("完成后必须命中正文缓存")
+        }
+        XCTAssertEqual(cached, payload)
+        XCTAssertEqual(calls.value, 1)
+    }
+
+    func testRemoteTrackCatalogReturnsPendingImmediatelyAndSingleFlights() {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let calls = LockedRemoteSubtitleCounter()
+        let expected = [remoteTrack(path: "/subtitle/metadata.vtt")]
+        let catalog = ServerRemoteSubtitleTrackCatalog(fetchTracks: { _, _, _ in
+            calls.increment()
+            entered.signal()
+            release.wait()
+            return expected
+        })
+        let item = embyItem(id: "async-track-list")
+        let streamURL = URL(string: item.filePath!)!
+
+        let startedAt = Date()
+        guard case .pending = catalog.tracks(for: item, streamURL: streamURL) else {
+            return XCTFail("冷清单必须立即进入 pending")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.1)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        for _ in 0..<12 {
+            guard case .pending = catalog.tracks(for: item, streamURL: streamURL) else {
+                return XCTFail("相同清单必须共享一个上游请求")
+            }
+        }
+        XCTAssertEqual(calls.value, 1)
+        release.signal()
+
+        let deadline = Date().addingTimeInterval(2)
+        var state = catalog.tracks(for: item, streamURL: streamURL)
+        while Date() < deadline {
+            guard case .pending = state else { break }
+            Thread.sleep(forTimeInterval: 0.005)
+            state = catalog.tracks(for: item, streamURL: streamURL)
+        }
+        guard case let .ready(tracks) = state else { return XCTFail("异步清单未发布") }
+        XCTAssertEqual(tracks, expected)
+        XCTAssertEqual(calls.value, 1)
+    }
+
+    func testRemoteTrackRevisionCancelsSupersededMetadataFetch() {
+        let oldEntered = DispatchSemaphore(value: 0)
+        let oldCancelled = DispatchSemaphore(value: 0)
+        let newRelease = DispatchSemaphore(value: 0)
+        let expected = [remoteTrack(path: "/subtitle/new.vtt")]
+        let catalog = ServerRemoteSubtitleTrackCatalog(fetchTracks: { _, streamURL, cancellation in
+            if streamURL.path.contains("old") {
+                oldEntered.signal()
+                while !cancellation.isCancelled {
+                    Thread.sleep(forTimeInterval: 0.005)
+                }
+                oldCancelled.signal()
+                return nil
+            }
+            newRelease.wait()
+            return expected
+        })
+        let item = embyItem(id: "metadata-revision")
+        let oldURL = URL(string: "https://media.example/Videos/old/stream.mkv?api_key=OLD")!
+        let newURL = URL(string: "https://media.example/Videos/new/stream.mkv?api_key=NEW")!
+
+        guard case .pending = catalog.tracks(for: item, streamURL: oldURL) else {
+            return XCTFail("旧清单未开始")
+        }
+        XCTAssertEqual(oldEntered.wait(timeout: .now() + 2), .success)
+        guard case .pending = catalog.tracks(for: item, streamURL: newURL) else {
+            return XCTFail("新清单未替换旧 flight")
+        }
+        XCTAssertEqual(oldCancelled.wait(timeout: .now() + 2), .success)
+        newRelease.signal()
+
+        let deadline = Date().addingTimeInterval(2)
+        var state = catalog.tracks(for: item, streamURL: newURL)
+        while Date() < deadline {
+            guard case .pending = state else { break }
+            Thread.sleep(forTimeInterval: 0.005)
+            state = catalog.tracks(for: item, streamURL: newURL)
+        }
+        guard case let .ready(tracks) = state else { return XCTFail("新清单未发布") }
+        XCTAssertEqual(tracks, expected)
+    }
+
+    func testRemoteBodyCatalogBoundsQueueAndConcurrency() {
+        let activity = LockedRemoteSubtitleActivity()
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let catalog = ServerRemoteSubtitleBodyCatalog(
+            fetchBody: { _, cancellation in
+                activity.begin()
+                entered.signal()
+                defer { activity.end() }
+                while release.wait(timeout: .now() + 0.01) != .success {
+                    if cancellation.isCancelled { return nil }
+                }
+                return Data("WEBVTT\n\n".utf8)
+            },
+            maximumConcurrentFetches: 2
+        )
+
+        var pending = 0
+        var rejected = 0
+        for index in 0..<10 {
+            switch catalog.webVTT(
+                ownerID: "movie/\(index)",
+                track: remoteTrack(path: "/subtitle/\(index).vtt")
+            ) {
+            case .pending: pending += 1
+            case .failed: rejected += 1
+            case .ready: XCTFail("冷任务不能同步完成")
+            }
+        }
+        XCTAssertEqual(pending, 8)
+        XCTAssertEqual(rejected, 2)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertEqual(activity.peak, 2)
+        for _ in 0..<8 { release.signal() }
+    }
+
+    func testRemoteBodyRevisionCancelsSupersededFetch() {
+        let oldEntered = DispatchSemaphore(value: 0)
+        let oldCancelled = DispatchSemaphore(value: 0)
+        let newRelease = DispatchSemaphore(value: 0)
+        let payload = Data("WEBVTT\n\n新修订\n".utf8)
+        let catalog = ServerRemoteSubtitleBodyCatalog(fetchBody: { track, cancellation in
+            if track.downloadURL.path == "/subtitle/old.vtt" {
+                oldEntered.signal()
+                while !cancellation.isCancelled {
+                    Thread.sleep(forTimeInterval: 0.005)
+                }
+                oldCancelled.signal()
+                return nil
+            }
+            newRelease.wait()
+            return payload
+        })
+        let old = remoteTrack(path: "/subtitle/old.vtt")
+        let new = remoteTrack(path: "/subtitle/new.vtt")
+
+        guard case .pending = catalog.webVTT(ownerID: "movie/0", track: old) else {
+            return XCTFail("旧修订未开始")
+        }
+        XCTAssertEqual(oldEntered.wait(timeout: .now() + 2), .success)
+        guard case .pending = catalog.webVTT(ownerID: "movie/0", track: new) else {
+            return XCTFail("新修订未替换旧 flight")
+        }
+        XCTAssertEqual(oldCancelled.wait(timeout: .now() + 2), .success)
+        newRelease.signal()
+        guard case let .ready(result) = waitForRemoteSubtitle(
+            catalog, ownerID: "movie/0", track: new
+        ) else { return XCTFail("新修订未发布") }
+        XCTAssertEqual(result, payload)
+    }
+
+    func testRemoteBodyFailureBecomesRetryableAfterShortVisibilityWindow() {
+        let clock = LockedRemoteSubtitleClock()
+        let calls = LockedRemoteSubtitleCounter()
+        let payload = Data("WEBVTT\n\n重试成功\n".utf8)
+        let catalog = ServerRemoteSubtitleBodyCatalog(
+            fetchBody: { _, _ in calls.increment() == 1 ? nil : payload },
+            uptimeProvider: { clock.value }
+        )
+        let track = remoteTrack(path: "/subtitle/retry.vtt")
+        guard case .pending = catalog.webVTT(ownerID: "movie/0", track: track) else {
+            return XCTFail("首次请求未开始")
+        }
+        let failed = waitForRemoteSubtitle(catalog, ownerID: "movie/0", track: track)
+        guard case .failed = failed else { return XCTFail("失败结果未短暂发布") }
+        XCTAssertEqual(calls.value, 1)
+        clock.value = 2
+        guard case .pending = catalog.webVTT(ownerID: "movie/0", track: track) else {
+            return XCTFail("失败窗口过后必须允许重试")
+        }
+        guard case let .ready(result) = waitForRemoteSubtitle(
+            catalog, ownerID: "movie/0", track: track
+        ) else { return XCTFail("重试未成功") }
+        XCTAssertEqual(result, payload)
+        XCTAssertEqual(calls.value, 2)
+    }
+
     /// 本地来源不会被误当成远程来源去联网。
     func testLocalItemsNeverReachUpstream() {
         let tracks = ServerRemoteSubtitleCatalog.tracks(
@@ -139,6 +357,93 @@ final class ServerRemoteSubtitleCatalogTests: XCTestCase {
             fetcher: fetcher(["/Items?": embyListing])
         )
         XCTAssertTrue(tracks.isEmpty)
+    }
+
+    private func remoteTrack(path: String) -> ServerRemoteSubtitleCatalog.Track {
+        ServerRemoteSubtitleCatalog.Track(
+            label: "远程字幕",
+            language: "zh-Hans",
+            format: "vtt",
+            downloadURL: URL(string: "https://media.example\(path)?token=SECRET")!
+        )
+    }
+
+    private func waitForRemoteSubtitle(
+        _ catalog: ServerRemoteSubtitleBodyCatalog,
+        ownerID: String,
+        track: ServerRemoteSubtitleCatalog.Track
+    ) -> ServerRemoteSubtitleBodyCatalog.State {
+        let deadline = Date().addingTimeInterval(2)
+        var state = catalog.webVTT(ownerID: ownerID, track: track)
+        while Date() < deadline {
+            guard case .pending = state else { return state }
+            Thread.sleep(forTimeInterval: 0.005)
+            state = catalog.webVTT(ownerID: ownerID, track: track)
+        }
+        return state
+    }
+}
+
+private final class LockedRemoteSubtitleCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
+
+    @discardableResult
+    func increment() -> Int {
+        lock.lock()
+        storedValue += 1
+        let result = storedValue
+        lock.unlock()
+        return result
+    }
+}
+
+private final class LockedRemoteSubtitleActivity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = 0
+    private var storedPeak = 0
+
+    var peak: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedPeak
+    }
+
+    func begin() {
+        lock.lock()
+        active += 1
+        storedPeak = max(storedPeak, active)
+        lock.unlock()
+    }
+
+    func end() {
+        lock.lock()
+        active -= 1
+        lock.unlock()
+    }
+}
+
+private final class LockedRemoteSubtitleClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: TimeInterval = 0
+
+    var value: TimeInterval {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedValue
+        }
+        set {
+            lock.lock()
+            storedValue = newValue
+            lock.unlock()
+        }
     }
 }
 

@@ -162,28 +162,82 @@ struct ServerHLSResource {
     }
 }
 
+/// Codec and timeline facts resolved before an HLS process is launched. Remote
+/// callers produce this from an authenticated loopback Range bridge so the
+/// upstream URL and credentials never become ffprobe or response metadata.
+struct ServerHLSPreparedMedia {
+    let videoCodec: String?
+    let videoHeight: Int?
+    let sourceIsHDR: Bool
+    let audioCodec: String?
+    let durationSeconds: Double?
+    let actualStartSeconds: Double
+
+    /// A missing remote probe is a recoverable compatibility miss, not proof
+    /// that the media is unplayable. Unknown codecs deliberately select the
+    /// full-transcode path, preserving playback while avoiding a false remux.
+    init(
+        remoteProbe: FFprobeMediaInspector.ProbedMedia?,
+        selectedAudioID: Int,
+        fallbackDurationSeconds: Double?,
+        actualStartSeconds: Double
+    ) {
+        videoCodec = remoteProbe?.video.first?.codec
+        videoHeight = remoteProbe?.video.first?.height
+        sourceIsHDR = remoteProbe?.video.first?.isHDR == true
+        audioCodec = remoteProbe?.audio.first(where: {
+            $0.typeOrdinal == selectedAudioID
+        })?.codec
+        durationSeconds = remoteProbe?.durationSeconds ?? fallbackDurationSeconds
+        self.actualStartSeconds = actualStartSeconds
+    }
+
+    init(
+        videoCodec: String?,
+        videoHeight: Int?,
+        sourceIsHDR: Bool,
+        audioCodec: String?,
+        durationSeconds: Double?,
+        actualStartSeconds: Double
+    ) {
+        self.videoCodec = videoCodec
+        self.videoHeight = videoHeight
+        self.sourceIsHDR = sourceIsHDR
+        self.audioCodec = audioCodec
+        self.durationSeconds = durationSeconds
+        self.actualStartSeconds = actualStartSeconds
+    }
+}
+
 /// Authenticated, bounded HLS session owner.
 ///
 /// Each session owns one ffmpeg process and, for remote assets, one ephemeral
 /// loopback Range bridge. Sessions are bound to the complete authenticated
 /// principal identity and are never addressable by an upstream URL or path.
 final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
+    private struct PreparedLaunch {
+        let mode: String
+        let reason: String
+        let durationSeconds: Double?
+        let actualStartSeconds: Double
+        let process: Process
+    }
+
     private final class Session {
         let id: String
         let owner: Owner
         let directory: URL
         let startedAt: Date
         var actualStartSeconds: Double
-        let durationSeconds: Double?
-        let mode: String
-        let reason: String
+        var durationSeconds: Double?
+        var mode: String
+        var reason: String
         let mediaURL: String
         let bridge: ServerRemoteMediaBridge?
         var lastAccessedAt: Date
         var process: Process?
         let preparationCancellation = ServerBoundedProcess.Cancellation()
-        let startResolver: ((ServerBoundedProcess.Cancellation) -> Double)?
-        let processBuilder: (Double) -> Process
+        let launchBuilder: (ServerBoundedProcess.Cancellation) -> PreparedLaunch?
         var state: ServerHLSPlaybackSessionState = .preparing
         var readinessTimer: DispatchSourceTimer?
         var finishedAt: Date?
@@ -198,8 +252,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             reason: String,
             mediaURL: String,
             bridge: ServerRemoteMediaBridge?,
-            startResolver: ((ServerBoundedProcess.Cancellation) -> Double)?,
-            processBuilder: @escaping (Double) -> Process
+            launchBuilder: @escaping (ServerBoundedProcess.Cancellation) -> PreparedLaunch?
         ) {
             self.id = id
             self.owner = owner
@@ -211,8 +264,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             self.reason = reason
             self.mediaURL = mediaURL
             self.bridge = bridge
-            self.startResolver = startResolver
-            self.processBuilder = processBuilder
+            self.launchBuilder = launchBuilder
             self.lastAccessedAt = Date()
         }
 
@@ -250,6 +302,9 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
     private let configurationCacheLifetime: TimeInterval
     private let ffmpegFilterCapabilities: ServerMediaToolchain.FFmpegFilterCapabilities
     private let ffmpegURLProvider: () -> URL?
+    /// Deterministic seam for exercising the final atomic reservation under a
+    /// simultaneous-create barrier. Production leaves it nil.
+    private let beforeReservation: (@Sendable () -> Void)?
     private let lock = NSLock()
     private let readinessQueue = DispatchQueue(label: "MediaLibServer.HLSReadiness", qos: .utility)
     private let preparationQueue = DispatchQueue(
@@ -272,7 +327,8 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         ffmpegFilterCapabilities: ServerMediaToolchain.FFmpegFilterCapabilities? = nil,
         ffmpegURLProvider: @escaping () -> URL? = { ServerMediaToolchain.ffmpegURL() },
         operationalSettingsProvider: (@Sendable () -> ServerOperationalSettings)? = nil,
-        configurationCacheLifetime: TimeInterval = 2
+        configurationCacheLifetime: TimeInterval = 2,
+        beforeReservation: (@Sendable () -> Void)? = nil
     ) {
         self.remoteAssetFetcher = remoteAssetFetcher
         let initialConfiguration = ServerOperationalSettings(
@@ -285,6 +341,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         self.ffmpegFilterCapabilities = ffmpegFilterCapabilities
             ?? ServerMediaToolchain.ffmpegFilterCapabilities()
         self.ffmpegURLProvider = ffmpegURLProvider
+        self.beforeReservation = beforeReservation
         self.rootDirectory = rootDirectory ?? FileManager.default.temporaryDirectory
             .appendingPathComponent("MediaLIB-HLS-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
         try? FileManager.default.createDirectory(
@@ -313,6 +370,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         sourceIsHDR: Bool = false,
         audioCodec: String?,
         burnInSubtitleStreamIndex: Int? = nil,
+        preparationResolver: ((URL, ServerBoundedProcess.Cancellation) -> ServerHLSPreparedMedia?)? = nil,
         principal: ServerRequestPrincipal,
         policy: ServerUserPolicy = ServerUserPolicy()
     ) -> ServerHLSPlaybackDescriptor? {
@@ -353,72 +411,97 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             try? FileManager.default.removeItem(at: directory)
             return nil
         }
-        let input = bridge?.inputURL.absoluteString ?? ServerMediaToolchain.inputArgument(for: asset.fileURL)
-        // H.264 can be repackaged without quality loss. Other codecs take the
-        // VideoToolbox path so Safari always receives an Apple-supported HLS
-        // profile; this is the last compatibility tier, not the default.
-        let normalizedVideoCodec = videoCodec?.lowercased()
-        let targetHeight = Self.targetVideoHeight(
-            quality: request.quality ?? .auto,
-            sourceHeight: videoHeight,
-            capabilities: request.capabilities
-        )
-        let preservesHDR = sourceIsHDR && request.capabilities?.hdrDisplay == true &&
-            targetHeight == nil && burnInSubtitleStreamIndex == nil &&
-            ["hevc", "h265"].contains(normalizedVideoCodec ?? "") &&
-            request.capabilities?.nativeHLS == true &&
-            request.capabilities?.videoCodecs.contains(where: {
-                ["hevc", "h265", "hvc1"].contains($0.lowercased())
-            }) == true
-        let toneMapsHDR = sourceIsHDR && !preservesHDR
-        guard !toneMapsHDR || ffmpegFilterCapabilities.softwareHDRToneMapping else {
-            bridge?.stop()
-            try? FileManager.default.removeItem(at: directory)
-            return nil
-        }
-        let copiesVideo = !toneMapsHDR && burnInSubtitleStreamIndex == nil && targetHeight == nil && (normalizedVideoCodec == "h264" || (
-            ["hevc", "h265"].contains(normalizedVideoCodec ?? "") &&
-                request.capabilities?.nativeHLS == true &&
-                request.capabilities?.videoCodecs.contains(where: { ["hevc", "h265", "hvc1"].contains($0.lowercased()) }) == true
-        ))
-        let copiesAudio = audioCodec?.lowercased() == "aac"
-        let mode = copiesVideo
-            ? (copiesAudio ? "hlsRemux" : "hlsAudioTranscode")
-            : "hlsTranscode"
-        guard (mode == "hlsRemux" && policy.remuxAllowed) ||
-                (mode != "hlsRemux" && policy.transcodeAllowed)
-        else {
-            bridge?.stop()
-            try? FileManager.default.removeItem(at: directory)
-            return nil
-        }
-        let reason = burnInSubtitleStreamIndex != nil
-            ? "bitmapSubtitleCompatibility"
-            : targetHeight != nil
-            ? "qualityCompatibility"
-            : copiesVideo
-            ? (copiesAudio ? "containerCompatibility" : "audioCodecCompatibility")
-            : "videoCodecCompatibility"
+        let inputURL = bridge?.inputURL ?? asset.fileURL
+        let input = bridge == nil
+            ? ServerMediaToolchain.inputArgument(for: inputURL)
+            : inputURL.absoluteString
         let playlist = directory.appendingPathComponent("index.m3u8")
-        let segmentPattern = directory.appendingPathComponent("segment-%05d.ts").path
-        let hdrFilter = toneMapsHDR ? Self.softwareHDRToneMappingFilter : nil
-        let bitrate = Self.effectiveBitrateMbps(
-            request: request,
-            policy: policy,
-            defaultValue: configuration.defaultRemoteBitrateMbps,
-            targetHeight: targetHeight
-        )
-        let encoderArguments = Self.encoderArguments(for: configuration.transcodeEngine)
-        let processBuilder: (Double) -> Process = { resolvedStartSeconds in
+        let buildLaunch: (ServerHLSPreparedMedia) -> PreparedLaunch? = { prepared in
+            guard prepared.actualStartSeconds.isFinite,
+                  prepared.actualStartSeconds >= 0,
+                  prepared.actualStartSeconds < 86_400
+            else { return nil }
+            let normalizedVideoCodec = prepared.videoCodec?.lowercased()
+            let targetHeight = Self.targetVideoHeight(
+                quality: request.quality ?? .auto,
+                sourceHeight: prepared.videoHeight,
+                capabilities: request.capabilities
+            )
+            let preservesHDR = prepared.sourceIsHDR && request.capabilities?.hdrDisplay == true &&
+                targetHeight == nil && burnInSubtitleStreamIndex == nil &&
+                ["hevc", "h265"].contains(normalizedVideoCodec ?? "") &&
+                request.capabilities?.nativeHLS == true &&
+                request.capabilities?.videoCodecs.contains(where: {
+                    ["hevc", "h265", "hvc1"].contains($0.lowercased())
+                }) == true
+            let toneMapsHDR = prepared.sourceIsHDR && !preservesHDR
+            guard !toneMapsHDR || self.ffmpegFilterCapabilities.softwareHDRToneMapping else {
+                return nil
+            }
+            let copiesVideo = !toneMapsHDR && burnInSubtitleStreamIndex == nil && targetHeight == nil && (
+                normalizedVideoCodec == "h264" || (
+                    ["hevc", "h265"].contains(normalizedVideoCodec ?? "") &&
+                    request.capabilities?.nativeHLS == true &&
+                    request.capabilities?.videoCodecs.contains(where: {
+                        ["hevc", "h265", "hvc1"].contains($0.lowercased())
+                    }) == true
+                )
+            )
+            let copiesAudio = prepared.audioCodec?.lowercased() == "aac"
+            let mode = copiesVideo
+                ? (copiesAudio ? "hlsRemux" : "hlsAudioTranscode")
+                : "hlsTranscode"
+            guard (mode == "hlsRemux" && policy.remuxAllowed) ||
+                    (mode != "hlsRemux" && policy.transcodeAllowed)
+            else { return nil }
+            let reason = burnInSubtitleStreamIndex != nil
+                ? "bitmapSubtitleCompatibility"
+                : targetHeight != nil
+                ? "qualityCompatibility"
+                : copiesVideo
+                ? (copiesAudio ? "containerCompatibility" : "audioCodecCompatibility")
+                : "videoCodecCompatibility"
+            // Apple clients accept HEVC in HLS through fragmented MP4. H.264
+            // and H.264 transcodes retain the mature MPEG-TS path.
+            let usesFragmentedMP4 = copiesVideo &&
+                ["hevc", "h265"].contains(normalizedVideoCodec ?? "")
+            let segmentExtension = usesFragmentedMP4 ? "m4s" : "ts"
+            let segmentPattern = directory
+                .appendingPathComponent("segment-%05d.\(segmentExtension)").path
+            let hdrFilter = toneMapsHDR ? Self.softwareHDRToneMappingFilter : nil
+            let bitrate = Self.effectiveBitrateMbps(
+                request: request,
+                policy: policy,
+                defaultValue: configuration.defaultRemoteBitrateMbps,
+                targetHeight: targetHeight
+            )
+            let encoderArguments = Self.encoderArguments(for: configuration.transcodeEngine)
+            // Input-side seeking is fast, but Matroska can land video on the
+            // preceding keyframe while TrueHD/DTS begins at the requested
+            // timestamp. That produces valid-looking HLS with seconds of silent
+            // video. Seek at most ten seconds earlier, burst-read only that
+            // bounded preroll, then trim on the output timeline so every mapped
+            // stream begins together. Long MKVs never scan from the file start.
+            let inputSeekSeconds = max(0, prepared.actualStartSeconds - 10)
+            let outputTrimSeconds = prepared.actualStartSeconds - inputSeekSeconds
             var arguments = [
                 "-nostdin", "-hide_banner", "-loglevel", "error",
-                "-ss", String(format: "%.3f", resolvedStartSeconds),
-                // Keep generation near playback speed. Combined with the sliding
-                // playlist below this bounds temporary storage instead of racing
-                // through a multi-hour movie and materializing gigabytes of HLS.
-                "-re",
-                "-i", input
+                "-ss", String(format: "%.3f", inputSeekSeconds)
             ]
+            if outputTrimSeconds > 0.001 {
+                arguments += [
+                    "-readrate", "1",
+                    "-readrate_initial_burst", String(format: "%.3f", outputTrimSeconds + 1)
+                ]
+            } else {
+                // Keep steady-state generation near playback speed. Combined
+                // with the sliding playlist this bounds temporary storage.
+                arguments += ["-re"]
+            }
+            arguments += ["-i", input]
+            if outputTrimSeconds > 0.001 {
+                arguments += ["-ss", String(format: "%.3f", outputTrimSeconds)]
+            }
             if let burnInSubtitleStreamIndex {
                 let graph: String
                 let inputVideo = hdrFilter.map { "[0:v:0]\($0)[toned]" }
@@ -469,17 +552,62 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
                 "-avoid_negative_ts", "make_zero",
                 "-f", "hls", "-hls_init_time", "1", "-hls_time", "6",
                 "-hls_list_size", "30", "-hls_delete_threshold", "2",
-                "-hls_flags", "delete_segments+independent_segments+temp_file",
-                "-hls_segment_filename", segmentPattern,
-                playlist.path
+                "-hls_flags", "delete_segments+independent_segments+temp_file"
             ]
+            if usesFragmentedMP4 {
+                arguments += [
+                    "-hls_segment_type", "fmp4",
+                    "-hls_fmp4_init_filename", "init.mp4"
+                ]
+            }
+            arguments += ["-hls_segment_filename", segmentPattern, playlist.path]
             let process = Process()
             process.executableURL = executable
             process.arguments = arguments
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
-            return process
+            return PreparedLaunch(
+                mode: mode,
+                reason: reason,
+                durationSeconds: prepared.durationSeconds,
+                actualStartSeconds: prepared.actualStartSeconds,
+                process: process
+            )
+        }
+
+        let knownPrepared = ServerHLSPreparedMedia(
+            videoCodec: videoCodec,
+            videoHeight: videoHeight,
+            sourceIsHDR: sourceIsHDR,
+            audioCodec: audioCodec,
+            durationSeconds: request.durationSeconds,
+            actualStartSeconds: actualStartSeconds
+        )
+        let preview = preparationResolver == nil ? buildLaunch(knownPrepared) : nil
+        guard preparationResolver != nil || preview != nil else {
+            bridge?.stop()
+            try? FileManager.default.removeItem(at: directory)
+            return nil
+        }
+        let launchBuilder: (ServerBoundedProcess.Cancellation) -> PreparedLaunch? = { cancellation in
+            guard !cancellation.isCancelled else { return nil }
+            if let preparationResolver {
+                guard let prepared = preparationResolver(inputURL, cancellation),
+                      !cancellation.isCancelled
+                else { return nil }
+                return buildLaunch(prepared)
+            }
+            let resolvedStart = startResolver?(cancellation) ?? actualStartSeconds
+            guard !cancellation.isCancelled else { return nil }
+            return buildLaunch(ServerHLSPreparedMedia(
+                videoCodec: videoCodec,
+                videoHeight: videoHeight,
+                sourceIsHDR: sourceIsHDR,
+                audioCodec: audioCodec,
+                durationSeconds: request.durationSeconds,
+                actualStartSeconds: resolvedStart
+            ))
         }
 
         let session = Session(
@@ -487,19 +615,25 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             owner: Owner(principal),
             directory: directory,
             actualStartSeconds: actualStartSeconds,
-            durationSeconds: request.durationSeconds,
-            mode: mode,
-            reason: reason,
+            durationSeconds: preview?.durationSeconds ?? request.durationSeconds,
+            mode: preview?.mode ?? "hlsPreparing",
+            reason: preview?.reason ?? "capabilityNegotiation",
             mediaURL: "/api/v1/playback/hls/\(id)/index.m3u8",
             bridge: bridge,
-            startResolver: startResolver,
-            processBuilder: processBuilder
+            launchBuilder: launchBuilder
         )
+        beforeReservation?()
         lock.lock()
-        // Recheck while reserving so simultaneous creates cannot overrun either
-        // the active slots or the bounded waiting queue.
+        // Recheck *every* capacity boundary while reserving. The preflight above
+        // deliberately releases the lock before directory/bridge construction;
+        // without this owner count, simultaneous requests from one account can
+        // all observe the same old value and enqueue past maximumConcurrentStreams.
+        let reservedOwnedSessionCount = sessions.values.filter {
+            $0.owner.userID == owner.userID && ![.finished, .failed, .cancelled].contains($0.state)
+        }.count
         let shouldLaunch = activeSessionCountLocked() < configuration.maximumTranscodeSessions
-        guard shouldLaunch || pendingSessionIDs.count < Self.maximumQueuedSessions else {
+        guard reservedOwnedSessionCount < policy.maximumConcurrentStreams,
+              shouldLaunch || pendingSessionIDs.count < Self.maximumQueuedSessions else {
             lock.unlock()
             stopAndRemove(session)
             return nil
@@ -609,9 +743,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         return ServerHLSResource(
             fileURL: url,
             byteLength: Int64(size),
-            contentType: fileName.hasSuffix(".m3u8")
-                ? "application/vnd.apple.mpegurl"
-                : "video/mp2t"
+            contentType: Self.resourceContentType(fileName)
         )
     }
 
@@ -780,28 +912,41 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             lock.unlock()
             return
         }
-        let requestedStartSeconds = session.actualStartSeconds
         lock.unlock()
 
-        let resolvedStartSeconds = session.startResolver?(session.preparationCancellation)
-            ?? requestedStartSeconds
-        guard resolvedStartSeconds.isFinite,
-              resolvedStartSeconds >= 0,
-              resolvedStartSeconds < 86_400,
-              !session.preparationCancellation.isCancelled
-        else { return }
-
-        let process = session.processBuilder(resolvedStartSeconds)
-        process.terminationHandler = { [weak self, weak session] _ in
+        guard let launch = session.launchBuilder(session.preparationCancellation) else {
+            guard !session.preparationCancellation.isCancelled else { return }
+            lock.lock()
+            let shouldAdvanceQueue = sessions[session.id] === session && session.state == .preparing
+            if shouldAdvanceQueue {
+                session.state = .failed
+                session.finishedAt = Date()
+            }
+            lock.unlock()
+            if shouldAdvanceQueue {
+                session.bridge?.stop()
+                startNextIfPossible()
+            }
+            return
+        }
+        guard !session.preparationCancellation.isCancelled else { return }
+        let process = launch.process
+        process.terminationHandler = { [weak self, weak session] process in
             guard let self, let session else { return }
-            self.processDidTerminate(session)
+            self.processDidTerminate(
+                session,
+                succeeded: process.terminationReason == .exit && process.terminationStatus == 0
+            )
         }
         lock.lock()
         guard sessions[session.id] === session, session.state == .preparing else {
             lock.unlock()
             return
         }
-        session.actualStartSeconds = resolvedStartSeconds
+        session.actualStartSeconds = launch.actualStartSeconds
+        session.durationSeconds = launch.durationSeconds
+        session.mode = launch.mode
+        session.reason = launch.reason
         session.process = process
         lock.unlock()
 
@@ -818,7 +963,6 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
                 of: session,
                 playlist: session.directory.appendingPathComponent("index.m3u8")
             )
-            return true
         } catch {
             lock.lock()
             if sessions[session.id] === session {
@@ -831,13 +975,25 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
         }
     }
 
-    private func processDidTerminate(_ session: Session) {
+    private func processDidTerminate(_ session: Session, succeeded: Bool) {
+        let playlist = session.directory.appendingPathComponent("index.m3u8")
+        let hasCompletedPlaylist: Bool = {
+            guard succeeded,
+                  let attributes = try? FileManager.default.attributesOfItem(atPath: playlist.path),
+                  let size = attributes[.size] as? NSNumber
+            else { return false }
+            return size.intValue > 0
+        }()
         lock.lock()
         session.readinessTimer?.cancel()
         session.readinessTimer = nil
-        if session.state == .preparing { session.state = .failed }
-        else if session.state != .cancelled && session.state != .failed { session.state = .finished }
-        session.finishedAt = Date()
+        if session.state != .cancelled && session.state != .failed {
+            // A short seek near EOF can finish before the 50 ms readiness poll.
+            // A successful process plus a non-empty manifest is a complete VOD,
+            // not a preparation failure, and remains readable during retention.
+            session.state = hasCompletedPlaylist ? .finished : .failed
+            session.finishedAt = Date()
+        }
         lock.unlock()
         session.bridge?.stop()
         startNextIfPossible()
@@ -919,8 +1075,25 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
 
     private static func isSafeResourceName(_ value: String) -> Bool {
         if value == "index.m3u8" { return true }
-        guard value.hasPrefix("segment-"), value.hasSuffix(".ts") else { return false }
-        let digits = value.dropFirst("segment-".count).dropLast(3)
+        if value == "init.mp4" { return true }
+        guard value.hasPrefix("segment-") else { return false }
+        let suffixLength: Int
+        if value.hasSuffix(".ts") { suffixLength = 3 }
+        else if value.hasSuffix(".m4s") { suffixLength = 4 }
+        else { return false }
+        let digits = value.dropFirst("segment-".count).dropLast(suffixLength)
         return digits.count == 5 && digits.allSatisfy(\.isNumber)
+    }
+
+    private static func resourceContentType(_ fileName: String) -> String {
+        if fileName.hasSuffix(".m3u8") { return "application/vnd.apple.mpegurl" }
+        if fileName == "init.mp4" { return "video/mp4" }
+        if fileName.hasSuffix(".m4s") { return "video/iso.segment" }
+        return "video/mp2t"
+    }
+
+    static func supportsKeyframeAlignedSeek(videoCodec: String?) -> Bool {
+        guard let codec = videoCodec?.lowercased() else { return false }
+        return ["h264", "hevc", "h265"].contains(codec)
     }
 }

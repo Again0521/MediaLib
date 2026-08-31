@@ -627,6 +627,29 @@ enum ServerWebShellScript {
       // 文档载入和每次就地换页之后原样放回去。
       const sidebarStateKey = 'medialib:sidebar-state';
       const sidebarElement = () => document.querySelector('.app-sidebar');
+      const drawerBreakpoint = window.matchMedia?.('(max-width: 1023px)');
+      const drawerStateElement = () => document.getElementById('app-drawer-state');
+      const drawerToggleElement = () => document.querySelector('.app-drawer-toggle');
+      const synchronizeDrawerAccessibility = () => {
+        const sidebar = sidebarElement();
+        const state = drawerStateElement();
+        const toggle = drawerToggleElement();
+        if (!sidebar || !state) return;
+        const isDrawer = drawerBreakpoint?.matches === true;
+        const isOpen = !isDrawer || state.checked;
+        // A translated drawer is still in the tab order. Keep its accessibility
+        // state aligned with the visible spatial model so keyboard readers never
+        // land on controls outside the viewport. Desktop retains the same live
+        // sidebar rather than inheriting stale mobile state after a resize.
+        sidebar.inert = !isOpen;
+        sidebar.toggleAttribute('inert', !isOpen);
+        if (isOpen) sidebar.removeAttribute('aria-hidden');
+        else sidebar.setAttribute('aria-hidden', 'true');
+        if (toggle) {
+          toggle.setAttribute('aria-expanded', state.checked ? 'true' : 'false');
+          toggle.setAttribute('aria-label', state.checked ? '关闭导航' : '打开导航');
+        }
+      };
       const disclosureKey = details => details.querySelector('summary')?.textContent?.trim() ?? '';
       const captureSidebarState = sidebar => {
         if (!sidebar) return null;
@@ -679,6 +702,32 @@ enum ServerWebShellScript {
       }, true);
       window.addEventListener('pagehide', persistSidebarState);
       restoreSidebarState();
+      synchronizeDrawerAccessibility();
+      drawerBreakpoint?.addEventListener?.('change', synchronizeDrawerAccessibility);
+      document.addEventListener('change', event => {
+        if (event.target?.id !== 'app-drawer-state') return;
+        synchronizeDrawerAccessibility();
+        if (!event.target.checked && sidebarElement()?.contains(document.activeElement)) {
+          drawerToggleElement()?.focus();
+        }
+      });
+      document.addEventListener('keydown', event => {
+        const toggle = event.target?.closest?.('.app-drawer-toggle');
+        if (toggle && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          const state = drawerStateElement();
+          if (!state) return;
+          state.checked = !state.checked;
+          state.dispatchEvent(new Event('change', { bubbles: true }));
+          if (state.checked) sidebarElement()?.querySelector('a[href], button, summary, select, input')?.focus();
+          return;
+        }
+        if (event.key !== 'Escape' || drawerBreakpoint?.matches !== true) return;
+        const state = drawerStateElement();
+        if (!state?.checked) return;
+        state.checked = false;
+        state.dispatchEvent(new Event('change', { bubbles: true }));
+      });
 
       // ---- 「返回」指向真正的来处 --------------------------------------------
       // 服务端已经按 `Referer` 把返回目标算好了（详情页、人物、合集、照片、歌单
@@ -1165,6 +1214,7 @@ enum ServerWebShellScript {
         const settledSidebar = keptLiveSidebar ? liveSidebar : document.querySelector('.app-sidebar');
         if (settledSidebar && sidebarState) settledSidebar.scrollTop = sidebarState.scrollTop;
         if (sidebarState) writeStoredJSON(sidebarStateKey, sidebarState);
+        synchronizeDrawerAccessibility();
         document.title = nextDocument.title;
         window.__medialibEnsureAudioDock?.();
 

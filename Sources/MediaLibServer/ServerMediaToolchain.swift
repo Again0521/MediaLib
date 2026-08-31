@@ -85,17 +85,41 @@ enum ServerMediaToolchain {
 
     /// 交给 ffmpeg / ffprobe 的 `-i` 参数。
     ///
-    /// 这里**不能**用 `URL.absoluteString`。那是一个百分号编码过的 URL，而 ffmpeg 的
-    /// file 协议是逐字节取用的，它不做百分号解码——于是
+    /// 本地文件**不能**用 `URL.absoluteString`。那是一个百分号编码过的 URL，而
+    /// ffmpeg 的 file 协议是逐字节取用的，它不做百分号解码——于是
     /// `file:///…/%E6%97%A0%E5%A3%B0.mkv` 得到的是 "No such file or directory"。
     /// 后果不是报错，而是**每一个带非 ASCII 文件名的条目都探测失败**：中日韩资料库
     /// 里那几乎是全部，音轨名单于是恒为空，"这段视频有没有声音"永远判不出来。
     ///
     /// 保留 `file:` 前缀是为了另外两类文件名：含冒号的会被当成协议名
     /// （`My Movie: Part 2.mkv`），以横线开头的会被当成选项。`file:` 之后的一切
-    /// 都按字面路径处理。
+    /// 都按字面路径处理。非 file URL 只允许服务端生成的 127.0.0.1 随机会话桥；
+    /// 其他 URL 失败闭合为 `/dev/null`，不能因为支持回环桥而重新开放任意网络输入。
     static func inputArgument(for fileURL: URL) -> String {
-        "file:\(fileURL.path)"
+        if fileURL.isFileURL {
+            return "file:\(fileURL.path)"
+        }
+        guard isEphemeralLoopbackMediaURL(fileURL) else { return "file:/dev/null" }
+        return fileURL.absoluteString
+    }
+
+    static func isEphemeralLoopbackMediaURL(_ fileURL: URL) -> Bool {
+        guard fileURL.scheme?.lowercased() == "http",
+              fileURL.host == "127.0.0.1",
+              fileURL.user == nil,
+              fileURL.password == nil,
+              fileURL.query == nil,
+              fileURL.fragment == nil,
+              let port = fileURL.port,
+              (1...65_535).contains(port)
+        else { return false }
+        let path = fileURL.path.split(separator: "/", omittingEmptySubsequences: true)
+        guard path.count == 2,
+              path[0].count == 32,
+              path[0].allSatisfy({ $0.isHexDigit && !$0.isUppercase }),
+              path[1] == "media"
+        else { return false }
+        return true
     }
 }
 

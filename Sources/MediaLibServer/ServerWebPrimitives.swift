@@ -164,8 +164,12 @@ enum ServerWebPrimitives {
       /* 拖动过程中不要让卡片继续响应 hover，否则整排卡片会跟着指针闪。 */
       .ui-rail.is-dragging { cursor: grabbing; }
       .ui-rail.is-dragging * { pointer-events: none; }
-      /* 触摸设备用原生惯性滚动，不需要这两个键。 */
-      @media (hover: none), (pointer: coarse) { .ui-rail-step { display: none; } }
+      /* 触摸设备用原生惯性滚动，不需要这两个键。窄视口也直接隐藏：浏览器设备
+         模拟、外接鼠标平板和小窗桌面仍可能报告 fine pointer，若只看 pointer，
+         放在轨道外侧的箭头会把整页撑宽。 */
+      @media (hover: none), (pointer: coarse), (max-width: 719px) {
+        .ui-rail-step { display: none; }
+      }
 
       .ui-divider {
         height: var(--hairline);
@@ -1120,6 +1124,13 @@ enum ServerWebPrimitives {
         transform: rotate(45deg);
       }
       .ui-breadcrumb [aria-current="page"] { color: var(--text-primary); font-weight: var(--weight-medium); }
+      @media (max-width: 719px) {
+        .ui-breadcrumb a {
+          display: inline-flex;
+          min-height: var(--control-height-lg);
+          align-items: center;
+        }
+      }
     """#
 
     // MARK: - Chips, badges, status

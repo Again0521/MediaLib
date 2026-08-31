@@ -237,7 +237,7 @@ enum ServerWebShellStyle {
       }
       .nav-subitem {
         display: flex;
-        min-height: 30px;
+        min-height: var(--nav-item-height);
         align-items: center;
         gap: var(--space-2);
         padding: 0 var(--space-2);
@@ -367,11 +367,18 @@ enum ServerWebShellStyle {
           width: min(320px, 86vw);
           height: 100dvh;
           padding-top: calc(var(--space-5) + env(safe-area-inset-top));
+          visibility: hidden;
           transform: translateX(-101%);
-          transition: transform var(--duration-base) var(--ease-out);
+          transition:
+            transform var(--duration-base) var(--ease-out),
+            visibility 0s linear var(--duration-base);
           box-shadow: var(--shadow-4);
         }
-        .app-drawer-state:checked ~ .app-sidebar { transform: none; }
+        .app-drawer-state:checked ~ .app-sidebar {
+          visibility: visible;
+          transform: none;
+          transition-delay: 0s;
+        }
 
         .app-drawer-scrim {
           position: fixed;
@@ -640,8 +647,8 @@ enum ServerWebShellStyle {
       .ml-audio-controls { display: flex; align-items: center; gap: var(--space-2); }
       .ml-audio-controls button {
         display: grid;
-        width: 34px;
-        height: 34px;
+        width: var(--control-height-lg);
+        height: var(--control-height-lg);
         place-items: center;
         border-radius: 50%;
         color: var(--text-secondary);
@@ -665,8 +672,8 @@ enum ServerWebShellStyle {
          正是这样——播放键写着 `color: var(--text-on-accent)`，实际渲染出来的却
          是 `--text-secondary`；蓝底上勉强还看得见，换成深色底就彻底糊了。 */
       .ml-audio-controls .ml-audio-play {
-        width: 42px;
-        height: 42px;
+        width: 48px;
+        height: 48px;
         color: var(--text-inverse);
         background: var(--text-primary);
         box-shadow: var(--shadow-1);
@@ -687,8 +694,8 @@ enum ServerWebShellStyle {
       .ml-audio-trail { display: flex; align-items: center; gap: var(--space-2); justify-content: flex-end; }
       .ml-audio-trail button, .ml-audio-queue {
         display: grid;
-        width: 32px;
-        height: 32px;
+        width: var(--control-height-lg);
+        height: var(--control-height-lg);
         flex: none;
         place-items: center;
         border-radius: 50%;
@@ -730,12 +737,10 @@ enum ServerWebShellStyle {
         .ml-audio-scrubber .ml-audio-time { display: none; }
       }
 
-      /* 触摸下的 44px 下限。
-         底栏的传输键不是 `.ui-btn`（它们是自己一套 34/42px 的圆键），所以
-         primitives 里那条 `(pointer: coarse) { .ui-btn { min-height: 44px } }`
-         对它们完全不生效——手机上留下的恰恰是 42px 的播放键和 34px 的下一首。
-         窄屏已经把次要键整条藏掉了（上面那段），剩下的这几个就必须够大。
-         只按指针粗细判，不按宽度：平板横屏在 1023px 以上，但手指没有变细。 */
+      /* 触摸下的 44px 下限。桌面底栏现在已经以 44px 为基础，主播放键略大；
+         这条规则继续把所有可见尾部动作锁在同一下限，防止页面级覆盖在平板横屏
+         下把它们重新压小。只按指针粗细判，不按宽度：平板横屏在 1023px 以上，
+         但手指没有变细。 */
       @media (pointer: coarse) {
         .ml-audio-controls button,
         .ml-audio-controls .ml-audio-play,

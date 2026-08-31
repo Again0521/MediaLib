@@ -16,8 +16,10 @@ final class ServerRemoteMediaBridge: @unchecked Sendable {
     private let remoteURL: URL
     private let byteLength: Int64
     private let contentType: String
+    private let requestPath: String
     private let lock = NSLock()
     private var stopped = false
+    private var activeClients: [Int32: ServerRemoteAssetFetcher.Cancellation] = [:]
     private let clients = DispatchSemaphore(value: 4)
 
     init?(asset: ServerMediaAsset, fetcher: ServerRemoteAssetFetcher) {
@@ -54,8 +56,9 @@ final class ServerRemoteMediaBridge: @unchecked Sendable {
                 getsockname(descriptor, $0, &actualLength)
             }
         }
+        let requestPath = "/\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())/media"
         guard named == 0,
-              let inputURL = URL(string: "http://127.0.0.1:\(UInt16(bigEndian: actual.sin_port))/media")
+              let inputURL = URL(string: "http://127.0.0.1:\(UInt16(bigEndian: actual.sin_port))\(requestPath)")
         else {
             close(descriptor)
             return nil
@@ -66,6 +69,7 @@ final class ServerRemoteMediaBridge: @unchecked Sendable {
         self.remoteURL = remoteURL
         self.byteLength = asset.byteLength
         self.contentType = asset.contentType
+        self.requestPath = requestPath
         self.inputURL = inputURL
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in self?.acceptLoop() }
     }
@@ -76,9 +80,23 @@ final class ServerRemoteMediaBridge: @unchecked Sendable {
         lock.lock()
         guard !stopped else { lock.unlock(); return }
         stopped = true
+        let cancellations = Array(activeClients.values)
+        // Shutdown while holding the registry lock. A worker removes its file
+        // descriptor under the same lock before closing it, so the descriptor
+        // cannot be reused for an unrelated socket between lookup and shutdown.
+        for client in activeClients.keys {
+            _ = Darwin.shutdown(client, SHUT_RDWR)
+        }
         lock.unlock()
+        cancellations.forEach { $0.cancel() }
         shutdown(listener, SHUT_RDWR)
         close(listener)
+    }
+
+    var activeClientCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeClients.count
     }
 
     private func acceptLoop() {
@@ -89,27 +107,45 @@ final class ServerRemoteMediaBridge: @unchecked Sendable {
                 if isStopped { return }
                 continue
             }
-            guard clients.wait(timeout: .now() + 1) == .success else {
+            let cancellation = ServerRemoteAssetFetcher.Cancellation()
+            lock.lock()
+            guard !stopped else {
+                lock.unlock()
                 close(client)
+                return
+            }
+            activeClients[client] = cancellation
+            lock.unlock()
+            guard configure(client) else {
+                unregisterAndClose(client)
+                continue
+            }
+            guard clients.wait(timeout: .now() + 1) == .success else {
+                unregisterAndClose(client)
                 continue
             }
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                defer { self?.clients.signal(); close(client) }
-                self?.serve(client)
+                guard let self else {
+                    close(client)
+                    return
+                }
+                defer {
+                    self.clients.signal()
+                    self.unregisterAndClose(client)
+                }
+                self.serve(client, cancellation: cancellation)
             }
         }
     }
 
-    private func serve(_ client: Int32) {
-        var noSignal: Int32 = 1
-        _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+    private func serve(_ client: Int32, cancellation: ServerRemoteAssetFetcher.Cancellation) {
         guard let head = readHead(client),
               let first = head.components(separatedBy: "\r\n").first
         else { return }
         let pieces = first.split(separator: " ")
         guard pieces.count == 3,
               (pieces[0] == "GET" || pieces[0] == "HEAD"),
-              pieces[1] == "/media"
+              pieces[1] == Substring(requestPath)
         else {
             _ = send(Data("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".utf8), to: client)
             return
@@ -150,11 +186,13 @@ final class ServerRemoteMediaBridge: @unchecked Sendable {
         var offset = range.lowerBound
         let end = range.upperBound + 1
         while offset < end {
+            guard !cancellation.isCancelled else { return }
             let length = min(end - offset, Int64(ServerRemoteAssetFetcher.maximumMediaRangeByteLength))
             let delivered = fetcher.streamMediaBytes(
                 url: remoteURL,
                 offset: offset,
-                length: length
+                length: length,
+                cancellation: cancellation
             ) { [weak self] data in
                 guard self != nil else { return false }
                 return self?.send(data, to: client) == true
@@ -162,6 +200,23 @@ final class ServerRemoteMediaBridge: @unchecked Sendable {
             guard delivered else { return }
             offset += length
         }
+    }
+
+    private func configure(_ client: Int32) -> Bool {
+        var noSignal: Int32 = 1
+        var timeout = timeval(tv_sec: 10, tv_usec: 0)
+        let timeoutSize = socklen_t(MemoryLayout<timeval>.size)
+        return setsockopt(
+            client, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size)
+        ) == 0 && setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, timeoutSize) == 0 &&
+            setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, timeoutSize) == 0
+    }
+
+    private func unregisterAndClose(_ client: Int32) {
+        lock.lock()
+        activeClients.removeValue(forKey: client)
+        lock.unlock()
+        close(client)
     }
 
     private func readHead(_ client: Int32) -> String? {

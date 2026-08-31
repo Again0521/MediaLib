@@ -41,6 +41,10 @@ enum ServerWebMediaDetailPage {
         }
         let browserContentType = detail.browserContentType.map(escape) ?? ""
         let resumePosition = detail.userState?.positionSeconds ?? 0
+        let sourceVideoDimensions = playbackDimensions(detail.resolution)
+        let sourceVideoDimensionsAttributes = sourceVideoDimensions.map {
+            #" data-video-width="\#($0.width)" data-video-height="\#($0.height)""#
+        } ?? ""
         // 音乐由应用壳内固定底栏接管；视频在当前剧集详情页的嵌入式播放器中
         // 直接由浏览器解码。保留 /play 深链以兼容旧书签与网页全屏入口。
         let videoPlaybackURL: String = {
@@ -288,7 +292,7 @@ enum ServerWebMediaDetailPage {
             // 之后才开始下载；先声明出来，它们和样式表并行取。
             preloadedImages: [backdropURL, isMusic ? nil : landingURL].compactMap { $0 },
             bodyClass: "media-detail-page",
-            bodyAttributes: #" data-media-kind="\#(isMusic ? "audio" : "video")" data-item-id="\#(escape(detail.id))" data-can-direct-play="\#(canDirectPlay)" data-browser-content-type="\#(browserContentType)" data-video-playback-url="\#(escape(videoPlaybackURL))" data-resume-position="\#(resumePosition)" data-duration-seconds="\#(detail.runtimeSeconds ?? 0)" data-is-watched="\#(detail.userState?.isWatched == true ? "true" : "false")" data-is-favorite="\#(detail.userPreference.isFavorite ? "true" : "false")" data-is-watchlist="\#(detail.userPreference.isWatchlist ? "true" : "false")" data-preference-rating="\#(preferenceRating)"\#(nextEpisodePathAttribute)\#(episodeDataAttributes)"#,
+            bodyAttributes: #" data-media-kind="\#(isMusic ? "audio" : "video")" data-item-id="\#(escape(detail.id))" data-can-direct-play="\#(canDirectPlay)" data-browser-content-type="\#(browserContentType)" data-video-playback-url="\#(escape(videoPlaybackURL))" data-resume-position="\#(resumePosition)" data-duration-seconds="\#(detail.runtimeSeconds ?? 0)" data-is-watched="\#(detail.userState?.isWatched == true ? "true" : "false")" data-is-favorite="\#(detail.userPreference.isFavorite ? "true" : "false")" data-is-watchlist="\#(detail.userPreference.isWatchlist ? "true" : "false")" data-preference-rating="\#(preferenceRating)"\#(sourceVideoDimensionsAttributes)\#(nextEpisodePathAttribute)\#(episodeDataAttributes)"#,
             tint: .video
         )
     }
@@ -558,8 +562,8 @@ enum ServerWebMediaDetailPage {
     .player-overlay-controls button,
     .player-symbol-button {
       display: grid;
-      width: 36px;
-      height: 36px;
+      width: var(--control-height-lg);
+      height: var(--control-height-lg);
       place-items: center;
       border: 0;
       border-radius: var(--radius-xs);
@@ -568,7 +572,7 @@ enum ServerWebMediaDetailPage {
       cursor: pointer;
       transition: background-color var(--duration-fast) var(--ease-out), transform var(--duration-instant) var(--ease-out);
     }
-    /* 画面正中那颗是"开始观看"，不是控制栏里的一个小图标——它和 36px 的静音、
+    /* 画面正中那颗是"开始观看"，不是控制栏里的一个小图标——它和 44px 的静音、
        倍速按钮一样大，读起来像误放在中间的一个次要控件。放大到 88px 并给它自己
        的材质：它是这一页唯一的主行动。 */
     .player-symbol-button {
@@ -694,7 +698,7 @@ enum ServerWebMediaDetailPage {
       font-variant-numeric: tabular-nums;
     }
     .speed-control select, .player-settings select {
-      height: var(--control-height-sm);
+      height: var(--control-height-lg);
       padding: 0 var(--space-2);
       border: var(--hairline) solid var(--glass-thin-border);
       border-radius: var(--radius-xs);
@@ -705,7 +709,13 @@ enum ServerWebMediaDetailPage {
     .speed-control select option, .player-settings select option { color: var(--text-primary); background: var(--surface); }
 
     .player-settings { position: relative; }
-    .player-settings > summary { display: grid; width: 36px; height: 36px; place-items: center; border-radius: var(--radius-xs); }
+    .player-settings > summary {
+      display: grid;
+      width: var(--control-height-lg);
+      height: var(--control-height-lg);
+      place-items: center;
+      border-radius: var(--radius-xs);
+    }
     .player-settings > summary:hover { background: var(--overlay-on-media); }
     .player-settings-panel {
       position: absolute;
@@ -742,7 +752,7 @@ enum ServerWebMediaDetailPage {
     /* 轨道面板里的那些条目仍然是手搓的按钮；「重新检测媒体源」已经走
        `ServerWebUI.button` + `.ui-btn-on-media`。 */
     .player-settings-panel button {
-      min-height: var(--control-height-sm);
+      min-height: var(--control-height-lg);
       padding: 0 var(--space-3);
       border: var(--hairline) solid var(--glass-thin-border);
       border-radius: var(--radius-xs);
@@ -773,14 +783,14 @@ enum ServerWebMediaDetailPage {
       padding: var(--space-2);
     }
     /* ⚠️ 选择器必须比 `.player-overlay-controls button` 更具体。
-       那条规则把控制栏里的**每一个** button 都压成 36×36 的图标方块——传输栏上的
+       那条规则把控制栏里的**每一个** button 都设成 44×44 的图标方块——传输栏上的
        按钮本该如此，但这两个面板也长在传输栏里，于是"关闭字幕"会被挤成一列
        竖排的单字。此前看不见，只是因为这两个菜单从来没有被填充过。 */
     .player-track-panel .player-track-item {
       display: flex;
       width: auto;
       height: auto;
-      min-height: var(--control-height-sm);
+      min-height: var(--control-height-lg);
       align-items: center;
       padding: 0 var(--space-3);
       border: 0;
@@ -942,7 +952,7 @@ enum ServerWebMediaDetailPage {
       gap: var(--space-2);
     }
     .episode-season-tab {
-      min-height: var(--control-height-sm);
+      min-height: var(--control-height-lg);
       padding: 0 var(--space-2);
       white-space: nowrap;
       border: var(--hairline) solid var(--border);
@@ -1160,8 +1170,8 @@ enum ServerWebMediaDetailPage {
     /* Five discrete stars, not a slider: rating is a choice among five values. */
     .rating-star {
       display: grid;
-      width: 28px;
-      height: 28px;
+      width: var(--control-height-lg);
+      height: var(--control-height-lg);
       place-items: center;
       border: 0;
       border-radius: var(--radius-xs);
@@ -1176,9 +1186,6 @@ enum ServerWebMediaDetailPage {
        toggles, not radios.  The rule used to look for `aria-checked`, which the
        markup never sets, so a chosen rating never actually filled in. */
     .rating-star[aria-pressed="true"] { color: var(--warning); }
-    @media (max-width: 719px) {
-      .rating-star { width: var(--control-height-lg); height: var(--control-height-lg); }
-    }
     .technical-facts { display: flex; flex-wrap: wrap; gap: var(--space-2); }
     .technical-facts li {
       padding: 2px var(--space-2);
@@ -1376,7 +1383,7 @@ enum ServerWebMediaDetailPage {
         justify-content: flex-end;
         gap: var(--space-1);
       }
-      /* 手机触控目标不能沿用桌面 36px 图标密度。分成两行后每颗按钮都能保留
+      /* 手机控制条需要稳定的 44px 目标。分成两行后每颗按钮都能保留
          44×44，而不必靠缩小命中区把九个动作硬塞进一行。 */
       .player-overlay-controls button,
       .player-settings > summary {
@@ -1470,7 +1477,20 @@ enum ServerWebMediaDetailPage {
       const lifecycle = new AbortController();
       const subtitlePath = (trackID) => `/api/v1/subtitles/${encodeURIComponent(itemID)}/${encodeURIComponent(String(trackID))}`;
       const csrfToken = document.querySelector('meta[name="medialib-csrf-token"]')?.content || '';
-      const clientPlaybackCapabilities = (() => {
+      const isIOSFamily = /iP(?:ad|hone|od)/.test(window.navigator?.userAgent || '')
+        || (window.navigator?.platform === 'MacIntel' && (window.navigator?.maxTouchPoints || 0) > 1);
+      const userAgent = String(window.navigator?.userAgent || '');
+      const isDesktopSafari = /Safari\//.test(userAgent)
+        && !/(?:Chrome|Chromium|CriOS|FxiOS|Edg|EdgiOS|OPR)\//.test(userAgent)
+        && String(window.navigator?.vendor || '').includes('Apple');
+      // Chromium on macOS may return "maybe" for the HLS MIME while still
+      // rejecting the manifest with MEDIA_ERR_SRC_NOT_SUPPORTED. Native HLS is
+      // therefore an Apple WebKit path; Chromium/Firefox use bundled same-origin
+      // hls.js whenever MSE is available.
+      const usesNativeHLSPlayback = (isIOSFamily || isDesktopSafari)
+        && (player.canPlayType('application/vnd.apple.mpegurl') !== ''
+          || player.canPlayType('application/x-mpegURL') !== '');
+      const baselineClientPlaybackCapabilities = (() => {
         const supports = (mime) => {
           try {
             return player.canPlayType(mime) !== '' ||
@@ -1487,7 +1507,7 @@ enum ServerWebMediaDetailPage {
         if (supports('audio/webm; codecs="opus"')) audioCodecs.push('opus');
         const downlink = Number(navigator.connection?.downlink);
         return {
-          nativeHLS:player.canPlayType('application/vnd.apple.mpegurl') !== '',
+          nativeHLS:usesNativeHLSPlayback,
           mediaSource:Boolean(window.MediaSource),
           videoCodecs,
           audioCodecs,
@@ -1496,6 +1516,65 @@ enum ServerWebMediaDetailPage {
           hdrDisplay:Boolean(window.matchMedia?.('(dynamic-range: high)').matches),
           measuredDownlinkMbps:Number.isFinite(downlink) && downlink > 0 ? downlink : null
         };
+      })();
+      // canPlayType() and MSE only answer whether a container/codec string is
+      // recognized.  They commonly return "maybe" for a decoder that cannot
+      // sustain the source dimensions. MediaCapabilities adds that missing
+      // decoder fact without becoming a new hard dependency: unsupported,
+      // rejected, absent, or slow queries fall back to the existing bounded
+      // capability set and never expand Direct Play on their own.
+      const clientPlaybackCapabilitiesPromise = (() => {
+        const decodingInfo = navigator.mediaCapabilities?.decodingInfo;
+        if (typeof decodingInfo !== 'function') return Promise.resolve(baselineClientPlaybackCapabilities);
+        const datasetWidth = Number(document.body.dataset.videoWidth);
+        const datasetHeight = Number(document.body.dataset.videoHeight);
+        const width = Number.isInteger(datasetWidth) && datasetWidth > 0
+          ? Math.min(16384, datasetWidth) : baselineClientPlaybackCapabilities.screenWidth;
+        const height = Number.isInteger(datasetHeight) && datasetHeight > 0
+          ? Math.min(16384, datasetHeight) : baselineClientPlaybackCapabilities.screenHeight;
+        const videoBitrate = Math.max(1_000_000, Math.min(80_000_000, width * height * 5));
+        const videoCandidates = [
+          ['h264', 'video/mp4; codecs="avc1.42E01E"'],
+          ['hevc', 'video/mp4; codecs="hvc1.1.6.L93.B0"'],
+          ['vp9', 'video/webm; codecs="vp09.00.10.08"'],
+          ['av1', 'video/mp4; codecs="av01.0.05M.08"']
+        ];
+        const audioCandidates = [
+          ['aac', 'audio/mp4; codecs="mp4a.40.2"'],
+          ['opus', 'audio/webm; codecs="opus"']
+        ];
+        const safelyDecode = async (configuration, fallback) => {
+          try {
+            const result = await decodingInfo.call(navigator.mediaCapabilities, configuration);
+            return result?.supported === true;
+          } catch (_) { return fallback; }
+        };
+        const probe = async () => {
+          const videoResults = await Promise.all(videoCandidates.map(([codec, contentType]) =>
+            safelyDecode({
+              type:'file',
+              video:{ contentType, width, height, bitrate:videoBitrate, framerate:30 }
+            }, baselineClientPlaybackCapabilities.videoCodecs.includes(codec))
+          ));
+          const audioResults = await Promise.all(audioCandidates.map(([codec, contentType]) =>
+            safelyDecode({
+              type:'file',
+              audio:{ contentType, channels:'2', bitrate:256000, samplerate:48000 }
+            }, baselineClientPlaybackCapabilities.audioCodecs.includes(codec))
+          ));
+          return {
+            ...baselineClientPlaybackCapabilities,
+            videoCodecs:videoCandidates.filter((_, index) => videoResults[index]).map(([codec]) => codec),
+            audioCodecs:audioCandidates.filter((_, index) => audioResults[index]).map(([codec]) => codec)
+          };
+        };
+        // Capability probing starts while the landing artwork is visible. A
+        // browser implementation must never hold the user's play gesture or
+        // first frame hostage, so the session request waits at most 400 ms.
+        return Promise.race([
+          probe().catch(() => baselineClientPlaybackCapabilities),
+          new Promise(resolve => window.setTimeout(() => resolve(baselineClientPlaybackCapabilities), 400))
+        ]);
       })();
       var isStarting = false;
       var resumeApplied = false;
@@ -1520,6 +1599,7 @@ enum ServerWebMediaDetailPage {
       var qualityChoiceLocked = false;
       var currentHLSSessionID = '';
       var currentHLSClient = null;
+      var hlsCancellationBarrier = Promise.resolve();
       var lastHLSMediaRecoveryAt = 0;
       var hlsNetworkRecoveryCount = 0;
       var playbackTracks = null;
@@ -1542,6 +1622,15 @@ enum ServerWebMediaDetailPage {
       var knownDurationSeconds = Number(document.body.dataset.durationSeconds || 0) || 0;
       var playerLayout = 'default';
       var activeEpisodeSeason = currentSeason;
+      const publishPlaybackMode = (mode, serverMode = '') => {
+        const normalizedMode = mode === 'hls' ? 'hls' : 'direct';
+        const normalizedServerMode = ['hlsRemux','hlsAudioTranscode','hlsTranscode'].includes(serverMode)
+          ? serverMode : '';
+        player.dataset.playbackMode = normalizedMode;
+        if (normalizedServerMode) player.dataset.serverPlaybackMode = normalizedServerMode;
+        else delete player.dataset.serverPlaybackMode;
+      };
+      publishPlaybackMode('direct');
       var episodeOffset = 0;
       var episodeHasMore = false;
       var episodeLoading = false;
@@ -1955,9 +2044,21 @@ enum ServerWebMediaDetailPage {
         if (playbackTracksPromise) return playbackTracksPromise;
         playbackTracksPromise = (async () => {
           try {
-            const response = await fetch(mediaPath('/api/v1/playback/tracks/'), {
-              credentials: 'same-origin', headers: { 'Accept': 'application/json' }
+            const deadline = performance.now() + 15000;
+            let response = await fetch(mediaPath('/api/v1/playback/tracks/'), {
+              credentials: 'same-origin', headers: { 'Accept': 'application/json' }, signal:lifecycle.signal
             });
+            while (response.status === 202) {
+              if (performance.now() >= deadline) throw new Error('track-timeout');
+              const retrySeconds = Number(response.headers.get('Retry-After'));
+              const retryMilliseconds = Number.isFinite(retrySeconds)
+                ? Math.min(2000, Math.max(500, retrySeconds * 1000)) : 1500;
+              await new Promise(resolve => window.setTimeout(resolve, retryMilliseconds));
+              if (lifecycle.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+              response = await fetch(mediaPath('/api/v1/playback/tracks/'), {
+                credentials: 'same-origin', headers: { 'Accept': 'application/json' }, signal:lifecycle.signal
+              });
+            }
             if (response.status === 401) { window.location.assign('/login'); return null; }
             if (!response.ok) throw new Error('unavailable');
             const payload = await response.json();
@@ -2217,8 +2318,6 @@ enum ServerWebMediaDetailPage {
       // iPhone/iPad 的 WebKit 不支持 Matroska 容器；即使里面是 H.264 + AAC，
       // canPlayType 也会失败。桌面 Chromium 对 MKV 的 canPlayType 又是假阴性，
       // 所以不能全局按 MIME 重封装，只对 iOS 家族启用这条兼容路径。
-      const isIOSFamily = /iP(?:ad|hone|od)/.test(window.navigator?.userAgent || '')
-        || (window.navigator?.platform === 'MacIntel' && (window.navigator?.maxTouchPoints || 0) > 1);
       const directPlayNeedsRemux = () => !directPlayHasSound()
         || (isIOSFamily && !['video/mp4', 'video/quicktime'].includes(browserContentType));
 
@@ -2834,6 +2933,15 @@ enum ServerWebMediaDetailPage {
           currentHLSClient.destroy();
           currentHLSClient = null;
         }
+        // `Hls.destroy()` detaches its MediaSource, but Chromium can retain the
+        // previous blob URL and audio SourceBuffer on the media element. A new
+        // session attached on top of that stale source may render video while
+        // its AAC track stays permanently silent after seek. Fully reset the
+        // element before either native HLS, hls.js, or Direct Play assigns the
+        // replacement source.
+        player.pause();
+        player.removeAttribute('src');
+        player.load();
         resumeApplied = false;
         playbackStartedReported = false;
         lastProgressBucket = -1;
@@ -2872,10 +2980,16 @@ enum ServerWebMediaDetailPage {
           await startRemux(track?.id ?? 0, configuredResumePosition(), { allowUnprobed:true });
           return;
         }
+        // Desktop browsers keep the click gesture while awaiting the shared
+        // track probe. Resolve it before assigning a source so known TrueHD/DTS
+        // audio cannot briefly report a falsely successful silent Direct Play.
+        // iOS retains the eager attempt below because WebKit binds media start
+        // much more strictly to the current touch gesture.
+        if (!playbackTracks && !isIOSFamily) await loadPlaybackTracks();
         // iOS 把媒体播放严格绑定在当前触摸事件上。若轨道预取还没结束，先等 fetch
         // 再 play() 会丢失这次授权，结果是所有格式都报“自动播放被阻止”。先同步
         // 发起直放保住授权，同时完成单飞探测；需要补声音时再无缝换到重封装流。
-        if (!playbackTracks) {
+        if (!playbackTracks && isIOSFamily) {
           const directAttempt = startDirect({ deferFailure: true });
           await loadPlaybackTracks();
           if (directPlayNeedsRemux() && (
@@ -2938,6 +3052,7 @@ enum ServerWebMediaDetailPage {
         currentHLSSessionID = '';
         const resumeAt = Number.isFinite(options.resumeAt) ? options.resumeAt : null;
         playbackMode = 'direct';
+        publishPlaybackMode('direct');
         if (typeof options.quality === 'string') activePlaybackQuality = options.quality;
         remuxOffset = 0;
         prepareNewSource();
@@ -2988,44 +3103,23 @@ enum ServerWebMediaDetailPage {
         }
       }
 
-      /// 服务端重封装：画面原样搬运，音频转成 AAC，输出分片 MP4。
-      //
-      // 这条流没有长度也不接受 Range，所以"从第几秒开始"是 URL 的一部分。跳转就是
-      // 换一条 URL；画面上那条时间轴由 `remuxOffset` 补回整部片子的位置。
-      /// 把想去的秒数换成**关键帧对齐后**的秒数。
-      //
-      // 重封装原样搬运画面，因此只能从关键帧起流：要第 7 秒而最近的关键帧在第 6 秒，服务端交
-      // 出来的就是从第 6 秒开始的那一段，页面却按第 7 秒记时间轴——差值最多一整个
-      // GOP，而且会一直留在这条流上（时间显示偏，续播点也跟着偏）。先问清楚落点，
-      // 再拿这个值去起流，ffmpeg 的吸附就成了空操作。
-      //
-      // 问不到就用原值：那时的表现和从前一样，而不是拒绝播放。
-      async function resolveRemuxStart(seconds) {
-        const target = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
-        if (target <= 0) return 0;
-        try {
-          const query = new URLSearchParams({ at: target.toFixed(3) });
-          const response = await fetch(`${mediaPath('/api/v1/playback/keyframe/')}?${query.toString()}`, {
-            credentials: 'same-origin', headers: { 'Accept': 'application/json' }
-          });
-          if (!response.ok) return target;
-          const payload = await response.json();
-          const resolved = Number(payload?.startSeconds);
-          return Number.isFinite(resolved) && resolved >= 0 && resolved <= target ? resolved : target;
-        } catch (_) { return target; }
-      }
-
       const cancelHLSSession = (sessionID, keepalive = false) => {
-        if (!sessionID) return;
-        void fetch(`/api/v1/playback/sessions/${encodeURIComponent(sessionID)}/cancel`, {
+        if (!sessionID) return Promise.resolve();
+        const request = fetch(`/api/v1/playback/sessions/${encodeURIComponent(sessionID)}/cancel`, {
           method: 'POST', credentials: 'same-origin', keepalive,
           headers: { 'X-MediaLIB-CSRF': csrfToken }
         }).catch(() => {});
+        // The server counts the current source and its atomic replacement as
+        // two owned sessions. A rapid second seek must wait until the already
+        // replaced source is actually cancelled, otherwise the transient third
+        // session is rejected by the per-user limit. Superseded callers recheck
+        // their revision after this barrier and never create stale sessions.
+        hlsCancellationBarrier = Promise.allSettled([hlsCancellationBarrier, request]).then(() => {});
+        return request;
       };
 
       const attachHLS = (mediaURL, sourceRevision) => {
-        const nativeHLS = player.canPlayType('application/vnd.apple.mpegurl') || player.canPlayType('application/x-mpegURL');
-        if (nativeHLS) {
+        if (usesNativeHLSPlayback) {
           player.src = mediaURL;
           player.load();
           return;
@@ -3083,7 +3177,7 @@ enum ServerWebMediaDetailPage {
           if (!response.ok) throw new Error(response.status === 429 ? 'busy' : 'unavailable');
           current = await response.json();
         }
-        if (!['ready','playing'].includes(current?.state || 'ready')) throw new Error('unavailable');
+        if (!['ready','playing','finished'].includes(current?.state || 'ready')) throw new Error('unavailable');
         return current;
       }
 
@@ -3101,6 +3195,9 @@ enum ServerWebMediaDetailPage {
           ? String(options.quality) : activePlaybackQuality;
         setStatus('正在准备兼容播放流…');
         try {
+          const clientPlaybackCapabilities = await clientPlaybackCapabilitiesPromise;
+          await hlsCancellationBarrier;
+          if (sourceRevision !== playbackSourceRevision) return;
           const response = await fetch('/api/v1/playback/sessions', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Accept': 'application/json', 'Content-Type': 'application/json', 'X-MediaLIB-CSRF': csrfToken },
@@ -3136,6 +3233,7 @@ enum ServerWebMediaDetailPage {
           const previousSessionID = currentHLSSessionID;
           currentHLSSessionID = sessionID;
           playbackMode = 'hls';
+          publishPlaybackMode('hls', descriptor.mode);
           activePlaybackQuality = requestedQuality;
           activeBurnInSubtitleTrackID = Number.isInteger(options.subtitleTrackID) ? options.subtitleTrackID : null;
           remuxOffset = Number.isFinite(Number(descriptor.actualStartSeconds))
@@ -3442,6 +3540,13 @@ enum ServerWebMediaDetailPage {
         updateTransportUI();
         // 创建 HLS 会话期间旧源可能先报一次失败；它不能覆盖即将接管的新源状态。
         if (sourceTransitionPending) return;
+        // hls.js owns fatal network/media recovery and publishes its own final
+        // error only after recovery is exhausted. Destroying the previous MSE
+        // attachment during a seek can still deliver a late element-level
+        // `error`; treating that as the new source's failure leaves a healthy,
+        // fully buffered stream underneath a false red status. Native Safari
+        // HLS has no client object and therefore keeps the element fallback.
+        if (playbackMode === 'hls' && currentHLSClient) return;
         // 切音轨/跳转会主动替换 src，旧请求的 error 可能晚于新流的首帧到达。只要
         // 当前元素仍在推进且已有可显示数据，这个错误就不属于用户正在看的那条流。
         if (!player.paused && player.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return;
@@ -3670,6 +3775,25 @@ enum ServerWebMediaDetailPage {
         guard let encodedID = ServerWebURL.pathSegment(episode.id) else { return "" }
         let safeTitle = escape(episode.title)
         return "<a class=\"episode-choice\" href=\"/item/\(encodedID)\"><span>\(escape(position))</span><strong>\(safeTitle)</strong><small>切换并播放</small></a>"
+    }
+
+    /// Converts the database's display-oriented resolution into bounded facts
+    /// that can be handed to the browser's MediaCapabilities API. Only the two
+    /// canonical separators are accepted; arbitrary database text never
+    /// becomes an HTML attribute.
+    private static func playbackDimensions(_ value: String?) -> (width: Int, height: Int)? {
+        guard let value else { return nil }
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "×", with: "x")
+            .lowercased()
+        let pieces = normalized.split(separator: "x", omittingEmptySubsequences: false)
+        guard pieces.count == 2,
+              let width = Int(pieces[0].trimmingCharacters(in: .whitespaces)),
+              let height = Int(pieces[1].trimmingCharacters(in: .whitespaces)),
+              (1...16_384).contains(width), (1...16_384).contains(height)
+        else { return nil }
+        return (width, height)
     }
 
     /// Delegates to the shared implementation in `ServerWebHTML`.

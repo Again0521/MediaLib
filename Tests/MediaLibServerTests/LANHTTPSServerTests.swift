@@ -21,6 +21,50 @@ final class LANHTTPSServerTests: XCTestCase {
         XCTAssertEqual(translated.headers[.acceptRanges], "bytes")
     }
 
+    func testMediaBackpressureGateBlocksUntilConsumerReleasesSlot() {
+        let gate = LANResponseBackpressureGate()
+        XCTAssertTrue(gate.acquire())
+
+        let attempted = DispatchSemaphore(value: 0)
+        let completed = DispatchSemaphore(value: 0)
+        let result = LockedBoolean()
+        DispatchQueue.global(qos: .userInitiated).async {
+            attempted.signal()
+            result.value = gate.acquire()
+            completed.signal()
+        }
+
+        XCTAssertEqual(attempted.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(completed.wait(timeout: .now() + 0.05), .timedOut)
+        gate.release()
+        XCTAssertEqual(completed.wait(timeout: .now() + 1), .success)
+        XCTAssertTrue(result.value)
+        gate.release()
+        gate.terminate()
+    }
+
+    func testMediaBackpressureTerminationWakesProducerAndIsSticky() {
+        let gate = LANResponseBackpressureGate()
+        XCTAssertTrue(gate.acquire())
+
+        let attempted = DispatchSemaphore(value: 0)
+        let completed = DispatchSemaphore(value: 0)
+        let result = LockedBoolean(true)
+        DispatchQueue.global(qos: .userInitiated).async {
+            attempted.signal()
+            result.value = gate.acquire()
+            completed.signal()
+        }
+
+        XCTAssertEqual(attempted.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(completed.wait(timeout: .now() + 0.05), .timedOut)
+        gate.terminate()
+        XCTAssertEqual(completed.wait(timeout: .now() + 1), .success)
+        XCTAssertFalse(result.value)
+        gate.release()
+        XCTAssertFalse(gate.acquire(), "终止后的 release 不能重新开放媒体生产器")
+    }
+
     func testLANAddressPolicyAllowsOnlyPrivateAndLoopbackIPv4() {
         for address in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "172.31.255.254", "192.168.31.100", "169.254.1.2"] {
             XCTAssertTrue(LANIPv4AddressPolicy.isPrivateOrLoopback(address), address)
@@ -116,4 +160,24 @@ final class LANHTTPSServerTests: XCTestCase {
 
 private enum LANHTTPSServerTestError: Error {
     case opensslFailed
+}
+
+private final class LockedBoolean: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: Bool
+
+    init(_ value: Bool = false) { storedValue = value }
+
+    var value: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedValue
+        }
+        set {
+            lock.lock()
+            storedValue = newValue
+            lock.unlock()
+        }
+    }
 }

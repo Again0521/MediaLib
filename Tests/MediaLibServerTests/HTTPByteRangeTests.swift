@@ -28,4 +28,21 @@ final class HTTPByteRangeTests: XCTestCase {
         XCTAssertNil(HTTPByteRangeRequest(headerValue: "items=0-1"))
         XCTAssertNil(HTTPByteRangeRequest(headerValue: "bytes=4-2"))
     }
+
+    func testResolvesRangesBeyondFourGiBWithoutNarrowingOrOverflow() {
+        let total: Int64 = 8 * 1_024 * 1_024 * 1_024
+        let lower: Int64 = 5 * 1_024 * 1_024 * 1_024
+        let resolved = HTTPByteRangeRequest(
+            headerValue: "bytes=\(lower)-\(lower + 1_023)"
+        )?.resolve(totalLength: total)
+
+        XCTAssertEqual(resolved?.lowerBound, lower)
+        XCTAssertEqual(resolved?.upperBound, lower + 1_023)
+        XCTAssertEqual(resolved?.length, 1_024)
+        XCTAssertEqual(
+            resolved?.contentRangeHeader,
+            "bytes \(lower)-\(lower + 1_023)/\(total)"
+        )
+        XCTAssertNil(HTTPByteRangeRequest(headerValue: "bytes=9223372036854775808-"))
+    }
 }

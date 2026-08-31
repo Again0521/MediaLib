@@ -105,11 +105,46 @@ final class ServerMediaTrackCatalog {
         self.uptimeProvider = uptimeProvider
     }
 
-    /// 本地文件的探测结果。远程资产没有本地文件可探，一律 nil——它们的轨道由
-    /// `ServerRemoteSubtitleCatalog` 从来源服务器问。
+    /// 本地文件的探测结果。远程资产必须显式提供受限回环桥，不能把上游 URL
+    /// 直接交给 ffprobe。
     func probe(asset: ServerMediaAsset) -> FFprobeMediaInspector.ProbedMedia? {
         guard asset.remoteURL == nil else { return nil }
         guard let key = cacheKey(for: asset) else { return nil }
+        return probe(key: key, inspectionAsset: asset, cancellation: nil)
+    }
+
+    /// 远程资产通过每会话随机 Range 桥探测。缓存键只保存上游 URL 的不可逆摘要
+    /// 与已验证长度，不保存 token、主机或路径；同一远程修订的并发 HLS 准备只让
+    /// 一个 ffprobe 读取上游，其余准备任务等待同一 flight。
+    func probeRemote(
+        asset: ServerMediaAsset,
+        through bridgeURL: URL,
+        cancellation: ServerBoundedProcess.Cancellation
+    ) -> FFprobeMediaInspector.ProbedMedia? {
+        guard let remoteURL = asset.remoteURL,
+              asset.byteLength > 0,
+              ServerMediaToolchain.isEphemeralLoopbackMediaURL(bridgeURL),
+              let identity = ServerTokenSecurity.digest(remoteURL.absoluteString)
+        else { return nil }
+        let key = CacheKey(
+            path: "remote:\(identity)",
+            byteLength: asset.byteLength,
+            modifiedAt: 0
+        )
+        let inspectionAsset = ServerMediaAsset(
+            id: asset.id,
+            fileURL: bridgeURL,
+            byteLength: asset.byteLength
+        )
+        return probe(key: key, inspectionAsset: inspectionAsset, cancellation: cancellation)
+    }
+
+    private func probe(
+        key: CacheKey,
+        inspectionAsset: ServerMediaAsset,
+        cancellation: ServerBoundedProcess.Cancellation?
+    ) -> FFprobeMediaInspector.ProbedMedia? {
+        guard cancellation?.isCancelled != true else { return nil }
         lock.lock()
         if let cached = cache[key] {
             lock.unlock()
@@ -117,7 +152,9 @@ final class ServerMediaTrackCatalog {
         }
         if let flight = probeFlights[key] {
             lock.unlock()
-            flight.completion.wait()
+            while flight.completion.wait(timeout: .now() + 0.05) == .timedOut {
+                if cancellation?.isCancelled == true { return nil }
+            }
             lock.lock()
             let result = cache[key] ?? flight.result
             lock.unlock()
@@ -126,7 +163,9 @@ final class ServerMediaTrackCatalog {
         let flight = ProbeFlight()
         probeFlights[key] = flight
         lock.unlock()
-        let probed = try? inspector.probe(asset: asset)
+        let probed = cancellation?.isCancelled == true
+            ? nil
+            : try? inspector.probe(asset: inspectionAsset)
         lock.lock()
         if let probed, cache[key] == nil {
             // 同一路径的新大小/mtime 已经是新的媒体修订；旧修订不再可能命中，

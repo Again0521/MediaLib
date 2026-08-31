@@ -831,6 +831,7 @@ struct LocalHTTPRouter {
     private let vaultAccessProvider: (ServerRequestPrincipal) throws -> ServerLibraryCatalog.VaultAccess
     private let artworkThumbnailer: ServerArtworkThumbnailer
     private let remoteAssetFetcher: ServerRemoteAssetFetcher
+    private let remoteSubtitleBodyCatalog: ServerRemoteSubtitleBodyCatalog
     private let mediaTrackCatalog: ServerMediaTrackCatalog
     private let playbackInfoProvider: (String, ServerRequestPrincipal) throws -> ServerMediaPlaybackInfo?
     private let currentUserProfileProvider: (ServerRequestPrincipal) throws -> ServerCurrentUserProfile?
@@ -907,6 +908,7 @@ struct LocalHTTPRouter {
         vaultAccessProvider: @escaping (ServerRequestPrincipal) throws -> ServerLibraryCatalog.VaultAccess = { _ in .locked },
         artworkThumbnailer: ServerArtworkThumbnailer = ServerArtworkThumbnailer(),
         remoteAssetFetcher: ServerRemoteAssetFetcher = ServerRemoteAssetFetcher(),
+        remoteSubtitleBodyCatalog: ServerRemoteSubtitleBodyCatalog? = nil,
         mediaTrackCatalog: ServerMediaTrackCatalog = ServerMediaTrackCatalog(),
         playbackInfoProvider: @escaping (String, ServerRequestPrincipal) throws -> ServerMediaPlaybackInfo? = { _, _ in nil },
         currentUserProfileProvider: @escaping (ServerRequestPrincipal) throws -> ServerCurrentUserProfile? = { _ in nil },
@@ -964,6 +966,8 @@ struct LocalHTTPRouter {
         self.vaultAccessProvider = vaultAccessProvider
         self.artworkThumbnailer = artworkThumbnailer
         self.remoteAssetFetcher = remoteAssetFetcher
+        self.remoteSubtitleBodyCatalog = remoteSubtitleBodyCatalog
+            ?? ServerRemoteSubtitleBodyCatalog(fetcher: remoteAssetFetcher)
         self.mediaTrackCatalog = mediaTrackCatalog
         self.playbackInfoProvider = playbackInfoProvider
         self.currentUserProfileProvider = currentUserProfileProvider
@@ -1549,8 +1553,14 @@ struct LocalHTTPRouter {
         }
 
         if path.hasPrefix("/api/v1/playback/sessions/") {
+            // This endpoint only reads the in-memory HLS state machine. It is
+            // polled while ffmpeg prepares the first segment and must not spend
+            // the deliberately scarce ffprobe budget (`mediaProbe`), otherwise
+            // a normal long-GOP stream exhausts that bucket before becoming
+            // ready. Playlist, segment and session-state traffic share the
+            // bounded playback bucket; actual media inspection stays isolated.
             if let limited = limitedResponse(
-                scope: .mediaProbe, principal: principal, clientAddressKey: clientAddressKey
+                scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             let raw = String(path.dropFirst("/api/v1/playback/sessions/".count))
             guard !raw.isEmpty, !raw.contains("/"),
@@ -3020,8 +3030,20 @@ struct LocalHTTPRouter {
             guard let itemID = decodedPathIdentifier(trackListPath, prefix: "/api/v1/playback/tracks/") else {
                 return .notFound()
             }
-            guard let baseTracks = try? playbackTracksProvider(itemID, principal)
-            else { return .notFound() }
+            let baseTracks: ServerWebPlaybackTrackSet
+            do {
+                guard let resolved = try playbackTracksProvider(itemID, principal) else {
+                    return .notFound()
+                }
+                baseTracks = resolved
+            } catch is ServerRemoteSubtitleTracksPending {
+                return .accepted(
+                    body: Data(),
+                    additionalHeaders: ["Cache-Control: no-store", "Retry-After: 2"]
+                )
+            } catch {
+                return .notFound()
+            }
             var selectionOverride = try? experienceRepository?.trackOverride(
                 userID: principal.userID,
                 scope: .media,
@@ -3999,6 +4021,11 @@ struct LocalHTTPRouter {
                   let body = ServerCommandOutput.jsonData(tracks)
             else { return .notFound() }
             return .ok(body: body, omitBody: omitBody)
+        } catch is ServerRemoteSubtitleTracksPending {
+            return .accepted(
+                body: Data(),
+                additionalHeaders: ["Cache-Control: no-store", "Retry-After: 2"]
+            )
         } catch {
             return .notFound()
         }
@@ -4017,9 +4044,22 @@ struct LocalHTTPRouter {
               !itemID.contains("/"),
               !itemID.contains("\\"),
               let trackID = strictNonnegativeInteger(String(remainder[1])),
-              trackID < ServerWebVTTSubtitleTrack.maximumTrackCount,
-              let track = try? subtitleTrackProvider(itemID, trackID, principal)
+              trackID < ServerWebVTTSubtitleTrack.maximumTrackCount
         else { return .notFound() }
+        let track: ServerSubtitleTrackReference
+        do {
+            guard let resolved = try subtitleTrackProvider(itemID, trackID, principal) else {
+                return .notFound()
+            }
+            track = resolved
+        } catch is ServerRemoteSubtitleTracksPending {
+            return .accepted(
+                body: Data(),
+                additionalHeaders: ["Cache-Control: no-store", "Retry-After: 2"]
+            )
+        } catch {
+            return .notFound()
+        }
         switch track.source {
         case let .sidecar(asset):
             let pathExtension = asset.fileURL.pathExtension.lowercased()
@@ -4063,10 +4103,20 @@ struct LocalHTTPRouter {
                 // HEAD 不该为了报一个长度就去 Emby 拉一份字幕回来。
                 return Self.webVTTResponse(payload: Data(), omitBody: true)
             }
-            guard let payload = ServerRemoteSubtitleCatalog.webVTT(
-                for: remoteTrack, fetcher: remoteAssetFetcher
-            ) else { return .notFound() }
-            return Self.webVTTResponse(payload: payload, omitBody: false)
+            switch remoteSubtitleBodyCatalog.webVTT(
+                ownerID: "\(itemID)/\(trackID)",
+                track: remoteTrack
+            ) {
+            case let .ready(payload):
+                return Self.webVTTResponse(payload: payload, omitBody: false)
+            case .pending:
+                return .accepted(
+                    body: Data(),
+                    additionalHeaders: ["Cache-Control: no-store", "Retry-After: 1"]
+                )
+            case .failed:
+                return .notFound()
+            }
         }
     }
 

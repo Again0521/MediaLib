@@ -173,25 +173,30 @@ struct LANHTTPSServer {
     }
 
     /// Adapts the existing synchronous, cancellation-aware media producer to an
-    /// async response body. A single buffered chunk bounds memory; retrying a
-    /// full yield supplies backpressure to NAS reads and ffmpeg output.
+    /// async response body. A single buffered chunk bounds memory; an explicit
+    /// gate blocks the producer until the async writer consumes that chunk.
+    /// Slow clients therefore apply real backpressure without a polling loop.
     private static func callbackBody(
         contentLength: Int?,
         produce: @escaping @Sendable (@escaping (Data) -> Bool) -> Bool
     ) -> ResponseBody {
         ResponseBody(contentLength: contentLength) { writer in
+            let flowControl = LANResponseBackpressureGate()
             let sequence = AsyncStream<ByteBuffer>(bufferingPolicy: .bufferingOldest(1)) { continuation in
+                continuation.onTermination = { _ in flowControl.terminate() }
                 DispatchQueue.global(qos: .userInitiated).async {
                     let completed = produce { data in
+                        guard flowControl.acquire() else { return false }
                         let buffer = ByteBuffer(bytes: data)
-                        while true {
-                            switch continuation.yield(buffer) {
-                            case .enqueued: return true
-                            case .dropped:
-                                Thread.sleep(forTimeInterval: 0.001)
-                            case .terminated: return false
-                            @unknown default: return false
-                            }
+                        switch continuation.yield(buffer) {
+                        case .enqueued:
+                            return true
+                        case .dropped, .terminated:
+                            flowControl.release()
+                            return false
+                        @unknown default:
+                            flowControl.release()
+                            return false
                         }
                     }
                     continuation.finish()
@@ -199,10 +204,53 @@ struct LANHTTPSServer {
                 }
             }
             for await buffer in sequence {
-                try await writer.write(buffer)
+                do {
+                    try await writer.write(buffer)
+                    flowControl.release()
+                } catch {
+                    flowControl.terminate()
+                    throw error
+                }
             }
+            flowControl.terminate()
             try await writer.finish(nil)
         }
+    }
+}
+
+/// One-slot blocking gate used at the sync-producer/async-writer boundary.
+/// `terminate()` is sticky and wakes a producer blocked behind a slow or
+/// disconnected client, so cancellation never leaves a media read stranded.
+final class LANResponseBackpressureGate: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var slotAvailable = true
+    private var terminated = false
+
+    func acquire() -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        while !slotAvailable && !terminated {
+            condition.wait()
+        }
+        guard !terminated else { return false }
+        slotAvailable = false
+        return true
+    }
+
+    func release() {
+        condition.lock()
+        if !terminated {
+            slotAvailable = true
+            condition.signal()
+        }
+        condition.unlock()
+    }
+
+    func terminate() {
+        condition.lock()
+        terminated = true
+        condition.broadcast()
+        condition.unlock()
     }
 }
 
