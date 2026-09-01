@@ -23,8 +23,27 @@ enum ServerWebSourcesPage {
             <h2 class="ui-card-title" id="sources-title">已连接媒体源</h2>
             <span id="sources-count" class="ui-badge ui-badge-neutral" aria-label="媒体源数量">—</span>
           </div>
+          <div class="sources-list-tools">
+            \(ServerWebUI.searchField(
+                id: "sources-search",
+                label: "筛选媒体源",
+                placeholder: "搜索名称、类型或稳定标识",
+                action: "/admin/libraries",
+                formID: "sources-search-form"
+            ))
+          </div>
           <p id="sources-state" class="ui-state-line sources-state t-callout t-tertiary">正在加载…</p>
           <div id="sources-content" class="sources-content" hidden></div>
+          <div class="sources-list-footer">
+            \(ServerWebUI.button(
+                "载入更多媒体源",
+                variant: .ghost,
+                size: .small,
+                icon: .chevronDown,
+                id: "sources-load-more",
+                attributes: " hidden"
+            ))
+          </div>
         </section>
         <p class="t-footnote t-tertiary sources-footnote">媒体源的路径、网络地址、账号、密码、令牌、Cookie 与连接配置不会发送到网页。</p>
         """
@@ -47,6 +66,9 @@ enum ServerWebSourcesPage {
     #global-status { margin-bottom: var(--space-5); }
     .sources-panel { padding: 0; }
     .sources-panel .ui-card-head { padding: var(--space-4) var(--space-5); border-bottom: var(--hairline) solid var(--divider); }
+    .sources-list-tools { padding: var(--space-4) var(--space-5) 0; }
+    .sources-list-tools .app-page-search { width: min(100%, 420px); }
+    .sources-list-footer { display: flex; justify-content: center; padding: var(--space-3) var(--space-5) var(--space-4); }
     .sources-state { padding: var(--space-6) var(--space-5); }
     .sources-state[hidden], .sources-content[hidden] { display: none; }
     .sources-content { padding: 0 var(--space-5) var(--space-2); }
@@ -112,26 +134,57 @@ enum ServerWebSourcesPage {
       // 文案写进内层节点：往外层写会把提示图标一起抹掉。
       const statusText = byID('global-status-text');
       const refresh = byID('refresh');
+      const searchForm = byID('sources-search-form');
+      const search = byID('sources-search');
+      const loadMore = byID('sources-load-more');
+      let loadedSources = [];
+      let loadedTotal = 0;
+      let loading = false;
+      let revision = 0;
       const formatter = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' });
       // 图标由 Swift 从 `ServerWebIcon` 插值下来。此前这里的四条路径是手写的
       // 第二套：`settings` 画的是一枚八芒星式的简化齿轮，和页面上那枚十二瓣的
       // `ServerWebIcon.settings` 并排出现在同一屏里。
-      \#(ServerWebIcon.scriptHelper(for: [.source, .settings, .refresh, .more]))
+      \#(ServerWebIcon.scriptHelper(for: [.source]))
       const glyph = (name, className) => medialibIcon(name, className || 'icon icon-sm');
       const element = (tag, className, text) => { const node = document.createElement(tag); if (className) node.className = className; if (text !== undefined) node.textContent = String(text); return node; };
       const safeDate = (value) => { const date = new Date(value); return Number.isNaN(date.getTime()) ? '时间未知' : formatter.format(date); };
       const state = (message, error = false) => { const notice = byID('sources-state'); const content = byID('sources-content'); notice.textContent = message; notice.classList.toggle('error', error); notice.hidden = false; content.hidden = true; content.replaceChildren(); };
-      async function fetchSources() {
+      async function fetchSources(offset) {
         const controller = new AbortController(); const timer = window.setTimeout(() => controller.abort(), 10000);
-        try { const response = await fetch('/api/v1/admin/sources', { credentials: 'same-origin', headers: { 'Accept': 'application/json' }, signal: controller.signal }); if (response.status === 401) { window.location.assign('/login'); throw new Error('登录已失效'); } if (response.status === 403) throw new Error('你没有查看媒体源的权限。'); if (!response.ok) throw new Error(response.status === 429 ? '请求过于频繁，请稍后刷新' : '服务暂时无法读取媒体源'); return await response.json(); } finally { window.clearTimeout(timer); }
+        const parameters = new URLSearchParams({offset:String(offset),limit:'50'});
+        const query = search?.value.trim().slice(0, 128) || '';
+        if (query) parameters.set('q', query);
+        try { const response = await fetch(`/api/v1/admin/sources?${parameters}`, { credentials: 'same-origin', headers: { 'Accept': 'application/json' }, signal: controller.signal }); if (response.status === 401) { window.location.assign('/login'); throw new Error('登录已失效'); } if (response.status === 403) throw new Error('你没有查看媒体源的权限。'); if (!response.ok) throw new Error(response.status === 429 ? '请求过于频繁，请稍后刷新' : '服务暂时无法读取媒体源'); return await response.json(); } finally { window.clearTimeout(timer); }
       }
-      function render(data) {
-        const sources = Array.isArray(data.sources) ? data.sources : []; byID('sources-count').textContent = String(Number.isFinite(data.totalCount) ? data.totalCount : sources.length); if (!sources.length) { state('还没有可显示的媒体源。'); return; }
-        const rows = element('div', 'rows'); sources.forEach((source) => { const title = element('div', 'source-title'); title.append(element('span', 'primary', source.name || '未命名媒体源')); title.append(element('span', 'ui-badge ui-badge-neutral', '可访问')); title.append(element('span', 'ui-badge ui-badge-neutral source-kind', source.sourceKind || 'unknown')); const identity = element('div', 'source-main'); identity.append(title); const policy = [source.autoScan ? '自动扫描' : '手动扫描', source.includeInMetadataFetch ? '自动补充信息' : '不自动补充信息', source.includeInHealthCheck ? '纳入健康检查' : '不纳入健康检查'].join(' · '); identity.append(element('div', 'secondary', policy)); const actions = element('div', 'source-actions-row'); actions.append(glyph('settings'), glyph('refresh'), glyph('more')); const sourceRow = element('div', 'row'); const sourceIcon = element('span', 'source-icon'); sourceIcon.append(glyph('source', 'icon icon-md')); sourceRow.append(sourceIcon, identity, actions); rows.append(sourceRow); });
+      function render(data, append) {
+        const sources = Array.isArray(data.sources) ? data.sources : [];
+        if (!append) loadedSources = [];
+        const knownIDs = new Set(loadedSources.map(source => source.id));
+        sources.forEach(source => { if (source && typeof source.id === 'string' && !knownIDs.has(source.id)) loadedSources.push(source); });
+        loadedTotal = Math.max(loadedSources.length, Number(data.totalCount) || 0);
+        byID('sources-count').textContent = String(loadedTotal);
+        loadMore.hidden = !data.isTruncated || loadedSources.length >= loadedTotal;
+        loadMore.disabled = false;
+        if (!loadedSources.length) { state(search?.value.trim() ? '没有匹配的媒体源。' : '还没有可显示的媒体源。'); return; }
+        const rows = element('div', 'rows'); loadedSources.forEach((source) => { const title = element('div', 'source-title'); title.append(element('span', 'primary', source.name || '未命名媒体源')); title.append(element('span', 'ui-badge ui-badge-neutral', '可访问')); title.append(element('span', 'ui-badge ui-badge-neutral source-kind', source.sourceKind || 'unknown')); const identity = element('div', 'source-main'); identity.append(title); const policy = [source.autoScan ? '自动扫描' : '手动扫描', source.includeInMetadataFetch ? '自动补充信息' : '不自动补充信息', source.includeInHealthCheck ? '纳入健康检查' : '不纳入健康检查'].join(' · '); identity.append(element('div', 'secondary', policy)); const actions = element('div', 'source-actions-row', `更新于 ${safeDate(source.updatedAt)}`); const sourceRow = element('div', 'row'); const sourceIcon = element('span', 'source-icon'); sourceIcon.append(glyph('source', 'icon icon-md')); sourceRow.append(sourceIcon, identity, actions); rows.append(sourceRow); });
         byID('sources-state').hidden = true; const content = byID('sources-content'); content.replaceChildren(rows); content.hidden = false;
       }
-      async function load() { refresh.disabled = true; status.hidden = false; statusText.textContent = '正在加载媒体源…'; state('正在加载…'); try { render(await fetchSources()); statusText.textContent = '媒体源数据已更新。'; } catch (error) { state(error && error.message ? error.message : '无法读取媒体源。', true); statusText.textContent = '加载失败，请稍后重试。'; } finally { refresh.disabled = false; } }
-      refresh.addEventListener('click', load); load();
+      async function load(reset = true) {
+        if (loading) return;
+        loading = true;
+        const currentRevision = reset ? ++revision : revision;
+        refresh.disabled = true;
+        if (reset) { status.hidden = false; statusText.textContent = '正在加载媒体源…'; state(search?.value.trim() ? '正在筛选媒体源…' : '正在加载…'); loadMore.hidden = true; }
+        else { loadMore.disabled = true; loadMore.dataset.busy = 'true'; }
+        try { const data = await fetchSources(reset ? 0 : loadedSources.length); if (currentRevision !== revision) return; render(data, !reset); statusText.textContent = '媒体源数据已更新。'; }
+        catch (error) { if (currentRevision !== revision) return; if (reset) state(error && error.message ? error.message : '无法读取媒体源。', true); else loadMore.hidden = false; statusText.textContent = '加载失败，请稍后重试。'; }
+        finally { loading = false; refresh.disabled = false; loadMore.disabled = false; delete loadMore.dataset.busy; }
+      }
+      refresh.addEventListener('click', () => load(true));
+      loadMore.addEventListener('click', () => load(false));
+      searchForm.addEventListener('submit', event => { event.preventDefault(); load(true); });
+      load(true);
     })();
     """#
 

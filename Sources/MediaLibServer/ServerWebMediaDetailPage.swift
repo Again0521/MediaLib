@@ -1579,7 +1579,12 @@ enum ServerWebMediaDetailPage {
       var isStarting = false;
       var resumeApplied = false;
       var playbackStartedReported = false;
-      var lastProgressBucket = -1;
+      // Bucket zero is the initial 0–14.999 second interval. Reporting it on
+      // the first timeupdate races the later pagehide checkpoint and can write
+      // a 0.03 second resume position over the user's real stop point on short
+      // clips. Start at zero; resumed media beyond 15 seconds still reports its
+      // current bucket immediately.
+      var lastProgressBucket = 0;
       var playbackTracksPromise = null;
       var playbackPreferencesPromise = null;
       var playbackPreferences = null;
@@ -1620,6 +1625,7 @@ enum ServerWebMediaDetailPage {
       // 这是可更新的页面事实，不能是 const，也不能只相信浏览器媒体元素——分片
       // MP4 的 `duration` 按规范会是 Infinity。
       var knownDurationSeconds = Number(document.body.dataset.durationSeconds || 0) || 0;
+      var lastKnownPlaybackPosition = Math.max(0, resumePosition);
       var playerLayout = 'default';
       var activeEpisodeSeason = currentSeason;
       const publishPlaybackMode = (mode, serverMode = '') => {
@@ -2308,18 +2314,33 @@ enum ServerWebMediaDetailPage {
         }
         return tracks.find(track => track.isDefault) ?? tracks[0];
       };
+      const browserCanPlayAudioTrack = (track) => {
+        if (track?.browserPlayable !== true) return false;
+        // Playwright WebKit and current Safari-compatible WebKit both advertise
+        // WebM/Opus as "maybe" while producing video-only playback. Keep the
+        // exception container-scoped: Opus in other supported containers must
+        // not be globally disabled, and non-Apple browsers retain Direct Play.
+        const appleWebKitOpusInWebM = (isIOSFamily || isDesktopSafari)
+          && browserContentType === 'video/webm'
+          && String(track?.codec || '').toLowerCase() === 'opus';
+        return !appleWebKitOpusInWebM;
+      };
       const directPlayHasSound = () => {
         const tracks = playbackTracks?.audio ?? [];
         // 探不到轨道（没有 ffprobe、远程来源）时不做判断：直放照旧，这与从前
         // 的行为一致，只是不再对"确实解不了"的那些文件也一起沉默。
         if (tracks.length === 0) return true;
-        return preferredAudioTrack()?.browserPlayable === true;
+        return browserCanPlayAudioTrack(preferredAudioTrack());
       };
-      // iPhone/iPad 的 WebKit 不支持 Matroska 容器；即使里面是 H.264 + AAC，
-      // canPlayType 也会失败。桌面 Chromium 对 MKV 的 canPlayType 又是假阴性，
-      // 所以不能全局按 MIME 重封装，只对 iOS 家族启用这条兼容路径。
+      // Apple WebKit 对 Matroska 等容器会明确返回空字符串；即使其中视频/音频
+      // 编码可解，随后直放仍只会异步报 MEDIA_ERR_SRC_NOT_SUPPORTED。桌面
+      // Chromium 对 MKV 的同一个空结果却可能是假阴性，所以这条容器门禁只能
+      // 与已经确认的 Apple WebKit 家族结合，不能全局按 MIME 重封装。
+      const browserRejectsDirectContainer = () => Boolean(browserContentType)
+        && typeof player.canPlayType === 'function'
+        && player.canPlayType(browserContentType) === '';
       const directPlayNeedsRemux = () => !directPlayHasSound()
-        || (isIOSFamily && !['video/mp4', 'video/quicktime'].includes(browserContentType));
+        || ((isIOSFamily || isDesktopSafari) && browserRejectsDirectContainer());
 
       // ---- Track menus ------------------------------------------------------
       // Both menus are <details> inside the stage rather than document-level
@@ -2391,7 +2412,7 @@ enum ServerWebMediaDetailPage {
         const activeID = playbackMode === 'hls' ? remuxAudioTrack : (preferredAudioTrack()?.id ?? 0);
         const fragment = document.createDocumentFragment();
         tracks.forEach((track, index) => {
-          const label = track.browserPlayable
+          const label = browserCanPlayAudioTrack(track)
             ? (track.label || `音轨 ${index + 1}`)
             : `${track.label || `音轨 ${index + 1}`}（需转码）`;
           fragment.append(trackButton(label, track.id === activeID, () => selectAudioTrack(track)));
@@ -2452,9 +2473,9 @@ enum ServerWebMediaDetailPage {
         if (!track || !playbackTracks) return;
         void persistPlaybackTrackOverride({audioFingerprint:track.fingerprint || null});
         const position = timelinePosition();
-        const isFirstBrowserPlayable = track.browserPlayable && track.id === (playbackTracks.audio[0]?.id ?? 0);
-        if (isFirstBrowserPlayable && activeBurnInSubtitleTrackID === null &&
-            !(isIOSFamily && !['video/mp4', 'video/quicktime'].includes(browserContentType))) {
+        const isFirstBrowserPlayable = browserCanPlayAudioTrack(track)
+          && track.id === (playbackTracks.audio[0]?.id ?? 0);
+        if (isFirstBrowserPlayable && activeBurnInSubtitleTrackID === null && !directPlayNeedsRemux()) {
           if (playbackMode === 'direct') return;
           void startDirect({ resumeAt: position });
           return;
@@ -2804,10 +2825,12 @@ enum ServerWebMediaDetailPage {
           playbackSeek.style.setProperty('--buffered', '0%');
         }
       }
-      async function reportPlaybackState(event, keepalive = false) {
+      async function reportPlaybackState(event, keepalive = false, positionOverride = null) {
         // 上报的是整部片子里的位置，不是当前这条流里的位置——否则从第 100 分钟
         // 重开一条重封装流之后，续播点会被写回第 0 分钟。
-        const positionSeconds = finitePlaybackNumber(timelinePosition());
+        const positionSeconds = finitePlaybackNumber(
+          Number.isFinite(positionOverride) ? positionOverride : timelinePosition()
+        );
         const reportedDuration = timelineDuration();
         const durationSeconds = Number.isFinite(reportedDuration) && reportedDuration > 0 ? reportedDuration : null;
         try {
@@ -2944,7 +2967,7 @@ enum ServerWebMediaDetailPage {
         player.load();
         resumeApplied = false;
         playbackStartedReported = false;
-        lastProgressBucket = -1;
+        lastProgressBucket = 0;
         playbackCompleted = false;
         lastAdvancingTime = 0;
       };
@@ -2962,7 +2985,7 @@ enum ServerWebMediaDetailPage {
         // iOS 对 MKV 的结论无需等待探测：容器本身就不被 WebKit 接受。立即用第一
         // 条音轨发起兼容重封装，才能让 play() 仍发生在这次点击的用户手势里；轨道
         // 名单并行补齐，之后仍可切到其他音轨。
-        if (!playbackTracks && isIOSFamily && !['video/mp4', 'video/quicktime'].includes(browserContentType)) {
+        if (!playbackTracks && isIOSFamily && browserRejectsDirectContainer()) {
           void loadPlaybackTracks();
           setStatus('正在为 iPhone / iPad 准备兼容播放流。');
           const resumeAt = configuredResumePosition();
@@ -2995,9 +3018,11 @@ enum ServerWebMediaDetailPage {
           if (directPlayNeedsRemux() && (
             (playbackTracks?.remuxable && (playbackTracks.audio?.length ?? 0) > 0) || isIOSFamily
           )) {
-            const track = preferredAudioTrack();
-            setStatus(
-              isIOSFamily
+          const track = preferredAudioTrack();
+          setStatus(
+            browserRejectsDirectContainer()
+              ? '这个容器无法直放，正在准备兼容播放流。'
+              : isIOSFamily
                 ? '正在为 iPhone / iPad 准备兼容播放流。'
                 : '这段视频的音轨浏览器解不了，正在改用服务器转码的音频。'
             );
@@ -3019,9 +3044,11 @@ enum ServerWebMediaDetailPage {
         )) {
           const track = preferredAudioTrack();
           setStatus(
-            isIOSFamily
-              ? '正在为 iPhone / iPad 准备兼容播放流。'
-              : '这段视频的音轨浏览器解不了，正在改用服务器转码的音频。'
+            browserRejectsDirectContainer()
+              ? '这个容器无法直放，正在准备兼容播放流。'
+              : isIOSFamily
+                ? '正在为 iPhone / iPad 准备兼容播放流。'
+                : '这段视频的音轨浏览器解不了，正在改用服务器转码的音频。'
           );
           // 续播点在直放那条路上由 `loadedmetadata` 处理；重封装这条路没有那一步
           // （流本来就从 `start=` 开始），所以要在这里把它交出去。
@@ -3170,7 +3197,7 @@ enum ServerWebMediaDetailPage {
         while (current?.state === 'queued' || current?.state === 'preparing') {
           if (sourceRevision !== playbackSourceRevision) throw new DOMException('Superseded', 'AbortError');
           if (window.performance.now() >= deadline) throw new Error('unavailable');
-          await new Promise((resolve) => window.setTimeout(resolve, 150));
+          await new Promise((resolve) => window.setTimeout(resolve, 250));
           const response = await fetch(`/api/v1/playback/sessions/${encodeURIComponent(current.sessionID)}`, {
             credentials:'same-origin', headers:{Accept:'application/json'}
           });
@@ -3477,6 +3504,7 @@ enum ServerWebMediaDetailPage {
         }
       });
       player.addEventListener('timeupdate', () => {
+        lastKnownPlaybackPosition = finitePlaybackNumber(timelinePosition());
         // `waiting`/`stalled` 在部分浏览器会迟到，甚至在解码已经恢复后不再补一个
         // `playing`。时间轴真正向前才是最可靠的“画面正在播放”证据；它一前进就必须
         // 收掉转圈与任何旧源留下的错误卡。
@@ -3495,6 +3523,7 @@ enum ServerWebMediaDetailPage {
         void reportPlaybackState('progress');
       });
       player.addEventListener('seeked', () => {
+        lastKnownPlaybackPosition = finitePlaybackNumber(timelinePosition());
         renderActiveSubtitle();
         settlePendingSeek();
       }, { signal: lifecycle.signal });
@@ -3565,14 +3594,14 @@ enum ServerWebMediaDetailPage {
       window.addEventListener('pagehide', () => {
         if (autoplayTimer !== null) { window.clearTimeout(autoplayTimer); autoplayTimer = null; }
         if (currentHLSClient) { currentHLSClient.destroy(); currentHLSClient = null; }
-        if (playbackStartedReported) void reportPlaybackState('stopped', true);
+        if (playbackStartedReported) void reportPlaybackState('stopped', true, lastKnownPlaybackPosition);
         if (currentHLSSessionID) cancelHLSSession(currentHLSSessionID, true);
       }, { signal: lifecycle.signal });
       document.addEventListener('medialib:pagewillunload', () => {
         if (autoplayTimer !== null) { window.clearTimeout(autoplayTimer); autoplayTimer = null; }
         if (currentHLSClient) { currentHLSClient.destroy(); currentHLSClient = null; }
         if (transportFrame !== null) window.cancelAnimationFrame(transportFrame);
-        if (playbackStartedReported) void reportPlaybackState('stopped', true);
+        if (playbackStartedReported) void reportPlaybackState('stopped', true, lastKnownPlaybackPosition);
         if (currentHLSSessionID) cancelHLSSession(currentHLSSessionID, true);
         subtitleLoadRevision += 1;
         releaseActiveSubtitle();

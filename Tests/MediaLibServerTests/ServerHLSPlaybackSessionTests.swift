@@ -234,7 +234,11 @@ final class ServerHLSPlaybackSessionTests: XCTestCase {
             ready = try XCTUnwrap(manager.status(sessionID: descriptor.sessionID, principal: principal))
         }
         XCTAssertEqual(ready.state, .ready)
-        XCTAssertEqual(ready.actualStartSeconds, 6.5)
+        XCTAssertEqual(
+            ready.actualStartSeconds,
+            6.25,
+            "copied video exposes the resolved keyframe minus the bounded 250ms preroll"
+        )
         let processID = try XCTUnwrap(Int(String(decoding: Data(contentsOf: processIDFile), as: UTF8.self)))
 
         manager.cancel(sessionID: descriptor.sessionID, principal: principal)
@@ -700,7 +704,7 @@ final class ServerHLSPlaybackSessionTests: XCTestCase {
         }
         XCTAssertEqual(status.state, .finished)
         XCTAssertEqual(status.mode, "hlsAudioTranscode")
-        XCTAssertLessThanOrEqual(status.actualStartSeconds, requestedStart)
+        XCTAssertLessThan(status.actualStartSeconds, requestedStart)
         XCTAssertGreaterThanOrEqual(status.actualStartSeconds, 0)
 
         let playlist = try XCTUnwrap(manager.resource(
@@ -727,8 +731,8 @@ final class ServerHLSPlaybackSessionTests: XCTestCase {
         let audioStart = Double(outputAudio["start_time"] as? String ?? "")
         XCTAssertNotNil(videoStart)
         XCTAssertNotNil(audioStart)
-        XCTAssertEqual(videoStart ?? 0, audioStart ?? 0, accuracy: 0.05,
-                       "seeked TrueHD audio must begin with copied H.264, not seconds later")
+        XCTAssertEqual(videoStart ?? 0, audioStart ?? 0, accuracy: 0.30,
+                       "seeked TrueHD audio and copied H.264 must share the bounded preroll")
         let audioProbeData = try runOutput(ffprobe, [
             "-v", "error", "-select_streams", "a:0", "-count_packets",
             "-show_entries", "stream=codec_name,nb_read_packets", "-of", "json", playlistURL.path
@@ -820,7 +824,12 @@ final class ServerHLSPlaybackSessionTests: XCTestCase {
         }
         XCTAssertEqual(status.state, .finished)
         XCTAssertLessThan(status.actualStartSeconds, 2.8)
-        XCTAssertEqual(status.actualStartSeconds, 2, accuracy: 0.15)
+        XCTAssertEqual(
+            status.actualStartSeconds,
+            1.75,
+            accuracy: 0.15,
+            "native HEVC HLS exposes the keyframe plus the copied-video preroll"
+        )
 
         let playlist = try XCTUnwrap(manager.resource(
             sessionID: descriptor.sessionID,

@@ -195,10 +195,26 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
         )
     }
 
-    func sources() throws -> ServerManagedSourcesResponse? {
+    func sources(
+        limit: Int = maximumSourceCount,
+        offset: Int = 0,
+        searchText: String? = nil
+    ) throws -> ServerManagedSourcesResponse? {
         guard let sourceRepository else { return nil }
-        let allSources = try sourceRepository.fetchAll()
-        let selected = allSources.prefix(Self.maximumSourceCount)
+        let normalizedSearch = searchText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let allSources = try sourceRepository.fetchAll().filter { source in
+            guard let normalizedSearch, !normalizedSearch.isEmpty else { return true }
+            return [source.id, source.name, source.mediaType.rawValue, source.sourceKind.rawValue]
+                .contains { $0.localizedCaseInsensitiveContains(normalizedSearch) }
+        }.sorted {
+            let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
+            return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
+        }
+        let boundedOffset = max(offset, 0)
+        let boundedLimit = min(max(limit, 1), Self.maximumSourceCount)
+        let selected = boundedOffset < allSources.count
+            ? Array(allSources.dropFirst(boundedOffset).prefix(boundedLimit))
+            : []
         let summaries = selected.map { source in
             ServerManagedSourceSummary(
                 id: source.id,
@@ -213,7 +229,7 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
         }
         return ServerManagedSourcesResponse(
             totalCount: allSources.count,
-            isTruncated: allSources.count > summaries.count,
+            isTruncated: boundedOffset + summaries.count < allSources.count,
             sources: summaries
         )
     }

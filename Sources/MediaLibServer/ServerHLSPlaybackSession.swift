@@ -480,10 +480,16 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
             // preceding keyframe while TrueHD/DTS begins at the requested
             // timestamp. That produces valid-looking HLS with seconds of silent
             // video. Seek at most ten seconds earlier, burst-read only that
-            // bounded preroll, then trim on the output timeline so every mapped
-            // stream begins together. Long MKVs never scan from the file start.
-            let inputSeekSeconds = max(0, prepared.actualStartSeconds - 10)
-            let outputTrimSeconds = prepared.actualStartSeconds - inputSeekSeconds
+            // bounded preroll, then trim on the output timeline. Copied video
+            // retains 250 ms before its resolved keyframe: trimming at the exact
+            // timestamp can make ffmpeg select the *next* keyframe and emit a
+            // zero-duration stream near EOF. The descriptor reports this real
+            // stream origin so the client can seek the remaining fraction.
+            let streamStartSeconds = copiesVideo
+                ? max(0, prepared.actualStartSeconds - 0.25)
+                : prepared.actualStartSeconds
+            let inputSeekSeconds = max(0, streamStartSeconds - 10)
+            let outputTrimSeconds = streamStartSeconds - inputSeekSeconds
             var arguments = [
                 "-nostdin", "-hide_banner", "-loglevel", "error",
                 "-ss", String(format: "%.3f", inputSeekSeconds)
@@ -571,7 +577,7 @@ final class ServerHLSPlaybackSessionManager: @unchecked Sendable {
                 mode: mode,
                 reason: reason,
                 durationSeconds: prepared.durationSeconds,
-                actualStartSeconds: prepared.actualStartSeconds,
+                actualStartSeconds: streamStartSeconds,
                 process: process
             )
         }

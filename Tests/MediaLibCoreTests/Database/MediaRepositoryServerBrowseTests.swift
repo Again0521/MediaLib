@@ -191,6 +191,30 @@ final class MediaRepositoryServerBrowseTests: XCTestCase {
         XCTAssertEqual(invalidMaximum.totalItemCount, 0, "无法识别的策略上限必须失败即关闭")
     }
 
+    func testRegionalContentRatingsShareTheDatabaseVisibilityLadder() throws {
+        let fixtures = [
+            ("de-child", "德国 12", "DE:FSK-12"),
+            ("uk-teen", "英国 15", "BBFC 15"),
+            ("jp-adult", "日本 18", "EIRIN R18+"),
+            ("numeric-noise", "非分级数字", "Season 2")
+        ]
+        let details = MediaDetailRepository(database: database)
+        for (id, title, rating) in fixtures {
+            try insert(id, title: title)
+            try details.save(MediaDetailSnapshot(
+                metadata: MediaDetailMetadata(mediaID: id, contentRating: rating, provider: "fixture", language: "en")
+            ))
+        }
+
+        let page = try repository.fetchServerLibraryPage(
+            allowedSourcePaths: [sourcePath], type: nil, topLevelOnly: true,
+            searchText: nil, offset: 0, limit: 100, sort: .title,
+            userID: admin, playbackFilter: nil, maximumContentRating: "16"
+        )
+        XCTAssertEqual(Set(page.items.map(\.id)), ["de-child", "uk-teen"])
+        XCTAssertEqual(page.totalItemCount, 2)
+    }
+
     // MARK: - Facets
 
     func testFacetsAreAuthorizedBoundedAndScopedToTheCurrentUser() throws {

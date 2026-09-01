@@ -836,13 +836,19 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertTrue(script.contains("window.performance.now() - lastUserPauseAt < 2_000"))
     }
 
-    func testIOSMatroskaUsesCompatibilityRemuxWithoutChangingDesktopProbePolicy() {
+    func testAppleWebKitRejectedContainersUseCompatibilityRemuxWithoutChangingChromiumPolicy() {
         let script = ServerWebMediaDetailPage.script
 
         XCTAssertTrue(script.contains("const isIOSFamily = /iP(?:ad|hone|od)/"))
-        XCTAssertTrue(script.contains("!['video/mp4', 'video/quicktime'].includes(browserContentType)"))
+        XCTAssertTrue(script.contains("const browserRejectsDirectContainer"))
+        XCTAssertTrue(script.contains("player.canPlayType(browserContentType) === ''"))
+        XCTAssertTrue(script.contains("(isIOSFamily || isDesktopSafari) && browserRejectsDirectContainer()"))
         XCTAssertTrue(script.contains("const directPlayNeedsRemux"))
+        XCTAssertTrue(script.contains("const browserCanPlayAudioTrack"))
+        XCTAssertTrue(script.contains("browserContentType === 'video/webm'"))
+        XCTAssertTrue(script.contains("String(track?.codec || '').toLowerCase() === 'opus'"))
         XCTAssertTrue(script.contains("await startRemux(0, resumeAt, { allowUnprobed: true })"))
+        XCTAssertTrue(script.contains("这个容器无法直放，正在准备兼容播放流。"))
         XCTAssertTrue(script.contains("正在为 iPhone / iPad 准备兼容播放流。"))
         XCTAssertFalse(script.contains("if (!browserCanPlay())"))
     }
@@ -860,6 +866,11 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertTrue(script.contains("return knownDurationSeconds > 0 ? knownDurationSeconds : NaN"))
         XCTAssertTrue(script.contains("seekTimeline(Math.min(resumeAt, duration))"))
         XCTAssertTrue(script.contains("if (playbackMode === 'hls' && knownDurationSeconds > 0) return knownDurationSeconds"))
+        XCTAssertTrue(script.contains("var lastProgressBucket = 0"))
+        XCTAssertFalse(script.contains("lastProgressBucket = -1"))
+        XCTAssertTrue(script.contains("var lastKnownPlaybackPosition = Math.max(0, resumePosition)"))
+        XCTAssertTrue(script.contains("lastKnownPlaybackPosition = finitePlaybackNumber(timelinePosition())"))
+        XCTAssertTrue(script.contains("reportPlaybackState('stopped', true, lastKnownPlaybackPosition)"))
     }
 
     func testScrubbingKeepsCapturedTargetUntilOneCommittedSeek() {
@@ -922,6 +933,9 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         )
         var cancelledBy: String?
         var receivedCapabilities: ServerWebClientCapabilities?
+        var ratePolicies = ServerRequestRateLimiter.productionPolicies
+        ratePolicies[.playbackControl] = ServerRateLimitPolicy(capacity: 64, refillPerSecond: 0.01)
+        ratePolicies[.mediaStream] = ServerRateLimitPolicy(capacity: 8, refillPerSecond: 0.01)
         let router = LocalHTTPRouter(
             serverID: "server", serverName: "Server",
             hlsSessionProvider: { itemID, request, principal in
@@ -958,6 +972,9 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
                     )
                 }
             },
+            rateLimiter: ServerRequestRateLimiter(
+                policies: ratePolicies, clock: { 100 }, salt: "hls-control-test"
+            ),
             csrfToken: "known-csrf"
         )
         let requestBody = Data(#"{"audioTrackID":1,"startSeconds":120,"durationSeconds":3600}"#.utf8)
@@ -988,8 +1005,9 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
         XCTAssertEqual(status.statusCode, 200)
         XCTAssertEqual(try JSONDecoder().decode(ServerHLSPlaybackDescriptor.self, from: status.body), descriptor)
         // A long GOP can take several seconds to emit its first playlist. The
-        // normal 150 ms state polling loop must not consume the scarce ffprobe
-        // bucket and rate-limit itself before the session becomes ready.
+        // normal 250 ms state polling loop must consume neither the scarce
+        // ffprobe bucket nor the byte-stream bucket; otherwise ordinary seek
+        // churn can 429 its next manifest or control request.
         for _ in 0..<20 {
             XCTAssertEqual(router.response(for: request(statusPath, token: "viewer")).statusCode, 200)
         }

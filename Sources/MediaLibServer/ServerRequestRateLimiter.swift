@@ -11,6 +11,7 @@ enum ServerRateLimitScope: String, CaseIterable, Sendable {
     case apiRead
     case artworkRead
     case mediaProbe
+    case playbackControl
     case mediaStream
     case authenticatedMutation
     case managementMutation
@@ -53,6 +54,12 @@ final class ServerRequestRateLimiter: @unchecked Sendable {
         // 有界的按主体与按客户端保护。
         .artworkRead: .init(capacity: 120, refillPerSecond: 2),
         .mediaProbe: .init(capacity: 12, refillPerSecond: 0.1),
+        // 会话创建、准备状态轮询、seek 换源和取消属于低成本控制面。
+        // 它们不能和清单/分片的字节传输共用额度，否则正常 HLS 播放会在
+        // 连续拖动时用自己的状态轮询耗尽后续控制请求。
+        // 四条允许的并发流按 250 ms 轮询时约为 16 次/秒；20 次/秒的补充率
+        // 留出 seek 创建/取消余量，240 的突发上限仍能约束失控客户端。
+        .playbackControl: .init(capacity: 240, refillPerSecond: 20),
         .mediaStream: .init(capacity: 240, refillPerSecond: 4),
         .authenticatedMutation: .init(capacity: 30, refillPerSecond: 0.5),
         // 管理写入包含密码重置、会话撤销、任务和维护操作。它与普通账号偏好写入

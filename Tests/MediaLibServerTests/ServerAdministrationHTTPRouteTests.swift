@@ -106,6 +106,7 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(response(path: "/api/v1/admin/sessions", token: "session-manager").statusCode, 200)
         XCTAssertEqual(response(path: "/api/v1/admin/security-events", token: "session-manager").statusCode, 403)
         XCTAssertEqual(response(path: "/api/v1/admin/sources", token: "session-manager").statusCode, 403)
+        XCTAssertEqual(response(path: "/api/v1/admin/sources", token: "library-manager").statusCode, 200)
         XCTAssertEqual(response(path: "/api/v1/admin/libraries", token: "library-manager").statusCode, 200)
 
         XCTAssertEqual(response(path: "/api/v1/admin/users", token: "administrator").statusCode, 200)
@@ -127,9 +128,27 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
             lastAccessedAt: Date(timeIntervalSince1970: 110),
             durationSeconds: 3_600
         )
+        let preparing = ServerAdminHLSPlaybackSession(
+            sessionID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            userID: "user-bob",
+            state: .preparing,
+            mode: "hlsAudioTranscode",
+            startedAt: Date(timeIntervalSince1970: 200),
+            lastAccessedAt: Date(timeIntervalSince1970: 210),
+            durationSeconds: 1_800
+        )
+        let queued = ServerAdminHLSPlaybackSession(
+            sessionID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            userID: "user-carol",
+            state: .queued,
+            mode: "hlsRemux",
+            startedAt: Date(timeIntervalSince1970: 200),
+            lastAccessedAt: Date(timeIntervalSince1970: 205),
+            durationSeconds: nil
+        )
         let cancellation = LockedPlaybackCancellation()
         router = makeRouter(
-            adminHLSSessionsProvider: { [session] },
+            adminHLSSessionsProvider: { [session, queued, preparing] },
             adminHLSCancellationProvider: { id, principal in
                 cancellation.record(id: id, actor: principal.userID)
                 return id == session.sessionID
@@ -139,7 +158,35 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         let list = response(path: "/api/v1/admin/playback-sessions", token: "session-manager")
         XCTAssertEqual(list.statusCode, 200)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: list.body) as? [[String: Any]])
-        XCTAssertEqual(json.first?["sessionID"] as? String, session.sessionID)
+        XCTAssertEqual(json.compactMap { $0["sessionID"] as? String }, [preparing.sessionID, queued.sessionID, session.sessionID])
+        XCTAssertTrue(list.additionalHeaders.contains("X-MediaLIB-Total-Count: 3"))
+
+        let filtered = response(
+            path: "/api/v1/admin/playback-sessions?state=preparing&q=audio&offset=0&limit=1",
+            token: "session-manager"
+        )
+        let filteredJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: filtered.body) as? [[String: Any]])
+        XCTAssertEqual(filteredJSON.first?["sessionID"] as? String, preparing.sessionID)
+        XCTAssertTrue(filtered.additionalHeaders.contains("X-MediaLIB-Total-Count: 1"))
+        XCTAssertTrue(filtered.additionalHeaders.contains("X-MediaLIB-Is-Truncated: false"))
+
+        let firstPage = response(
+            path: "/api/v1/admin/playback-sessions?offset=0&limit=1", token: "session-manager"
+        )
+        XCTAssertTrue(firstPage.additionalHeaders.contains("X-MediaLIB-Total-Count: 3"))
+        XCTAssertTrue(firstPage.additionalHeaders.contains("X-MediaLIB-Is-Truncated: true"))
+        XCTAssertEqual(
+            response(path: "/api/v1/admin/playback-sessions?state=unknown", token: "session-manager").statusCode,
+            400
+        )
+        XCTAssertEqual(
+            response(path: "/api/v1/admin/playback-sessions?limit=1&limit=2", token: "session-manager").statusCode,
+            400
+        )
+        XCTAssertEqual(
+            response(path: "/api/v1/admin/playback-sessions?sort=user", token: "session-manager").statusCode,
+            400
+        )
         XCTAssertEqual(response(
             path: "/api/v1/admin/playback-sessions/\(session.sessionID)", token: "session-manager"
         ).statusCode, 200)
@@ -359,15 +406,21 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertTrue(initial.additionalHeaders.contains("ETag: \"0\""))
         XCTAssertTrue(String(decoding: initial.body, as: UTF8.self).contains("\"directPlayAllowed\":true"))
 
+        let invalidPolicy = try JSONEncoder().encode(ServerUserPolicy(maximumContentRating: "custom-label"))
+        let invalidRequest = "PATCH \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer user-manager\r\nContent-Type: application/json\r\nContent-Length: \(invalidPolicy.count)\r\nIf-Match: \"0\"\r\nX-MediaLIB-CSRF: test-csrf-token\r\n\r\n"
+        XCTAssertEqual(router.response(for: invalidRequest, body: invalidPolicy).statusCode, 400)
+
         var policy = ServerUserPolicy()
         policy.directPlayAllowed = false
         policy.maximumConcurrentStreams = 1
         policy.remoteBitrateLimitMbps = 12
+        policy.maximumContentRating = "14"
         let body = try JSONEncoder().encode(policy)
         let request = "PATCH \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer user-manager\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nIf-Match: \"0\"\r\nX-MediaLIB-CSRF: test-csrf-token\r\n\r\n"
         let saved = router.response(for: request, body: body)
         XCTAssertEqual(saved.statusCode, 200)
         XCTAssertTrue(saved.additionalHeaders.contains("ETag: \"1\""))
+        XCTAssertTrue(String(decoding: saved.body, as: UTF8.self).contains("\"maximumContentRating\":\"14\""))
         XCTAssertEqual(router.response(for: request, body: body).statusCode, 409)
         XCTAssertTrue(try repository.sessions(userID: "user-bob").isEmpty)
 
@@ -874,6 +927,64 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         ] {
             XCTAssertFalse(allText.contains(forbiddenField), "unexpected sensitive field: \(forbiddenField)")
         }
+    }
+
+    func testSourceListingFiltersAndUsesStablePagesForLibraryManagers() throws {
+        let sources = SourceRepository(database: database)
+        try sources.save(MediaSource(
+            id: "source-nas-b", name: "NAS 影片 B", path: "/private/Media/NAS-B", mediaType: .movie
+        ))
+        try sources.save(MediaSource(
+            id: "source-nas-a", name: "NAS 影片 A", path: "/private/Media/NAS-A", mediaType: .movie
+        ))
+        try sources.save(MediaSource(
+            id: "source-music", name: "音乐库", path: "/private/Media/Music", mediaType: .music
+        ))
+        router = makeRouter()
+
+        let firstResponse = response(
+            path: "/api/v1/admin/sources?q=nas&offset=0&limit=1", token: "library-manager"
+        )
+        let secondResponse = response(
+            path: "/api/v1/admin/sources?q=nas&offset=1&limit=1", token: "library-manager"
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let first = try decoder.decode(ServerManagedSourcesResponse.self, from: firstResponse.body)
+        let second = try decoder.decode(ServerManagedSourcesResponse.self, from: secondResponse.body)
+
+        XCTAssertEqual(firstResponse.statusCode, 200)
+        XCTAssertEqual(first.totalCount, 2)
+        XCTAssertEqual(first.sources.map(\.id), ["source-nas-a"])
+        XCTAssertTrue(first.isTruncated)
+        XCTAssertEqual(second.sources.map(\.id), ["source-nas-b"])
+        XCTAssertFalse(second.isTruncated)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/sources?limit=1&limit=2", token: "library-manager"
+        ).statusCode, 400)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/sources?sort=path", token: "library-manager"
+        ).statusCode, 400)
+        XCTAssertFalse(String(decoding: firstResponse.body, as: UTF8.self).contains("/private/"))
+    }
+
+    func testCatalogBackedAdministrationReadsShareStrictHandlerContract() throws {
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/users?offset=0&limit=1", token: "user-manager"
+        ).statusCode, 200)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/users?offset=0&sort=password", token: "user-manager"
+        ).statusCode, 400)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/libraries?path=%2Fprivate", token: "library-manager"
+        ).statusCode, 400)
+
+        let head = router.response(
+            for: "HEAD /api/v1/admin/sources?limit=1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer library-manager\r\n\r\n"
+        )
+        XCTAssertEqual(head.statusCode, 200)
+        XCTAssertTrue(head.body.isEmpty)
+        XCTAssertGreaterThan(head.declaredContentLength, 0)
     }
 
     func testSecurityEventRoutesPageAndFilterOnTheServer() throws {

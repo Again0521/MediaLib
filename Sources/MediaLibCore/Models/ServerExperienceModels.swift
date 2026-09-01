@@ -331,6 +331,7 @@ public struct ServerUserPolicy: Codable, Equatable, Sendable {
             && (accessEndMinute.map { (0..<1440).contains($0) } ?? true)
             && ((accessStartMinute == nil) == (accessEndMinute == nil))
             && (maximumContentRating?.utf8.count ?? 0) <= 32
+            && (maximumContentRating.map { ServerContentRatingAgePolicy.age(for: $0) != nil } ?? true)
     }
 }
 
@@ -338,6 +339,33 @@ public struct ServerUserPolicy: Codable, Equatable, Sendable {
 /// database-backed catalog visibility. Keeping the ladder in Core prevents a
 /// title from being hidden at playback time but exposed by browse/search.
 public enum ServerContentRatingAgePolicy {
+    private static let exactAges: [String: Int] = [
+        // US television and film.
+        "G": 0, "TV-Y": 0, "TV-G": 0, "TV-Y7": 7, "TV-Y7-FV": 7,
+        "PG": 8, "TV-PG": 10, "PG-13": 13, "PG13": 13, "TV-14": 14,
+        "R": 17, "TV-MA": 17, "NC-17": 18, "NC17": 18, "X": 18,
+        // UK, Ireland, Australia, New Zealand and Canada.
+        "U": 0, "UC": 0, "C": 0, "P": 0, "12A": 12, "14A": 14,
+        "M": 15, "MA-15+": 15, "MA15+": 15, "18A": 18,
+        "R18+": 18, "R-18+": 18, "X18+": 18, "X-18+": 18,
+        // Japan, Singapore and India.
+        "PG12": 12, "R15+": 15, "R-15+": 15, "NC16": 16,
+        "M18": 18, "R21": 21, "A": 18, "S": 18,
+        "UA7+": 7, "UA13+": 13, "UA16+": 16,
+        // Common all-age labels used by European, Asian and Latin American providers.
+        "ALL": 0, "AL": 0, "L": 0, "TP": 0, "TOUS-PUBLICS": 0
+    ]
+    private static let boardPrefixes = [
+        "FSK", "BBFC", "IFCO", "ACB", "OFLC", "CHVRS", "REGIE",
+        "CNC", "EIRIN", "KMRB", "IMDA", "CBFC", "DJCTQ", "KIJKWIJZER"
+    ]
+    private static let namespacePrefixes = [
+        "RATED-", "US-", "USA-", "GB-", "UK-", "IE-", "DE-", "GERMANY-",
+        "AU-", "AUSTRALIA-", "NZ-", "CA-", "CANADA-", "FR-", "FRANCE-",
+        "JP-", "JAPAN-", "KR-", "KOREA-", "SG-", "SINGAPORE-", "IN-",
+        "INDIA-", "BR-", "BRAZIL-", "NL-", "NETHERLANDS-"
+    ]
+
     public static func allows(contentRating: String?, maximum: String?) -> Bool {
         guard let maximum else { return true }
         guard let maximumAge = age(for: maximum),
@@ -348,21 +376,67 @@ public enum ServerContentRatingAgePolicy {
     }
 
     public static func age(for rawValue: String) -> Int? {
-        let normalized = rawValue
+        let normalized = normalize(rawValue)
+        guard !normalized.isEmpty else { return nil }
+        if let value = exactAges[normalized] { return value }
+
+        let withoutNamespace = stripKnownNamespace(from: normalized)
+        if withoutNamespace != normalized, let value = exactAges[withoutNamespace] { return value }
+        if let numeric = numericAge(from: withoutNamespace) { return numeric }
+
+        // These boards commonly publish a board name followed by an age. The
+        // prefix is required so unrelated metadata containing a number cannot
+        // silently become an allowed content rating.
+        for prefix in boardPrefixes {
+            guard withoutNamespace.hasPrefix(prefix) else { continue }
+            var suffix = String(withoutNamespace.dropFirst(prefix.count))
+            while suffix.first == "-" { suffix.removeFirst() }
+            if let value = exactAges[suffix] { return value }
+            if let numeric = numericAge(from: suffix) { return numeric }
+        }
+        return nil
+    }
+
+    private static func normalize(_ rawValue: String) -> String {
+        let folded = rawValue
             .trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
             .uppercased()
-            .replacingOccurrences(of: "_", with: "-")
-            .replacingOccurrences(of: " ", with: "-")
-        let exact: [String: Int] = [
-            "G": 0, "TV-Y": 0, "TV-G": 0, "U": 0, "ALL": 0,
-            "TV-Y7": 7, "PG": 8, "TV-PG": 10,
-            "PG-13": 13, "TV-14": 14,
-            "R": 17, "TV-MA": 17, "NC-17": 18, "X": 18
-        ]
-        if let value = exact[normalized] { return value }
-        let components = normalized.split(whereSeparator: { !$0.isNumber })
-        guard let numeric = components.compactMap({ Int($0) }).first,
-              (0...21).contains(numeric) else { return nil }
+        var result = ""
+        var lastWasSeparator = false
+        for scalar in folded.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "+" {
+                result.unicodeScalars.append(scalar)
+                lastWasSeparator = false
+            } else if !lastWasSeparator && !result.isEmpty {
+                result.append("-")
+                lastWasSeparator = true
+            }
+        }
+        while result.last == "-" { result.removeLast() }
+        return result
+    }
+
+    private static func stripKnownNamespace(from value: String) -> String {
+        var result = value
+        var removed = true
+        while removed {
+            removed = false
+            for prefix in namespacePrefixes where result.hasPrefix(prefix) {
+                result.removeFirst(prefix.count)
+                removed = true
+                break
+            }
+        }
+        return result
+    }
+
+    private static func numericAge(from value: String) -> Int? {
+        var candidate = value
+        if candidate.last == "+" { candidate.removeLast() }
+        guard !candidate.isEmpty, candidate.allSatisfy(\.isNumber),
+              let numeric = Int(candidate), (0...21).contains(numeric)
+        else { return nil }
         return numeric
     }
 }

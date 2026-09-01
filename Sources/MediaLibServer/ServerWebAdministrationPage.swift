@@ -161,7 +161,17 @@ enum ServerWebAdministrationPage {
               </div>
               <div class="ui-field">
                 <label class="ui-label" for="policy-rating">最高内容分级</label>
-                <input class="ui-input" id="policy-rating" type="text" maxlength="32" placeholder="不限制">
+                <select class="ui-select" id="policy-rating">
+                  <option value="">不限制</option>
+                  <option value="0">全年龄</option><option value="6">6 岁</option>
+                  <option value="7">7 岁</option><option value="8">8 岁</option>
+                  <option value="10">10 岁</option><option value="12">12 岁</option>
+                  <option value="13">13 岁</option><option value="14">14 岁</option>
+                  <option value="15">15 岁</option><option value="16">16 岁</option>
+                  <option value="17">17 岁</option><option value="18">18 岁</option>
+                  <option value="21">21 岁</option>
+                </select>
+                <p class="ui-help">媒体原有的 MPAA、TV、BBFC、FSK 等地区标签会统一换算为建议年龄；无法识别的标签会隐藏。</p>
               </div>
               <p class="ui-help">访问时间必须同时填写或同时留空。保存策略后该成员的现有会话会失效。</p>
             </fieldset>
@@ -204,8 +214,41 @@ enum ServerWebAdministrationPage {
                 attributes: " hidden"
             )
           ))
-          \(dataPanel(id: "playback-sessions", title: "当前播放", note: "正在准备、排队或播放的 HLS 会话"))
+          \(dataPanel(
+            id: "playback-sessions",
+            title: "当前播放",
+            note: "按开始时间稳定排序；可筛选准备、排队或播放中的 HLS 会话",
+            tools: playbackSessionTools,
+            footer: ServerWebUI.button(
+                "载入更多",
+                variant: .ghost,
+                size: .small,
+                icon: .chevronDown,
+                id: "playback-sessions-load-more",
+                attributes: " hidden"
+            )
+          ))
         </div>
+        """
+
+    private static let playbackSessionTools = """
+        <form id="playback-sessions-search-form" class="admin-filter-form" role="search">
+          <div class="ui-field admin-filter-search">
+            <label class="ui-label" for="playback-sessions-search">筛选当前播放</label>
+            <input class="ui-input" id="playback-sessions-search" type="search" maxlength="128" placeholder="搜索用户、模式或会话">
+          </div>
+          <div class="ui-field admin-filter-state">
+            <label class="ui-label" for="playback-sessions-state-filter">状态</label>
+            <select class="ui-select" id="playback-sessions-state-filter">
+              <option value="">全部状态</option>
+              <option value="queued">排队</option><option value="preparing">准备</option>
+              <option value="ready">就绪</option><option value="playing">播放</option>
+              <option value="finished">完成</option><option value="failed">失败</option>
+              <option value="cancelled">取消</option>
+            </select>
+          </div>
+          \(ServerWebUI.button("筛选", variant: .secondary, icon: .search, type: "submit"))
+        </form>
         """
 
     /// Read-only list panels share one shape; their ids remain the contract
@@ -245,6 +288,13 @@ enum ServerWebAdministrationPage {
     .admin-panel .ui-card-head { align-items: flex-start; }
     .admin-list-tools { margin: var(--space-3) 0; }
     .admin-list-tools .app-page-search { width: min(100%, 420px); }
+    .admin-filter-form {
+      display: grid;
+      grid-template-columns: minmax(180px, 1fr) minmax(140px, 200px) auto;
+      align-items: end;
+      gap: var(--space-3);
+      max-width: 720px;
+    }
     .admin-list-footer { display: flex; justify-content: center; padding-top: var(--space-3); }
     .content[hidden], .admin-state[hidden] { display: none; }
 
@@ -338,6 +388,8 @@ enum ServerWebAdministrationPage {
     .admin-footnote { padding-top: var(--space-6); }
 
     @media (max-width: 719px) {
+      .admin-filter-form { grid-template-columns: minmax(0, 1fr); }
+      .admin-filter-form .ui-btn { width: 100%; }
       .admin-form-grid { grid-template-columns: minmax(0, 1fr); }
       .admin-policy-grid { grid-template-columns: minmax(0, 1fr); }
       .row > * { flex: 1 1 100%; }
@@ -383,9 +435,30 @@ enum ServerWebAdministrationPage {
       const policyStart = byID('policy-start');
       const policyEnd = byID('policy-end');
       const policyRating = byID('policy-rating');
+      const removeLegacyPolicyRating = () => {
+        policyRating.querySelectorAll('option[data-legacy-rating]').forEach((option) => option.remove());
+      };
+      const setPolicyRating = (rawValue) => {
+        removeLegacyPolicyRating();
+        const value = typeof rawValue === 'string' ? rawValue.trim() : '';
+        if (!value || Array.from(policyRating.options).some((option) => option.value === value)) {
+          policyRating.value = value;
+          return;
+        }
+        const legacyOption = document.createElement('option');
+        legacyOption.value = value;
+        legacyOption.textContent = `当前设置：${value}`;
+        legacyOption.dataset.legacyRating = 'true';
+        policyRating.append(legacyOption);
+        policyRating.value = value;
+      };
       const sessionsSearchForm = byID('sessions-search-form');
       const sessionsSearch = byID('sessions-search');
       const sessionsLoadMore = byID('sessions-load-more');
+      const playbackSessionsSearchForm = byID('playback-sessions-search-form');
+      const playbackSessionsSearch = byID('playback-sessions-search');
+      const playbackSessionsStateFilter = byID('playback-sessions-state-filter');
+      const playbackSessionsLoadMore = byID('playback-sessions-load-more');
       var availableLibraries = [];
       var editingUser = null;
       var editingPolicy = null;
@@ -398,6 +471,10 @@ enum ServerWebAdministrationPage {
       var loadedSessionTotal = 0;
       var sessionsLoading = false;
       var sessionsRevision = 0;
+      var loadedPlaybackSessions = [];
+      var loadedPlaybackSessionTotal = 0;
+      var playbackSessionsLoading = false;
+      var playbackSessionsRevision = 0;
       const initialSessionQuery = window.location.pathname === '/admin/sessions'
         ? new URLSearchParams(window.location.search).get('q') || ''
         : '';
@@ -437,7 +514,7 @@ enum ServerWebAdministrationPage {
         values.forEach((value) => node.append(value));
         return node;
       };
-      async function fetchJSON(path) {
+      async function fetchJSONResponse(path) {
         const controller = new AbortController();
         const timer = window.setTimeout(() => controller.abort(), 10000);
         try {
@@ -452,11 +529,12 @@ enum ServerWebAdministrationPage {
           }
           if (response.status === 403) throw new Error('你没有查看这部分内容的权限。');
           if (!response.ok) throw new Error(response.status === 429 ? '请求过于频繁，请稍后刷新' : '服务暂时无法读取此区域');
-          return await response.json();
+          return { data: await response.json(), response };
         } finally {
           window.clearTimeout(timer);
         }
       }
+      async function fetchJSON(path) { return (await fetchJSONResponse(path)).data; }
       function renderEditLibraryOptions(selectedIDs) {
         const selected = new Set(Array.isArray(selectedIDs) ? selectedIDs : []);
         editLibraryOptions.replaceChildren();
@@ -591,7 +669,7 @@ enum ServerWebAdministrationPage {
           policyBitrate.value = Number.isInteger(policy.remoteBitrateLimitMbps) ? String(policy.remoteBitrateLimitMbps) : '';
           policyStart.value = minutesToTime(policy.accessStartMinute);
           policyEnd.value = minutesToTime(policy.accessEndMinute);
-          policyRating.value = typeof policy.maximumContentRating === 'string' ? policy.maximumContentRating : '';
+          setPolicyRating(policy.maximumContentRating);
           editPolicyState.textContent = '策略已加载；保存后新限制立即生效。';
         } catch (error) {
           if (revision !== policyLoadRevision || editingUser?.id !== userID) return;
@@ -613,6 +691,7 @@ enum ServerWebAdministrationPage {
         editState.classList.remove('error');
         editPolicyState.textContent = '选择成员后加载策略。';
         editPolicyState.classList.remove('error');
+        removeLegacyPolicyRating();
       }
       function openEditUser(user, focusPassword = false) {
         if (!user || typeof user.id !== 'string' || !user.id || user.isBuiltInAdministrator) return;
@@ -922,13 +1001,27 @@ enum ServerWebAdministrationPage {
           button.disabled = false;
         }
       }
-      function renderPlaybackSessions(data) {
+      function renderPlaybackSessions(data, totalCount, isTruncated, append = false) {
         const sessions = Array.isArray(data) ? data : [];
-        byID('playback-sessions-count').textContent = String(sessions.length);
-        if (!sessions.length) { setState('playback-sessions', '目前没有活动播放。'); return; }
+        if (!append) loadedPlaybackSessions = [];
+        const knownSessionIDs = new Set(loadedPlaybackSessions.map((session) => session.sessionID));
+        sessions.forEach((session) => {
+          if (session && typeof session.sessionID === 'string' && !knownSessionIDs.has(session.sessionID)) {
+            loadedPlaybackSessions.push(session);
+          }
+        });
+        loadedPlaybackSessionTotal = Math.max(0, Number(totalCount) || loadedPlaybackSessions.length);
+        byID('playback-sessions-count').textContent = String(loadedPlaybackSessionTotal);
+        playbackSessionsLoadMore.hidden = !isTruncated || loadedPlaybackSessions.length >= loadedPlaybackSessionTotal;
+        playbackSessionsLoadMore.disabled = false;
+        if (!loadedPlaybackSessions.length) {
+          const filtering = playbackSessionsSearch?.value.trim() || playbackSessionsStateFilter?.value;
+          setState('playback-sessions', filtering ? '没有匹配的播放会话。' : '目前没有活动播放。');
+          return;
+        }
         const stateLabel = { queued:'排队', preparing:'准备', ready:'就绪', playing:'播放', finished:'完成', failed:'失败', cancelled:'取消' };
         const rows = element('div', 'rows');
-        sessions.forEach((session) => {
+        loadedPlaybackSessions.forEach((session) => {
           const terminate = element('button', 'ui-btn ui-btn-secondary', '终止');
           terminate.type = 'button';
           terminate.addEventListener('click', () => terminatePlaybackSession(session.sessionID, terminate));
@@ -940,6 +1033,45 @@ enum ServerWebAdministrationPage {
           ]));
         });
         showContent('playback-sessions', rows);
+      }
+      function playbackSessionListPath(offset) {
+        const params = new URLSearchParams({ offset: String(offset), limit: '50' });
+        const query = playbackSessionsSearch?.value.trim().slice(0, 128) || '';
+        const state = playbackSessionsStateFilter?.value || '';
+        if (query) params.set('q', query);
+        if (state) params.set('state', state);
+        return `/api/v1/admin/playback-sessions?${params.toString()}`;
+      }
+      async function loadMorePlaybackSessions(reset = false) {
+        if (playbackSessionsLoading) return;
+        playbackSessionsLoading = true;
+        const revision = reset ? ++playbackSessionsRevision : playbackSessionsRevision;
+        if (reset) {
+          setState('playback-sessions', '正在筛选当前播放…');
+          playbackSessionsLoadMore.hidden = true;
+        } else {
+          playbackSessionsLoadMore.disabled = true;
+          playbackSessionsLoadMore.dataset.busy = 'true';
+        }
+        try {
+          const result = await fetchJSONResponse(playbackSessionListPath(reset ? 0 : loadedPlaybackSessions.length));
+          if (revision !== playbackSessionsRevision) return;
+          const total = Number(result.response.headers.get('X-MediaLIB-Total-Count'));
+          const truncated = result.response.headers.get('X-MediaLIB-Is-Truncated') === 'true';
+          renderPlaybackSessions(result.data, total, truncated, !reset);
+        } catch (error) {
+          if (revision !== playbackSessionsRevision) return;
+          if (reset) setState('playback-sessions', error && error.message ? error.message : '无法读取当前播放。', true);
+          else {
+            playbackSessionsLoadMore.hidden = false;
+            globalStatus.hidden = false;
+            globalStatusText.textContent = error && error.message ? error.message : '无法载入更多播放会话。';
+          }
+        } finally {
+          playbackSessionsLoading = false;
+          playbackSessionsLoadMore.disabled = false;
+          delete playbackSessionsLoadMore.dataset.busy;
+        }
       }
       async function terminatePlaybackSession(id, button) {
         if (typeof id !== 'string' || !id || !window.confirm('此播放会立即停止。要继续吗？')) return;
@@ -953,7 +1085,7 @@ enum ServerWebAdministrationPage {
           if (response.status === 401) { window.location.assign('/login'); return; }
           if (response.status === 403) throw new Error('你没有终止播放会话的权限。');
           if (!response.ok) throw new Error('播放会话已结束或暂时无法终止。');
-          await load();
+          await loadMorePlaybackSessions(true);
         } catch (error) {
           globalStatus.hidden = false;
           globalStatusText.textContent = error && error.message ? error.message : '无法终止播放会话。';
@@ -983,24 +1115,35 @@ enum ServerWebAdministrationPage {
           else setLibraryLoadFailure('看不到可分配的资料库，不过仍然可以先把人加进来。');
         } else if (pageSection === 'sessions') {
           const sessionPageRevision = ++sessionsRevision;
+          const playbackPageRevision = ++playbackSessionsRevision;
           setState('sessions', '正在加载…');
           setState('playback-sessions', '正在加载…');
           const results = await Promise.allSettled([
             fetchJSON(sessionListPath(0)),
-            fetchJSON('/api/v1/admin/playback-sessions')
+            fetchJSONResponse(playbackSessionListPath(0))
           ]);
           if (sessionPageRevision === sessionsRevision) {
             if (results[0].status === 'fulfilled') renderSessions(results[0].value, new Map(), false);
             else { failures += 1; setState('sessions', results[0].reason.message || '读不到登录设备。', true); }
           }
-          if (results[1].status === 'fulfilled') renderPlaybackSessions(results[1].value);
-          else { failures += 1; setState('playback-sessions', results[1].reason.message || '无法读取当前播放。', true); }
+          if (playbackPageRevision === playbackSessionsRevision) {
+            if (results[1].status === 'fulfilled') {
+              const total = Number(results[1].value.response.headers.get('X-MediaLIB-Total-Count'));
+              const truncated = results[1].value.response.headers.get('X-MediaLIB-Is-Truncated') === 'true';
+              renderPlaybackSessions(results[1].value.data, total, truncated, false);
+            } else { failures += 1; setState('playback-sessions', results[1].reason.message || '无法读取当前播放。', true); }
+          }
         }
         globalStatusText.textContent = failures ? `已加载，其中 ${failures} 个区域不可用。可检查账号权限后重试。` : '管理数据已更新。';
         refreshButton.disabled = false;
       }
       refreshButton.addEventListener('click', load);
       sessionsLoadMore?.addEventListener('click', () => loadMoreSessions(false));
+      playbackSessionsLoadMore?.addEventListener('click', () => loadMorePlaybackSessions(false));
+      playbackSessionsSearchForm?.addEventListener('submit', (event) => {
+        event.preventDefault();
+        loadMorePlaybackSessions(true);
+      });
       sessionsSearchForm?.addEventListener('submit', (event) => {
         event.preventDefault();
         const query = sessionsSearch.value.trim().slice(0, 128);

@@ -836,6 +836,7 @@ struct LocalHTTPRouter {
     private let playbackInfoProvider: (String, ServerRequestPrincipal) throws -> ServerMediaPlaybackInfo?
     private let currentUserProfileProvider: (ServerRequestPrincipal) throws -> ServerCurrentUserProfile?
     private let administrationCatalog: ServerAdministrationCatalog?
+    private let administrationReadHandler: ServerAdministrationReadHandler
     private let experienceRepository: ServerExperienceRepository?
     private let maintenanceService: ServerMaintenanceService?
     private let runtimeDiagnosticsProvider: () -> ServerRuntimeDiagnosticsSnapshot?
@@ -972,6 +973,7 @@ struct LocalHTTPRouter {
         self.playbackInfoProvider = playbackInfoProvider
         self.currentUserProfileProvider = currentUserProfileProvider
         self.administrationCatalog = administrationCatalog
+        self.administrationReadHandler = ServerAdministrationReadHandler(catalog: administrationCatalog)
         self.experienceRepository = experienceRepository
         self.maintenanceService = maintenanceService
         self.runtimeDiagnosticsProvider = runtimeDiagnosticsProvider
@@ -1222,7 +1224,7 @@ struct LocalHTTPRouter {
         }
         if method == "DELETE", path.hasPrefix("/api/v1/playback/sessions/") {
             if let limited = limitedResponse(
-                scope: .authenticatedMutation, principal: principal, clientAddressKey: clientAddressKey
+                scope: .playbackControl, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             let raw = String(path.dropFirst("/api/v1/playback/sessions/".count))
             guard !raw.isEmpty, !raw.contains("/") else { return .notFound() }
@@ -1257,7 +1259,7 @@ struct LocalHTTPRouter {
         if method == "POST" {
             if path == "/api/v1/playback/sessions" {
                 if let limited = limitedResponse(
-                    scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
+                    scope: .playbackControl, principal: principal, clientAddressKey: clientAddressKey
                 ) { return limited }
                 guard let creation: ServerHLSPlaybackSessionCreationRequest = strictlyDecode(
                     ServerHLSPlaybackSessionCreationRequest.self,
@@ -1282,7 +1284,7 @@ struct LocalHTTPRouter {
             }
             if path.hasPrefix("/api/v1/playback/sessions/") {
                 if let limited = limitedResponse(
-                    scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
+                    scope: .playbackControl, principal: principal, clientAddressKey: clientAddressKey
                 ) { return limited }
                 if path.hasSuffix("/cancel") {
                     let raw = String(
@@ -1557,10 +1559,10 @@ struct LocalHTTPRouter {
             // polled while ffmpeg prepares the first segment and must not spend
             // the deliberately scarce ffprobe budget (`mediaProbe`), otherwise
             // a normal long-GOP stream exhausts that bucket before becoming
-            // ready. Playlist, segment and session-state traffic share the
-            // bounded playback bucket; actual media inspection stays isolated.
+            // ready. 状态轮询使用独立的有界控制面桶；清单和分片字节继续使用
+            // `mediaStream`，真实媒体检查继续留在 `mediaProbe`。
             if let limited = limitedResponse(
-                scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
+                scope: .playbackControl, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             let raw = String(path.dropFirst("/api/v1/playback/sessions/".count))
             guard !raw.isEmpty, !raw.contains("/"),
@@ -1579,7 +1581,22 @@ struct LocalHTTPRouter {
             let sessions = adminHLSSessionsProvider()
             let encoded: Data?
             if path == "/api/v1/admin/playback-sessions" {
-                encoded = ServerCommandOutput.jsonData(sessions)
+                guard let query = ServerAdministrationQueryParser.playbackSessions(from: target) else {
+                    return .badRequest()
+                }
+                let page = ServerAdminPlaybackSessionCatalog.page(sessions, query: query)
+                guard let encoded = ServerCommandOutput.jsonData(page.sessions) else {
+                    return .serviceUnavailable()
+                }
+                return .json(
+                    body: encoded,
+                    omitBody: isHeadRequest,
+                    additionalHeaders: administrationPaginationHeaders(
+                        totalCount: page.totalCount,
+                        offset: query.offset,
+                        itemCount: page.sessions.count
+                    )
+                )
             } else {
                 let raw = String(path.dropFirst("/api/v1/admin/playback-sessions/".count))
                 guard !raw.isEmpty, !raw.contains("/"),
@@ -1646,7 +1663,7 @@ struct LocalHTTPRouter {
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            guard let query = administrationBackupsQuery(from: target) else { return .badRequest() }
+            guard let query = ServerAdministrationQueryParser.backups(from: target) else { return .badRequest() }
             guard let maintenanceService else { return .serviceUnavailable() }
             do {
                 let page = try maintenanceService.managedBackups(
@@ -2862,7 +2879,7 @@ struct LocalHTTPRouter {
             guard principal.permissions.contains(.manageLibraries) ||
                     principal.permissions.contains(.manageServer)
             else { return .forbidden() }
-            guard let query = administrationJobsQuery(from: target) else { return .badRequest() }
+            guard let query = ServerAdministrationQueryParser.jobs(from: target) else { return .badRequest() }
             guard let experienceRepository else { return .serviceUnavailable() }
             let libraryKinds: Set<String> = ["library.scan", "library.reindex", "metadata.refresh"]
             let serverKinds: Set<String> = ["database.backup", "database.restore", "transcode-cache.clear"]
@@ -2892,21 +2909,21 @@ struct LocalHTTPRouter {
                     )
                 )
             } catch { return .serviceUnavailable() }
-        case "/api/v1/admin/users":
+        case "/api/v1/admin/users",
+             "/api/v1/admin/sessions",
+             "/api/v1/admin/security-events",
+             "/api/v1/admin/logs",
+             "/api/v1/admin/sources",
+             "/api/v1/admin/libraries":
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
-            guard principal.permissions.contains(.manageUsers) else { return .forbidden() }
-            guard let query = pagingQuery(from: target, path: "/api/v1/admin/users") else {
-                return .badRequest()
-            }
-            guard let administrationCatalog,
-                  let encoded = try? administrationCatalog.users(limit: query.limit, offset: query.offset),
-                  let data = ServerCommandOutput.jsonData(encoded)
-            else {
-                return .serviceUnavailable()
-            }
-            body = data
+            return administrationReadHandler.response(
+                path: path,
+                target: target,
+                principal: principal,
+                omitBody: isHeadRequest
+            ) ?? .notFound()
         case "/api/v1/auth/me":
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
@@ -2919,56 +2936,6 @@ struct LocalHTTPRouter {
             } catch {
                 return .serviceUnavailable()
             }
-        case "/api/v1/admin/sessions":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageSessions) else { return .forbidden() }
-            guard let query = administrationSessionsQuery(from: target) else { return .badRequest() }
-            guard let administrationCatalog,
-                  let encoded = try? administrationCatalog.activeSessions(
-                    limit: query.limit,
-                    offset: query.offset,
-                    searchText: query.searchText
-                  ),
-                  let data = ServerCommandOutput.jsonData(encoded)
-            else {
-                return .serviceUnavailable()
-            }
-            body = data
-        case "/api/v1/admin/security-events", "/api/v1/admin/logs":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            guard let query = administrationSecurityEventsQuery(from: target, path: path) else {
-                return .badRequest()
-            }
-            guard let administrationCatalog,
-                  let encoded = try? administrationCatalog.securityEvents(
-                    limit: query.limit,
-                    offset: query.offset,
-                    category: query.category,
-                    outcome: query.outcome,
-                    searchText: query.searchText
-                  ),
-                  let data = ServerCommandOutput.jsonData(encoded)
-            else {
-                return .serviceUnavailable()
-            }
-            body = data
-        case "/api/v1/admin/sources":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            guard let administrationCatalog,
-                  let sources = try? administrationCatalog.sources(),
-                  let data = ServerCommandOutput.jsonData(sources)
-            else {
-                return .serviceUnavailable()
-            }
-            body = data
         // 局域网开放就绪度只回答策略事实：没有地址、端口、代理 IP、上游 URL 或
         // 媒体标题，未认证客户端也拿不到部署形态。
         case "/api/v1/admin/lan-readiness":
@@ -2988,18 +2955,6 @@ struct LocalHTTPRouter {
             ) { return limited }
             guard principal.permissions.contains(.manageServer) else { return .forbidden() }
             guard let data = ServerCommandOutput.jsonData(playbackTelemetry.snapshot()) else {
-                return .serviceUnavailable()
-            }
-            body = data
-        case "/api/v1/admin/libraries":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageLibraries) else { return .forbidden() }
-            guard let administrationCatalog,
-                  let libraries = try? administrationCatalog.libraries(),
-                  let data = ServerCommandOutput.jsonData(libraries)
-            else {
                 return .serviceUnavailable()
             }
             body = data
@@ -3629,104 +3584,6 @@ struct LocalHTTPRouter {
 
     private func collectionsQuery(from target: String) -> (offset: Int, limit: Int)? {
         pagingQuery(from: target, path: "/api/v1/collections")
-    }
-
-    private func administrationSessionsQuery(
-        from target: String
-    ) -> (offset: Int, limit: Int, searchText: String?)? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.first.map(String.init) == "/api/v1/admin/sessions",
-              let values = boundedQuery(from: target, allowedKeys: ["offset", "limit", "q"]),
-              let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "50"), (1...100).contains(limit)
-        else { return nil }
-        let trimmed = values["q"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (trimmed?.utf8.count ?? 0) <= 128,
-              trimmed?.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) != true
-        else { return nil }
-        return (offset, limit, trimmed?.isEmpty == false ? trimmed : nil)
-    }
-
-    private func administrationSecurityEventsQuery(
-        from target: String,
-        path expectedPath: String
-    ) -> (
-        offset: Int,
-        limit: Int,
-        category: ServerSecurityEventCategory?,
-        outcome: ServerSecurityEventOutcome?,
-        searchText: String?
-    )? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.first.map(String.init) == expectedPath,
-              let values = boundedQuery(
-                from: target,
-                allowedKeys: ["offset", "limit", "category", "outcome", "q"]
-              ),
-              let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "50"), (1...100).contains(limit)
-        else { return nil }
-        let category = values["category"].flatMap(ServerSecurityEventCategory.init(rawValue:))
-        let outcome = values["outcome"].flatMap(ServerSecurityEventOutcome.init(rawValue:))
-        guard values["category"] == nil || category != nil,
-              values["outcome"] == nil || outcome != nil
-        else { return nil }
-        let trimmed = values["q"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (trimmed?.utf8.count ?? 0) <= 128,
-              trimmed?.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) != true
-        else { return nil }
-        return (offset, limit, category, outcome, trimmed?.isEmpty == false ? trimmed : nil)
-    }
-
-    private func administrationJobsQuery(
-        from target: String
-    ) -> (
-        offset: Int,
-        limit: Int,
-        state: ServerJobState?,
-        kind: String?,
-        scope: String?,
-        searchText: String?
-    )? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.first.map(String.init) == "/api/v1/admin/jobs",
-              let values = boundedQuery(
-                from: target,
-                allowedKeys: ["offset", "limit", "state", "kind", "scope", "q"]
-              ),
-              let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "50"), (1...100).contains(limit)
-        else { return nil }
-        let state = values["state"].flatMap(ServerJobState.init(rawValue:))
-        let knownKinds: Set<String> = [
-            "library.scan", "library.reindex", "metadata.refresh",
-            "database.backup", "database.restore", "transcode-cache.clear"
-        ]
-        let kind = values["kind"]
-        let scope = values["scope"]
-        guard values["state"] == nil || state != nil,
-              kind.map({ knownKinds.contains($0) }) ?? true,
-              scope.map({ ["library", "server"].contains($0) }) ?? true
-        else { return nil }
-        let trimmed = values["q"]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard (trimmed?.utf8.count ?? 0) <= 128,
-              trimmed?.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) != true
-        else { return nil }
-        return (offset, limit, state, kind, scope, trimmed?.isEmpty == false ? trimmed : nil)
-    }
-
-    private func administrationBackupsQuery(
-        from target: String
-    ) -> (offset: Int, limit: Int, kind: ServerBackupKind?)? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.first.map(String.init) == "/api/v1/admin/backups",
-              let values = boundedQuery(from: target, allowedKeys: ["offset", "limit", "kind"]),
-              let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "100"), (1...100).contains(limit)
-        else { return nil }
-        let kind = values["kind"].flatMap(ServerBackupKind.init(rawValue:))
-        guard values["kind"] == nil || kind != nil else { return nil }
-        return (offset, limit, kind)
     }
 
     private func administrationPaginationHeaders(

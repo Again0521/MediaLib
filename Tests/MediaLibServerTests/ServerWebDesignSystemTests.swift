@@ -951,4 +951,45 @@ final class ServerWebDesignSystemTests: XCTestCase {
         XCTAssertTrue(script.contains("event.key !== 'Escape'"))
         XCTAssertTrue(script.contains("synchronizeDrawerAccessibility();"))
     }
+
+    func testAdministrationContentRatingUsesSharedSelectAndPreservesRecognizedLegacyValues() {
+        let page = ServerWebAdministrationPage.render(
+            section: .users, serverName: "fixture", csrfToken: "fixture", sidebarExtras: .empty
+        )
+        XCTAssertTrue(page.contains("<select class=\"ui-select\" id=\"policy-rating\">"))
+        XCTAssertTrue(page.contains("<option value=\"0\">全年龄</option>"))
+        XCTAssertTrue(page.contains("<option value=\"18\">18 岁</option>"))
+        XCTAssertFalse(page.contains("id=\"policy-rating\" type=\"text\""))
+        XCTAssertTrue(ServerWebAdministrationPage.script.contains("legacyOption.textContent = `当前设置：${value}`"))
+        XCTAssertTrue(ServerWebAdministrationPage.script.contains("legacyOption.dataset.legacyRating = 'true'"))
+        XCTAssertTrue(ServerWebAdministrationPage.script.contains("setPolicyRating(policy.maximumContentRating)"))
+    }
+
+    func testAdministrationPlaybackSessionListUsesSharedFiltersAndPagedLoading() {
+        let page = ServerWebAdministrationPage.render(
+            section: .sessions, serverName: "fixture", csrfToken: "fixture", sidebarExtras: .empty
+        )
+        XCTAssertTrue(page.contains("id=\"playback-sessions-search-form\""))
+        XCTAssertTrue(page.contains("class=\"ui-input\" id=\"playback-sessions-search\""))
+        XCTAssertTrue(page.contains("class=\"ui-select\" id=\"playback-sessions-state-filter\""))
+        XCTAssertTrue(page.contains("id=\"playback-sessions-load-more\""))
+        XCTAssertTrue(ServerWebAdministrationPage.style.contains(".admin-filter-form"))
+        XCTAssertTrue(ServerWebAdministrationPage.script.contains("X-MediaLIB-Total-Count"))
+        XCTAssertTrue(ServerWebAdministrationPage.script.contains("X-MediaLIB-Is-Truncated"))
+        XCTAssertTrue(ServerWebAdministrationPage.script.contains("loadMorePlaybackSessions(true)"))
+    }
+
+    func testAdministrationSourcesUseSharedSearchAndPagedLoadingWithoutDecorativeButtons() {
+        let page = ServerWebSourcesPage.render(
+            serverName: "fixture", csrfToken: "fixture", sidebarExtras: .empty
+        )
+        XCTAssertTrue(page.contains("id=\"sources-search-form\""))
+        XCTAssertTrue(page.contains("id=\"sources-load-more\""))
+        XCTAssertTrue(ServerWebSourcesPage.script.contains("offset:String(offset),limit:'50'"))
+        XCTAssertTrue(ServerWebSourcesPage.script.contains("loadMore.addEventListener('click'"))
+        XCTAssertTrue(ServerWebSourcesPage.script.contains("没有匹配的媒体源"))
+        XCTAssertFalse(ServerWebSourcesPage.script.contains("glyph('settings')"))
+        XCTAssertFalse(ServerWebSourcesPage.script.contains("glyph('refresh')"))
+        XCTAssertFalse(ServerWebSourcesPage.script.contains("glyph('more')"))
+    }
 }
