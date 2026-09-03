@@ -71,6 +71,22 @@ enum ServerAdministrationQueryParser {
         values(from: target, path: "/api/v1/admin/libraries", allowedKeys: []) != nil
     }
 
+    static func dashboard(from target: String) -> Bool {
+        values(from: target, path: "/api/v1/admin/dashboard", allowedKeys: []) != nil
+    }
+
+    static func settings(from target: String) -> Bool {
+        values(from: target, path: "/api/v1/admin/settings", allowedKeys: []) != nil
+    }
+
+    static func diagnostics(from target: String) -> Bool {
+        values(from: target, path: "/api/v1/admin/diagnostics", allowedKeys: []) != nil
+    }
+
+    static func backupDownload(from target: String, path: String) -> Bool {
+        values(from: target, path: path, allowedKeys: []) != nil
+    }
+
     static func sessions(from target: String) -> Sessions? {
         guard let values = values(
             from: target,

@@ -111,6 +111,19 @@ final class ServerAdministrationCatalog: @unchecked Sendable {
         ))
     }
 
+    func recordBackupDownload(actor: ServerRequestPrincipal) throws {
+        try repository.appendSecurityEvent(ServerSecurityEvent(
+            category: .authorization,
+            action: "backup.downloaded",
+            outcome: .success,
+            actorUserID: actor.userID,
+            targetUserID: actor.userID,
+            sessionID: actor.sessionID,
+            deviceID: actor.deviceID,
+            detailCode: "opaque.sqlite"
+        ))
+    }
+
     func activeSessions(
         limit: Int = 100,
         offset: Int = 0,

@@ -14,6 +14,19 @@ final class ServerAdministrationQueryTests: XCTestCase {
         XCTAssertTrue(ServerAdministrationQueryParser.libraries(
             from: "/api/v1/admin/libraries"
         ))
+        XCTAssertTrue(ServerAdministrationQueryParser.dashboard(
+            from: "/api/v1/admin/dashboard"
+        ))
+        XCTAssertTrue(ServerAdministrationQueryParser.settings(
+            from: "/api/v1/admin/settings"
+        ))
+        XCTAssertTrue(ServerAdministrationQueryParser.diagnostics(
+            from: "/api/v1/admin/diagnostics"
+        ))
+        XCTAssertTrue(ServerAdministrationQueryParser.backupDownload(
+            from: "/api/v1/admin/backups/0123456789abcdef0123456789abcdef/download",
+            path: "/api/v1/admin/backups/0123456789abcdef0123456789abcdef/download"
+        ))
         XCTAssertEqual(
             ServerAdministrationQueryParser.sessions(from: "/api/v1/admin/sessions"),
             .init(offset: 0, limit: 50, searchText: nil)
@@ -107,6 +120,19 @@ final class ServerAdministrationQueryTests: XCTestCase {
         ))
         XCTAssertFalse(ServerAdministrationQueryParser.libraries(
             from: "/api/v1/admin/libraries?"
+        ))
+        XCTAssertFalse(ServerAdministrationQueryParser.dashboard(
+            from: "/api/v1/admin/dashboard?details=paths"
+        ))
+        XCTAssertFalse(ServerAdministrationQueryParser.settings(
+            from: "/api/v1/admin/settings?"
+        ))
+        XCTAssertFalse(ServerAdministrationQueryParser.diagnostics(
+            from: "/api/v1/admin/diagnostics?include=paths"
+        ))
+        XCTAssertFalse(ServerAdministrationQueryParser.backupDownload(
+            from: "/api/v1/admin/backups/0123456789abcdef0123456789abcdef/download?raw=1",
+            path: "/api/v1/admin/backups/0123456789abcdef0123456789abcdef/download"
         ))
         XCTAssertNil(ServerAdministrationQueryParser.securityEvents(
             from: "/api/v1/admin/logs?category=authorization",

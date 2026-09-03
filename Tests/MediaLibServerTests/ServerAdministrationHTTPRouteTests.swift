@@ -196,6 +196,18 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
             token: "member", bodyLength: 0, method: "DELETE"
         ))
         XCTAssertEqual(denied.statusCode, 403)
+        let unexpectedBody = Data(#"{"reason":"hidden-side-effect"}"#.utf8)
+        let rejectedBody = router.response(
+            for: mutationRequest(
+                "/api/v1/admin/playback-sessions/\(session.sessionID)",
+                token: "session-manager",
+                bodyLength: unexpectedBody.count,
+                method: "DELETE"
+            ),
+            body: unexpectedBody
+        )
+        XCTAssertEqual(rejectedBody.statusCode, 404)
+        XCTAssertNil(cancellation.sessionID)
         let terminated = router.response(for: mutationRequest(
             "/api/v1/admin/playback-sessions/\(session.sessionID)",
             token: "session-manager", bodyLength: 0, method: "DELETE"
@@ -485,8 +497,16 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         )
         XCTAssertEqual(download.statusCode, 200)
         XCTAssertEqual(Int64(download.declaredContentLength), backup.byteLength)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/backups/\(backup.id)/download?raw=1",
+            token: "server-manager"
+        ).statusCode, 400)
         XCTAssertTrue(try repository.securityEvents(limit: 20).contains {
             $0.action == "backup.created" && $0.actorUserID == "user-alice"
+        })
+        XCTAssertTrue(try repository.securityEvents(limit: 20).contains {
+            $0.action == "backup.downloaded" && $0.actorUserID == "user-alice" &&
+                $0.detailCode == "opaque.sqlite"
         })
 
         let logs = response(path: "/api/v1/admin/logs", token: "server-manager")
@@ -613,6 +633,9 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
             )
         })
         XCTAssertEqual(response(path: "/api/v1/admin/diagnostics", token: "member").statusCode, 403)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/diagnostics?include=paths", token: "server-manager"
+        ).statusCode, 400)
         let granted = response(path: "/api/v1/admin/diagnostics", token: "server-manager")
         XCTAssertEqual(granted.statusCode, 200)
         let decoder = JSONDecoder()
@@ -639,6 +662,7 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
     func testTranscodeCacheCleanupRunsAsBoundedAuditedBackgroundJob() async throws {
         let counter = LockedCleanupCounter()
         router = makeRouter(transcodeCacheCleanup: { counter.incrementAndReturnRemovedCount() })
+        let unexpectedBody = Data(#"{"scope":"all"}"#.utf8)
         let denied = router.response(
             for: mutationRequest(
                 "/api/v1/admin/storage/transcode-cache",
@@ -647,6 +671,17 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
                 method: "DELETE"
             )
         )
+        let rejectedBody = router.response(
+            for: mutationRequest(
+                "/api/v1/admin/storage/transcode-cache",
+                token: "server-manager",
+                bodyLength: unexpectedBody.count,
+                method: "DELETE"
+            ),
+            body: unexpectedBody
+        )
+        XCTAssertEqual(rejectedBody.statusCode, 400)
+        XCTAssertEqual(counter.callCount, 0)
         let accepted = router.response(
             for: mutationRequest(
                 "/api/v1/admin/storage/transcode-cache",
@@ -987,6 +1022,32 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertGreaterThan(head.declaredContentLength, 0)
     }
 
+    func testOperationalAdministrationReadsShareStrictHandlerContract() throws {
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/dashboard?details=paths", token: "server-manager"
+        ).statusCode, 400)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/settings?", token: "server-manager"
+        ).statusCode, 400)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/jobs?scope=server", token: "library-manager"
+        ).statusCode, 200)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/jobs?kind=database.backup", token: "library-manager"
+        ).statusCode, 403)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/backups?kind=manual", token: "server-manager"
+        ).statusCode, 200)
+
+        let head = router.response(
+            for: "HEAD /api/v1/admin/settings HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer server-manager\r\n\r\n"
+        )
+        XCTAssertEqual(head.statusCode, 200)
+        XCTAssertTrue(head.body.isEmpty)
+        XCTAssertGreaterThan(head.declaredContentLength, 0)
+        XCTAssertTrue(head.additionalHeaders.contains { $0.hasPrefix("ETag: ") })
+    }
+
     func testSecurityEventRoutesPageAndFilterOnTheServer() throws {
         let timestamp = Date()
         try repository.appendSecurityEvent(.init(
@@ -1238,10 +1299,53 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertGreaterThan(head.declaredContentLength, 0)
     }
 
+    func testUnsupportedAdministrationMutationMethodDoesNotSpendRateLimit() throws {
+        var policies = ServerRequestRateLimiter.productionPolicies
+        policies[.managementMutation] = ServerRateLimitPolicy(capacity: 1, refillPerSecond: 0.001)
+        router = makeRouter(rateLimiter: ServerRequestRateLimiter(
+            policies: policies,
+            salt: "administration-mutation-method-test"
+        ))
+
+        let unsupported = router.response(for: mutationRequest(
+            "/api/v1/admin/users",
+            token: "user-manager",
+            bodyLength: 0,
+            method: "PUT"
+        ))
+        XCTAssertEqual(unsupported.statusCode, 405)
+
+        let accepted = router.response(for: mutationRequest(
+            "/api/v1/admin/users/user-bob/disable",
+            token: "user-manager",
+            bodyLength: 0
+        ))
+        XCTAssertEqual(accepted.statusCode, 204)
+        XCTAssertTrue(try XCTUnwrap(repository.user(id: "user-bob")).isDisabled)
+
+        let limited = router.response(for: mutationRequest(
+            "/api/v1/admin/users/user-bob/enable",
+            token: "user-manager",
+            bodyLength: 0
+        ))
+        XCTAssertEqual(limited.statusCode, 429)
+    }
+
     func testSessionRevocationRequiresSessionManagementPermissionAndWritesNoSensitiveResponse() throws {
         let denied = router.response(
             for: "POST /api/v1/admin/sessions/session-alice/revoke HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer member\r\n\r\n"
         )
+        let unexpectedBody = Data(#"{"userID":"user-alice"}"#.utf8)
+        let rejectedBody = router.response(
+            for: mutationRequest(
+                "/api/v1/admin/sessions/session-alice/revoke",
+                token: "session-manager",
+                bodyLength: unexpectedBody.count
+            ),
+            body: unexpectedBody
+        )
+        XCTAssertEqual(rejectedBody.statusCode, 400)
+        XCTAssertFalse(try repository.sessions(userID: "user-alice").isEmpty)
         let success = router.response(
             for: "POST /api/v1/admin/sessions/session-alice/revoke HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer session-manager\r\n\r\n"
         )
@@ -1262,6 +1366,18 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         let denied = router.response(
             for: "POST /api/v1/admin/users/user-bob/disable HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer member\r\n\r\n"
         )
+        let unexpectedBody = Data(#"{"disabled":true}"#.utf8)
+        let rejectedBody = router.response(
+            for: mutationRequest(
+                "/api/v1/admin/users/user-bob/disable",
+                token: "user-manager",
+                bodyLength: unexpectedBody.count
+            ),
+            body: unexpectedBody
+        )
+        XCTAssertEqual(rejectedBody.statusCode, 400)
+        XCTAssertFalse(try XCTUnwrap(repository.user(id: "user-bob")).isDisabled)
+        XCTAssertFalse(try repository.sessions(userID: "user-bob").isEmpty)
         let disabled = router.response(
             for: "POST /api/v1/admin/users/user-bob/disable HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer user-manager\r\n\r\n"
         )

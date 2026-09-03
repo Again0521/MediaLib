@@ -549,73 +549,6 @@ private struct LocalHTTPRequest {
     let body: Data
 }
 
-/// Web 管理成员创建的严格正文。未知字段、缺字段、重复权限表达或异常值一律拒绝，
-/// 避免由宽松 JSON 解码把未来字段静默扩展成权限接口。
-private struct ServerAdministrationMemberCreateRequest: Decodable {
-    let username: String
-    let displayName: String
-    let password: String
-    let libraryIDs: [String]
-
-    private enum CodingKeys: String, CodingKey, CaseIterable {
-        case username, displayName, password, libraryIDs
-    }
-
-    init(from decoder: Decoder) throws {
-        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
-        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.rawValue)) else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unexpected fields"))
-        }
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        username = try values.decode(String.self, forKey: .username)
-        displayName = try values.decode(String.self, forKey: .displayName)
-        password = try values.decode(String.self, forKey: .password)
-        libraryIDs = try values.decode([String].self, forKey: .libraryIDs)
-    }
-}
-
-/// 普通成员编辑只允许显示名和资料库不透明 ID；权限位、角色、路径和用户身份
-/// 均由服务端固定/认证 principal 派生，不能由网页任意提交。
-private struct ServerAdministrationMemberAccessRequest: Decodable {
-    let displayName: String
-    let libraryIDs: [String]
-
-    private enum CodingKeys: String, CodingKey, CaseIterable {
-        case displayName, libraryIDs
-    }
-
-    init(from decoder: Decoder) throws {
-        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
-        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.rawValue)) else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unexpected fields"))
-        }
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        displayName = try values.decode(String.self, forKey: .displayName)
-        libraryIDs = try values.decode([String].self, forKey: .libraryIDs)
-    }
-}
-
-/// 管理员重置成员密码时正文只含新口令；不能指定 userID、角色、会话或恢复票据。
-private struct ServerAdministrationPasswordResetRequest: Decodable {
-    let password: String
-
-    private enum CodingKeys: String, CodingKey, CaseIterable {
-        case password
-    }
-
-    init(from decoder: Decoder) throws {
-        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
-        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.rawValue)) else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unexpected fields"))
-        }
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        password = try values.decode(String.self, forKey: .password)
-        guard (12...1_024).contains(password.utf8.count) else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "invalid password length"))
-        }
-    }
-}
-
 /// 仅允许当前会话主体提交自己的当前密码和新密码。正文不含 userID、设备、会话或
 /// 恢复票据，字段不精确匹配即拒绝。
 private struct ServerPasswordChangeRequest: Decodable {
@@ -644,26 +577,6 @@ private struct ServerPasswordChangeRequest: Decodable {
 
 /// 数据库恢复只接受当前会话账号的密码。备份 ID 来自路径中的不透明服务端 ID，
 /// 正文不能夹带文件名、路径、用户或其它恢复参数。
-private struct ServerBackupRestoreRequest: Decodable {
-    let currentPassword: String
-
-    private enum CodingKeys: String, CodingKey, CaseIterable {
-        case currentPassword
-    }
-
-    init(from decoder: Decoder) throws {
-        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
-        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.rawValue)) else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unexpected fields"))
-        }
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        currentPassword = try values.decode(String.self, forKey: .currentPassword)
-        guard (1...1_024).contains(currentPassword.utf8.count) else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "invalid password length"))
-        }
-    }
-}
-
 private struct DynamicCodingKey: CodingKey {
     let stringValue: String
     let intValue: Int?
@@ -824,8 +737,6 @@ struct LocalHTTPRouter {
     private let hlsStatusProvider: (String, ServerRequestPrincipal) throws -> ServerHLSPlaybackDescriptor?
     private let hlsResourceProvider: (String, String, ServerRequestPrincipal) throws -> ServerHLSResource?
     private let hlsCancellationProvider: (String, ServerRequestPrincipal) -> Void
-    private let adminHLSSessionsProvider: () -> [ServerAdminHLSPlaybackSession]
-    private let adminHLSCancellationProvider: (String, ServerRequestPrincipal) -> Bool
     private let artworkAssetProvider: (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset?
     private let detailImageProvider: (String, ServerDetailImageKind, Int, ServerRequestPrincipal) throws -> ServerMediaAsset?
     private let vaultAccessProvider: (ServerRequestPrincipal) throws -> ServerLibraryCatalog.VaultAccess
@@ -837,10 +748,8 @@ struct LocalHTTPRouter {
     private let currentUserProfileProvider: (ServerRequestPrincipal) throws -> ServerCurrentUserProfile?
     private let administrationCatalog: ServerAdministrationCatalog?
     private let administrationReadHandler: ServerAdministrationReadHandler
+    private let administrationMutationHandler: ServerAdministrationMutationHandler
     private let experienceRepository: ServerExperienceRepository?
-    private let maintenanceService: ServerMaintenanceService?
-    private let runtimeDiagnosticsProvider: () -> ServerRuntimeDiagnosticsSnapshot?
-    private let runtimeConfigurationApplyProvider: (ServerRuntimeConfigurationMutationRequest) throws -> Bool
     private let authenticationService: ServerAuthenticationService?
     private let authenticationProvider: (String) throws -> ServerRequestPrincipal?
     private let rateLimiter: ServerRequestRateLimiter
@@ -960,8 +869,6 @@ struct LocalHTTPRouter {
         self.hlsStatusProvider = hlsStatusProvider
         self.hlsResourceProvider = hlsResourceProvider
         self.hlsCancellationProvider = hlsCancellationProvider
-        self.adminHLSSessionsProvider = adminHLSSessionsProvider
-        self.adminHLSCancellationProvider = adminHLSCancellationProvider
         self.artworkAssetProvider = artworkAssetProvider
         self.detailImageProvider = detailImageProvider
         self.vaultAccessProvider = vaultAccessProvider
@@ -973,11 +880,26 @@ struct LocalHTTPRouter {
         self.playbackInfoProvider = playbackInfoProvider
         self.currentUserProfileProvider = currentUserProfileProvider
         self.administrationCatalog = administrationCatalog
-        self.administrationReadHandler = ServerAdministrationReadHandler(catalog: administrationCatalog)
+        self.administrationReadHandler = ServerAdministrationReadHandler(
+            catalog: administrationCatalog,
+            experienceRepository: experienceRepository,
+            maintenanceService: maintenanceService,
+            serverName: serverName,
+            playbackTelemetry: playbackTelemetry,
+            remoteAccessPolicy: remoteAccessPolicy,
+            runtimeDiagnosticsProvider: runtimeDiagnosticsProvider,
+            playbackSessionsProvider: adminHLSSessionsProvider
+        )
+        self.administrationMutationHandler = ServerAdministrationMutationHandler(
+            catalog: administrationCatalog,
+            experienceRepository: experienceRepository,
+            maintenanceService: maintenanceService,
+            runtimeDiagnosticsProvider: runtimeDiagnosticsProvider,
+            runtimeConfigurationApplyProvider: runtimeConfigurationApplyProvider,
+            authenticationService: authenticationService,
+            playbackSessionCancellationProvider: adminHLSCancellationProvider
+        )
         self.experienceRepository = experienceRepository
-        self.maintenanceService = maintenanceService
-        self.runtimeDiagnosticsProvider = runtimeDiagnosticsProvider
-        self.runtimeConfigurationApplyProvider = runtimeConfigurationApplyProvider
         self.authenticationService = authenticationService
         self.authenticationProvider = authenticationProvider
         self.rateLimiter = rateLimiter
@@ -1067,12 +989,29 @@ struct LocalHTTPRouter {
             }
             return .unauthorized()
         }
+        if let response = administrationMutationHandler.response(
+            method: method,
+            path: path,
+            requestHead: requestHead,
+            body: body,
+            principal: principal,
+            rateLimitResponse: { cost in
+                limitedResponse(
+                    scope: .managementMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey,
+                    cost: cost
+                )
+            }
+        ) {
+            return response
+        }
         if method == "PATCH", path == "/api/v1/me/preferences" {
             if let limited = limitedResponse(
                 scope: .authenticatedMutation, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             guard let expectedVersion = ifMatchVersion(in: requestHead) else { return .preconditionRequired() }
-            guard let value: ServerUserExperiencePreferences = strictlyDecode(
+            guard let value: ServerUserExperiencePreferences = ServerStrictJSONDecoder.decode(
                     ServerUserExperiencePreferences.self,
                     from: body,
                     allowedKeys: [
@@ -1102,7 +1041,7 @@ struct LocalHTTPRouter {
                 scope: .authenticatedMutation, principal: principal, clientAddressKey: clientAddressKey
             ) { return limited }
             guard let expectedVersion = ifMatchVersion(in: requestHead) else { return .preconditionRequired() }
-            guard let value: ServerDeviceExperienceOverrides = strictlyDecode(
+            guard let value: ServerDeviceExperienceOverrides = ServerStrictJSONDecoder.decode(
                     ServerDeviceExperienceOverrides.self,
                     from: body,
                     allowedKeys: [
@@ -1134,59 +1073,6 @@ struct LocalHTTPRouter {
                 return .noContent()
             } catch { return experienceMutationErrorResponse(error) }
         }
-        if method == "PATCH", path == "/api/v1/admin/settings" {
-            if let limited = limitedResponse(
-                scope: .managementMutation, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            guard let expectedVersion = ifMatchVersion(in: requestHead) else { return .preconditionRequired() }
-            guard let value: ServerOperationalSettings = strictlyDecode(
-                    ServerOperationalSettings.self,
-                    from: body,
-                    allowedKeys: [
-                        "schemaVersion", "transcodeEngine", "maximumTranscodeSessions",
-                        "defaultRemoteBitrateMbps", "temporaryStorageLimitGB", "minimumFreeDiskGB",
-                        "sessionIdleMinutes", "telemetryRetentionHours"
-                    ]
-                  ),
-                  value.isValid, let experienceRepository
-            else { return .badRequest() }
-            do {
-                let saved = try experienceRepository.saveOperationalSettings(value, expectedVersion: expectedVersion)
-                guard let encoded = ServerCommandOutput.jsonData(saved) else { return .serviceUnavailable() }
-                return .json(body: encoded, additionalHeaders: [etagHeader(saved.version), "Cache-Control: no-store"])
-            } catch { return experienceMutationErrorResponse(error) }
-        }
-        if method == "PATCH", let userID = administrationUserPolicyID(path) {
-            if let limited = limitedResponse(
-                scope: .managementMutation, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageUsers) else { return .forbidden() }
-            guard let expectedVersion = ifMatchVersion(in: requestHead) else { return .preconditionRequired() }
-            guard let administrationCatalog,
-                  (try? administrationCatalog.containsUser(id: userID)) == true
-            else { return .notFound() }
-            guard let value: ServerUserPolicy = strictlyDecode(
-                ServerUserPolicy.self,
-                from: body,
-                allowedKeys: [
-                    "schemaVersion", "playbackAllowed", "remoteAccessAllowed", "directPlayAllowed",
-                    "remuxAllowed", "transcodeAllowed", "downloadAllowed", "maximumConcurrentStreams",
-                    "remoteBitrateLimitMbps", "accessStartMinute", "accessEndMinute", "maximumContentRating"
-                ]
-            ), value.isValid, let experienceRepository else { return .badRequest() }
-            do {
-                let saved = try experienceRepository.saveUserPolicy(
-                    userID: userID, value: value, expectedVersion: expectedVersion
-                )
-                try administrationCatalog.recordPolicyUpdate(userID: userID, actor: principal)
-                guard let encoded = ServerCommandOutput.jsonData(saved) else { return .serviceUnavailable() }
-                return .json(
-                    body: encoded,
-                    additionalHeaders: [etagHeader(saved.version), "Cache-Control: no-store"]
-                )
-            } catch { return experienceMutationErrorResponse(error) }
-        }
         if method == "PUT" || method == "DELETE",
            let route = playbackOverrideRoute(path) {
             if let limited = limitedResponse(
@@ -1201,7 +1087,7 @@ struct LocalHTTPRouter {
                     return .noContent()
                 } catch { return .serviceUnavailable() }
             }
-            guard let request: ServerTrackOverrideMutation = strictlyDecode(
+            guard let request: ServerTrackOverrideMutation = ServerStrictJSONDecoder.decode(
                 ServerTrackOverrideMutation.self,
                 from: body,
                 allowedKeys: ["audioFingerprint", "subtitleFingerprint", "subtitleDisabled"]
@@ -1231,37 +1117,12 @@ struct LocalHTTPRouter {
             hlsCancellationProvider(raw, principal)
             return .noContent()
         }
-        if method == "DELETE", path.hasPrefix("/api/v1/admin/playback-sessions/") {
-            if let limited = limitedResponse(
-                scope: .managementMutation, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageSessions) else { return .forbidden() }
-            let raw = String(path.dropFirst("/api/v1/admin/playback-sessions/".count))
-            guard !raw.isEmpty, !raw.contains("/"), body.isEmpty else { return .notFound() }
-            guard adminHLSCancellationProvider(raw, principal) else { return .notFound() }
-            return .noContent()
-        }
-        if method == "DELETE", path == "/api/v1/admin/storage/transcode-cache" {
-            if let limited = limitedResponse(
-                scope: .managementMutation,
-                principal: principal,
-                clientAddressKey: clientAddressKey,
-                cost: 3
-            ) { return limited }
-            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            guard body.isEmpty, let maintenanceService else { return .badRequest() }
-            do {
-                let job = try maintenanceService.enqueueTranscodeCacheCleanup(requestedBy: principal)
-                guard let encoded = ServerCommandOutput.jsonData(job) else { return .serviceUnavailable() }
-                return .accepted(body: encoded, additionalHeaders: ["Cache-Control: no-store"])
-            } catch { return .serviceUnavailable() }
-        }
         if method == "POST" {
             if path == "/api/v1/playback/sessions" {
                 if let limited = limitedResponse(
                     scope: .playbackControl, principal: principal, clientAddressKey: clientAddressKey
                 ) { return limited }
-                guard let creation: ServerHLSPlaybackSessionCreationRequest = strictlyDecode(
+                guard let creation: ServerHLSPlaybackSessionCreationRequest = ServerStrictJSONDecoder.decode(
                     ServerHLSPlaybackSessionCreationRequest.self,
                     from: body,
                     allowedKeys: ["itemID", "audioTrackID", "subtitleTrackID", "startSeconds", "durationSeconds", "capabilities", "quality", "maximumBitrateMbps"],
@@ -1295,7 +1156,7 @@ struct LocalHTTPRouter {
                     return .noContent()
                 }
                 guard let itemID = decodedPathIdentifier(path, prefix: "/api/v1/playback/sessions/"),
-                      let request: ServerHLSPlaybackRequest = strictlyDecode(
+                      let request: ServerHLSPlaybackRequest = ServerStrictJSONDecoder.decode(
                         ServerHLSPlaybackRequest.self,
                         from: body,
                         allowedKeys: ["audioTrackID", "subtitleTrackID", "startSeconds", "durationSeconds", "capabilities", "quality", "maximumBitrateMbps"],
@@ -1359,195 +1220,6 @@ struct LocalHTTPRouter {
                 ) { return limited }
                 return updateMediaPreferenceResponse(path: path, body: body, principal: principal)
             }
-            if path == "/api/v1/admin/runtime/validate" || path == "/api/v1/admin/runtime/apply" {
-                guard method == "POST" else { return .methodNotAllowed() }
-                if let limited = limitedResponse(
-                    scope: .managementMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey,
-                    cost: path.hasSuffix("/apply") ? 3 : 1
-                ) { return limited }
-                guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-                guard let request: ServerRuntimeConfigurationMutationRequest = strictlyDecode(
-                    ServerRuntimeConfigurationMutationRequest.self,
-                    from: body,
-                    allowedKeys: [
-                        "currentPassword", "serverName", "port", "networkAccessMode",
-                        "publicOrigin", "trustedProxyAddresses"
-                    ]
-                ) else { return .badRequest() }
-                let hostControlAvailable = runtimeDiagnosticsProvider()?.hostControlAvailable == true
-                let validation = ServerRuntimeConfigurationValidator.validate(
-                    request,
-                    hostControlAvailable: hostControlAvailable
-                )
-                guard validation.valid else {
-                    guard let encoded = ServerCommandOutput.jsonData(validation) else {
-                        return .serviceUnavailable()
-                    }
-                    return .jsonError(
-                        statusCode: 400,
-                        reason: "Bad Request",
-                        body: encoded,
-                        additionalHeaders: ["Cache-Control: no-store"]
-                    )
-                }
-                if path.hasSuffix("/apply") {
-                    guard hostControlAvailable else { return .serviceUnavailable() }
-                    guard let authenticationService,
-                          let password = request.currentPassword,
-                          (try? authenticationService.verifyCurrentPassword(
-                            for: principal,
-                            password: password,
-                            purpose: "runtime.apply"
-                          )) == true
-                    else { return .forbidden() }
-                    do {
-                        let accepted = try runtimeConfigurationApplyProvider(request)
-                        try administrationCatalog?.recordRuntimeConfigurationApply(
-                            accepted: accepted,
-                            actor: principal,
-                            detailCode: accepted ? "host.accepted" : "host.rejected"
-                        )
-                        guard accepted,
-                              let encoded = ServerCommandOutput.jsonData(validation)
-                        else { return .serviceUnavailable() }
-                        return .accepted(
-                            body: encoded,
-                            additionalHeaders: ["Cache-Control: no-store", "Retry-After: 1"]
-                        )
-                    } catch {
-                        try? administrationCatalog?.recordRuntimeConfigurationApply(
-                            accepted: false,
-                            actor: principal,
-                            detailCode: "host.transport-failed"
-                        )
-                        return .serviceUnavailable()
-                    }
-                }
-                guard let encoded = ServerCommandOutput.jsonData(validation) else {
-                    return .serviceUnavailable()
-                }
-                return .json(body: encoded, additionalHeaders: ["Cache-Control: no-store"])
-            }
-            if path == "/api/v1/admin/jobs" {
-                guard method == "POST" else { return .methodNotAllowed() }
-                if let limited = limitedResponse(
-                    scope: .managementMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey
-                ) { return limited }
-                guard principal.permissions.contains(.manageLibraries) else { return .forbidden() }
-                guard let request: ServerJobCreationRequest = strictlyDecode(
-                        ServerJobCreationRequest.self, from: body, allowedKeys: ["kind"]
-                      ),
-                      request.isValid,
-                      let maintenanceService
-                else { return .badRequest() }
-                do {
-                    let job = try maintenanceService.enqueueLibraryJob(
-                        kind: request.kind,
-                        requestedBy: principal
-                    )
-                    guard let encoded = ServerCommandOutput.jsonData(job) else { return .serviceUnavailable() }
-                    return .created(body: encoded, additionalHeaders: ["Cache-Control: no-store"])
-                } catch { return .serviceUnavailable() }
-            }
-            if path == "/api/v1/admin/backups" {
-                guard method == "POST" else { return .methodNotAllowed() }
-                if let limited = limitedResponse(
-                    scope: .managementMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey,
-                    cost: 3
-                ) { return limited }
-                guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-                guard body.isEmpty, let maintenanceService else { return .badRequest() }
-                do {
-                    let job = try maintenanceService.enqueueBackup(requestedBy: principal)
-                    guard let encoded = ServerCommandOutput.jsonData(job) else { return .serviceUnavailable() }
-                    return .created(body: encoded, additionalHeaders: ["Cache-Control: no-store"])
-                } catch { return .serviceUnavailable() }
-            }
-            if path.hasPrefix("/api/v1/admin/backups/"), path.hasSuffix("/restore") {
-                guard method == "POST" else { return .methodNotAllowed() }
-                if let limited = limitedResponse(
-                    scope: .managementMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey,
-                    cost: 4
-                ) { return limited }
-                guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-                let backupID = String(
-                    path.dropFirst("/api/v1/admin/backups/".count).dropLast("/restore".count)
-                )
-                guard !backupID.isEmpty, !backupID.contains("/"),
-                      let request: ServerBackupRestoreRequest = strictlyDecode(
-                        ServerBackupRestoreRequest.self,
-                        from: body,
-                        allowedKeys: ["currentPassword"]
-                      )
-                else { return .badRequest() }
-                guard let authenticationService,
-                      (try? authenticationService.verifyCurrentPassword(
-                        for: principal,
-                        password: request.currentPassword,
-                        purpose: "backup.restore"
-                      )) == true
-                else { return .forbidden() }
-                guard let maintenanceService else { return .serviceUnavailable() }
-                do {
-                    let job = try maintenanceService.enqueueRestore(
-                        backupID: backupID,
-                        requestedBy: principal
-                    )
-                    guard let encoded = ServerCommandOutput.jsonData(job) else { return .serviceUnavailable() }
-                    return .accepted(body: encoded, additionalHeaders: [
-                        "Cache-Control: no-store",
-                        "Clear-Site-Data: \"cache\""
-                    ])
-                } catch ServerMaintenanceError.backupNotFound {
-                    return .notFound()
-                } catch ServerMaintenanceError.invalidBackup {
-                    return .conflict()
-                } catch {
-                    return .serviceUnavailable()
-                }
-            }
-            if path == "/api/v1/admin/users" {
-                if let limited = limitedResponse(
-                    scope: .managementMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey
-                ) { return limited }
-                guard principal.permissions.contains(.manageUsers) else { return .forbidden() }
-                return createAdministrationMemberResponse(body: body, principal: principal)
-            }
-            if path.hasPrefix("/api/v1/admin/sessions/") {
-                if let limited = limitedResponse(
-                    scope: .managementMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey
-                ) { return limited }
-                guard principal.permissions.contains(.manageSessions) else { return .forbidden() }
-                return revokeAdministrationSessionResponse(path: path, principal: principal)
-            }
-            if path.hasPrefix("/api/v1/admin/users/") {
-                if let limited = limitedResponse(
-                    scope: .managementMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey
-                ) { return limited }
-                guard principal.permissions.contains(.manageUsers) else { return .forbidden() }
-                if path.hasSuffix("/access") {
-                    guard principal.permissions.contains(.manageLibraries) else { return .forbidden() }
-                    return updateAdministrationMemberAccessResponse(path: path, body: body, principal: principal)
-                }
-                if path.hasSuffix("/password") {
-                    return resetAdministrationMemberPasswordResponse(path: path, body: body, principal: principal)
-                }
-                return updateAdministrationUserAvailabilityResponse(path: path, principal: principal)
-            }
             return .methodNotAllowed()
         }
         guard method == "GET" || isHeadRequest else {
@@ -1570,62 +1242,6 @@ struct LocalHTTPRouter {
                   let encoded = ServerCommandOutput.jsonData(descriptor)
             else { return .notFound() }
             return .json(body: encoded, omitBody: isHeadRequest, additionalHeaders: ["Cache-Control: no-store"])
-        }
-
-        if path == "/api/v1/admin/playback-sessions" ||
-            path.hasPrefix("/api/v1/admin/playback-sessions/") {
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageSessions) else { return .forbidden() }
-            let sessions = adminHLSSessionsProvider()
-            let encoded: Data?
-            if path == "/api/v1/admin/playback-sessions" {
-                guard let query = ServerAdministrationQueryParser.playbackSessions(from: target) else {
-                    return .badRequest()
-                }
-                let page = ServerAdminPlaybackSessionCatalog.page(sessions, query: query)
-                guard let encoded = ServerCommandOutput.jsonData(page.sessions) else {
-                    return .serviceUnavailable()
-                }
-                return .json(
-                    body: encoded,
-                    omitBody: isHeadRequest,
-                    additionalHeaders: administrationPaginationHeaders(
-                        totalCount: page.totalCount,
-                        offset: query.offset,
-                        itemCount: page.sessions.count
-                    )
-                )
-            } else {
-                let raw = String(path.dropFirst("/api/v1/admin/playback-sessions/".count))
-                guard !raw.isEmpty, !raw.contains("/"),
-                      let session = sessions.first(where: { $0.sessionID == raw })
-                else { return .notFound() }
-                encoded = ServerCommandOutput.jsonData(session)
-            }
-            guard let encoded else { return .serviceUnavailable() }
-            return .json(body: encoded, omitBody: isHeadRequest, additionalHeaders: ["Cache-Control: no-store"])
-        }
-
-        if let userID = administrationUserPolicyID(path) {
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageUsers) else { return .forbidden() }
-            guard let administrationCatalog,
-                  (try? administrationCatalog.containsUser(id: userID)) == true
-            else { return .notFound() }
-            guard let experienceRepository else { return .serviceUnavailable() }
-            do {
-                let policy = try experienceRepository.userPolicy(userID: userID)
-                guard let encoded = ServerCommandOutput.jsonData(policy) else { return .serviceUnavailable() }
-                return .json(
-                    body: encoded,
-                    omitBody: isHeadRequest,
-                    additionalHeaders: [etagHeader(policy.version), "Cache-Control: no-store"]
-                )
-            } catch { return .serviceUnavailable() }
         }
 
         if path.hasPrefix("/api/v1/playback/hls/") {
@@ -1658,86 +1274,19 @@ struct LocalHTTPRouter {
             }
         }
 
-        if path == "/api/v1/admin/backups" {
+        if let cost = administrationReadHandler.rateLimitCost(for: path) {
             if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
+                scope: .apiRead,
+                principal: principal,
+                clientAddressKey: clientAddressKey,
+                cost: cost
             ) { return limited }
-            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            guard let query = ServerAdministrationQueryParser.backups(from: target) else { return .badRequest() }
-            guard let maintenanceService else { return .serviceUnavailable() }
-            do {
-                let page = try maintenanceService.managedBackups(
-                    limit: query.limit,
-                    offset: query.offset,
-                    kind: query.kind
-                )
-                guard let encoded = ServerCommandOutput.jsonData(page.backups) else { return .serviceUnavailable() }
-                return .json(
-                    body: encoded,
-                    omitBody: isHeadRequest,
-                    additionalHeaders: administrationPaginationHeaders(
-                        totalCount: page.totalCount,
-                        offset: query.offset,
-                        itemCount: page.backups.count
-                    )
-                )
-            } catch { return .serviceUnavailable() }
-        }
-        if path == "/api/v1/admin/diagnostics" {
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey, cost: 2
-            ) { return limited }
-            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            guard let administrationCatalog,
-                  let experienceRepository,
-                  let runtime = runtimeDiagnosticsProvider()
-            else { return .serviceUnavailable() }
-            do {
-                try administrationCatalog.recordDiagnosticExport(actor: principal)
-                let users = try administrationCatalog.users(limit: 1)
-                let sessions = try administrationCatalog.activeSessions()
-                let sources = try administrationCatalog.sources()
-                let security = try administrationCatalog.securityEvents()
-                let export = ServerRedactedDiagnosticExport(
-                    runtime: runtime,
-                    userCount: users.totalCount,
-                    activeDeviceCount: sessions.devices.count,
-                    activeSessionCount: sessions.sessions.count,
-                    managedSourceCount: sources?.totalCount ?? 0,
-                    jobs: try experienceRepository.jobs(limit: 25),
-                    securityEvents: security.events
-                )
-                guard let encoded = ServerCommandOutput.jsonData(export) else { return .serviceUnavailable() }
-                return .json(
-                    body: encoded,
-                    omitBody: isHeadRequest,
-                    additionalHeaders: [
-                        "Cache-Control: no-store",
-                        "Content-Disposition: attachment; filename=\"MediaLIB-diagnostics.json\""
-                    ]
-                )
-            } catch { return .serviceUnavailable() }
-        }
-        if path.hasPrefix("/api/v1/admin/backups/"), path.hasSuffix("/download") {
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            let id = String(path.dropFirst("/api/v1/admin/backups/".count).dropLast("/download".count))
-            guard !id.contains("/"),
-                  let maintenanceService,
-                  let backup = try? maintenanceService.backupFile(id: id)
-            else { return .notFound() }
-            return .file(
-                url: backup.url,
-                byteLength: backup.byteLength,
-                contentType: "application/vnd.sqlite3",
-                omitBody: isHeadRequest,
-                additionalHeaders: [
-                    "Cache-Control: no-store",
-                    "Content-Disposition: attachment; filename=\"MediaLib-backup.sqlite\""
-                ]
-            )
+            return administrationReadHandler.response(
+                path: path,
+                target: target,
+                principal: principal,
+                omitBody: isHeadRequest
+            ) ?? .notFound()
         }
 
         let body: Data
@@ -2832,98 +2381,6 @@ struct LocalHTTPRouter {
                     additionalHeaders: [etagHeader(device.version), "Cache-Control: no-store"]
                 )
             } catch { return .serviceUnavailable() }
-        case "/api/v1/admin/dashboard":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            guard let experienceRepository else { return .serviceUnavailable() }
-            do {
-                let settings = try experienceRepository.operationalSettings()
-                let jobCounts = try experienceRepository.jobStateCounts()
-                let response = ServerAdminDashboardResponse(
-                    serverName: serverName,
-                    apiVersion: MlinkProtocol.currentAPIVersion,
-                    settingsVersion: settings.version,
-                    maximumTranscodeSessions: settings.value.maximumTranscodeSessions,
-                    queuedJobCount: jobCounts[.queued, default: 0],
-                    runningJobCount: jobCounts[.running, default: 0],
-                    failedJobCount: jobCounts[.failed, default: 0],
-                    recentSecurityEventCount: (try? administrationCatalog?.securityEvents().events.count) ?? 0,
-                    playback: playbackTelemetry.snapshot(),
-                    lan: remoteAccessPolicy.lanAccessReadiness(),
-                    runtime: runtimeDiagnosticsProvider()
-                )
-                guard let encoded = ServerCommandOutput.jsonData(response) else { return .serviceUnavailable() }
-                return .json(body: encoded, omitBody: isHeadRequest, additionalHeaders: ["Cache-Control: no-store"])
-            } catch { return .serviceUnavailable() }
-        case "/api/v1/admin/settings":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            guard let experienceRepository else { return .serviceUnavailable() }
-            do {
-                let settings = try experienceRepository.operationalSettings()
-                guard let encoded = ServerCommandOutput.jsonData(settings) else { return .serviceUnavailable() }
-                return .json(
-                    body: encoded,
-                    omitBody: isHeadRequest,
-                    additionalHeaders: [etagHeader(settings.version), "Cache-Control: no-store"]
-                )
-            } catch { return .serviceUnavailable() }
-        case "/api/v1/admin/jobs":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageLibraries) ||
-                    principal.permissions.contains(.manageServer)
-            else { return .forbidden() }
-            guard let query = ServerAdministrationQueryParser.jobs(from: target) else { return .badRequest() }
-            guard let experienceRepository else { return .serviceUnavailable() }
-            let libraryKinds: Set<String> = ["library.scan", "library.reindex", "metadata.refresh"]
-            let serverKinds: Set<String> = ["database.backup", "database.restore", "transcode-cache.clear"]
-            var allowedKinds: Set<String> = []
-            if principal.permissions.contains(.manageLibraries) { allowedKinds.formUnion(libraryKinds) }
-            if principal.permissions.contains(.manageServer) { allowedKinds.formUnion(serverKinds) }
-            if query.scope == "library" { allowedKinds.formIntersection(libraryKinds) }
-            if query.scope == "server" { allowedKinds.formIntersection(serverKinds) }
-            guard query.kind.map({ allowedKinds.contains($0) }) ?? true else { return .forbidden() }
-            do {
-                let page = try experienceRepository.managedJobs(
-                    limit: query.limit,
-                    offset: query.offset,
-                    state: query.state,
-                    kind: query.kind,
-                    searchText: query.searchText,
-                    allowedKinds: allowedKinds
-                )
-                guard let encoded = ServerCommandOutput.jsonData(page.jobs) else { return .serviceUnavailable() }
-                return .json(
-                    body: encoded,
-                    omitBody: isHeadRequest,
-                    additionalHeaders: administrationPaginationHeaders(
-                        totalCount: page.totalCount,
-                        offset: query.offset,
-                        itemCount: page.jobs.count
-                    )
-                )
-            } catch { return .serviceUnavailable() }
-        case "/api/v1/admin/users",
-             "/api/v1/admin/sessions",
-             "/api/v1/admin/security-events",
-             "/api/v1/admin/logs",
-             "/api/v1/admin/sources",
-             "/api/v1/admin/libraries":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            return administrationReadHandler.response(
-                path: path,
-                target: target,
-                principal: principal,
-                omitBody: isHeadRequest
-            ) ?? .notFound()
         case "/api/v1/auth/me":
             if let limited = limitedResponse(
                 scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
@@ -2936,28 +2393,6 @@ struct LocalHTTPRouter {
             } catch {
                 return .serviceUnavailable()
             }
-        // 局域网开放就绪度只回答策略事实：没有地址、端口、代理 IP、上游 URL 或
-        // 媒体标题，未认证客户端也拿不到部署形态。
-        case "/api/v1/admin/lan-readiness":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            guard let data = ServerCommandOutput.jsonData(remoteAccessPolicy.lanAccessReadiness()) else {
-                return .serviceUnavailable()
-            }
-            body = data
-        // 播放遥测只回答"代理整体表现如何"：计数、分桶与分位数。它不含媒体 ID、
-        // 标题、路径、上游 URL、token、用户、设备或客户端地址。
-        case "/api/v1/admin/playback-telemetry":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.manageServer) else { return .forbidden() }
-            guard let data = ServerCommandOutput.jsonData(playbackTelemetry.snapshot()) else {
-                return .serviceUnavailable()
-            }
-            body = data
         case let infoPath where infoPath.hasPrefix("/api/v1/playback/info/"):
             if let limited = limitedResponse(
                 scope: .mediaProbe, principal: principal, clientAddressKey: clientAddressKey
@@ -3586,21 +3021,6 @@ struct LocalHTTPRouter {
         pagingQuery(from: target, path: "/api/v1/collections")
     }
 
-    private func administrationPaginationHeaders(
-        totalCount: Int,
-        offset: Int,
-        itemCount: Int
-    ) -> [String] {
-        let boundedTotal = max(totalCount, 0)
-        let boundedOffset = max(offset, 0)
-        let boundedItemCount = max(itemCount, 0)
-        return [
-            "Cache-Control: no-store",
-            "X-MediaLIB-Total-Count: \(boundedTotal)",
-            "X-MediaLIB-Is-Truncated: \(boundedOffset + boundedItemCount < boundedTotal ? "true" : "false")"
-        ]
-    }
-
     private func pagingQuery(from target: String, path expectedPath: String) -> (offset: Int, limit: Int)? {
         let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
         guard pieces.first.map(String.init) == expectedPath else { return nil }
@@ -4119,154 +3539,6 @@ struct LocalHTTPRouter {
         }
     }
 
-    private func revokeAdministrationSessionResponse(
-        path: String,
-        principal: ServerRequestPrincipal
-    ) -> LocalHTTPResponse {
-        let prefix = "/api/v1/admin/sessions/"
-        let suffix = "/revoke"
-        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return .notFound() }
-        let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
-        guard !encodedID.isEmpty,
-              let sessionID = encodedID.removingPercentEncoding,
-              !sessionID.isEmpty,
-              !sessionID.contains("/"),
-              !sessionID.contains("\\"),
-              !sessionID.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }),
-              sessionID.utf8.count <= 512,
-              let administrationCatalog
-        else { return .notFound() }
-        do {
-            try administrationCatalog.revokeSession(id: sessionID, actorUserID: principal.userID)
-            return .noContent()
-        } catch {
-            return .notFound()
-        }
-    }
-
-    private func updateAdministrationUserAvailabilityResponse(
-        path: String,
-        principal: ServerRequestPrincipal
-    ) -> LocalHTTPResponse {
-        let prefix = "/api/v1/admin/users/"
-        let action: (suffix: String, disabled: Bool)
-        if path.hasSuffix("/disable") {
-            action = ("/disable", true)
-        } else if path.hasSuffix("/enable") {
-            action = ("/enable", false)
-        } else {
-            return .notFound()
-        }
-        let encodedID = String(path.dropFirst(prefix.count).dropLast(action.suffix.count))
-        guard !encodedID.isEmpty,
-              let userID = encodedID.removingPercentEncoding,
-              !userID.isEmpty,
-              !userID.contains("/"),
-              !userID.contains("\\"),
-              !userID.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }),
-              userID.utf8.count <= 512,
-              let administrationCatalog
-        else { return .notFound() }
-        do {
-            try administrationCatalog.setUserDisabled(
-                id: userID,
-                disabled: action.disabled,
-                actorUserID: principal.userID
-            )
-            return .noContent()
-        } catch {
-            return .notFound()
-        }
-    }
-
-    private func updateAdministrationMemberAccessResponse(
-        path: String,
-        body: Data,
-        principal: ServerRequestPrincipal
-    ) -> LocalHTTPResponse {
-        guard let userID = administrationUserID(path: path, suffix: "/access"),
-              let request = try? JSONDecoder().decode(ServerAdministrationMemberAccessRequest.self, from: body),
-              let administrationCatalog
-        else { return .badRequest() }
-        do {
-            try administrationCatalog.updateMemberAccess(
-                id: userID,
-                displayName: request.displayName,
-                libraryIDs: request.libraryIDs,
-                actorUserID: principal.userID
-            )
-            return .noContent()
-        } catch {
-            // 不区分成员是否存在、是否是内置管理员或资料库 ID 是否有效，避免管理接口
-            // 形成账户/资料库枚举器；前端只显示通用失败提示。
-            return .badRequest()
-        }
-    }
-
-    private func resetAdministrationMemberPasswordResponse(
-        path: String,
-        body: Data,
-        principal: ServerRequestPrincipal
-    ) -> LocalHTTPResponse {
-        guard let userID = administrationUserID(path: path, suffix: "/password"),
-              let request = try? JSONDecoder().decode(ServerAdministrationPasswordResetRequest.self, from: body),
-              let administrationCatalog
-        else { return .badRequest() }
-        do {
-            try administrationCatalog.resetMemberPassword(
-                id: userID,
-                password: request.password,
-                actorUserID: principal.userID
-            )
-            return .noContent()
-        } catch {
-            return .badRequest()
-        }
-    }
-
-    private func administrationUserID(path: String, suffix: String) -> String? {
-        let prefix = "/api/v1/admin/users/"
-        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
-        let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
-        guard !encodedID.isEmpty,
-              let userID = encodedID.removingPercentEncoding,
-              !userID.isEmpty,
-              !userID.contains("/"),
-              !userID.contains("\\"),
-              !userID.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }),
-              userID.utf8.count <= 512
-        else { return nil }
-        return userID
-    }
-
-    private func createAdministrationMemberResponse(
-        body: Data,
-        principal: ServerRequestPrincipal
-    ) -> LocalHTTPResponse {
-        guard let request = try? JSONDecoder().decode(ServerAdministrationMemberCreateRequest.self, from: body),
-              let administrationCatalog
-        else { return .badRequest() }
-        guard request.libraryIDs.isEmpty || principal.permissions.contains(.manageLibraries) else {
-            return .forbidden()
-        }
-        do {
-            try administrationCatalog.createMember(
-                username: request.username,
-                displayName: request.displayName,
-                password: request.password,
-                libraryIDs: request.libraryIDs,
-                actorUserID: principal.userID
-            )
-            return .noContent()
-        } catch ServerAdministrationCatalogError.unavailable {
-            return .serviceUnavailable()
-        } catch {
-            // 此处不把重复用户名、来源存在性或口令细节回显给浏览器，避免成员枚举与
-            // 内部资料库信息泄漏；前端只给出通用的输入/创建失败提示。
-            return .badRequest()
-        }
-    }
-
     private func playbackInfoResponse(
         itemID: String,
         principal: ServerRequestPrincipal,
@@ -4628,19 +3900,6 @@ struct LocalHTTPRouter {
         return (scope, decoded)
     }
 
-    private func administrationUserPolicyID(_ path: String) -> String? {
-        let prefix = "/api/v1/admin/users/"
-        let suffix = "/policy"
-        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
-        let raw = String(path.dropFirst(prefix.count).dropLast(suffix.count))
-        guard let decoded = raw.removingPercentEncoding,
-              !decoded.isEmpty, decoded.utf8.count <= 128,
-              !decoded.contains("/"), !decoded.contains("\\"),
-              !decoded.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
-        else { return nil }
-        return decoded
-    }
-
     private func experiencePolicy(for principal: ServerRequestPrincipal) -> ServerUserPolicy? {
         guard let experienceRepository else { return ServerUserPolicy() }
         return try? experienceRepository.userPolicy(userID: principal.userID).value
@@ -4673,26 +3932,6 @@ struct LocalHTTPRouter {
         let normalized = value.lowercased()
         return !(normalized == "localhost" || normalized == "::1" || normalized == "[::1]" ||
             normalized.hasPrefix("127.") || normalized.hasPrefix("loopback"))
-    }
-
-    private func strictlyDecode<Value: Decodable>(
-        _ type: Value.Type,
-        from body: Data,
-        allowedKeys: Set<String>,
-        nestedAllowedKeys: [String: Set<String>] = [:]
-    ) -> Value? {
-        guard let raw = try? JSONSerialization.jsonObject(with: body),
-              let object = raw as? [String: Any],
-              Set(object.keys).isSubset(of: allowedKeys)
-        else { return nil }
-        for (key, keys) in nestedAllowedKeys {
-            guard let nested = object[key] else { continue }
-            if nested is NSNull { continue }
-            guard let dictionary = nested as? [String: Any],
-                  Set(dictionary.keys).isSubset(of: keys)
-            else { return nil }
-        }
-        return try? JSONDecoder().decode(type, from: body)
     }
 
     private func effectivePreferences(
@@ -4740,29 +3979,6 @@ private struct ServerTrackOverrideMutation: Decodable {
         subtitleFingerprint = try values.decodeIfPresent(String.self, forKey: .subtitleFingerprint)
         subtitleDisabled = try values.decodeIfPresent(Bool.self, forKey: .subtitleDisabled) ?? false
     }
-}
-
-private struct ServerJobCreationRequest: Decodable {
-    let kind: String
-
-    var isValid: Bool {
-        ["library.scan", "library.reindex", "metadata.refresh"]
-            .contains(kind)
-    }
-}
-
-private struct ServerAdminDashboardResponse: Encodable {
-    let serverName: String
-    let apiVersion: String
-    let settingsVersion: Int
-    let maximumTranscodeSessions: Int
-    let queuedJobCount: Int
-    let runningJobCount: Int
-    let failedJobCount: Int
-    let recentSecurityEventCount: Int
-    let playback: ServerPlaybackTelemetrySnapshot
-    let lan: ServerLanAccessReadiness
-    let runtime: ServerRuntimeDiagnosticsSnapshot?
 }
 
 private enum ServerAuthenticationDelivery: String, Decodable {
