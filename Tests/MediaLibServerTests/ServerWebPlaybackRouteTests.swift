@@ -931,7 +931,7 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
             reason: "containerOrAudioCompatibility",
             mediaURL: "/api/v1/playback/hls/\(sessionID)/index.m3u8"
         )
-        var cancelledBy: String?
+        var cancellations: [String] = []
         var receivedCapabilities: ServerWebClientCapabilities?
         var ratePolicies = ServerRequestRateLimiter.productionPolicies
         ratePolicies[.playbackControl] = ServerRateLimitPolicy(capacity: 64, refillPerSecond: 0.01)
@@ -962,7 +962,7 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
                     return nil
                 }
             },
-            hlsCancellationProvider: { _, principal in cancelledBy = principal.userID },
+            hlsCancellationProvider: { _, principal in cancellations.append(principal.userID) },
             authenticationProvider: { head in
                 let user = head.contains("Bearer viewer") ? "viewer" : (head.contains("Bearer other") ? "other" : nil)
                 return user.map {
@@ -999,11 +999,24 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
             for: mutationRequest("/api/v1/playback/sessions", bodyLength: unknownCapabilityBody.count),
             body: unknownCapabilityBody
         ).statusCode, 400)
+        XCTAssertEqual(router.response(
+            for: mutationRequest(
+                "/api/v1/playback/sessions?include=policy", bodyLength: capabilityBody.count
+            ),
+            body: capabilityBody
+        ).statusCode, 400)
 
         let statusPath = "/api/v1/playback/sessions/\(sessionID)"
         let status = router.response(for: request(statusPath, token: "viewer"))
         XCTAssertEqual(status.statusCode, 200)
         XCTAssertEqual(try JSONDecoder().decode(ServerHLSPlaybackDescriptor.self, from: status.body), descriptor)
+        XCTAssertEqual(router.response(
+            for: request("\(statusPath)?include=internal", token: "viewer")
+        ).statusCode, 400)
+        let head = router.response(for: request(statusPath, token: "viewer", method: "HEAD"))
+        XCTAssertEqual(head.statusCode, 200)
+        XCTAssertTrue(head.body.isEmpty)
+        XCTAssertGreaterThan(head.declaredContentLength, 0)
         // A long GOP can take several seconds to emit its first playlist. The
         // normal 250 ms state polling loop must consume neither the scarce
         // ffprobe bucket nor the byte-stream bucket; otherwise ordinary seek
@@ -1037,15 +1050,29 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
             "/api/v1/playback/hls/\(sessionID)/../secret", token: "viewer"
         )).statusCode, 404)
 
+        let unexpectedCancelBody = Data("{}".utf8)
+        XCTAssertEqual(router.response(
+            for: mutationRequest(
+                "/api/v1/playback/sessions/\(sessionID)/cancel",
+                bodyLength: unexpectedCancelBody.count
+            ),
+            body: unexpectedCancelBody
+        ).statusCode, 400)
+        XCTAssertTrue(cancellations.isEmpty)
+
         let cancel = Data()
         XCTAssertEqual(router.response(
             for: mutationRequest(
                 "/api/v1/playback/sessions/\(sessionID)/cancel", bodyLength: cancel.count
             ), body: cancel
         ).statusCode, 204)
-        XCTAssertEqual(cancelledBy, "viewer")
+        XCTAssertEqual(cancellations, ["viewer"])
+        let rejectedDelete = "DELETE \(statusPath) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer viewer\r\nX-MediaLIB-CSRF: known-csrf\r\nContent-Length: 2\r\n\r\n"
+        XCTAssertEqual(router.response(for: rejectedDelete, body: unexpectedCancelBody).statusCode, 400)
+        XCTAssertEqual(cancellations, ["viewer"])
         let delete = "DELETE \(statusPath) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer viewer\r\nX-MediaLIB-CSRF: known-csrf\r\nContent-Length: 0\r\n\r\n"
         XCTAssertEqual(router.response(for: delete).statusCode, 204)
+        XCTAssertEqual(cancellations, ["viewer", "viewer"])
     }
 
     /// 音量不再通过 `slider-vertical` 退回各浏览器不同的系统外观；它与进度、倍速
@@ -1363,6 +1390,42 @@ final class ServerWebPlaybackRouteTests: XCTestCase {
             for: mutationRequest("/api/v1/playback/state/movie-1", bodyLength: validBody.count, token: "missing"),
             body: validBody
         ).statusCode, 401)
+    }
+
+    func testUserMediaStateMutationsRejectQueriesBeforeUpdatingState() {
+        var playbackUpdateCount = 0
+        var preferenceUpdateCount = 0
+        let router = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            mediaPlaybackStateUpdater: { _, _, _ in playbackUpdateCount += 1; return nil },
+            mediaPreferenceUpdater: { _, _, _ in preferenceUpdateCount += 1; return nil },
+            authenticationProvider: { head in
+                head.contains("Authorization: Bearer viewer")
+                    ? ServerRequestPrincipal(
+                        userID: "viewer", deviceID: "device", sessionID: "session",
+                        permissions: [.viewMedia], libraryGrants: [:]
+                    ) : nil
+            },
+            csrfToken: "known-csrf"
+        )
+        let playbackBody = Data(#"{"event":"progress","positionSeconds":1}"#.utf8)
+        let preferenceBody = Data(#"{"favorite":true}"#.utf8)
+
+        XCTAssertEqual(router.response(
+            for: mutationRequest(
+                "/api/v1/playback/state/movie-1?unexpected=1", bodyLength: playbackBody.count
+            ),
+            body: playbackBody
+        ).statusCode, 400)
+        XCTAssertEqual(router.response(
+            for: mutationRequest(
+                "/api/v1/user-media/preferences/movie-1?unexpected=1",
+                bodyLength: preferenceBody.count
+            ),
+            body: preferenceBody
+        ).statusCode, 400)
+        XCTAssertEqual(playbackUpdateCount, 0)
+        XCTAssertEqual(preferenceUpdateCount, 0)
     }
 
     func testMediaPreferenceMutationUsesAuthenticatedPrincipalAndSingleFieldBody() throws {

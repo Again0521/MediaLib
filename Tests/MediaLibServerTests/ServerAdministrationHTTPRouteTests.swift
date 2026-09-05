@@ -190,6 +190,10 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(response(
             path: "/api/v1/admin/playback-sessions/\(session.sessionID)", token: "session-manager"
         ).statusCode, 200)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/playback-sessions/\(session.sessionID)?include=path",
+            token: "session-manager"
+        ).statusCode, 400)
 
         let denied = router.response(for: mutationRequest(
             "/api/v1/admin/playback-sessions/\(session.sessionID)",
@@ -329,6 +333,10 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         let initial = response(path: "/api/v1/me/preferences", token: "preferences")
         XCTAssertEqual(initial.statusCode, 200)
         XCTAssertTrue(initial.additionalHeaders.contains("ETag: \"0\""))
+        XCTAssertEqual(
+            response(path: "/api/v1/me/preferences?include=policy", token: "preferences").statusCode,
+            400
+        )
         let head = router.response(
             for: "HEAD /api/v1/me/preferences HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer preferences\r\n\r\n"
         )
@@ -369,6 +377,88 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
             .replacingOccurrences(of: "Content-Length: \(body.count)", with: "Content-Length: \(nestedBody.count)")
             .replacingOccurrences(of: "If-Match: \"0\"", with: "If-Match: \"1\"")
         XCTAssertEqual(router.response(for: nestedRequest, body: nestedBody).statusCode, 400)
+    }
+
+    func testDevicePreferencesAndTrackOverridesRejectQueriesAndDeleteBodiesWithoutSideEffects() throws {
+        let experience = ServerExperienceRepository(database: database)
+        let deviceValue = ServerDeviceExperienceOverrides(
+            appearance: .dark,
+            contentDensity: .compact,
+            motion: .reduced,
+            defaultQuality: .quality1080p,
+            remoteBitrateMbps: 18
+        )
+        let deviceBody = try JSONEncoder().encode(deviceValue)
+        let devicePatch = mutationRequest(
+            "/api/v1/me/preferences/device",
+            token: "preferences",
+            bodyLength: deviceBody.count,
+            method: "PATCH"
+        ).replacingOccurrences(
+            of: "X-MediaLIB-CSRF: test-csrf-token\r\n",
+            with: "If-Match: \"0\"\r\nX-MediaLIB-CSRF: test-csrf-token\r\n"
+        )
+        let savedDevice = router.response(for: devicePatch, body: deviceBody)
+        XCTAssertEqual(savedDevice.statusCode, 200)
+        XCTAssertTrue(savedDevice.additionalHeaders.contains("ETag: \"1\""))
+        XCTAssertEqual(response(path: "/api/v1/me/preferences/device", token: "preferences").statusCode, 200)
+        XCTAssertEqual(
+            response(path: "/api/v1/me/preferences/device?include=account", token: "preferences").statusCode,
+            400
+        )
+
+        let nonemptyDeleteBody = Data("{}".utf8)
+        let deviceDelete = mutationRequest(
+            "/api/v1/me/preferences/device",
+            token: "preferences",
+            bodyLength: nonemptyDeleteBody.count,
+            method: "DELETE"
+        ).replacingOccurrences(
+            of: "X-MediaLIB-CSRF: test-csrf-token\r\n",
+            with: "If-Match: \"1\"\r\nX-MediaLIB-CSRF: test-csrf-token\r\n"
+        )
+        XCTAssertEqual(router.response(for: deviceDelete, body: nonemptyDeleteBody).statusCode, 400)
+        XCTAssertNotNil(try experience.devicePreferences(userID: "user-alice", deviceID: "device-alice"))
+        let validDeviceDelete = deviceDelete.replacingOccurrences(
+            of: "Content-Length: \(nonemptyDeleteBody.count)",
+            with: "Content-Length: 0"
+        )
+        XCTAssertEqual(router.response(for: validDeviceDelete).statusCode, 204)
+        XCTAssertNil(try experience.devicePreferences(userID: "user-alice", deviceID: "device-alice"))
+
+        let overridePath = "/api/v1/me/playback-overrides/media/movie-1"
+        let overrideBody = Data(#"{"audioFingerprint":"audio-1","subtitleDisabled":true}"#.utf8)
+        let overridePut = mutationRequest(
+            overridePath,
+            token: "preferences",
+            bodyLength: overrideBody.count,
+            method: "PUT"
+        )
+        XCTAssertEqual(router.response(for: overridePut, body: overrideBody).statusCode, 200)
+        XCTAssertNotNil(try experience.trackOverride(
+            userID: "user-alice", scope: .media, scopeID: "movie-1"
+        ))
+        let queriedPut = overridePut.replacingOccurrences(of: overridePath, with: "\(overridePath)?scope=user")
+        XCTAssertEqual(router.response(for: queriedPut, body: overrideBody).statusCode, 400)
+
+        let overrideDelete = mutationRequest(
+            overridePath,
+            token: "preferences",
+            bodyLength: nonemptyDeleteBody.count,
+            method: "DELETE"
+        )
+        XCTAssertEqual(router.response(for: overrideDelete, body: nonemptyDeleteBody).statusCode, 400)
+        XCTAssertNotNil(try experience.trackOverride(
+            userID: "user-alice", scope: .media, scopeID: "movie-1"
+        ))
+        let validOverrideDelete = overrideDelete.replacingOccurrences(
+            of: "Content-Length: \(nonemptyDeleteBody.count)",
+            with: "Content-Length: 0"
+        )
+        XCTAssertEqual(router.response(for: validOverrideDelete).statusCode, 204)
+        XCTAssertNil(try experience.trackOverride(
+            userID: "user-alice", scope: .media, scopeID: "movie-1"
+        ))
     }
 
     func testPlaybackTrackResponseResolvesSavedMediaOverrideWithoutLeakingIdentifiers() throws {
@@ -413,6 +503,7 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
     func testUserPolicyRequiresUserManagementUsesETagAndWritesAudit() throws {
         let path = "/api/v1/admin/users/user-bob/policy"
         XCTAssertEqual(response(path: path, token: "member").statusCode, 403)
+        XCTAssertEqual(response(path: "\(path)?include=sessions", token: "user-manager").statusCode, 400)
         let initial = response(path: path, token: "user-manager")
         XCTAssertEqual(initial.statusCode, 200)
         XCTAssertTrue(initial.additionalHeaders.contains("ETag: \"0\""))
@@ -775,6 +866,9 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(response(path: "/api/v1/admin/lan-readiness", token: nil).statusCode, 401)
         XCTAssertEqual(response(path: "/api/v1/admin/lan-readiness", token: "member").statusCode, 403)
         XCTAssertEqual(response(path: "/api/v1/admin/lan-readiness", token: "session-manager").statusCode, 403)
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/lan-readiness?include=addresses", token: "server-manager"
+        ).statusCode, 400)
 
         let granted = response(path: "/api/v1/admin/lan-readiness", token: "server-manager")
         XCTAssertEqual(granted.statusCode, 200)
@@ -794,6 +888,9 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(
             response(path: "/api/v1/admin/playback-telemetry", token: "session-manager").statusCode, 403
         )
+        XCTAssertEqual(response(
+            path: "/api/v1/admin/playback-telemetry?session=all", token: "server-manager"
+        ).statusCode, 400)
 
         let granted = response(path: "/api/v1/admin/playback-telemetry", token: "server-manager")
         XCTAssertEqual(granted.statusCode, 200)

@@ -75,6 +75,22 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         XCTAssertEqual(loginResponse.statusCode, 200)
         XCTAssertFalse(String(data: loginResponse.serializedHeaders(), encoding: .utf8)?.contains("Set-Cookie") ?? true)
         let refreshBody = try requestBody(["refreshToken": first.refreshToken, "delivery": "token"])
+        XCTAssertEqual(router.response(
+            for: "POST /api/v1/auth/refresh?debug=1 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            body: refreshBody
+        ).statusCode, 400)
+        let unexpectedRefreshBody = try JSONSerialization.data(
+            withJSONObject: [
+                "refreshToken": first.refreshToken,
+                "delivery": "token",
+                "unsafe": true
+            ],
+            options: [.sortedKeys]
+        )
+        XCTAssertEqual(router.response(
+            for: "POST /api/v1/auth/refresh HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            body: unexpectedRefreshBody
+        ).statusCode, 400)
         let refreshResponse = router.response(
             for: "POST /api/v1/auth/refresh HTTP/1.1\r\nHost: localhost\r\n\r\n",
             body: refreshBody
@@ -112,6 +128,18 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         XCTAssertFalse(String(data: loginResponse.body, encoding: .utf8)?.contains(accessToken) ?? true)
         XCTAssertTrue(headers.contains("HttpOnly; Secure; SameSite=Strict"))
         XCTAssertTrue(headers.contains("Path=/api/v1/auth"))
+
+        let unexpectedBody = Data("{}".utf8)
+        let rejectedLogout = router.response(
+            for: "POST /api/v1/auth/logout HTTP/1.1\r\nHost: localhost\r\nCookie: MediaLIBAccess=\(accessToken)\r\nContent-Length: 2\r\n\r\n",
+            body: unexpectedBody
+        )
+        XCTAssertEqual(rejectedLogout.statusCode, 400)
+        XCTAssertNotNil(try authentication.principal(forAccessToken: accessToken))
+        XCTAssertEqual(router.response(
+            for: "POST /api/v1/auth/logout?all=true HTTP/1.1\r\nHost: localhost\r\nCookie: MediaLIBAccess=\(accessToken)\r\n\r\n"
+        ).statusCode, 400)
+        XCTAssertNotNil(try authentication.principal(forAccessToken: accessToken))
 
         let logout = router.response(
             for: "POST /api/v1/auth/logout HTTP/1.1\r\nHost: localhost\r\nCookie: MediaLIBAccess=\(accessToken)\r\n\r\n"
@@ -156,6 +184,33 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         XCTAssertFalse(refreshBody.contains(refreshToken))
     }
 
+    func testHTMLFormLoginUsesServerReturnStateAndRejectsUnknownQueryBeforeLogin() throws {
+        let form = Data(
+            "username=alice&password=correct+horse+battery+staple&csrf=test-csrf-token".utf8
+        )
+        let invalidTarget = router.response(
+            for: "POST /login?next=L2FjY291bnQ&debug=1 HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: \(form.count)\r\n\r\n",
+            body: form
+        )
+        XCTAssertEqual(invalidTarget.statusCode, 400)
+        XCTAssertTrue(try repository.sessions(userID: "user-alice").isEmpty)
+
+        let response = router.response(
+            for: "POST /login?next=L2FjY291bnQ HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: \(form.count)\r\n\r\n",
+            body: form
+        )
+        let headers = String(data: response.serializedHeaders(), encoding: .utf8) ?? ""
+        let accessToken = try XCTUnwrap(cookieValue(
+            named: ServerAuthenticationService.accessCookieName,
+            in: headers
+        ))
+
+        XCTAssertEqual(response.statusCode, 303)
+        XCTAssertTrue(headers.contains("Location: /account"))
+        XCTAssertTrue(headers.contains("HttpOnly; Secure; SameSite=Strict"))
+        XCTAssertNotNil(try authentication.principal(forAccessToken: accessToken))
+    }
+
     func testWrongPasswordAndMalformedJSONUseSafeStatuses() throws {
         let wrong = try requestBody([
             "username": "alice", "password": "wrong-password-value",
@@ -176,6 +231,21 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
             ).statusCode,
             400
         )
+        let unknownLoginField = try JSONSerialization.data(
+            withJSONObject: [
+                "username": "alice", "password": "correct horse battery staple",
+                "deviceName": "Browser", "platform": "Web", "administrator": true
+            ],
+            options: [.sortedKeys]
+        )
+        XCTAssertEqual(router.response(
+            for: "POST /api/v1/auth/login HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            body: unknownLoginField
+        ).statusCode, 400)
+        XCTAssertEqual(router.response(
+            for: "POST /api/v1/auth/login?delivery=cookie HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            body: wrong
+        ).statusCode, 400)
         let invalidRefreshDelivery = try requestBody([
             "refreshToken": String(repeating: "r", count: 32), "delivery": "local-storage"
         ])
@@ -234,6 +304,9 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         let script = String(data: asset.body, encoding: .utf8) ?? ""
 
         XCTAssertEqual(router.response(for: "GET /api/v1/auth/me HTTP/1.1\r\nHost: localhost\r\n\r\n").statusCode, 401)
+        XCTAssertEqual(router.response(
+            for: authenticatedRequest("/api/v1/auth/me?include=session", token: tokens.accessToken)
+        ).statusCode, 400)
         XCTAssertEqual(profile.statusCode, 200)
         XCTAssertEqual(profileObject["username"] as? String, "alice")
         XCTAssertEqual(profileObject["displayName"] as? String, "Alice")
@@ -288,6 +361,15 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
             body: login
         ).body)
         let body = Data(#"{"currentPassword":"correct horse battery staple","newPassword":"new horse battery staple"}"#.utf8)
+        XCTAssertEqual(router.response(
+            for: passwordChangeRequest(
+                path: "/api/v1/auth/password?user=other",
+                token: tokens.accessToken,
+                bodyLength: body.count
+            ),
+            body: body
+        ).statusCode, 400)
+        XCTAssertNotNil(try authentication.principal(forAccessToken: tokens.accessToken))
         let response = router.response(
             for: passwordChangeRequest(token: tokens.accessToken, bodyLength: body.count),
             body: body
@@ -340,8 +422,12 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         "GET \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(token)\r\n\r\n"
     }
 
-    private func passwordChangeRequest(token: String, bodyLength: Int) -> String {
-        "POST /api/v1/auth/password HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nContent-Length: \(bodyLength)\r\nX-MediaLIB-CSRF: test-csrf-token\r\n\r\n"
+    private func passwordChangeRequest(
+        path: String = "/api/v1/auth/password",
+        token: String,
+        bodyLength: Int
+    ) -> String {
+        "POST \(path) HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \(token)\r\nContent-Type: application/json\r\nContent-Length: \(bodyLength)\r\nX-MediaLIB-CSRF: test-csrf-token\r\n\r\n"
     }
 
     private func cookieValue(named name: String, in headers: String) -> String? {

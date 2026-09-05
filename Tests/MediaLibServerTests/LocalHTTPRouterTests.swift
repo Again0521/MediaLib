@@ -589,6 +589,51 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertFalse(String(data: itemsResponse.body, encoding: .utf8)?.contains("filePath") ?? true)
     }
 
+    func testLibraryReadRoutesRejectQueriesAndMethodsBeforeCatalogProviders() {
+        var snapshotCalls = 0
+        var categoryCalls = 0
+        var detailCalls = 0
+        let router = LocalHTTPRouter(
+            serverID: "server-001",
+            serverName: "客厅服务器",
+            librarySnapshotProvider: { _ in
+                snapshotCalls += 1
+                return ServerLibrarySnapshot(
+                    summary: ServerLibrarySummary(totalItemCount: 0, countsByType: [:]),
+                    items: ServerLibraryItemsResponse(totalItemCount: 0, items: [])
+                )
+            },
+            libraryCategoriesProvider: { _ in
+                categoryCalls += 1
+                return ServerLibraryCategoriesResponse(categories: [])
+            },
+            mediaDetailProvider: { _, _ in detailCalls += 1; return nil },
+            authenticationProvider: { _ in .testAdministrator() }
+        )
+
+        for target in [
+            "/api/v1/library/summary?unexpected=1",
+            "/api/v1/library/items?unexpected=1",
+            "/api/v1/library/categories?unexpected=1",
+            "/api/v1/items/movie-1?unexpected=1"
+        ] {
+            XCTAssertEqual(
+                router.response(for: "GET \(target) HTTP/1.1\r\nHost: localhost\r\n\r\n").statusCode,
+                400,
+                target
+            )
+        }
+        XCTAssertEqual(
+            router.response(
+                for: "POST /api/v1/library/summary HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            ).statusCode,
+            405
+        )
+        XCTAssertEqual(snapshotCalls, 0)
+        XCTAssertEqual(categoryCalls, 0)
+        XCTAssertEqual(detailCalls, 0)
+    }
+
     /// 首页那两栏（最近添加／高分精选）与首页看板同口径：跨本地与远程。
     ///
     /// 少了这一条，同一页上「继续观看」里有 Emby 的剧、「最近添加」里一部都没有。
@@ -1465,6 +1510,62 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertEqual(head.declaredContentLength, 4)
     }
 
+    func testArtworkRoutesValidateMethodPermissionTargetAndQueryBeforeProviders() {
+        var artworkCalls = 0
+        var detailCalls = 0
+        let restricted = ServerRequestPrincipal(
+            userID: "restricted", deviceID: "device", sessionID: "session",
+            permissions: [], libraryGrants: [:]
+        )
+        func router(principal: ServerRequestPrincipal) -> LocalHTTPRouter {
+            LocalHTTPRouter(
+                serverID: "server-001",
+                serverName: "客厅服务器",
+                artworkAssetProvider: { _, _, _ in artworkCalls += 1; return nil },
+                detailImageProvider: { _, _, _, _ in detailCalls += 1; return nil },
+                authenticationProvider: { _ in principal }
+            )
+        }
+
+        let denied = router(principal: restricted)
+        XCTAssertEqual(
+            denied.response(for: "GET /api/v1/images/movie-1/poster HTTP/1.1\r\n\r\n").statusCode,
+            403
+        )
+        XCTAssertEqual([artworkCalls, detailCalls], [0, 0])
+        XCTAssertEqual(
+            denied.response(for: "POST /api/v1/images/movie-1/poster HTTP/1.1\r\nContent-Length: 0\r\n\r\n").statusCode,
+            405
+        )
+        XCTAssertEqual([artworkCalls, detailCalls], [0, 0])
+
+        let authorized = router(principal: .testAdministrator())
+        for target in [
+            "/api/v1/images/movie-1/poster?size=320&size=640",
+            "/api/v1/images/movie-1/poster?width=320",
+            "/api/v1/images/movie-1/poster?",
+            "/api/v1/images/movie%2Fescape/poster",
+            "/api/v1/images/movie-1/unknown",
+            "/api/v1/images/movie-1/portrait/-1",
+            "/api/v1/images/movie-1/portrait/64",
+            "/api/v1/images/movie-1/portrait/0/extra"
+        ] {
+            let response = authorized.response(for: "GET \(target) HTTP/1.1\r\n\r\n")
+            XCTAssertTrue(response.statusCode == 400 || response.statusCode == 404, target)
+        }
+        XCTAssertEqual([artworkCalls, detailCalls], [0, 0])
+
+        XCTAssertEqual(
+            authorized.response(for: "GET /api/v1/images/movie%20id%2B1/poster?size=320 HTTP/1.1\r\n\r\n").statusCode,
+            404
+        )
+        XCTAssertEqual(
+            authorized.response(for: "GET /api/v1/images/movie%20id%2B1/portrait/0?size=160 HTTP/1.1\r\n\r\n").statusCode,
+            404
+        )
+        XCTAssertEqual([artworkCalls, detailCalls], [1, 1])
+    }
+
     func testArtworkRouteGeneratesOnlyBoundedCachedThumbnailVariants() throws {
         let fileManager = FileManager.default
         let imageURL = fileManager.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).png")
@@ -1914,6 +2015,81 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertFalse(String(data: failure.body, encoding: .utf8)?.contains("private") ?? true)
     }
 
+    func testPlaybackMetadataRoutesValidateMethodPermissionTargetAndQueryBeforeProviders() throws {
+        var infoCalls = 0
+        var subtitleCalls = 0
+        var trackCalls = 0
+        var keyframeCalls = 0
+        let restricted = ServerRequestPrincipal(
+            userID: "restricted", deviceID: "device", sessionID: "session",
+            permissions: [], libraryGrants: [:]
+        )
+        func router(principal: ServerRequestPrincipal) -> LocalHTTPRouter {
+            LocalHTTPRouter(
+                serverID: "server-001",
+                serverName: "客厅服务器",
+                webVTTSubtitleTracksProvider: { _, _ in subtitleCalls += 1; return nil },
+                playbackTracksProvider: { _, _ in trackCalls += 1; return nil },
+                remuxStartProvider: { _, _, _ in keyframeCalls += 1; return nil },
+                playbackInfoProvider: { _, _ in infoCalls += 1; return nil },
+                authenticationProvider: { _ in principal }
+            )
+        }
+
+        let denied = router(principal: restricted)
+        for target in [
+            "/api/v1/playback/info/movie-1",
+            "/api/v1/playback/subtitles/movie-1",
+            "/api/v1/playback/tracks/movie-1",
+            "/api/v1/playback/keyframe/movie-1?at=12.5"
+        ] {
+            XCTAssertEqual(denied.response(for: "GET \(target) HTTP/1.1\r\n\r\n").statusCode, 403, target)
+        }
+        XCTAssertEqual([infoCalls, subtitleCalls, trackCalls, keyframeCalls], [0, 0, 0, 0])
+
+        let authorized = router(principal: .testAdministrator())
+        XCTAssertEqual(
+            authorized.response(for: "POST /api/v1/playback/info/movie-1 HTTP/1.1\r\nContent-Length: 0\r\n\r\n").statusCode,
+            405
+        )
+        for target in [
+            "/api/v1/playback/info/movie-1?details=path",
+            "/api/v1/playback/subtitles/movie-1?userID=admin",
+            "/api/v1/playback/tracks/movie-1?audio=all",
+            "/api/v1/playback/info/movie%2Fescape"
+        ] {
+            XCTAssertEqual(authorized.response(for: "GET \(target) HTTP/1.1\r\n\r\n").statusCode, 400, target)
+        }
+        for target in [
+            "/api/v1/playback/keyframe/movie-1",
+            "/api/v1/playback/keyframe/movie-1?at=1&at=2",
+            "/api/v1/playback/keyframe/movie-1?at=86400",
+            "/api/v1/playback/keyframe/movie%2Fescape?at=1"
+        ] {
+            XCTAssertEqual(authorized.response(for: "GET \(target) HTTP/1.1\r\n\r\n").statusCode, 404, target)
+        }
+        XCTAssertEqual([infoCalls, subtitleCalls, trackCalls, keyframeCalls], [0, 0, 0, 0])
+
+        var receivedKeyframe: (id: String, seconds: Double, userID: String)?
+        let keyframeRouter = LocalHTTPRouter(
+            serverID: "server-001",
+            serverName: "客厅服务器",
+            remuxStartProvider: { id, seconds, principal in
+                receivedKeyframe = (id, seconds, principal.userID)
+                return 10.125
+            },
+            authenticationProvider: { _ in .testAdministrator() }
+        )
+        let response = keyframeRouter.response(
+            for: "GET /api/v1/playback/keyframe/movie%20id%2B1?at=12.5 HTTP/1.1\r\n\r\n"
+        )
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(receivedKeyframe?.id, "movie id+1")
+        XCTAssertEqual(receivedKeyframe?.seconds, 12.5)
+        XCTAssertEqual(receivedKeyframe?.userID, "test-admin")
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: response.body) as? [String: Double], ["startSeconds": 10.125])
+    }
+
     func testWebVTTSubtitleRoutesRequireAuthorizedOpaqueItemAndNeverExposePaths() throws {
         // 扩展名要真的是 `.vtt`：只有已经是 WebVTT 的那一份才原样流式送出，
         // SRT 与 ASS 必须先在服务端转换（`<track>` 只认 WebVTT）。
@@ -1954,6 +2130,129 @@ final class LocalHTTPRouterTests: XCTestCase {
         XCTAssertEqual(asset.declaredContentLength, Data("WEBVTT\n\n".utf8).count)
         XCTAssertTrue(asset.body.isEmpty, "文件内容会由 socket 流式写出，路由层不复制进内存 body")
         XCTAssertEqual(malformed.statusCode, 404)
+    }
+
+    func testSubtitleBodyRoutesValidateMethodPermissionTargetAndQueryBeforeProvider() {
+        var providerCalls = 0
+        var received: (itemID: String, trackID: Int, userID: String)?
+        let restricted = ServerRequestPrincipal(
+            userID: "restricted", deviceID: "device", sessionID: "session",
+            permissions: [], libraryGrants: [:]
+        )
+        func router(principal: ServerRequestPrincipal) -> LocalHTTPRouter {
+            LocalHTTPRouter(
+                serverID: "server-001",
+                serverName: "客厅服务器",
+                subtitleTrackProvider: { itemID, trackID, principal in
+                    providerCalls += 1
+                    received = (itemID, trackID, principal.userID)
+                    return nil
+                },
+                authenticationProvider: { _ in principal }
+            )
+        }
+
+        XCTAssertEqual(
+            router(principal: restricted).response(
+                for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n"
+            ).statusCode,
+            403
+        )
+        let authorized = router(principal: .testAdministrator())
+        XCTAssertEqual(
+            authorized.response(for: "POST /api/v1/subtitles/movie-1/0 HTTP/1.1\r\nContent-Length: 0\r\n\r\n").statusCode,
+            405
+        )
+        for target in [
+            "/api/v1/subtitles/movie-1/0?download=1",
+            "/api/v1/subtitles/movie%2Fescape/0",
+            "/api/v1/subtitles/movie-1/-1",
+            "/api/v1/subtitles/movie-1/32",
+            "/api/v1/subtitles/movie-1/0/extra"
+        ] {
+            let expectedStatus = target.contains("?") ? 400 : 404
+            XCTAssertEqual(
+                authorized.response(for: "GET \(target) HTTP/1.1\r\n\r\n").statusCode,
+                expectedStatus,
+                target
+            )
+        }
+        XCTAssertEqual(providerCalls, 0)
+
+        XCTAssertEqual(
+            authorized.response(for: "GET /api/v1/subtitles/movie%20id%2B1/17 HTTP/1.1\r\n\r\n").statusCode,
+            404
+        )
+        XCTAssertEqual(providerCalls, 1)
+        XCTAssertEqual(received?.itemID, "movie id+1")
+        XCTAssertEqual(received?.trackID, 17)
+        XCTAssertEqual(received?.userID, "test-admin")
+    }
+
+    func testSidecarSubtitleHeadDoesNotReadOrConvertColdTextFile() {
+        let missingSRT = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).srt")
+        let router = LocalHTTPRouter(
+            serverID: "server-001",
+            serverName: "客厅服务器",
+            subtitleTrackProvider: { itemID, trackID, _ in
+                guard itemID == "movie-1", trackID == 0 else { return nil }
+                return ServerSubtitleTrackReference(
+                    label: "简体中文",
+                    language: "zh-Hans",
+                    origin: .sidecar,
+                    source: .sidecar(ServerMediaAsset(
+                        id: itemID,
+                        fileURL: missingSRT,
+                        byteLength: 128
+                    ))
+                )
+            },
+            authenticationProvider: { _ in .testAdministrator() }
+        )
+
+        let head = router.response(
+            for: "HEAD /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n"
+        )
+        XCTAssertEqual(head.statusCode, 200)
+        XCTAssertEqual(head.contentType, "text/vtt; charset=utf-8")
+        XCTAssertEqual(head.declaredContentLength, 0)
+        XCTAssertTrue(head.body.isEmpty)
+        XCTAssertEqual(
+            router.response(for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n").statusCode,
+            404,
+            "GET 才去读取并转换冷字幕"
+        )
+    }
+
+    func testSidecarSubtitleReadEnforcesActualEightMiBBoundDespiteStaleLength() throws {
+        let oversized = try makeFixtureFile(
+            contents: Data(repeating: 0x41, count: ServerWebVTTSubtitleTrack.maximumByteLength + 1),
+            pathExtension: "srt"
+        )
+        let router = LocalHTTPRouter(
+            serverID: "server-001",
+            serverName: "客厅服务器",
+            subtitleTrackProvider: { itemID, trackID, _ in
+                guard itemID == "movie-1", trackID == 0 else { return nil }
+                return ServerSubtitleTrackReference(
+                    label: "字幕",
+                    language: nil,
+                    origin: .sidecar,
+                    source: .sidecar(ServerMediaAsset(
+                        id: itemID,
+                        fileURL: oversized,
+                        byteLength: 1
+                    ))
+                )
+            },
+            authenticationProvider: { _ in .testAdministrator() }
+        )
+
+        XCTAssertEqual(
+            router.response(for: "GET /api/v1/subtitles/movie-1/0 HTTP/1.1\r\n\r\n").statusCode,
+            404
+        )
     }
 
     func testEmbeddedSubtitleRouteQueuesWithoutBlockingThenReturnsCachedWebVTT() throws {

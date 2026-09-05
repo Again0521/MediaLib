@@ -63,6 +63,82 @@ final class ServerWebCollectionRouteTests: XCTestCase {
         ] { XCTAssertEqual(router.response(for: request(invalid)).statusCode, 400, invalid) }
     }
 
+    func testSmartCollectionAndPlaylistAPIsShareStrictDiscoveryBoundary() {
+        var calls: [String] = []
+        let emptyItems = ServerLibraryItemsPage(totalItemCount: 0, offset: 0, limit: 24, items: [])
+        let router = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            smartCollectionsProvider: { offset, limit, principal in
+                calls.append("smart-list:\(offset):\(limit):\(principal.userID)")
+                return ServerSmartCollectionsPage(
+                    totalItemCount: 1, offset: offset, limit: limit,
+                    items: [ServerSmartCollectionCard(id: "smart id+1", name: "智能合集", mediaCount: 0)]
+                )
+            },
+            smartCollectionDetailProvider: { id, offset, limit, principal in
+                calls.append("smart-items:\(id):\(offset):\(limit):\(principal.userID)")
+                return id == "smart id+1"
+                    ? ServerSmartCollectionDetail(id: id, name: "智能合集", items: emptyItems)
+                    : nil
+            },
+            musicPlaylistsProvider: { offset, limit, principal in
+                calls.append("playlist-list:\(offset):\(limit):\(principal.userID)")
+                return ServerMusicPlaylistsPage(
+                    totalItemCount: 1, offset: offset, limit: limit,
+                    items: [ServerMusicPlaylistCard(id: "playlist id+1", name: "歌单", trackCount: 0, isSmart: false)]
+                )
+            },
+            musicPlaylistDetailProvider: { id, offset, limit, principal in
+                calls.append("playlist-items:\(id):\(offset):\(limit):\(principal.userID)")
+                return id == "playlist id+1"
+                    ? ServerMusicPlaylistDetail(id: id, name: "歌单", isSmart: false, items: emptyItems)
+                    : nil
+            },
+            authenticationProvider: { head in head.contains("Authorization: Bearer viewer") ? self.viewer : nil }
+        )
+
+        XCTAssertEqual(router.response(for: request("/api/v1/smart-collections?offset=2&limit=7")).statusCode, 200)
+        XCTAssertEqual(router.response(for: request("/api/v1/smart-collections/smart%20id%2B1/items?offset=3&limit=4")).statusCode, 200)
+        XCTAssertEqual(router.response(for: request("/api/v1/music/playlists?offset=5&limit=6")).statusCode, 200)
+        XCTAssertEqual(router.response(for: request("/api/v1/music/playlists/playlist%20id%2B1/items?offset=7&limit=8")).statusCode, 200)
+        XCTAssertEqual(calls, [
+            "smart-list:2:7:viewer", "smart-items:smart id+1:3:4:viewer",
+            "playlist-list:5:6:viewer", "playlist-items:playlist id+1:7:8:viewer"
+        ])
+
+        for invalid in [
+            "/api/v1/smart-collections?sort=title",
+            "/api/v1/smart-collections/smart%20id%2B1/items",
+            "/api/v1/smart-collections/smart%2Fescape/items?offset=0&limit=24",
+            "/api/v1/music/playlists?offset=0&limit=0",
+            "/api/v1/music/playlists/playlist%20id%2B1/items?offset=0&limit=24&userID=admin"
+        ] {
+            XCTAssertEqual(router.response(for: request(invalid)).statusCode, 400, invalid)
+        }
+        XCTAssertEqual(calls.count, 4, "rejected discovery queries must not reach catalog providers")
+    }
+
+    func testDiscoveryRoutesRejectMethodsAndMissingViewPermissionBeforeProviders() {
+        var providerCallCount = 0
+        let restricted = ServerRequestPrincipal(
+            userID: "restricted", deviceID: "device", sessionID: "session",
+            permissions: [], libraryGrants: [:]
+        )
+        let router = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            collectionsProvider: { offset, limit, _ in
+                providerCallCount += 1
+                return ServerCollectionsPage(totalItemCount: 0, offset: offset, limit: limit, items: [])
+            },
+            authenticationProvider: { _ in restricted }
+        )
+
+        XCTAssertEqual(router.response(for: request("/api/v1/collections")).statusCode, 403)
+        let post = "POST /api/v1/collections HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer viewer\r\nContent-Length: 0\r\n\r\n"
+        XCTAssertEqual(router.response(for: post).statusCode, 405)
+        XCTAssertEqual(providerCallCount, 0)
+    }
+
     func testCollectionAssetsAvoidUnsafeDOMAndPersistentSecrets() {
         let router = makeRouter()
         let css = router.response(for: "GET /assets/collections.css HTTP/1.1\r\nHost: localhost\r\n\r\n")

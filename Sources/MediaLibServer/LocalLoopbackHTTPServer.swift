@@ -549,57 +549,9 @@ private struct LocalHTTPRequest {
     let body: Data
 }
 
-/// 仅允许当前会话主体提交自己的当前密码和新密码。正文不含 userID、设备、会话或
-/// 恢复票据，字段不精确匹配即拒绝。
-private struct ServerPasswordChangeRequest: Decodable {
-    let currentPassword: String
-    let newPassword: String
-
-    private enum CodingKeys: String, CodingKey, CaseIterable {
-        case currentPassword, newPassword
-    }
-
-    init(from decoder: Decoder) throws {
-        let dynamic = try decoder.container(keyedBy: DynamicCodingKey.self)
-        guard Set(dynamic.allKeys.map(\.stringValue)) == Set(CodingKeys.allCases.map(\.rawValue)) else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "unexpected fields"))
-        }
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        currentPassword = try values.decode(String.self, forKey: .currentPassword)
-        newPassword = try values.decode(String.self, forKey: .newPassword)
-        guard (1...1_024).contains(currentPassword.utf8.count),
-              (12...1_024).contains(newPassword.utf8.count)
-        else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "invalid password lengths"))
-        }
-    }
-}
-
-/// 数据库恢复只接受当前会话账号的密码。备份 ID 来自路径中的不透明服务端 ID，
-/// 正文不能夹带文件名、路径、用户或其它恢复参数。
-private struct DynamicCodingKey: CodingKey {
-    let stringValue: String
-    let intValue: Int?
-
-    init?(stringValue: String) {
-        self.stringValue = stringValue
-        intValue = nil
-    }
-
-    init?(intValue: Int) {
-        stringValue = String(intValue)
-        self.intValue = intValue
-    }
-}
-
 private enum LocalHTTPRequestReceiveResult {
     case request(LocalHTTPRequest)
     case rejected(HTTPRequestSecurityPolicy.Rejection)
-}
-
-private enum ArtworkRequest {
-    case original
-    case thumbnail(Int)
 }
 
 private final class ServerNavigationSnapshotCache: @unchecked Sendable {
@@ -724,33 +676,24 @@ struct LocalHTTPRouter {
     private let musicPlaylistDetailProvider: (String, Int, Int, ServerRequestPrincipal) throws -> ServerMusicPlaylistDetail?
     private let musicItemsProvider: (ServerRequestPrincipal) throws -> [ServerLibraryItem]
     private let queueProvider: (ServerRequestPrincipal) throws -> ServerQueueResponse
-    private let queueMutationProvider: (ServerQueueMutationRequest, ServerRequestPrincipal) throws -> ServerQueueResponse?
-    private let mediaPlaybackStateUpdater: (String, ServerPlaybackStateUpdateRequest, ServerRequestPrincipal) throws -> ServerMediaUserState?
-    private let mediaPreferenceUpdater: (String, ServerUserMediaPreferenceUpdate, ServerRequestPrincipal) throws -> ServerMediaUserPreference?
     private let mediaAssetProvider: (String, ServerRequestPrincipal, ServerPermission) throws -> ServerMediaAsset?
-    private let webVTTSubtitleTracksProvider: (String, ServerRequestPrincipal) throws -> [ServerWebVTTSubtitleTrack]?
-    private let subtitleTrackProvider: (String, Int, ServerRequestPrincipal) throws -> ServerSubtitleTrackReference?
-    private let playbackTracksProvider: (String, ServerRequestPrincipal) throws -> ServerWebPlaybackTrackSet?
     private let audioRemuxProvider: (String, Int, Double, ServerRequestPrincipal) throws -> ServerAudioRemuxStream?
-    private let remuxStartProvider: (String, Double, ServerRequestPrincipal) throws -> Double?
-    private let hlsSessionProvider: (String, ServerHLSPlaybackRequest, ServerRequestPrincipal) throws -> ServerHLSPlaybackDescriptor?
-    private let hlsStatusProvider: (String, ServerRequestPrincipal) throws -> ServerHLSPlaybackDescriptor?
     private let hlsResourceProvider: (String, String, ServerRequestPrincipal) throws -> ServerHLSResource?
-    private let hlsCancellationProvider: (String, ServerRequestPrincipal) -> Void
-    private let artworkAssetProvider: (String, ServerArtworkKind, ServerRequestPrincipal) throws -> ServerMediaAsset?
-    private let detailImageProvider: (String, ServerDetailImageKind, Int, ServerRequestPrincipal) throws -> ServerMediaAsset?
     private let vaultAccessProvider: (ServerRequestPrincipal) throws -> ServerLibraryCatalog.VaultAccess
-    private let artworkThumbnailer: ServerArtworkThumbnailer
     private let remoteAssetFetcher: ServerRemoteAssetFetcher
-    private let remoteSubtitleBodyCatalog: ServerRemoteSubtitleBodyCatalog
-    private let mediaTrackCatalog: ServerMediaTrackCatalog
-    private let playbackInfoProvider: (String, ServerRequestPrincipal) throws -> ServerMediaPlaybackInfo?
-    private let currentUserProfileProvider: (ServerRequestPrincipal) throws -> ServerCurrentUserProfile?
     private let administrationCatalog: ServerAdministrationCatalog?
     private let administrationReadHandler: ServerAdministrationReadHandler
     private let administrationMutationHandler: ServerAdministrationMutationHandler
-    private let experienceRepository: ServerExperienceRepository?
-    private let authenticationService: ServerAuthenticationService?
+    private let authenticationHandler: ServerAuthenticationHTTPHandler
+    private let userExperienceHandler: ServerUserExperienceHandler
+    private let userMediaStateHandler: ServerUserMediaStateHandler
+    private let libraryHandler: ServerLibraryHTTPHandler
+    private let discoveryHandler: ServerDiscoveryHTTPHandler
+    private let playbackMetadataHandler: ServerPlaybackMetadataHTTPHandler
+    private let artworkHandler: ServerArtworkHTTPHandler
+    private let subtitleHandler: ServerSubtitleHTTPHandler
+    private let playbackAccessEvaluator: ServerPlaybackAccessEvaluator
+    private let playbackSessionHandler: ServerPlaybackSessionHandler
     private let authenticationProvider: (String) throws -> ServerRequestPrincipal?
     private let rateLimiter: ServerRequestRateLimiter
     private let csrfToken: String
@@ -856,29 +799,11 @@ struct LocalHTTPRouter {
         self.collectionDetailProvider = collectionDetailProvider
         self.musicItemsProvider = musicItemsProvider
         self.queueProvider = queueProvider
-        self.queueMutationProvider = queueMutationProvider
-        self.mediaPlaybackStateUpdater = mediaPlaybackStateUpdater
-        self.mediaPreferenceUpdater = mediaPreferenceUpdater
         self.mediaAssetProvider = mediaAssetProvider
-        self.webVTTSubtitleTracksProvider = webVTTSubtitleTracksProvider
-        self.subtitleTrackProvider = subtitleTrackProvider
-        self.playbackTracksProvider = playbackTracksProvider
         self.audioRemuxProvider = audioRemuxProvider
-        self.remuxStartProvider = remuxStartProvider
-        self.hlsSessionProvider = hlsSessionProvider
-        self.hlsStatusProvider = hlsStatusProvider
         self.hlsResourceProvider = hlsResourceProvider
-        self.hlsCancellationProvider = hlsCancellationProvider
-        self.artworkAssetProvider = artworkAssetProvider
-        self.detailImageProvider = detailImageProvider
         self.vaultAccessProvider = vaultAccessProvider
-        self.artworkThumbnailer = artworkThumbnailer
         self.remoteAssetFetcher = remoteAssetFetcher
-        self.remoteSubtitleBodyCatalog = remoteSubtitleBodyCatalog
-            ?? ServerRemoteSubtitleBodyCatalog(fetcher: remoteAssetFetcher)
-        self.mediaTrackCatalog = mediaTrackCatalog
-        self.playbackInfoProvider = playbackInfoProvider
-        self.currentUserProfileProvider = currentUserProfileProvider
         self.administrationCatalog = administrationCatalog
         self.administrationReadHandler = ServerAdministrationReadHandler(
             catalog: administrationCatalog,
@@ -899,8 +824,68 @@ struct LocalHTTPRouter {
             authenticationService: authenticationService,
             playbackSessionCancellationProvider: adminHLSCancellationProvider
         )
-        self.experienceRepository = experienceRepository
-        self.authenticationService = authenticationService
+        self.authenticationHandler = ServerAuthenticationHTTPHandler(
+            authenticationService: authenticationService,
+            currentUserProfileProvider: currentUserProfileProvider,
+            csrfToken: csrfToken
+        )
+        self.userExperienceHandler = ServerUserExperienceHandler(repository: experienceRepository)
+        self.userMediaStateHandler = ServerUserMediaStateHandler(
+            queueProvider: queueProvider,
+            queueMutationProvider: queueMutationProvider,
+            playbackStateUpdater: mediaPlaybackStateUpdater,
+            mediaPreferenceUpdater: mediaPreferenceUpdater
+        )
+        self.libraryHandler = ServerLibraryHTTPHandler(
+            snapshotProvider: librarySnapshotProvider,
+            browseProvider: libraryBrowseProvider,
+            categoriesProvider: libraryCategoriesProvider,
+            facetsProvider: libraryFacetsProvider,
+            detailProvider: mediaDetailProvider
+        )
+        self.discoveryHandler = ServerDiscoveryHTTPHandler(
+            seriesEpisodesProvider: seriesEpisodesProvider,
+            peopleProvider: peopleProvider,
+            personDetailProvider: personDetailProvider,
+            collectionsProvider: collectionsProvider,
+            collectionDetailProvider: collectionDetailProvider,
+            smartCollectionsProvider: smartCollectionsProvider,
+            smartCollectionDetailProvider: smartCollectionDetailProvider,
+            musicPlaylistsProvider: musicPlaylistsProvider,
+            musicPlaylistDetailProvider: musicPlaylistDetailProvider,
+            libraryBrowseProvider: libraryBrowseProvider
+        )
+        self.playbackMetadataHandler = ServerPlaybackMetadataHTTPHandler(
+            playbackInfoProvider: playbackInfoProvider,
+            subtitleTracksProvider: webVTTSubtitleTracksProvider,
+            playbackTracksProvider: playbackTracksProvider,
+            remuxStartProvider: remuxStartProvider,
+            experienceRepository: experienceRepository,
+            mediaDetailProvider: mediaDetailProvider
+        )
+        self.artworkHandler = ServerArtworkHTTPHandler(
+            artworkAssetProvider: artworkAssetProvider,
+            detailImageProvider: detailImageProvider,
+            thumbnailer: artworkThumbnailer,
+            remoteAssetFetcher: remoteAssetFetcher
+        )
+        self.subtitleHandler = ServerSubtitleHTTPHandler(
+            subtitleTrackProvider: subtitleTrackProvider,
+            mediaTrackCatalog: mediaTrackCatalog,
+            remoteSubtitleBodyCatalog: remoteSubtitleBodyCatalog
+                ?? ServerRemoteSubtitleBodyCatalog(fetcher: remoteAssetFetcher)
+        )
+        let playbackAccessEvaluator = ServerPlaybackAccessEvaluator(
+            experienceRepository: experienceRepository,
+            mediaDetailProvider: mediaDetailProvider
+        )
+        self.playbackAccessEvaluator = playbackAccessEvaluator
+        self.playbackSessionHandler = ServerPlaybackSessionHandler(
+            sessionProvider: hlsSessionProvider,
+            statusProvider: hlsStatusProvider,
+            cancellationProvider: hlsCancellationProvider,
+            accessEvaluator: playbackAccessEvaluator
+        )
         self.authenticationProvider = authenticationProvider
         self.rateLimiter = rateLimiter
         self.csrfToken = csrfToken
@@ -935,7 +920,7 @@ struct LocalHTTPRouter {
                 body: Data(ServerWebLoginPage.render(
                     serverName: serverName,
                     csrfToken: csrfToken,
-                    returnState: loginReturnState(from: target)
+                    returnState: authenticationHandler.loginReturnState(from: target)
                 ).utf8),
                 omitBody: isHeadRequest
             )
@@ -962,19 +947,18 @@ struct LocalHTTPRouter {
                 }
             }
         }
-        if method == "POST", path == "/api/v1/auth/login" {
-            return loginResponse(requestHead: requestHead, body: body, clientAddressKey: clientAddressKey)
-        }
-        if method == "POST", path == "/login" {
-            return webFormLoginResponse(
-                requestHead: requestHead,
-                target: target,
-                body: body,
-                clientAddressKey: clientAddressKey
-            )
-        }
-        if method == "POST", path == "/api/v1/auth/refresh" {
-            return refreshResponse(requestHead: requestHead, body: body, clientAddressKey: clientAddressKey)
+        if let response = authenticationHandler.publicResponse(
+            method: method,
+            path: path,
+            target: target,
+            requestHead: requestHead,
+            body: body,
+            clientAddressKey: clientAddressKey,
+            rateLimitResponse: { scope, identityComponents in
+                limitedResponse(scope: scope, identityComponents: identityComponents)
+            }
+        ) {
+            return response
         }
         guard let principal = try? authenticationProvider(requestHead) else {
             if let limited = limitedResponse(
@@ -985,9 +969,36 @@ struct LocalHTTPRouter {
                 return .seeOther(location: "/login", omitBody: isHeadRequest)
             }
             if (method == "GET" || isHeadRequest), acceptsHTMLNavigation(requestHead) {
-                return .seeOther(location: loginLocation(for: target), omitBody: isHeadRequest)
+                return .seeOther(
+                    location: authenticationHandler.loginLocation(for: target),
+                    omitBody: isHeadRequest
+                )
             }
             return .unauthorized()
+        }
+        if let response = authenticationHandler.authenticatedResponse(
+            method: method,
+            path: path,
+            target: target,
+            body: body,
+            principal: principal,
+            omitBody: isHeadRequest,
+            readRateLimitResponse: {
+                limitedResponse(
+                    scope: .apiRead,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                )
+            },
+            mutationRateLimitResponse: {
+                limitedResponse(
+                    scope: .authenticatedMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                )
+            }
+        ) {
+            return response
         }
         if let response = administrationMutationHandler.response(
             method: method,
@@ -1006,242 +1017,159 @@ struct LocalHTTPRouter {
         ) {
             return response
         }
-        if method == "PATCH", path == "/api/v1/me/preferences" {
-            if let limited = limitedResponse(
-                scope: .authenticatedMutation, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let expectedVersion = ifMatchVersion(in: requestHead) else { return .preconditionRequired() }
-            guard let value: ServerUserExperiencePreferences = ServerStrictJSONDecoder.decode(
-                    ServerUserExperiencePreferences.self,
-                    from: body,
-                    allowedKeys: [
-                        "schemaVersion", "interfaceLanguage", "appearance", "defaultLandingPath",
-                        "homeSectionOrder", "hiddenHomeSections", "contentDensity", "motion",
-                        "autoplayNext", "resumePlayback", "defaultQuality", "remoteBitrateMbps",
-                        "preferredAudioLanguage", "preferredSubtitleLanguage", "subtitleMode",
-                        "subtitleSDHPreference", "rememberTrackSelections", "subtitleStyle"
-                    ],
-                    nestedAllowedKeys: ["subtitleStyle": [
-                        "fontFamily", "fontScalePercent", "fontWeight", "textColor",
-                        "backgroundOpacityPercent", "edgeStyle", "verticalPositionPercent"
-                    ]]
-                  ),
-                  value.isValid, let experienceRepository
-            else { return .badRequest() }
-            do {
-                let saved = try experienceRepository.saveUserPreferences(
-                    userID: principal.userID, value: value, expectedVersion: expectedVersion
+        if let response = userExperienceHandler.response(
+            method: method,
+            path: path,
+            target: target,
+            requestHead: requestHead,
+            body: body,
+            principal: principal,
+            omitBody: isHeadRequest,
+            readRateLimitResponse: {
+                limitedResponse(
+                    scope: .apiRead,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
                 )
-                guard let encoded = ServerCommandOutput.jsonData(saved) else { return .serviceUnavailable() }
-                return .json(body: encoded, additionalHeaders: [etagHeader(saved.version), "Cache-Control: no-store"])
-            } catch { return experienceMutationErrorResponse(error) }
-        }
-        if method == "PATCH", path == "/api/v1/me/preferences/device" {
-            if let limited = limitedResponse(
-                scope: .authenticatedMutation, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let expectedVersion = ifMatchVersion(in: requestHead) else { return .preconditionRequired() }
-            guard let value: ServerDeviceExperienceOverrides = ServerStrictJSONDecoder.decode(
-                    ServerDeviceExperienceOverrides.self,
-                    from: body,
-                    allowedKeys: [
-                        "schemaVersion", "appearance", "contentDensity", "motion",
-                        "defaultQuality", "remoteBitrateMbps"
-                    ]
-                  ),
-                  value.isValid, let experienceRepository
-            else { return .badRequest() }
-            do {
-                let saved = try experienceRepository.saveDevicePreferences(
-                    userID: principal.userID, deviceID: principal.deviceID,
-                    value: value, expectedVersion: expectedVersion
+            },
+            mutationRateLimitResponse: {
+                limitedResponse(
+                    scope: .authenticatedMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
                 )
-                guard let encoded = ServerCommandOutput.jsonData(saved) else { return .serviceUnavailable() }
-                return .json(body: encoded, additionalHeaders: [etagHeader(saved.version), "Cache-Control: no-store"])
-            } catch { return experienceMutationErrorResponse(error) }
-        }
-        if method == "DELETE", path == "/api/v1/me/preferences/device" {
-            if let limited = limitedResponse(
-                scope: .authenticatedMutation, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let expectedVersion = ifMatchVersion(in: requestHead) else { return .preconditionRequired() }
-            guard let experienceRepository else { return .serviceUnavailable() }
-            do {
-                try experienceRepository.deleteDevicePreferences(
-                    userID: principal.userID, deviceID: principal.deviceID, expectedVersion: expectedVersion
-                )
-                return .noContent()
-            } catch { return experienceMutationErrorResponse(error) }
-        }
-        if method == "PUT" || method == "DELETE",
-           let route = playbackOverrideRoute(path) {
-            if let limited = limitedResponse(
-                scope: .authenticatedMutation, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let experienceRepository else { return .serviceUnavailable() }
-            if method == "DELETE" {
-                do {
-                    try experienceRepository.deleteTrackOverride(
-                        userID: principal.userID, scope: route.scope, scopeID: route.id
-                    )
-                    return .noContent()
-                } catch { return .serviceUnavailable() }
             }
-            guard let request: ServerTrackOverrideMutation = ServerStrictJSONDecoder.decode(
-                ServerTrackOverrideMutation.self,
-                from: body,
-                allowedKeys: ["audioFingerprint", "subtitleFingerprint", "subtitleDisabled"]
-            ) else {
-                return .badRequest()
-            }
-            let value = ServerTrackSelectionOverride(
-                scope: route.scope,
-                scopeID: route.id,
-                audioFingerprint: request.audioFingerprint,
-                subtitleFingerprint: request.subtitleFingerprint,
-                subtitleDisabled: request.subtitleDisabled
-            )
-            guard value.isValid else { return .badRequest() }
-            do {
-                let saved = try experienceRepository.saveTrackOverride(userID: principal.userID, value: value)
-                guard let encoded = ServerCommandOutput.jsonData(saved) else { return .serviceUnavailable() }
-                return .json(body: encoded, additionalHeaders: ["Cache-Control: no-store"])
-            } catch { return .serviceUnavailable() }
+        ) {
+            return response
         }
-        if method == "DELETE", path.hasPrefix("/api/v1/playback/sessions/") {
-            if let limited = limitedResponse(
-                scope: .playbackControl, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            let raw = String(path.dropFirst("/api/v1/playback/sessions/".count))
-            guard !raw.isEmpty, !raw.contains("/") else { return .notFound() }
-            hlsCancellationProvider(raw, principal)
-            return .noContent()
+        if let response = playbackSessionHandler.response(
+            method: method,
+            path: path,
+            target: target,
+            body: body,
+            principal: principal,
+            clientAddressKey: clientAddressKey,
+            omitBody: isHeadRequest,
+            rateLimitResponse: {
+                limitedResponse(
+                    scope: .playbackControl,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                )
+            }
+        ) {
+            return response
+        }
+        if let response = userMediaStateHandler.response(
+            method: method,
+            path: path,
+            target: target,
+            body: body,
+            principal: principal,
+            omitBody: isHeadRequest,
+            readRateLimitResponse: {
+                limitedResponse(
+                    scope: .apiRead,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                )
+            },
+            mutationRateLimitResponse: {
+                limitedResponse(
+                    scope: .authenticatedMutation,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                )
+            }
+        ) {
+            return response
+        }
+        if let response = libraryHandler.response(
+            method: method,
+            path: path,
+            target: target,
+            principal: principal,
+            omitBody: isHeadRequest,
+            rateLimitResponse: {
+                limitedResponse(
+                    scope: .apiRead,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                )
+            }
+        ) {
+            return response
+        }
+        if let response = discoveryHandler.response(
+            method: method,
+            path: path,
+            target: target,
+            principal: principal,
+            omitBody: isHeadRequest,
+            rateLimitResponse: {
+                limitedResponse(
+                    scope: .apiRead,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                )
+            }
+        ) {
+            return response
+        }
+        if let response = playbackMetadataHandler.response(
+            method: method,
+            path: path,
+            target: target,
+            principal: principal,
+            omitBody: isHeadRequest,
+            rateLimitResponse: {
+                limitedResponse(
+                    scope: .mediaProbe,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                )
+            }
+        ) {
+            return response
+        }
+        if let response = artworkHandler.response(
+            method: method,
+            path: path,
+            target: target,
+            requestHead: requestHead,
+            principal: principal,
+            omitBody: isHeadRequest,
+            rateLimitResponse: {
+                limitedResponse(
+                    scope: .artworkRead,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                )
+            }
+        ) {
+            return response
+        }
+        if let response = subtitleHandler.response(
+            method: method,
+            path: path,
+            target: target,
+            principal: principal,
+            omitBody: isHeadRequest,
+            rateLimitResponse: {
+                limitedResponse(
+                    scope: .mediaStream,
+                    principal: principal,
+                    clientAddressKey: clientAddressKey
+                )
+            }
+        ) {
+            return response
         }
         if method == "POST" {
-            if path == "/api/v1/playback/sessions" {
-                if let limited = limitedResponse(
-                    scope: .playbackControl, principal: principal, clientAddressKey: clientAddressKey
-                ) { return limited }
-                guard let creation: ServerHLSPlaybackSessionCreationRequest = ServerStrictJSONDecoder.decode(
-                    ServerHLSPlaybackSessionCreationRequest.self,
-                    from: body,
-                    allowedKeys: ["itemID", "audioTrackID", "subtitleTrackID", "startSeconds", "durationSeconds", "capabilities", "quality", "maximumBitrateMbps"],
-                    nestedAllowedKeys: ["capabilities": [
-                        "nativeHLS", "mediaSource", "videoCodecs", "audioCodecs",
-                        "screenWidth", "screenHeight", "hdrDisplay", "measuredDownlinkMbps"
-                    ]]
-                ), creation.isValid else { return .badRequest() }
-                guard let policy = experiencePolicy(for: principal),
-                      policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
-                      policyAllowsItem(policy, itemID: creation.itemID, principal: principal),
-                      policy.remuxAllowed || policy.transcodeAllowed else {
-                    return .forbidden()
-                }
-                guard let descriptor = try? hlsSessionProvider(
-                    creation.itemID, creation.playbackRequest, principal
-                ), let encoded = ServerCommandOutput.jsonData(descriptor)
-                else { return .serviceUnavailable() }
-                return .json(body: encoded, additionalHeaders: ["Cache-Control: no-store"])
-            }
-            if path.hasPrefix("/api/v1/playback/sessions/") {
-                if let limited = limitedResponse(
-                    scope: .playbackControl, principal: principal, clientAddressKey: clientAddressKey
-                ) { return limited }
-                if path.hasSuffix("/cancel") {
-                    let raw = String(
-                        path.dropFirst("/api/v1/playback/sessions/".count).dropLast("/cancel".count)
-                    )
-                    guard !raw.isEmpty, !raw.contains("/") else { return .notFound() }
-                    hlsCancellationProvider(raw, principal)
-                    return .noContent()
-                }
-                guard let itemID = decodedPathIdentifier(path, prefix: "/api/v1/playback/sessions/"),
-                      let request: ServerHLSPlaybackRequest = ServerStrictJSONDecoder.decode(
-                        ServerHLSPlaybackRequest.self,
-                        from: body,
-                        allowedKeys: ["audioTrackID", "subtitleTrackID", "startSeconds", "durationSeconds", "capabilities", "quality", "maximumBitrateMbps"],
-                        nestedAllowedKeys: ["capabilities": [
-                            "nativeHLS", "mediaSource", "videoCodecs", "audioCodecs",
-                            "screenWidth", "screenHeight", "hdrDisplay", "measuredDownlinkMbps"
-                        ]]
-                      ), request.isValid else { return .badRequest() }
-                guard let policy = experiencePolicy(for: principal),
-                      policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
-                      policyAllowsItem(policy, itemID: itemID, principal: principal),
-                      policy.remuxAllowed || policy.transcodeAllowed else {
-                    return .forbidden()
-                }
-                guard let descriptor = try? hlsSessionProvider(itemID, request, principal),
-                      let encoded = ServerCommandOutput.jsonData(descriptor)
-                else { return .serviceUnavailable() }
-                return .json(body: encoded, additionalHeaders: ["Cache-Control: no-store"])
-            }
-            if path == "/api/v1/auth/password" {
-                if let limited = limitedResponse(
-                    scope: .authenticatedMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey
-                ) { return limited }
-                return passwordChangeResponse(body: body, principal: principal)
-            }
-            if path == "/api/v1/auth/logout" {
-                if let limited = limitedResponse(
-                    scope: .authenticatedMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey
-                ) { return limited }
-                return logoutResponse(principal: principal)
-            }
-            if path == "/api/v1/queue" {
-                if let limited = limitedResponse(
-                    scope: .authenticatedMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey
-                ) { return limited }
-                return mutateQueueResponse(body: body, principal: principal)
-            }
-            if path.hasPrefix("/api/v1/playback/state/") {
-                if let limited = limitedResponse(
-                    scope: .authenticatedMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey
-                ) { return limited }
-                return updatePlaybackStateResponse(
-                    path: path,
-                    body: body,
-                    principal: principal
-                )
-            }
-            if path.hasPrefix("/api/v1/user-media/preferences/") {
-                if let limited = limitedResponse(
-                    scope: .authenticatedMutation,
-                    principal: principal,
-                    clientAddressKey: clientAddressKey
-                ) { return limited }
-                return updateMediaPreferenceResponse(path: path, body: body, principal: principal)
-            }
             return .methodNotAllowed()
         }
         guard method == "GET" || isHeadRequest else {
             return .methodNotAllowed()
-        }
-
-        if path.hasPrefix("/api/v1/playback/sessions/") {
-            // This endpoint only reads the in-memory HLS state machine. It is
-            // polled while ffmpeg prepares the first segment and must not spend
-            // the deliberately scarce ffprobe budget (`mediaProbe`), otherwise
-            // a normal long-GOP stream exhausts that bucket before becoming
-            // ready. 状态轮询使用独立的有界控制面桶；清单和分片字节继续使用
-            // `mediaStream`，真实媒体检查继续留在 `mediaProbe`。
-            if let limited = limitedResponse(
-                scope: .playbackControl, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            let raw = String(path.dropFirst("/api/v1/playback/sessions/".count))
-            guard !raw.isEmpty, !raw.contains("/"),
-                  let descriptor = try? hlsStatusProvider(raw, principal),
-                  let encoded = ServerCommandOutput.jsonData(descriptor)
-            else { return .notFound() }
-            return .json(body: encoded, omitBody: isHeadRequest, additionalHeaders: ["Cache-Control: no-store"])
         }
 
         if path.hasPrefix("/api/v1/playback/hls/") {
@@ -1289,7 +1217,6 @@ struct LocalHTTPRouter {
             ) ?? .notFound()
         }
 
-        let body: Data
         switch path {
         case "/", "/index.html":
             if let limited = limitedResponse(
@@ -2045,427 +1972,6 @@ struct LocalHTTPRouter {
                     )
                 ).utf8), omitBody: isHeadRequest)
             } catch { return .serviceUnavailable() }
-        case "/api/v1/library/summary":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
-            guard let encoded = encodedLibraryResponse(\.summary, principal: principal) else {
-                return .serviceUnavailable()
-            }
-            body = encoded
-        case "/api/v1/library/items":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
-            guard let encoded = encodedLibraryResponse(\.items, principal: principal) else {
-                return .serviceUnavailable()
-            }
-            body = encoded
-        case "/api/v1/library/categories":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
-            do {
-                guard let encoded = ServerCommandOutput.jsonData(try libraryCategoriesProvider(principal)) else {
-                    return .serviceUnavailable()
-                }
-                body = encoded
-            } catch {
-                return .serviceUnavailable()
-            }
-        case "/api/v1/library/facets":
-            // 网页用它决定该给出哪些排序键和哪些题材。没有这个端点，筛选栏只能
-            // 渲染一串固定选项，其中一部分在当前资料库里永远匹配不到内容。
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
-            guard let scope = libraryFacetsScope(from: target) else { return .badRequest() }
-            do {
-                guard let encoded = ServerCommandOutput.jsonData(
-                    try libraryFacetsProvider(scope.type, scope.group, principal)
-                ) else {
-                    return .serviceUnavailable()
-                }
-                body = encoded
-            } catch {
-                return .serviceUnavailable()
-            }
-        case "/api/v1/library/browse":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
-            guard let query = libraryQuery(from: target) else { return .badRequest() }
-            do {
-                guard let encoded = ServerCommandOutput.jsonData(try libraryBrowseProvider(query, principal)) else {
-                    return .serviceUnavailable()
-                }
-                body = encoded
-            } catch {
-                return .serviceUnavailable()
-            }
-        case "/api/v1/queue":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard principal.permissions.contains(.viewMedia) else { return .forbidden() }
-            do {
-                guard let encoded = ServerCommandOutput.jsonData(try queueProvider(principal)) else {
-                    return .serviceUnavailable()
-                }
-                body = encoded
-            } catch { return .serviceUnavailable() }
-        case let itemDetailPath where itemDetailPath.hasPrefix("/api/v1/items/"):
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let itemID = decodedPathIdentifier(itemDetailPath, prefix: "/api/v1/items/") else {
-                return .notFound()
-            }
-            do {
-                guard let detail = try mediaDetailProvider(itemID, principal) else { return .notFound() }
-                guard let encoded = ServerCommandOutput.jsonData(detail) else { return .serviceUnavailable() }
-                body = encoded
-            } catch {
-                return .serviceUnavailable()
-            }
-        case let seriesEpisodesPath where seriesEpisodesPath.hasPrefix("/api/v1/series/"):
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let request = seriesEpisodeQuery(from: target) else { return .badRequest() }
-            do {
-                guard let page = try seriesEpisodesProvider(
-                    request.id, request.season, request.offset, request.limit, principal
-                ) else { return .notFound() }
-                guard let encoded = ServerCommandOutput.jsonData(page) else { return .serviceUnavailable() }
-                body = encoded
-            } catch {
-                return .serviceUnavailable()
-            }
-        case "/api/v1/people":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let query = peopleQuery(from: target) else { return .badRequest() }
-            do {
-                guard let encoded = ServerCommandOutput.jsonData(try peopleProvider(query.searchText, query.offset, query.limit, principal)) else {
-                    return .serviceUnavailable()
-                }
-                body = encoded
-            } catch { return .serviceUnavailable() }
-        case let personCreditsPath where personCreditsPath.hasPrefix("/api/v1/people/"):
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let request = personCreditsQuery(from: target) else { return .badRequest() }
-            do {
-                guard let detail = try personDetailProvider(request.id, request.offset, request.limit, principal),
-                      let encoded = ServerCommandOutput.jsonData(detail.credits)
-                else { return .notFound() }
-                body = encoded
-            } catch { return .serviceUnavailable() }
-        case "/api/v1/collections":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let query = collectionsQuery(from: target) else { return .badRequest() }
-            do {
-                guard let encoded = ServerCommandOutput.jsonData(try collectionsProvider(query.offset, query.limit, principal)) else {
-                    return .serviceUnavailable()
-                }
-                body = encoded
-            } catch { return .serviceUnavailable() }
-        case "/api/v1/photos":
-            if let limited = limitedResponse(scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey) { return limited }
-            guard let query = photosQuery(from: target) else { return .badRequest() }
-            do {
-                let page = try libraryBrowseProvider(ServerLibraryQuery(type: "photo", offset: query.offset, limit: query.limit), principal)
-                guard let encoded = ServerCommandOutput.jsonData(page) else { return .serviceUnavailable() }
-                body = encoded
-            } catch { return .serviceUnavailable() }
-        case let collectionItemsPath where collectionItemsPath.hasPrefix("/api/v1/collections/"):
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let request = collectionItemsQuery(from: target) else { return .badRequest() }
-            do {
-                guard let detail = try collectionDetailProvider(request.id, request.offset, request.limit, principal),
-                      let encoded = ServerCommandOutput.jsonData(detail.items)
-                else { return .notFound() }
-                body = encoded
-            } catch { return .serviceUnavailable() }
-        case "/api/v1/smart-collections":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let query = pagingQuery(from: target, path: "/api/v1/smart-collections") else { return .badRequest() }
-            do {
-                guard let encoded = ServerCommandOutput.jsonData(try smartCollectionsProvider(query.offset, query.limit, principal)) else {
-                    return .serviceUnavailable()
-                }
-                body = encoded
-            } catch { return .serviceUnavailable() }
-        case let smartItemsPath where smartItemsPath.hasPrefix("/api/v1/smart-collections/"):
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let request = identifiedPagingQuery(
-                from: target, prefix: "/api/v1/smart-collections/", identifierNamespace: "smart-collections"
-            ) else { return .badRequest() }
-            do {
-                guard let detail = try smartCollectionDetailProvider(request.id, request.offset, request.limit, principal),
-                      let encoded = ServerCommandOutput.jsonData(detail.items)
-                else { return .notFound() }
-                body = encoded
-            } catch { return .serviceUnavailable() }
-        case "/api/v1/music/playlists":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let query = pagingQuery(from: target, path: "/api/v1/music/playlists") else { return .badRequest() }
-            do {
-                guard let encoded = ServerCommandOutput.jsonData(try musicPlaylistsProvider(query.offset, query.limit, principal)) else {
-                    return .serviceUnavailable()
-                }
-                body = encoded
-            } catch { return .serviceUnavailable() }
-        case let playlistItemsPath where playlistItemsPath.hasPrefix("/api/v1/music/playlists/"):
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let request = identifiedPagingQuery(
-                from: target, prefix: "/api/v1/music/playlists/", identifierNamespace: "playlists"
-            ) else { return .badRequest() }
-            do {
-                guard let detail = try musicPlaylistDetailProvider(request.id, request.offset, request.limit, principal),
-                      let encoded = ServerCommandOutput.jsonData(detail.items)
-                else { return .notFound() }
-                body = encoded
-            } catch { return .serviceUnavailable() }
-        case let imagePath where imagePath.hasPrefix("/api/v1/images/"):
-            if let limited = limitedResponse(
-                scope: .artworkRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            let remainder = imagePath.dropFirst("/api/v1/images/".count)
-            let segments = remainder.split(separator: "/", omittingEmptySubsequences: false)
-            guard let artworkRequest = artworkRequest(from: target) else { return .badRequest() }
-            let asset: ServerMediaAsset?
-            switch segments.count {
-            case 2:
-                guard let kind = ServerArtworkKind(rawValue: String(segments[1])),
-                      let itemID = decodedPathIdentifier("/image/\(segments[0])", prefix: "/image/")
-                else { return .notFound() }
-                asset = try? artworkAssetProvider(itemID, kind, principal)
-            case 3:
-                // 详情页的剧照、推荐海报与人物头像。序号是浏览器拿到的全部信息：
-                // 上游地址在服务端解析，浏览器从不直接联系元数据提供方。
-                guard let kind = ServerDetailImageKind(rawValue: String(segments[1])),
-                      let index = strictNonnegativeInteger(String(segments[2])), index < 64,
-                      let itemID = decodedPathIdentifier("/image/\(segments[0])", prefix: "/image/")
-                else { return .notFound() }
-                asset = try? detailImageProvider(itemID, kind, index, principal)
-            default:
-                return .notFound()
-            }
-            guard let asset else { return .notFound() }
-            // 派生结果都是磁盘文件，实体标签由「尺寸 + 修改时间」得到；`If-None-Match`
-            // 命中就退成一次 304，不再重传整张 JPEG，远程封面还顺带免掉一次上游取图。
-            let ifNoneMatch = httpHeader(named: "If-None-Match", in: requestHead)
-            func fileResponse(
-                _ served: ServerMediaAsset, cacheControl: String, omitBody: Bool
-            ) -> LocalHTTPResponse {
-                guard let entityTag = Self.fileEntityTag(for: served.fileURL) else {
-                    return .fullFile(asset: served, omitBody: omitBody, cacheControl: cacheControl)
-                }
-                if Self.entityTagMatches(entityTag, ifNoneMatch: ifNoneMatch) {
-                    return .notModified(entityTag: entityTag, cacheControl: cacheControl)
-                }
-                return .fullFile(
-                    asset: served, omitBody: omitBody, cacheControl: cacheControl, entityTag: entityTag
-                )
-            }
-            if let remoteURL = asset.remoteURL {
-                // 远程封面只经已授权条目的同源图片端点返回；原始 URL 与 token
-                // 从不进入 HTML。请求缩略图时，服务端先受限读取再生成私有 JPEG，
-                // 避免浏览器为海报墙反复下载并解码多 MB 原图。
-                // 上游身份剥掉了会轮换的 token 与尺寸参数，因此磁盘上已派生的缩略图
-                // 可以直接按路径命中——不必为了"找到它"而把原图重新下载一遍。
-                let upstreamIdentity = ServerRemoteArtworkURL.stableIdentity(for: remoteURL)
-                // 远程条目没有「原图」这一档。
-                //
-                // 不带 `?size=` 时它从前是把上游原图整份代理给浏览器：不落磁盘缓存、
-                // 只有五分钟的内存缓存，于是每看一次就回源一整张图。照片详情页正是
-                // 这一条路径。改为一律走最大的那个桶——1024 已经是本产品里"最大展示
-                // 尺寸"（详情页剧照灯箱用的就是它），而且它有磁盘缓存与实体标签。
-                let remoteMaximumPixel: Int
-                if case let .thumbnail(requestedMaximumPixel) = artworkRequest {
-                    remoteMaximumPixel = requestedMaximumPixel
-                } else {
-                    remoteMaximumPixel = ServerArtworkThumbnailer.supportedMaximumPixels.max() ?? 1_024
-                }
-                if let cached = artworkThumbnailer.cachedRemoteThumbnail(
-                    id: asset.id, upstreamIdentity: upstreamIdentity, maximumPixel: remoteMaximumPixel
-                ) {
-                    return fileResponse(cached, cacheControl: "private, max-age=86400", omitBody: isHeadRequest)
-                }
-                // 只向上游要真正需要的尺寸：同步阶段写下的地址固定是 maxWidth=700，
-                // 而海报墙要的多半是 320，等于每张卡都在下载四倍面积的图再丢掉。
-                let fetchURL = ServerRemoteArtworkURL.sized(remoteURL, maximumPixel: remoteMaximumPixel)
-                guard !isHeadRequest, let body = remoteAssetFetcher.artworkBytes(url: fetchURL) else {
-                    return isHeadRequest ? .notFound() : .serviceUnavailable()
-                }
-                // 上游字节**从不**原样转发：一律派生成本地 JPEG 再发出。
-                //
-                // 这既是性能上的选择（浏览器不必为海报墙反复解码多 MB 原图），也是
-                // 授权层敢于放宽"远程地址必须带图片扩展名"那条判断的前提——不能解码
-                // 成图片的字节到不了浏览器。派生失败即 503，不留降级通道。
-                guard let thumbnail = artworkThumbnailer.thumbnail(
-                    forRemoteData: body,
-                    id: asset.id,
-                    upstreamIdentity: upstreamIdentity,
-                    maximumPixel: remoteMaximumPixel
-                ) else { return .serviceUnavailable() }
-                return fileResponse(thumbnail, cacheControl: "private, max-age=86400", omitBody: false)
-            }
-            switch artworkRequest {
-            case .thumbnail(let requestedMaximumPixel):
-                guard let thumbnail = artworkThumbnailer.thumbnail(for: asset, maximumPixel: requestedMaximumPixel) else {
-                    return .notFound()
-                }
-                // 本地缩略图的实体标签跟着源文件的 mtime 走（文件名里就含它），
-                // 所以换封面立刻失配。有了复验，这里不必再靠五分钟的短过期兜底。
-                return fileResponse(thumbnail, cacheControl: "private, max-age=86400", omitBody: isHeadRequest)
-            case .original:
-                return fileResponse(asset, cacheControl: "private, max-age=300", omitBody: isHeadRequest)
-            }
-        case "/api/v1/me/preferences":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let experienceRepository else { return .serviceUnavailable() }
-            do {
-                let account = try experienceRepository.userPreferences(userID: principal.userID)
-                let device = try experienceRepository.devicePreferences(
-                    userID: principal.userID, deviceID: principal.deviceID
-                )
-                let response = ServerPreferencesResponse(
-                    account: account,
-                    device: device,
-                    effective: effectivePreferences(account.value, device: device?.value)
-                )
-                guard let encoded = ServerCommandOutput.jsonData(response) else { return .serviceUnavailable() }
-                return .json(
-                    body: encoded,
-                    omitBody: isHeadRequest,
-                    additionalHeaders: [etagHeader(account.version), "Cache-Control: no-store"]
-                )
-            } catch { return .serviceUnavailable() }
-        case "/api/v1/me/preferences/device":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let experienceRepository else { return .serviceUnavailable() }
-            do {
-                guard let device = try experienceRepository.devicePreferences(
-                    userID: principal.userID, deviceID: principal.deviceID
-                ) else { return .notFound() }
-                guard let encoded = ServerCommandOutput.jsonData(device) else { return .serviceUnavailable() }
-                return .json(
-                    body: encoded,
-                    omitBody: isHeadRequest,
-                    additionalHeaders: [etagHeader(device.version), "Cache-Control: no-store"]
-                )
-            } catch { return .serviceUnavailable() }
-        case "/api/v1/auth/me":
-            if let limited = limitedResponse(
-                scope: .apiRead, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            do {
-                guard let profile = try currentUserProfileProvider(principal),
-                      let data = ServerCommandOutput.jsonData(profile)
-                else { return .unauthorized() }
-                body = data
-            } catch {
-                return .serviceUnavailable()
-            }
-        case let infoPath where infoPath.hasPrefix("/api/v1/playback/info/"):
-            if let limited = limitedResponse(
-                scope: .mediaProbe, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            let encodedID = String(infoPath.dropFirst("/api/v1/playback/info/".count))
-            guard !encodedID.isEmpty,
-                  let itemID = encodedID.removingPercentEncoding,
-                  !itemID.contains("/")
-            else {
-                return .notFound()
-            }
-            return playbackInfoResponse(itemID: itemID, principal: principal, omitBody: isHeadRequest)
-        case let subtitleListPath where subtitleListPath.hasPrefix("/api/v1/playback/subtitles/"):
-            if let limited = limitedResponse(
-                scope: .mediaProbe, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let itemID = decodedPathIdentifier(subtitleListPath, prefix: "/api/v1/playback/subtitles/") else {
-                return .notFound()
-            }
-            return webVTTSubtitleTracksResponse(itemID: itemID, principal: principal, omitBody: isHeadRequest)
-        case let trackListPath where trackListPath.hasPrefix("/api/v1/playback/tracks/"):
-            if let limited = limitedResponse(
-                scope: .mediaProbe, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let itemID = decodedPathIdentifier(trackListPath, prefix: "/api/v1/playback/tracks/") else {
-                return .notFound()
-            }
-            let baseTracks: ServerWebPlaybackTrackSet
-            do {
-                guard let resolved = try playbackTracksProvider(itemID, principal) else {
-                    return .notFound()
-                }
-                baseTracks = resolved
-            } catch is ServerRemoteSubtitleTracksPending {
-                return .accepted(
-                    body: Data(),
-                    additionalHeaders: ["Cache-Control: no-store", "Retry-After: 2"]
-                )
-            } catch {
-                return .notFound()
-            }
-            var selectionOverride = try? experienceRepository?.trackOverride(
-                userID: principal.userID,
-                scope: .media,
-                scopeID: itemID
-            )
-            if selectionOverride == nil,
-               let detail = try? mediaDetailProvider(itemID, principal),
-               let seriesID = detail.episodeContext?.seriesID {
-                selectionOverride = try? experienceRepository?.trackOverride(
-                    userID: principal.userID,
-                    scope: .series,
-                    scopeID: seriesID
-                )
-            }
-            let tracks = baseTracks.applying(selectionOverride: selectionOverride ?? nil)
-            guard let encoded = ServerCommandOutput.jsonData(tracks) else { return .serviceUnavailable() }
-            return .ok(body: encoded, omitBody: isHeadRequest)
-        case let keyframePath where keyframePath.hasPrefix("/api/v1/playback/keyframe/"):
-            if let limited = limitedResponse(
-                scope: .mediaProbe, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            guard let itemID = decodedPathIdentifier(keyframePath, prefix: "/api/v1/playback/keyframe/"),
-                  let requested = keyframeQuery(from: target),
-                  let resolved = try? remuxStartProvider(itemID, requested, principal)
-            else { return .notFound() }
-            let encoded = Data("{\"startSeconds\":\(String(format: "%.3f", resolved))}".utf8)
-            return .ok(body: encoded, omitBody: isHeadRequest)
-        case let subtitlePath where subtitlePath.hasPrefix("/api/v1/subtitles/"):
-            if let limited = limitedResponse(
-                scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
-            ) { return limited }
-            return webVTTSubtitleResponse(path: subtitlePath, principal: principal, omitBody: isHeadRequest)
         case let remuxPath where remuxPath.hasPrefix("/api/v1/transcode/"):
             if let limited = limitedResponse(
                 scope: .mediaStream, principal: principal, clientAddressKey: clientAddressKey
@@ -2516,15 +2022,6 @@ struct LocalHTTPRouter {
         default:
             return .notFound()
         }
-        return .ok(body: body, omitBody: isHeadRequest)
-    }
-
-    private func encodedLibraryResponse<T: Encodable>(
-        _ value: (ServerLibrarySnapshot) -> T,
-        principal: ServerRequestPrincipal
-    ) -> Data? {
-        guard let snapshot = try? librarySnapshotProvider(principal) else { return nil }
-        return ServerCommandOutput.jsonData(value(snapshot))
     }
 
     private func decodedPathIdentifier(_ path: String, prefix: String) -> String? {
@@ -2540,120 +2037,6 @@ struct LocalHTTPRouter {
             return nil
         }
         return itemID
-    }
-
-    /// 只接受固定键和值域；重复键、未知键、控制字符和畸形百分号统一拒绝。
-    private func libraryQuery(from target: String) -> ServerLibraryQuery? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.first == "/api/v1/library/browse" else { return nil }
-        var values: [String: String] = [:]
-        if pieces.count == 2, !pieces[1].isEmpty {
-            for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
-                guard !pair.isEmpty else { return nil }
-                let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                guard keyValue.count == 2,
-                      let key = decodeQueryComponent(String(keyValue[0])),
-                      let value = decodeQueryComponent(String(keyValue[1])),
-                      ["q", "type", "group", "offset", "limit", "sort", "order", "genre", "state", "preference", "remoteScope", "vault"].contains(key),
-                      values[key] == nil
-                else { return nil }
-                values[key] = value
-            }
-        }
-        guard values.values.allSatisfy({ value in
-            value.utf8.count <= 512 && !value.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7f }
-        }) else { return nil }
-        let searchText = values["q"].flatMap { value -> String? in
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : String(trimmed.prefix(128))
-        }
-        if let rawSearch = values["q"], rawSearch.count > 128 { return nil }
-        let type = values["type"].flatMap { $0.isEmpty ? nil : $0 }
-        if let type {
-            guard let mediaType = MediaType(rawValue: type), mediaType != .privateCollection, mediaType != .auto else {
-                return nil
-            }
-        }
-        let mediaGroup: ServerLibraryMediaGroup?
-        if let rawGroup = values["group"], !rawGroup.isEmpty {
-            guard type == nil, let parsed = ServerLibraryMediaGroup(rawValue: rawGroup) else { return nil }
-            mediaGroup = parsed
-        } else {
-            mediaGroup = nil
-        }
-        let playbackFilter: ServerLibraryPlaybackFilter?
-        if let rawState = values["state"], !rawState.isEmpty {
-            guard let parsed = ServerLibraryPlaybackFilter(rawValue: rawState) else { return nil }
-            playbackFilter = parsed
-        } else {
-            playbackFilter = nil
-        }
-        let preferenceFilter: ServerLibraryPreferenceFilter?
-        if let rawPreference = values["preference"], !rawPreference.isEmpty {
-            guard let parsed = ServerLibraryPreferenceFilter(rawValue: rawPreference) else { return nil }
-            preferenceFilter = parsed
-        } else {
-            preferenceFilter = nil
-        }
-        // 排序键与方向。旧的四个 `sort` 值（`updatedDescending` 等）永远被接受——
-        // 用户地址栏里已经存着它们——但它们各自只代表一个完整状态，所以与显式
-        // `order` 同时出现会被拒绝：同一个状态不能有两种拼法。
-        let rawSort = values["sort"] ?? ServerLibrarySort.recentlyUpdated.rawValue
-        let sort: ServerLibrarySort
-        let sortOrder: ServerLibrarySortOrder
-        if let legacy = ServerLibrarySort.legacy(rawSort) {
-            guard values["order"] == nil else { return nil }
-            (sort, sortOrder) = legacy
-        } else {
-            guard let parsedSort = ServerLibrarySort(rawValue: rawSort) else { return nil }
-            sort = parsedSort
-            if let rawOrder = values["order"] {
-                guard let parsedOrder = ServerLibrarySortOrder(rawValue: rawOrder) else { return nil }
-                sortOrder = parsedOrder
-            } else {
-                sortOrder = .primary
-            }
-        }
-        // 题材是自由文本（数据决定，不是固定枚举），所以它被裁剪而非白名单校验；
-        // 仓储层把它当作绑定参数并转义 LIKE 元字符。空值是错误而不是"无筛选"：
-        // 无筛选的写法是不带这个键。
-        let genre: String?
-        if let rawGenre = values["genre"] {
-            let trimmed = rawGenre.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, trimmed.count <= 64 else { return nil }
-            genre = trimmed
-        } else {
-            genre = nil
-        }
-        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "48"), (1...100).contains(limit)
-        else { return nil }
-        // 远程作用域只接受不透明十六进制 ID；解析仍在已授权集合内匹配，
-        // 未知值得到空集合而不是一个未加作用域的结果。
-        // 保险库作用域只认一个字面量 `1`。它不是"再加一个筛选"，而是把浏览范围
-        // 整个换掉，所以它与远程作用域互斥——同时给出两个作用域是矛盾的请求，
-        // 拒绝比挑一个执行更安全。
-        let vaultScope: Bool
-        if let rawVault = values["vault"] {
-            guard rawVault == "1", values["remoteScope"] == nil else { return nil }
-            vaultScope = true
-        } else {
-            vaultScope = false
-        }
-        let remoteScopeID: String?
-        if let rawScope = values["remoteScope"], !rawScope.isEmpty {
-            guard rawScope.count <= 64, rawScope.allSatisfy(\.isHexDigit) else { return nil }
-            remoteScopeID = rawScope
-        } else {
-            remoteScopeID = nil
-        }
-        return ServerLibraryQuery(
-            searchText: searchText, type: type, offset: offset, limit: limit,
-            sort: sort, sortOrder: sortOrder, genre: genre,
-            playbackFilter: playbackFilter, preferenceFilter: preferenceFilter, mediaGroup: mediaGroup,
-            remoteScopeID: remoteScopeID,
-            vaultScope: vaultScope
-        )
     }
 
     /// 从一个 HTML 页面路由的查询串里读一个受限文本键。
@@ -2689,49 +2072,9 @@ struct LocalHTTPRouter {
             ?? ServerLibraryFacetsResponse(genres: [], availableSorts: [])
     }
 
-    /// `/api/v1/library/facets` 的作用域。键白名单与 browse 同样严格——多一个未知键
-    /// 就是 400，而不是被忽略。
-    private func libraryFacetsScope(from target: String) -> (type: String?, group: ServerLibraryMediaGroup?)? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.first == "/api/v1/library/facets" else { return nil }
-        var values: [String: String] = [:]
-        if pieces.count == 2, !pieces[1].isEmpty {
-            for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
-                guard !pair.isEmpty else { return nil }
-                let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                guard keyValue.count == 2,
-                      let key = decodeQueryComponent(String(keyValue[0])),
-                      let value = decodeQueryComponent(String(keyValue[1])),
-                      ["type", "group"].contains(key),
-                      values[key] == nil
-                else { return nil }
-                values[key] = value
-            }
-        }
-        let type = values["type"].flatMap { $0.isEmpty ? nil : $0 }
-        if let type {
-            guard let mediaType = MediaType(rawValue: type), mediaType != .privateCollection, mediaType != .auto else {
-                return nil
-            }
-        }
-        let group: ServerLibraryMediaGroup?
-        if let rawGroup = values["group"], !rawGroup.isEmpty {
-            guard type == nil, let parsed = ServerLibraryMediaGroup(rawValue: rawGroup) else { return nil }
-            group = parsed
-        } else {
-            group = nil
-        }
-        return (type, group)
-    }
-
     private func decodeQueryComponent(_ value: String) -> String? {
         value.replacingOccurrences(of: "+", with: " ").removingPercentEncoding
     }
-
-    /// 图片接口只有显式的尺寸桶；它不接受未知键、重复键或空值，避免暴露任意图片
-    /// 处理能力，也让缓存键保持可预测。
-    /// 浏览器给失败的封面重试时挂上的序号。服务端只认识它、然后忽略它。
-    static let artworkRetryQueryKey = "_retry"
 
     /// `/api/v1/transcode/<id>?audio=<序号>&start=<秒>` 的严格解析。
     ///
@@ -2753,14 +2096,6 @@ struct LocalHTTPRouter {
             startSeconds = parsed
         }
         return (audioTrackID, startSeconds)
-    }
-
-    /// `/api/v1/playback/keyframe/<id>?at=<秒>`。
-    private func keyframeQuery(from target: String) -> Double? {
-        guard let values = boundedQuery(from: target, allowedKeys: ["at"]),
-              let raw = values["at"]
-        else { return nil }
-        return Self.boundedSeconds(raw)
     }
 
     /// 键白名单式的查询串解析：未知键、重复键、畸形百分号一律拒绝。
@@ -2800,118 +2135,6 @@ struct LocalHTTPRouter {
         return value
     }
 
-    private func artworkRequest(from target: String) -> ArtworkRequest? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.count <= 2 else { return nil }
-        guard pieces.count == 2 else { return .original }
-        guard !pieces[1].isEmpty else { return nil }
-
-        var values: [String: String] = [:]
-        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
-            guard !pair.isEmpty else { return nil }
-            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard keyValue.count == 2,
-                  let key = decodeQueryComponent(String(keyValue[0])),
-                  let value = decodeQueryComponent(String(keyValue[1])),
-                  key == "size" || key == Self.artworkRetryQueryKey,
-                  values[key] == nil,
-                  !value.isEmpty,
-                  value.utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
-                  value.utf8.count <= 4
-            else { return nil }
-            // 重试序号只是一个换 URL 的手段：浏览器不会为同一个地址再发一次请求，
-            // 而失败的封面必须能真正重取。它不参与任何解析，1–3 位数字之外一律拒绝。
-            if key == Self.artworkRetryQueryKey {
-                guard value.utf8.count <= 3 else { return nil }
-                // 记下来只为了让「同一个键出现两次」照旧被拒绝；读取时只认 `size`。
-                values[key] = value
-                continue
-            }
-            guard let maximumPixel = Int(value),
-                  ServerArtworkThumbnailer.supportedMaximumPixels.contains(maximumPixel)
-            else { return nil }
-            values[key] = value
-        }
-        // 只带重试序号、没有 `size` 时仍然是"原图"那一档，与不带查询串一致。
-        guard let value = values["size"] else { return .original }
-        guard let maximumPixel = Int(value) else { return nil }
-        return .thumbnail(maximumPixel)
-    }
-
-    /// 派生自「将要发出的那个文件」的实体标签。
-    ///
-    /// 用尺寸与修改时间，不读内容：缩略图的磁盘文件名本身已经是内容身份的摘要
-    /// （本地是 `路径|大小|mtime`，远程是与凭据无关的上游身份），所以这两项一变
-    /// 就一定是另一张图。为每次复验重新读一遍几十 KB 的 JPEG 去算哈希，代价正好
-    /// 落在这个机制想省掉的地方。
-    ///
-    /// 弱标签（`W/`）：Range 请求不按它做条件取字节，海报也从不走 Range。
-    private static func fileEntityTag(for url: URL) -> String? {
-        guard let values = try? url.resourceValues(
-            forKeys: [.isRegularFileKey, .fileSizeKey, .contentModificationDateKey]
-        ), values.isRegularFile == true, let size = values.fileSize else { return nil }
-        let modified = Int64((values.contentModificationDate ?? .distantPast).timeIntervalSince1970 * 1_000)
-        return "W/\"\(size)-\(modified)\""
-    }
-
-    /// `If-None-Match` 是否覆盖这个标签。`*` 按 RFC 9110 匹配任何现存表示。
-    private static func entityTagMatches(_ entityTag: String, ifNoneMatch header: String?) -> Bool {
-        guard let header else { return false }
-        let candidates = header.split(separator: ",").map {
-            $0.trimmingCharacters(in: .whitespaces)
-        }
-        guard !candidates.isEmpty else { return false }
-        if candidates.contains("*") { return true }
-        // 弱比较：`W/"x"` 与 `"x"` 视为同一表示，这正是弱标签该有的语义。
-        func normalized(_ value: String) -> String {
-            value.hasPrefix("W/") ? String(value.dropFirst(2)) : value
-        }
-        let expected = normalized(entityTag)
-        return candidates.contains { normalized($0) == expected }
-    }
-
-    private func seriesEpisodeQuery(
-        from target: String
-    ) -> (id: String, season: ServerSeriesSeasonSelector, offset: Int, limit: Int)? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.count == 2 else { return nil }
-        let path = String(pieces[0])
-        let prefix = "/api/v1/series/"
-        let suffix = "/episodes"
-        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
-        let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
-        guard !encodedID.isEmpty,
-              let id = decodedPathIdentifier("/series/\(encodedID)", prefix: "/series/")
-        else { return nil }
-        var values: [String: String] = [:]
-        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
-            guard !pair.isEmpty else { return nil }
-            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard keyValue.count == 2,
-                  let key = decodeQueryComponent(String(keyValue[0])),
-                  let value = decodeQueryComponent(String(keyValue[1])),
-                  ["season", "offset", "limit"].contains(key),
-                  values[key] == nil,
-                  value.utf8.count <= 64,
-                  !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
-            else { return nil }
-            values[key] = value
-        }
-        let season: ServerSeriesSeasonSelector
-        if values["season"] == "unspecified" {
-            season = .unspecified
-        } else {
-            guard let rawSeason = values["season"],
-                  let number = strictNonnegativeInteger(rawSeason), number <= 10_000
-            else { return nil }
-            season = .numbered(number)
-        }
-        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "50"), (1...100).contains(limit)
-        else { return nil }
-        return (id, season, offset, limit)
-    }
-
     private func decodedSeriesPlayIdentifier(_ path: String) -> String? {
         let prefix = "/series/"
         let suffix = "/play"
@@ -2921,65 +2144,6 @@ struct LocalHTTPRouter {
         return decodedPathIdentifier("/series/\(encodedID)", prefix: prefix)
     }
 
-    /// 人物目录只接受固定搜索键和有界分页。搜索语句最终是 SQLite 绑定参数，且这里
-    /// 先拒绝重复键、控制字符、畸形百分号和超长输入，避免把目录接口变成枚举入口。
-    private func peopleQuery(from target: String) -> (searchText: String?, offset: Int, limit: Int)? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.first == "/api/v1/people" else { return nil }
-        var values: [String: String] = [:]
-        if pieces.count == 2, !pieces[1].isEmpty {
-            for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
-                let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                guard keyValue.count == 2,
-                      let key = decodeQueryComponent(String(keyValue[0])),
-                      let value = decodeQueryComponent(String(keyValue[1])),
-                      ["q", "offset", "limit"].contains(key), values[key] == nil,
-                      value.utf8.count <= 512,
-                      !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
-                else { return nil }
-                values[key] = value
-            }
-        }
-        let search = values["q"].flatMap { value -> String? in
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : String(trimmed.prefix(128))
-        }
-        if let raw = values["q"], raw.count > 128 { return nil }
-        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "24"), (1...100).contains(limit)
-        else { return nil }
-        return (search, offset, limit)
-    }
-
-    private func personCreditsQuery(from target: String) -> (id: String, offset: Int, limit: Int)? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.count == 2 else { return nil }
-        let path = String(pieces[0])
-        let prefix = "/api/v1/people/"
-        let suffix = "/credits"
-        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
-        let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
-        guard let id = decodedPathIdentifier("/people/\(encodedID)", prefix: "/people/") else { return nil }
-        var values: [String: String] = [:]
-        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
-            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard keyValue.count == 2,
-                  let key = decodeQueryComponent(String(keyValue[0])),
-                  let value = decodeQueryComponent(String(keyValue[1])),
-                  ["offset", "limit"].contains(key), values[key] == nil,
-                  value.utf8.count <= 32,
-                  !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
-            else { return nil }
-            values[key] = value
-        }
-        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "24"), (1...100).contains(limit)
-        else { return nil }
-        return (id, offset, limit)
-    }
-
-    /// 合集仅接受分页参数。合集 ID 经过同一套路径段解码与控制字符检查，查询键
-    /// 不能携带账号、资料库或任意排序字段，从路由边界阻断横向枚举。
     /// 侧栏那两串由数据决定的条目。
     ///
     /// 智能集合与智能歌单必须在**每一个**页面上都出现，否则它们会在展开「视频」或
@@ -3017,94 +2181,6 @@ struct LocalHTTPRouter {
         )
     }
 
-    private func collectionsQuery(from target: String) -> (offset: Int, limit: Int)? {
-        pagingQuery(from: target, path: "/api/v1/collections")
-    }
-
-    private func pagingQuery(from target: String, path expectedPath: String) -> (offset: Int, limit: Int)? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.first.map(String.init) == expectedPath else { return nil }
-        var values: [String: String] = [:]
-        if pieces.count == 2, !pieces[1].isEmpty {
-            for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
-                let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                guard keyValue.count == 2,
-                      let key = decodeQueryComponent(String(keyValue[0])),
-                      let value = decodeQueryComponent(String(keyValue[1])),
-                      ["offset", "limit"].contains(key), values[key] == nil,
-                      value.utf8.count <= 32,
-                      !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
-                else { return nil }
-                values[key] = value
-            }
-        }
-        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "24"), (1...100).contains(limit)
-        else { return nil }
-        return (offset, limit)
-    }
-
-    private func collectionItemsQuery(from target: String) -> (id: String, offset: Int, limit: Int)? {
-        identifiedPagingQuery(from: target, prefix: "/api/v1/collections/", identifierNamespace: "collections")
-    }
-
-    /// `/api/v1/<集合>/<id>/items?offset=&limit=` 的解析。
-    ///
-    /// 智能集合和歌单的 items 路由与合集逐字同形，所以共用这一份而不是各抄一遍：
-    /// 抄一遍就是多一处可以漏掉 `decodedPathIdentifier`、漏掉上界检查的地方。
-    private func identifiedPagingQuery(
-        from target: String,
-        prefix: String,
-        identifierNamespace: String
-    ) -> (id: String, offset: Int, limit: Int)? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.count == 2 else { return nil }
-        let path = String(pieces[0])
-        let suffix = "/items"
-        guard path.hasPrefix(prefix), path.hasSuffix(suffix) else { return nil }
-        let encodedID = String(path.dropFirst(prefix.count).dropLast(suffix.count))
-        guard let id = decodedPathIdentifier("/\(identifierNamespace)/\(encodedID)", prefix: "/\(identifierNamespace)/") else { return nil }
-        var values: [String: String] = [:]
-        for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
-            let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard keyValue.count == 2,
-                  let key = decodeQueryComponent(String(keyValue[0])),
-                  let value = decodeQueryComponent(String(keyValue[1])),
-                  ["offset", "limit"].contains(key), values[key] == nil,
-                  value.utf8.count <= 32,
-                  !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
-            else { return nil }
-            values[key] = value
-        }
-        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "24"), (1...100).contains(limit)
-        else { return nil }
-        return (id, offset, limit)
-    }
-
-    private func photosQuery(from target: String) -> (offset: Int, limit: Int)? {
-        let pieces = target.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
-        guard pieces.first == "/api/v1/photos" else { return nil }
-        var values: [String: String] = [:]
-        if pieces.count == 2, !pieces[1].isEmpty {
-            for pair in pieces[1].split(separator: "&", omittingEmptySubsequences: false) {
-                let keyValue = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-                guard keyValue.count == 2,
-                      let key = decodeQueryComponent(String(keyValue[0])),
-                      let value = decodeQueryComponent(String(keyValue[1])),
-                      ["offset", "limit"].contains(key), values[key] == nil,
-                      value.utf8.count <= 32,
-                      !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f })
-                else { return nil }
-                values[key] = value
-            }
-        }
-        guard let offset = strictNonnegativeInteger(values["offset"] ?? "0"), offset <= 1_000_000,
-              let limit = strictNonnegativeInteger(values["limit"] ?? "24"), (1...100).contains(limit)
-        else { return nil }
-        return (offset, limit)
-    }
-
     private func strictNonnegativeInteger(_ value: String) -> Int? {
         guard !value.isEmpty, value.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
         return Int(value)
@@ -3117,10 +2193,12 @@ struct LocalHTTPRouter {
         rangeHeader: String?,
         omitBody: Bool
     ) -> LocalHTTPResponse {
-        guard let policy = experiencePolicy(for: principal),
-              policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
-              policyAllowsItem(policy, itemID: itemID, principal: principal),
-              policy.directPlayAllowed
+        guard playbackAccessEvaluator.allows(
+            itemID: itemID,
+            principal: principal,
+            clientAddressKey: clientAddressKey,
+            capability: .directPlay
+        )
         else { return .notFound() }
         guard let asset = try? mediaAssetProvider(itemID, principal, .playMedia) else {
             // 与不存在的条目统一返回 404，避免 ID 或资料库权限被枚举。
@@ -3158,10 +2236,12 @@ struct LocalHTTPRouter {
         rangeHeader: String?,
         omitBody: Bool
     ) -> LocalHTTPResponse {
-        guard let policy = experiencePolicy(for: principal),
-              policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
-              policyAllowsItem(policy, itemID: itemID, principal: principal),
-              policy.downloadAllowed
+        guard playbackAccessEvaluator.allows(
+            itemID: itemID,
+            principal: principal,
+            clientAddressKey: clientAddressKey,
+            capability: .download
+        )
         else { return .notFound() }
         guard let asset = try? mediaAssetProvider(itemID, principal, .downloadMedia) else {
             // 下载与播放使用同一条目隐藏策略；无权时不能通过状态码差异枚举媒体。
@@ -3288,126 +2368,6 @@ struct LocalHTTPRouter {
         return "MediaLIB-download.\(ext)"
     }
 
-    private func webVTTSubtitleTracksResponse(
-        itemID: String,
-        principal: ServerRequestPrincipal,
-        omitBody: Bool
-    ) -> LocalHTTPResponse {
-        do {
-            guard let tracks = try webVTTSubtitleTracksProvider(itemID, principal),
-                  let body = ServerCommandOutput.jsonData(tracks)
-            else { return .notFound() }
-            return .ok(body: body, omitBody: omitBody)
-        } catch is ServerRemoteSubtitleTracksPending {
-            return .accepted(
-                body: Data(),
-                additionalHeaders: ["Cache-Control: no-store", "Retry-After: 2"]
-            )
-        } catch {
-            return .notFound()
-        }
-    }
-
-    private func webVTTSubtitleResponse(
-        path: String,
-        principal: ServerRequestPrincipal,
-        omitBody: Bool
-    ) -> LocalHTTPResponse {
-        let prefix = "/api/v1/subtitles/"
-        let remainder = path.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: false)
-        guard remainder.count == 2,
-              let itemID = String(remainder[0]).removingPercentEncoding,
-              !itemID.isEmpty,
-              !itemID.contains("/"),
-              !itemID.contains("\\"),
-              let trackID = strictNonnegativeInteger(String(remainder[1])),
-              trackID < ServerWebVTTSubtitleTrack.maximumTrackCount
-        else { return .notFound() }
-        let track: ServerSubtitleTrackReference
-        do {
-            guard let resolved = try subtitleTrackProvider(itemID, trackID, principal) else {
-                return .notFound()
-            }
-            track = resolved
-        } catch is ServerRemoteSubtitleTracksPending {
-            return .accepted(
-                body: Data(),
-                additionalHeaders: ["Cache-Control: no-store", "Retry-After: 2"]
-            )
-        } catch {
-            return .notFound()
-        }
-        switch track.source {
-        case let .sidecar(asset):
-            let pathExtension = asset.fileURL.pathExtension.lowercased()
-            // 已经是 VTT 的原样流式送出，保持"路由层不把文件复制进内存"的既有边界。
-            guard pathExtension != "vtt" else {
-                return .file(
-                    url: asset.fileURL,
-                    byteLength: asset.byteLength,
-                    contentType: "text/vtt; charset=utf-8",
-                    omitBody: omitBody
-                )
-            }
-            // SRT 与 ASS 必须落到内存再转：`<track>` 只认 WebVTT，把原文交出去
-            // 浏览器会静默丢掉整条轨道。转换要读完全文，而且中文资料库里的这两类
-            // 文件常常不是 UTF-8，顺带统一编码。体积由 8 MiB 上限兜住。
-            guard asset.byteLength <= Int64(ServerWebVTTSubtitleTrack.maximumByteLength),
-                  let raw = try? Data(contentsOf: asset.fileURL),
-                  let payload = ServerSubtitleSidecar.webVTTPayload(
-                    from: raw, pathExtension: pathExtension
-                  )
-            else { return .notFound() }
-            return Self.webVTTResponse(payload: payload, omitBody: omitBody)
-        case let .embedded(asset, streamIndex):
-            switch mediaTrackCatalog.embeddedSubtitleWebVTT(
-                for: asset,
-                streamIndex: streamIndex,
-                startIfNeeded: !omitBody
-            ) {
-            case let .ready(payload):
-                return Self.webVTTResponse(payload: payload, omitBody: omitBody)
-            case .pending:
-                return .accepted(
-                    body: Data(),
-                    additionalHeaders: ["Cache-Control: no-store", "Retry-After: 1"]
-                )
-            case .failed:
-                return .notFound()
-            }
-        case let .remote(remoteTrack):
-            guard !omitBody else {
-                // HEAD 不该为了报一个长度就去 Emby 拉一份字幕回来。
-                return Self.webVTTResponse(payload: Data(), omitBody: true)
-            }
-            switch remoteSubtitleBodyCatalog.webVTT(
-                ownerID: "\(itemID)/\(trackID)",
-                track: remoteTrack
-            ) {
-            case let .ready(payload):
-                return Self.webVTTResponse(payload: payload, omitBody: false)
-            case .pending:
-                return .accepted(
-                    body: Data(),
-                    additionalHeaders: ["Cache-Control: no-store", "Retry-After: 1"]
-                )
-            case .failed:
-                return .notFound()
-            }
-        }
-    }
-
-    private static func webVTTResponse(payload: Data, omitBody: Bool) -> LocalHTTPResponse {
-        LocalHTTPResponse(
-            statusCode: 200,
-            reason: "OK",
-            contentType: "text/vtt; charset=utf-8",
-            payload: .data(omitBody ? Data() : payload),
-            declaredContentLength: payload.count,
-            additionalHeaders: ["Cache-Control: private, max-age=300"]
-        )
-    }
-
     /// 重新封装音轨的播放流。
     ///
     /// 它**没有** `Content-Length`，也不接受 Range：字节是 ffmpeg 边转边给的，长度
@@ -3421,10 +2381,12 @@ struct LocalHTTPRouter {
         clientAddressKey: String,
         omitBody: Bool
     ) -> LocalHTTPResponse {
-        guard let policy = experiencePolicy(for: principal),
-              policyAllowsPlayback(policy, clientAddressKey: clientAddressKey),
-              policyAllowsItem(policy, itemID: itemID, principal: principal),
-              policy.transcodeAllowed
+        guard playbackAccessEvaluator.allows(
+            itemID: itemID,
+            principal: principal,
+            clientAddressKey: clientAddressKey,
+            capability: .transcode
+        )
         else { return .notFound() }
         guard let stream = try? audioRemuxProvider(itemID, audioTrackID, startSeconds, principal) else {
             return .notFound()
@@ -3450,110 +2412,6 @@ struct LocalHTTPRouter {
         )
     }
 
-    private func mutateQueueResponse(body: Data, principal: ServerRequestPrincipal) -> LocalHTTPResponse {
-        guard let object = try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed]),
-              let dictionary = object as? [String: Any],
-              !dictionary.isEmpty,
-              Set(dictionary.keys).isSubset(of: ["action", "mediaID", "fromIndex", "toIndex", "repeatMode", "shuffleEnabled", "currentPosition"]),
-              let action = dictionary["action"] as? String,
-              ["add", "remove", "clear", "move", "settings"].contains(action),
-              let request = try? JSONDecoder().decode(ServerQueueMutationRequest.self, from: body),
-              request.isValid
-        else { return .badRequest() }
-        do {
-            guard let queue = try queueMutationProvider(request, principal),
-                  let encoded = ServerCommandOutput.jsonData(queue)
-            else { return .notFound() }
-            return .json(body: encoded)
-        } catch is ServerUserQueueRepositoryError {
-            return .badRequest()
-        } catch {
-            return .serviceUnavailable()
-        }
-    }
-
-    private func updatePlaybackStateResponse(
-        path: String,
-        body: Data,
-        principal: ServerRequestPrincipal
-    ) -> LocalHTTPResponse {
-        guard let itemID = decodedPathIdentifier(path, prefix: "/api/v1/playback/state/") else {
-            return .notFound()
-        }
-        guard let object = try? JSONSerialization.jsonObject(with: body),
-              let dictionary = object as? [String: Any],
-              Set(dictionary.keys).isSubset(of: ["event", "positionSeconds", "durationSeconds"]),
-              dictionary["event"] != nil,
-              dictionary["positionSeconds"] != nil,
-              let request = try? JSONDecoder().decode(ServerPlaybackStateUpdateRequest.self, from: body),
-              request.isValid
-        else {
-            return .badRequest()
-        }
-        do {
-            guard let state = try mediaPlaybackStateUpdater(itemID, request, principal) else {
-                return .notFound()
-            }
-            guard let encoded = ServerCommandOutput.jsonData(state) else { return .serviceUnavailable() }
-            return .json(body: encoded)
-        } catch {
-            return .serviceUnavailable()
-        }
-    }
-
-    /// 偏好请求只允许一次更新一个字段，避免浏览器可借构造型正文意外覆盖其他字段。
-    /// 用户身份始终取 principal；评分 0 表示清除，1–5 表示星级。
-    private func updateMediaPreferenceResponse(
-        path: String,
-        body: Data,
-        principal: ServerRequestPrincipal
-    ) -> LocalHTTPResponse {
-        guard let itemID = decodedPathIdentifier(path, prefix: "/api/v1/user-media/preferences/"),
-              let object = try? JSONSerialization.jsonObject(with: body),
-              let dictionary = object as? [String: Any],
-              dictionary.count == 1
-        else { return .badRequest() }
-
-        let preference: ServerUserMediaPreferenceUpdate
-        if let value = dictionary["favorite"] as? Bool, Set(dictionary.keys) == Set(["favorite"]) {
-            preference = .favorite(value)
-        } else if let value = dictionary["watchlist"] as? Bool, Set(dictionary.keys) == Set(["watchlist"]) {
-            preference = .watchlist(value)
-        } else if let value = dictionary["rating"] as? NSNumber,
-                  CFGetTypeID(value) != CFBooleanGetTypeID(),
-                  value.doubleValue.isFinite,
-                  (0...5).contains(value.doubleValue),
-                  Set(dictionary.keys) == Set(["rating"]) {
-            preference = .rating(value.doubleValue == 0 ? nil : value.doubleValue)
-        } else {
-            return .badRequest()
-        }
-        do {
-            guard let updated = try mediaPreferenceUpdater(itemID, preference, principal),
-                  let encoded = ServerCommandOutput.jsonData(updated)
-            else { return .notFound() }
-            return .json(body: encoded)
-        } catch {
-            // 未知/无权媒体和内部仓储细节均不能通过偏好写接口区分。
-            return .notFound()
-        }
-    }
-
-    private func playbackInfoResponse(
-        itemID: String,
-        principal: ServerRequestPrincipal,
-        omitBody: Bool
-    ) -> LocalHTTPResponse {
-        do {
-            guard let info = try playbackInfoProvider(itemID, principal) else { return .notFound() }
-            guard let body = ServerCommandOutput.jsonData(info) else { return .serviceUnavailable() }
-            return .ok(body: body, omitBody: omitBody)
-        } catch {
-            // ffprobe 的原始错误可能包含路径或损坏文件的内容摘要，不可作为 HTTP 响应返回。
-            return .serviceUnavailable()
-        }
-    }
-
     /// 浏览器直接打开受保护页面时返回登录页，而 API、播放器字节流和脚本请求仍保持
     /// 401，防止非 HTML 客户端把重定向误当成成功响应。
     private func acceptsHTMLNavigation(_ requestHead: String) -> Bool {
@@ -3563,44 +2421,6 @@ struct LocalHTTPRouter {
         return accept.split(separator: ",").contains { item in
             item.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("text/html")
         }
-    }
-
-    /// The server, not browser JavaScript, derives the return target. It travels
-    /// as URL-safe Base64 rather than a percent-encoded path, because the public
-    /// HTTP policy intentionally rejects encoded slash and backslash sequences.
-    private func loginLocation(for target: String) -> String {
-        guard target.hasPrefix("/"), !target.hasPrefix("//"), target.utf8.count <= 2_048 else {
-            return "/login"
-        }
-        let state = Data(target.utf8).base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
-        return "/login?next=\(state)"
-    }
-
-    private func loginReturnState(from target: String) -> String? {
-        guard let components = URLComponents(string: "http://localhost\(target)"),
-              let values = components.queryItems?.filter({ $0.name == "next" }),
-              values.count == 1,
-              let value = values[0].value,
-              value.utf8.count <= 2_732,
-              value.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil
-        else { return nil }
-        return value
-    }
-
-    private func loginReturnPath(from target: String) -> String? {
-        guard let state = loginReturnState(from: target) else { return nil }
-        let padding = String(repeating: "=", count: (4 - state.count % 4) % 4)
-        let base64 = state.replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/") + padding
-        guard let data = Data(base64Encoded: base64),
-              let value = String(data: data, encoding: .utf8),
-              value.hasPrefix("/"), !value.hasPrefix("//"), !value.contains("\\"),
-              value.utf8.count <= 2_048
-        else { return nil }
-        return value
     }
 
     private func publicProbeResponse(path: String, omitBody: Bool) -> LocalHTTPResponse {
@@ -3619,213 +2439,6 @@ struct LocalHTTPRouter {
             ) ?? Data()
         }
         return .ok(body: body, omitBody: omitBody)
-    }
-
-    private func loginResponse(
-        requestHead: String,
-        body: Data,
-        clientAddressKey: String
-    ) -> LocalHTTPResponse {
-        if let limited = limitedResponse(
-            scope: .loginClient,
-            identityComponents: [clientAddressKey]
-        ) { return limited }
-        guard let request = try? JSONDecoder().decode(ServerLoginRequest.self, from: body),
-              request.isValid
-        else {
-            return authenticationService == nil ? .serviceUnavailable() : .badRequest()
-        }
-        if let limited = limitedResponse(
-            scope: .loginIdentity,
-            identityComponents: [
-                "username",
-                ServerIdentityRepository.normalizeUsername(
-                    request.username.trimmingCharacters(in: .whitespacesAndNewlines)
-                )
-            ]
-        ) { return limited }
-        guard let authenticationService else { return .serviceUnavailable() }
-        do {
-            switch try authenticationService.login(
-                username: request.username,
-                password: request.password,
-                deviceName: request.deviceName,
-                platform: request.platform
-            ) {
-            case let .success(tokens):
-                return authenticationResponse(tokens: tokens, delivery: request.deliveryMode)
-            case .rejected:
-                return .unauthorized()
-            case let .temporarilyLocked(until):
-                return .tooManyRequests(retryAfter: max(Int(until.timeIntervalSinceNow.rounded(.up)), 1))
-            case .initialSetupRequired:
-                return .preconditionRequired()
-            }
-        } catch {
-            return .serviceUnavailable()
-        }
-    }
-
-    /// A browser can submit this constrained form even when JavaScript is
-    /// unavailable. It never places credentials in the URL; the return state is
-    /// server-generated Base64URL and is decoded only after successful login.
-    private func webFormLoginResponse(
-        requestHead: String,
-        target: String,
-        body: Data,
-        clientAddressKey: String
-    ) -> LocalHTTPResponse {
-        guard httpHeader(named: "Content-Type", in: requestHead)?.lowercased() == "application/x-www-form-urlencoded",
-              let form = String(data: body, encoding: .utf8),
-              let components = URLComponents(string: "http://localhost/?\(form.replacingOccurrences(of: "+", with: "%20"))"),
-              let items = components.queryItems,
-              Set(items.map(\.name)) == Set(["username", "password", "csrf"]),
-              items.count == 3,
-              let username = items.first(where: { $0.name == "username" })?.value,
-              let password = items.first(where: { $0.name == "password" })?.value,
-              let submittedCSRF = items.first(where: { $0.name == "csrf" })?.value,
-              submittedCSRF == csrfToken
-        else { return .badRequest() }
-        if let limited = limitedResponse(
-            scope: .loginClient,
-            identityComponents: [clientAddressKey]
-        ) { return limited }
-        let request = ServerLoginRequest(
-            username: username,
-            password: password,
-            deviceName: "Web Browser",
-            platform: "Web",
-            delivery: "cookie"
-        )
-        guard request.isValid else { return .badRequest() }
-        if let limited = limitedResponse(
-            scope: .loginIdentity,
-            identityComponents: [
-                "username",
-                ServerIdentityRepository.normalizeUsername(
-                    request.username.trimmingCharacters(in: .whitespacesAndNewlines)
-                )
-            ]
-        ) { return limited }
-        guard let authenticationService else { return .serviceUnavailable() }
-        do {
-            switch try authenticationService.login(
-                username: request.username,
-                password: request.password,
-                deviceName: request.deviceName,
-                platform: request.platform
-            ) {
-            case let .success(tokens):
-                return .seeOther(
-                    location: loginReturnPath(from: target) ?? "/",
-                    omitBody: false,
-                    additionalHeaders: Self.authenticationCookieHeaders(tokens: tokens)
-                )
-            case .rejected:
-                return .unauthorized()
-            case let .temporarilyLocked(until):
-                return .tooManyRequests(retryAfter: max(Int(until.timeIntervalSinceNow.rounded(.up)), 1))
-            case .initialSetupRequired:
-                return .preconditionRequired()
-            }
-        } catch {
-            return .serviceUnavailable()
-        }
-    }
-
-    private func refreshResponse(
-        requestHead: String,
-        body: Data,
-        clientAddressKey: String
-    ) -> LocalHTTPResponse {
-        if let limited = limitedResponse(
-            scope: .refreshClient,
-            identityComponents: [clientAddressKey]
-        ) { return limited }
-        guard let authenticationService else { return .serviceUnavailable() }
-        let cookieToken = authenticationService.refreshToken(forRequestHead: requestHead)
-        let request: ServerRefreshRequest
-        if body.isEmpty {
-            request = ServerRefreshRequest(refreshToken: nil, delivery: nil)
-        } else if let decoded = try? JSONDecoder().decode(ServerRefreshRequest.self, from: body) {
-            request = decoded
-        } else {
-            return .badRequest()
-        }
-        guard request.isValid,
-              !(cookieToken != nil && request.refreshToken != nil),
-              let token = request.refreshToken ?? cookieToken
-        else {
-            return .badRequest()
-        }
-        if let limited = limitedResponse(
-            scope: .refreshCredential,
-            identityComponents: ["refresh", token]
-        ) { return limited }
-        do {
-            guard let tokens = try authenticationService.refresh(refreshToken: token) else {
-                return .unauthorized(clearingCookies: cookieToken != nil)
-            }
-            let delivery: ServerAuthenticationDelivery = cookieToken != nil ? .cookie : request.deliveryMode
-            return authenticationResponse(tokens: tokens, delivery: delivery)
-        } catch {
-            return .serviceUnavailable()
-        }
-    }
-
-    private func logoutResponse(principal: ServerRequestPrincipal) -> LocalHTTPResponse {
-        guard let authenticationService else { return .serviceUnavailable() }
-        do {
-            try authenticationService.logout(principal: principal)
-            return .noContent(clearingAuthenticationCookies: true)
-        } catch {
-            return .serviceUnavailable()
-        }
-    }
-
-    private func passwordChangeResponse(
-        body: Data,
-        principal: ServerRequestPrincipal
-    ) -> LocalHTTPResponse {
-        guard let request = try? JSONDecoder().decode(ServerPasswordChangeRequest.self, from: body),
-              let authenticationService
-        else { return .badRequest() }
-        do {
-            try authenticationService.changePassword(
-                for: principal,
-                currentPassword: request.currentPassword,
-                newPassword: request.newPassword
-            )
-            // 轮换服务已撤销所有会话；清除当前浏览器的双 Cookie，强制使用新口令重新登录。
-            return .noContent(clearingAuthenticationCookies: true)
-        } catch {
-            // 不区分当前密码错误、重用、并发修改、禁用或 Argon2 参数错误，避免通过 HTTP
-            // 形成凭据/账户状态预言机。服务已在需要时记录脱敏拒绝审计。
-            return .badRequest()
-        }
-    }
-
-    private func authenticationResponse(
-        tokens: ServerIssuedTokens,
-        delivery: ServerAuthenticationDelivery
-    ) -> LocalHTTPResponse {
-        switch delivery {
-        case .token:
-            guard let body = ServerCommandOutput.jsonData(tokens) else { return .serviceUnavailable() }
-            return .ok(body: body, omitBody: false)
-        case .cookie:
-            let session = ServerBrowserSession(
-                accessExpiresAt: tokens.accessExpiresAt,
-                refreshExpiresAt: tokens.refreshExpiresAt,
-                sessionID: tokens.sessionID,
-                deviceID: tokens.deviceID
-            )
-            guard let body = ServerCommandOutput.jsonData(session) else { return .serviceUnavailable() }
-            return .json(
-                body: body,
-                additionalHeaders: Self.authenticationCookieHeaders(tokens: tokens)
-            )
-        }
     }
 
     private func limitedResponse(
@@ -3859,172 +2472,6 @@ struct LocalHTTPRouter {
         )
     }
 
-    private func ifMatchVersion(in requestHead: String) -> Int? {
-        guard let raw = httpHeader(named: "If-Match", in: requestHead),
-              !raw.contains(","), !raw.hasPrefix("W/")
-        else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let value = trimmed.hasPrefix("\"") && trimmed.hasSuffix("\"")
-            ? String(trimmed.dropFirst().dropLast())
-            : trimmed
-        guard !value.isEmpty, value.allSatisfy(\.isNumber), let version = Int(value), version >= 0 else {
-            return nil
-        }
-        return version
-    }
-
-    private func etagHeader(_ version: Int) -> String { "ETag: \"\(max(version, 0))\"" }
-
-    private func experienceMutationErrorResponse(_ error: Error) -> LocalHTTPResponse {
-        switch error {
-        case ServerExperienceRepositoryError.invalidValue:
-            return .badRequest()
-        case let ServerExperienceRepositoryError.versionConflict(currentVersion):
-            return .conflict(additionalHeaders: [etagHeader(currentVersion)])
-        case ServerExperienceRepositoryError.notFound:
-            return .notFound()
-        default:
-            return .serviceUnavailable()
-        }
-    }
-
-    private func playbackOverrideRoute(_ path: String) -> (scope: ServerTrackOverrideScope, id: String)? {
-        let prefix = "/api/v1/me/playback-overrides/"
-        guard path.hasPrefix(prefix) else { return nil }
-        let pieces = path.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: false)
-        guard pieces.count == 2,
-              let scope = ServerTrackOverrideScope(rawValue: String(pieces[0])),
-              let decoded = String(pieces[1]).removingPercentEncoding,
-              !decoded.isEmpty, !decoded.contains("/"), !decoded.contains("\\")
-        else { return nil }
-        return (scope, decoded)
-    }
-
-    private func experiencePolicy(for principal: ServerRequestPrincipal) -> ServerUserPolicy? {
-        guard let experienceRepository else { return ServerUserPolicy() }
-        return try? experienceRepository.userPolicy(userID: principal.userID).value
-    }
-
-    private func policyAllowsPlayback(_ policy: ServerUserPolicy, clientAddressKey: String) -> Bool {
-        guard policy.isValid, policy.playbackAllowed else { return false }
-        if isRemoteClientAddressKey(clientAddressKey), !policy.remoteAccessAllowed { return false }
-        guard let start = policy.accessStartMinute, let end = policy.accessEndMinute else { return true }
-        let components = Calendar.current.dateComponents([.hour, .minute], from: Date())
-        guard let hour = components.hour, let minute = components.minute else { return false }
-        let current = hour * 60 + minute
-        return start <= end ? (start...end).contains(current) : (current >= start || current <= end)
-    }
-
-    private func policyAllowsItem(
-        _ policy: ServerUserPolicy,
-        itemID: String,
-        principal: ServerRequestPrincipal
-    ) -> Bool {
-        guard policy.maximumContentRating != nil else { return true }
-        guard let detail = try? mediaDetailProvider(itemID, principal) else { return false }
-        return ServerContentRatingPolicy.allows(
-            contentRating: detail.detailExtras?.contentRating,
-            maximum: policy.maximumContentRating
-        )
-    }
-
-    private func isRemoteClientAddressKey(_ value: String) -> Bool {
-        let normalized = value.lowercased()
-        return !(normalized == "localhost" || normalized == "::1" || normalized == "[::1]" ||
-            normalized.hasPrefix("127.") || normalized.hasPrefix("loopback"))
-    }
-
-    private func effectivePreferences(
-        _ account: ServerUserExperiencePreferences,
-        device: ServerDeviceExperienceOverrides?
-    ) -> ServerUserExperiencePreferences {
-        guard let device else { return account }
-        var effective = account
-        if let value = device.appearance { effective.appearance = value }
-        if let value = device.contentDensity { effective.contentDensity = value }
-        if let value = device.motion { effective.motion = value }
-        if let value = device.defaultQuality { effective.defaultQuality = value }
-        if let value = device.remoteBitrateMbps { effective.remoteBitrateMbps = value }
-        return effective
-    }
-
-    private static func authenticationCookieHeaders(tokens: ServerIssuedTokens) -> [String] {
-        let accessAge = max(Int(tokens.accessExpiresAt.timeIntervalSinceNow), 1)
-        let refreshAge = max(Int(tokens.refreshExpiresAt.timeIntervalSinceNow), 1)
-        return [
-            "Set-Cookie: \(ServerAuthenticationService.accessCookieName)=\(tokens.accessToken); Path=/; Max-Age=\(accessAge); HttpOnly; Secure; SameSite=Strict",
-            "Set-Cookie: \(ServerAuthenticationService.refreshCookieName)=\(tokens.refreshToken); Path=/api/v1/auth; Max-Age=\(refreshAge); HttpOnly; Secure; SameSite=Strict"
-        ]
-    }
-}
-
-private struct ServerPreferencesResponse: Encodable {
-    let account: ServerVersionedDocument<ServerUserExperiencePreferences>
-    let device: ServerVersionedDocument<ServerDeviceExperienceOverrides>?
-    let effective: ServerUserExperiencePreferences
-}
-
-private struct ServerTrackOverrideMutation: Decodable {
-    let audioFingerprint: String?
-    let subtitleFingerprint: String?
-    let subtitleDisabled: Bool
-
-    private enum CodingKeys: String, CodingKey {
-        case audioFingerprint, subtitleFingerprint, subtitleDisabled
-    }
-
-    init(from decoder: Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        audioFingerprint = try values.decodeIfPresent(String.self, forKey: .audioFingerprint)
-        subtitleFingerprint = try values.decodeIfPresent(String.self, forKey: .subtitleFingerprint)
-        subtitleDisabled = try values.decodeIfPresent(Bool.self, forKey: .subtitleDisabled) ?? false
-    }
-}
-
-private enum ServerAuthenticationDelivery: String, Decodable {
-    case token
-    case cookie
-}
-
-private struct ServerLoginRequest: Decodable {
-    let username: String
-    let password: String
-    let deviceName: String
-    let platform: String
-    let delivery: String?
-
-    var deliveryMode: ServerAuthenticationDelivery {
-        ServerAuthenticationDelivery(rawValue: delivery?.lowercased() ?? "") ?? .token
-    }
-
-    var isValid: Bool {
-        !username.isEmpty && username.utf8.count <= 128 &&
-            !password.isEmpty && password.utf8.count <= 1_024 &&
-            !deviceName.isEmpty && deviceName.utf8.count <= 128 &&
-            !platform.isEmpty && platform.utf8.count <= 128 &&
-            (delivery == nil || ServerAuthenticationDelivery(rawValue: delivery?.lowercased() ?? "") != nil)
-    }
-}
-
-private struct ServerRefreshRequest: Decodable {
-    let refreshToken: String?
-    let delivery: String?
-
-    var deliveryMode: ServerAuthenticationDelivery {
-        ServerAuthenticationDelivery(rawValue: delivery?.lowercased() ?? "") ?? .token
-    }
-
-    var isValid: Bool {
-        (refreshToken == nil || (32...1_024).contains(refreshToken?.utf8.count ?? 0)) &&
-            (delivery == nil || ServerAuthenticationDelivery(rawValue: delivery?.lowercased() ?? "") != nil)
-    }
-}
-
-private struct ServerBrowserSession: Encodable {
-    let accessExpiresAt: Date
-    let refreshExpiresAt: Date
-    let sessionID: String
-    let deviceID: String
 }
 
 struct LocalHTTPResponse {

@@ -69,6 +69,37 @@ final class ServerWebQueueRouteTests: XCTestCase {
         XCTAssertEqual(router.response(for: "POST /api/v1/queue HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer viewer\r\n\r\n", body: unknown).statusCode, 400)
     }
 
+    func testQueueAPIRejectsQueriesBeforeProvidersAndHEADPreservesLength() {
+        var readCount = 0
+        var mutationCount = 0
+        let expected = ServerQueueResponse(
+            repeatMode: "sequential", shuffleEnabled: false, currentPosition: 0, items: []
+        )
+        let router = LocalHTTPRouter(
+            serverID: "server", serverName: "Server",
+            queueProvider: { _ in readCount += 1; return expected },
+            queueMutationProvider: { _, _ in mutationCount += 1; return expected },
+            authenticationProvider: { head in head.contains("Authorization: Bearer viewer") ? self.viewer : nil }
+        )
+
+        XCTAssertEqual(router.response(for: request("/api/v1/queue?unexpected=1")).statusCode, 400)
+        let body = Data(#"{"action":"clear"}"#.utf8)
+        XCTAssertEqual(router.response(
+            for: "POST /api/v1/queue?unexpected=1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer viewer\r\n\r\n",
+            body: body
+        ).statusCode, 400)
+        XCTAssertEqual(readCount, 0)
+        XCTAssertEqual(mutationCount, 0)
+
+        let head = router.response(
+            for: "HEAD /api/v1/queue HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer viewer\r\n\r\n"
+        )
+        XCTAssertEqual(head.statusCode, 200)
+        XCTAssertTrue(head.body.isEmpty)
+        XCTAssertGreaterThan(head.declaredContentLength, 0)
+        XCTAssertEqual(readCount, 1)
+    }
+
     func testQueuePageAndAssetsUseSafeDOM() {
         let router = LocalHTTPRouter(
             serverID: "server", serverName: "Server",
