@@ -15,6 +15,32 @@ enum ServerBackupKind: String, Codable, CaseIterable, Sendable {
     case other
 }
 
+struct ServerMaintenanceServiceHooks: @unchecked Sendable {
+    var beforeOperationStart: @Sendable (ServerJob) throws -> Void
+    var beforeRunningPersistence: @Sendable (ServerJob) throws -> Void
+    var beforeTerminalPersistence: @Sendable (ServerJob) throws -> Void
+
+    init(
+        beforeOperationStart: @escaping @Sendable (ServerJob) throws -> Void = { _ in },
+        beforeRunningPersistence: @escaping @Sendable (ServerJob) throws -> Void = { _ in },
+        beforeTerminalPersistence: @escaping @Sendable (ServerJob) throws -> Void = { _ in }
+    ) {
+        self.beforeOperationStart = beforeOperationStart
+        self.beforeRunningPersistence = beforeRunningPersistence
+        self.beforeTerminalPersistence = beforeTerminalPersistence
+    }
+
+    static let live = ServerMaintenanceServiceHooks()
+}
+
+private struct ServerMaintenanceOperationResult: Sendable {
+    let state: ServerJobState
+    let resultCode: String
+    let auditAction: String
+    let auditOutcome: ServerSecurityEventOutcome
+    let auditDetailCode: String
+}
+
 /// 执行不会改变媒体源配置的本机维护操作。
 ///
 /// 文件系统路径永不跨过此边界；HTTP 层只能看到稳定的不透明 ID、时间和字节数。
@@ -28,8 +54,14 @@ final class ServerMaintenanceService: @unchecked Sendable {
     private let backupDirectory: URL
     private let fileManager: FileManager
     private let transcodeCacheCleanup: @Sendable () -> Int
+    private let restoreAllowed: @Sendable () -> Bool
+    private let securityEventAppender: @Sendable (ServerSecurityEvent) throws -> Void
+    private let hooks: ServerMaintenanceServiceHooks
     private let operationLock = NSLock()
     private var operationTail: Task<Void, Never>?
+    private var acceptingJobs = false
+    private var preparedForServing = false
+    private var storedDiagnosticCode: String?
 
     init(
         database: DatabaseManager,
@@ -37,16 +69,66 @@ final class ServerMaintenanceService: @unchecked Sendable {
         identityRepository: ServerIdentityRepository? = nil,
         backupDirectory: URL,
         transcodeCacheCleanup: @escaping @Sendable () -> Int = { 0 },
-        fileManager: FileManager = .default
+        restoreAllowed: @escaping @Sendable () -> Bool = { true },
+        fileManager: FileManager = .default,
+        securityEventAppender: (@Sendable (ServerSecurityEvent) throws -> Void)? = nil,
+        hooks: ServerMaintenanceServiceHooks = .live
     ) {
+        let resolvedExperienceRepository = experienceRepository ?? ServerExperienceRepository(database: database)
+        let resolvedIdentityRepository = identityRepository ?? ServerIdentityRepository(database: database)
         self.database = database
-        self.experienceRepository = experienceRepository ?? ServerExperienceRepository(database: database)
-        self.identityRepository = identityRepository ?? ServerIdentityRepository(database: database)
+        self.experienceRepository = resolvedExperienceRepository
+        self.identityRepository = resolvedIdentityRepository
         self.sourceRepository = SourceRepository(database: database)
         self.mediaRepository = MediaRepository(database: database)
         self.backupDirectory = backupDirectory
         self.transcodeCacheCleanup = transcodeCacheCleanup
+        self.restoreAllowed = restoreAllowed
         self.fileManager = fileManager
+        self.securityEventAppender = securityEventAppender ?? { event in
+            try resolvedIdentityRepository.appendSecurityEvent(event)
+        }
+        self.hooks = hooks
+    }
+
+    var diagnosticCode: String? {
+        operationLock.withLock { storedDiagnosticCode }
+    }
+
+    func stopAcceptingNewJobs() {
+        operationLock.withLock { acceptingJobs = false }
+    }
+
+    /// Stops admission and gives already committed work a bounded opportunity to finish.
+    /// Anything still queued/running after process exit is explained by startup recovery.
+    @discardableResult
+    func shutdown(waitTimeout: TimeInterval = 5) -> Bool {
+        let tail = operationLock.withLock { () -> Task<Void, Never>? in
+            acceptingJobs = false
+            return operationTail
+        }
+        guard let tail else { return true }
+        let completion = DispatchSemaphore(value: 0)
+        Task.detached {
+            _ = await tail.value
+            completion.signal()
+        }
+        return completion.wait(timeout: .now() + max(0, waitTimeout)) == .success
+    }
+
+    func prepareForServing() throws {
+        operationLock.lock()
+        defer { operationLock.unlock() }
+        if preparedForServing { return }
+        do {
+            try recoverInterruptedJobsFromPreviousExecutor()
+            preparedForServing = true
+            acceptingJobs = true
+        } catch {
+            acceptingJobs = false
+            storedDiagnosticCode = "job.startup-recovery-failed"
+            throw error
+        }
     }
 
     func backups(limit: Int = 100) throws -> [ServerBackupSummary] {
@@ -108,298 +190,323 @@ final class ServerMaintenanceService: @unchecked Sendable {
     }
 
     func enqueueBackup(requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
-        let counts = try experienceRepository.jobStateCounts()
-        let activeCount = counts[.queued, default: 0] + counts[.running, default: 0]
-        guard activeCount < 8 else { throw ServerMaintenanceError.queueFull }
-        let job = try experienceRepository.saveJob(ServerJob(
+        let job = ServerJob(
             kind: "database.backup",
             requestedByUserID: principal.userID
-        ))
-        try appendAudit(
-            category: .authorization,
-            action: "backup.requested",
-            outcome: .success,
-            principal: principal,
-            detailCode: "job.queued"
         )
-        enqueueOperation { [database, backupDirectory, experienceRepository, identityRepository] in
-            var running = job
-            running.state = .running
-            running.startedAt = Date()
-            _ = try? experienceRepository.saveJob(running)
-            do {
-                let url = try await database.createBackupAsync(in: backupDirectory, reason: "manual")
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-                running.state = .succeeded
-                running.progress = 1
-                running.resultCode = "backup.created"
-                running.finishedAt = Date()
-                _ = try experienceRepository.saveJob(running)
-                try identityRepository.appendSecurityEvent(ServerSecurityEvent(
-                    category: .authorization,
-                    action: "backup.created",
-                    outcome: .success,
-                    actorUserID: principal.userID,
-                    sessionID: principal.sessionID,
-                    deviceID: principal.deviceID,
-                    detailCode: "database.snapshot"
-                ))
-            } catch {
-                running.state = .failed
-                running.resultCode = "backup.failed"
-                running.finishedAt = Date()
-                _ = try? experienceRepository.saveJob(running)
-                try? identityRepository.appendSecurityEvent(ServerSecurityEvent(
-                    category: .authorization,
-                    action: "backup.failed",
-                    outcome: .failure,
-                    actorUserID: principal.userID,
-                    sessionID: principal.sessionID,
-                    deviceID: principal.deviceID,
-                    detailCode: "database.snapshot"
-                ))
-            }
+        return try admitAndSchedule(
+            job: job,
+            principal: principal,
+            requestedAction: "backup.requested",
+            requestedDetailCode: "job.queued",
+            failureResult: .init(
+                state: .failed,
+                resultCode: "backup.failed",
+                auditAction: "backup.failed",
+                auditOutcome: .failure,
+                auditDetailCode: "database.snapshot"
+            )
+        ) { [database, backupDirectory] _ in
+            let url = try await database.createBackupAsync(in: backupDirectory, reason: "manual")
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return .init(
+                state: .succeeded,
+                resultCode: "backup.created",
+                auditAction: "backup.created",
+                auditOutcome: .success,
+                auditDetailCode: "database.snapshot"
+            )
         }
-        return job
     }
 
     func enqueueRestore(backupID: String, requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
-        let counts = try experienceRepository.jobStateCounts()
-        let activeCount = counts[.queued, default: 0] + counts[.running, default: 0]
-        guard activeCount < 8 else { throw ServerMaintenanceError.queueFull }
+        guard restoreAllowed() else { throw ServerMaintenanceError.restoreHostActive }
         guard let backup = try backupFile(id: backupID) else { throw ServerMaintenanceError.backupNotFound }
         do {
             try database.validateBackupForRestore(at: backup.url)
         } catch {
-            try? appendAudit(
-                category: .authorization,
+            try? securityEventAppender(event(
                 action: "restore.preflight",
                 outcome: .failure,
                 principal: principal,
                 detailCode: "backup.invalid"
-            )
+            ))
             throw ServerMaintenanceError.invalidBackup
         }
-        let job = try experienceRepository.saveJob(ServerJob(
+        let job = ServerJob(
             kind: "database.restore",
             requestedByUserID: principal.userID
-        ))
-        try appendAudit(
-            category: .authorization,
-            action: "restore.requested",
-            outcome: .success,
-            principal: principal,
-            detailCode: "job.queued"
         )
-        enqueueOperation { [database, backupDirectory, experienceRepository, identityRepository] in
-            var running = job
-            running.state = .running
-            running.startedAt = Date()
-            _ = try? experienceRepository.saveJob(running)
-            do {
-                try database.restore(from: backup.url, safetyBackupDirectory: backupDirectory)
-                // The restored snapshot may predate this job. Reinsert the stable job record
-                // into the restored database before reporting success.
-                running.state = .succeeded
-                running.progress = 1
-                running.resultCode = "restore.completed"
-                running.finishedAt = Date()
-                _ = try experienceRepository.saveJob(running)
-                try identityRepository.appendSecurityEvent(ServerSecurityEvent(
+        return try admitAndSchedule(
+            job: job,
+            principal: principal,
+            requestedAction: "restore.requested",
+            requestedDetailCode: "job.queued",
+            failureResult: .init(
+                state: .failed,
+                resultCode: "restore.failed",
+                auditAction: "restore.failed",
+                auditOutcome: .failure,
+                auditDetailCode: "database.snapshot"
+            )
+        ) { [database, backupDirectory, experienceRepository, securityEventAppender] running in
+            try database.restore(from: backup.url, safetyBackupDirectory: backupDirectory)
+            _ = try experienceRepository.reconcileAfterRestore(currentRestoreJob: running) { interruptedCount in
+                let actorUserID = try self.identityRepository.user(id: principal.userID) == nil
+                    ? nil
+                    : principal.userID
+                try securityEventAppender(ServerSecurityEvent(
                     category: .authorization,
-                    action: "restore.completed",
+                    action: "restore.snapshot-applied",
                     outcome: .success,
-                    actorUserID: principal.userID,
+                    actorUserID: actorUserID,
                     sessionID: principal.sessionID,
                     deviceID: principal.deviceID,
-                    detailCode: "database.snapshot"
-                ))
-            } catch {
-                running.state = .failed
-                running.resultCode = "restore.failed"
-                running.finishedAt = Date()
-                _ = try? experienceRepository.saveJob(running)
-                try? identityRepository.appendSecurityEvent(ServerSecurityEvent(
-                    category: .authorization,
-                    action: "restore.failed",
-                    outcome: .failure,
-                    actorUserID: principal.userID,
-                    sessionID: principal.sessionID,
-                    deviceID: principal.deviceID,
-                    detailCode: "database.snapshot"
+                    detailCode: interruptedCount == 0 ? "database.snapshot" : "jobs.interrupted"
                 ))
             }
+            return .init(
+                state: .succeeded,
+                resultCode: "restore.completed",
+                auditAction: "restore.completed",
+                auditOutcome: .success,
+                auditDetailCode: "database.snapshot"
+            )
         }
-        return job
     }
 
     func enqueueLibraryJob(kind: String, requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
         guard ["library.scan", "library.reindex", "metadata.refresh"].contains(kind) else {
             throw ServerMaintenanceError.unsupportedJob
         }
-        let counts = try experienceRepository.jobStateCounts()
-        let activeCount = counts[.queued, default: 0] + counts[.running, default: 0]
-        guard activeCount < 8 else { throw ServerMaintenanceError.queueFull }
-        let job = try experienceRepository.saveJob(ServerJob(
+        let job = ServerJob(
             kind: kind,
             requestedByUserID: principal.userID
-        ))
-        try appendAudit(
-            category: .authorization,
-            action: "maintenance.requested",
-            outcome: .success,
-            principal: principal,
-            detailCode: kind
         )
-        enqueueOperation { [weak self] in
-            await self?.runLibraryJob(job, principal: principal)
+        return try admitAndSchedule(
+            job: job,
+            principal: principal,
+            requestedAction: "maintenance.requested",
+            requestedDetailCode: kind,
+            failureResult: .init(
+                state: .failed,
+                resultCode: "maintenance.failed",
+                auditAction: "maintenance.failed",
+                auditOutcome: .failure,
+                auditDetailCode: kind
+            )
+        ) { [weak self] running in
+            guard let self else { throw ServerMaintenanceError.unavailable }
+            return try await self.runLibraryJob(running)
         }
-        return job
     }
 
     func enqueueTranscodeCacheCleanup(requestedBy principal: ServerRequestPrincipal) throws -> ServerJob {
-        let counts = try experienceRepository.jobStateCounts()
-        let activeCount = counts[.queued, default: 0] + counts[.running, default: 0]
-        guard activeCount < 8 else { throw ServerMaintenanceError.queueFull }
-        let job = try experienceRepository.saveJob(ServerJob(
+        let job = ServerJob(
             kind: "transcode-cache.clear",
             requestedByUserID: principal.userID
-        ))
-        try appendAudit(
-            category: .authorization,
-            action: "transcode-cache.clear.requested",
-            outcome: .success,
-            principal: principal,
-            detailCode: "job.queued"
         )
-        enqueueOperation { [experienceRepository, identityRepository, transcodeCacheCleanup] in
-            var running = job
-            running.state = .running
-            running.startedAt = Date()
-            _ = try? experienceRepository.saveJob(running)
+        return try admitAndSchedule(
+            job: job,
+            principal: principal,
+            requestedAction: "transcode-cache.clear.requested",
+            requestedDetailCode: "job.queued",
+            failureResult: .init(
+                state: .failed,
+                resultCode: "cache.failed",
+                auditAction: "transcode-cache.clear.failed",
+                auditOutcome: .failure,
+                auditDetailCode: "result.unknown"
+            )
+        ) { [transcodeCacheCleanup] _ in
             let removedSessionCount = transcodeCacheCleanup()
-            running.state = .succeeded
-            running.progress = 1
-            running.resultCode = removedSessionCount == 0 ? "cache.already-empty" : "cache.cleared"
-            running.finishedAt = Date()
-            _ = try? experienceRepository.saveJob(running)
-            try? identityRepository.appendSecurityEvent(ServerSecurityEvent(
-                category: .authorization,
-                action: "transcode-cache.cleared",
-                outcome: .success,
-                actorUserID: principal.userID,
-                sessionID: principal.sessionID,
-                deviceID: principal.deviceID,
-                detailCode: removedSessionCount == 0 ? "cache.already-empty" : "cache.sessions-removed"
-            ))
+            return .init(
+                state: .succeeded,
+                resultCode: removedSessionCount == 0 ? "cache.already-empty" : "cache.cleared",
+                auditAction: "transcode-cache.cleared",
+                auditOutcome: .success,
+                auditDetailCode: removedSessionCount == 0 ? "cache.already-empty" : "cache.sessions-removed"
+            )
         }
-        return job
     }
 
-    private func runLibraryJob(_ job: ServerJob, principal: ServerRequestPrincipal) async {
-        var running = job
-        running.state = .running
-        running.startedAt = Date()
-        _ = try? experienceRepository.saveJob(running)
+    private func runLibraryJob(_ job: ServerJob) async throws -> ServerMaintenanceOperationResult {
+        if job.kind == "library.reindex" {
+            // FTS5 external-content index rebuilds from the authoritative media table.
+            // It does not need to touch media files or source credentials.
+            try database.execute("INSERT INTO media_items_fts(media_items_fts) VALUES ('rebuild')")
+            return .init(
+                state: .succeeded,
+                resultCode: "index.rebuilt",
+                auditAction: "maintenance.completed",
+                auditOutcome: .success,
+                auditDetailCode: job.kind
+            )
+        }
+        // 网页只能触发已有本地普通媒体库的完整扫描；远程来源、URL、SMB/FTP
+        // 和保险库仍由桌面宿主管理，避免 Web 进程接触来源凭据或未解锁隐私路径。
+        let sources = try sourceRepository.fetchAll().filter {
+            $0.sourceKind == .local && $0.mediaType != .privateCollection &&
+                (job.kind != "metadata.refresh" || $0.includeInMetadataFetch)
+        }
+        let scanner = MediaScanner(
+            thumbnailGenerator: nil,
+            mediaRepository: mediaRepository
+        )
+        var errorCount = 0
+        for (index, source) in sources.enumerated() {
+            let summary = await scanner.scan(source: source, settings: AppSettings(), progress: { _ in })
+            errorCount += summary.errors.count
+            try experienceRepository.updateRunningJobProgress(
+                id: job.id,
+                progress: sources.isEmpty ? 1 : Double(index + 1) / Double(sources.count)
+            )
+        }
+        let operation = job.kind == "metadata.refresh" ? "metadata" : "scan"
+        return .init(
+            state: errorCount == 0 ? .succeeded : .failed,
+            resultCode: errorCount == 0
+                ? (sources.isEmpty ? "\(operation).no-eligible-sources" : "\(operation).completed")
+                : "\(operation).completed-with-errors",
+            auditAction: errorCount == 0 ? "maintenance.completed" : "maintenance.failed",
+            auditOutcome: errorCount == 0 ? .success : .failure,
+            auditDetailCode: job.kind
+        )
+    }
+
+    private func admitAndSchedule(
+        job: ServerJob,
+        principal: ServerRequestPrincipal,
+        requestedAction: String,
+        requestedDetailCode: String,
+        failureResult: ServerMaintenanceOperationResult,
+        operation: @escaping @Sendable (ServerJob) async throws -> ServerMaintenanceOperationResult
+    ) throws -> ServerJob {
+        operationLock.lock()
+        defer { operationLock.unlock() }
+        guard acceptingJobs else { throw ServerMaintenanceError.unavailable }
+        let committed: ServerJob
         do {
-            if job.kind == "library.reindex" {
-                // FTS5 external-content index rebuilds from the authoritative media table.
-                // It does not need to touch media files or source credentials.
-                try database.execute("INSERT INTO media_items_fts(media_items_fts) VALUES ('rebuild')")
-                running.state = .succeeded
-                running.progress = 1
-                running.resultCode = "index.rebuilt"
-                running.finishedAt = Date()
-                _ = try experienceRepository.saveJob(running)
-                try identityRepository.appendSecurityEvent(ServerSecurityEvent(
-                    category: .authorization,
-                    action: "maintenance.completed",
+            committed = try experienceRepository.admitJob(job) {
+                try securityEventAppender(event(
+                    action: requestedAction,
                     outcome: .success,
-                    actorUserID: principal.userID,
-                    sessionID: principal.sessionID,
-                    deviceID: principal.deviceID,
-                    detailCode: job.kind
+                    principal: principal,
+                    detailCode: requestedDetailCode
                 ))
+            }
+        } catch ServerJobAdmissionError.queueFull {
+            throw ServerMaintenanceError.queueFull
+        } catch ServerJobAdmissionError.exclusiveJobConflict {
+            throw ServerMaintenanceError.exclusiveJobActive
+        } catch {
+            throw error
+        }
+
+        let predecessor = operationTail
+        operationTail = Task.detached(priority: .utility) { [self] in
+            _ = await predecessor?.value
+            await execute(
+                committed,
+                principal: principal,
+                failureResult: failureResult,
+                operation: operation
+            )
+        }
+        return committed
+    }
+
+    private func execute(
+        _ job: ServerJob,
+        principal: ServerRequestPrincipal,
+        failureResult: ServerMaintenanceOperationResult,
+        operation: @escaping @Sendable (ServerJob) async throws -> ServerMaintenanceOperationResult
+    ) async {
+        let running: ServerJob
+        do {
+            try hooks.beforeOperationStart(job)
+            try hooks.beforeRunningPersistence(job)
+            guard let claimed = try experienceRepository.beginJob(id: job.id) else {
+                pauseAfterLifecycleFailure(code: "job.claim-conflict")
                 return
             }
-            // 网页只能触发已有本地普通媒体库的完整扫描；远程来源、URL、SMB/FTP
-            // 和保险库仍由桌面宿主管理，避免 Web 进程接触来源凭据或未解锁隐私路径。
-            let sources = try sourceRepository.fetchAll().filter {
-                $0.sourceKind == .local && $0.mediaType != .privateCollection &&
-                    (job.kind != "metadata.refresh" || $0.includeInMetadataFetch)
-            }
-            let scanner = MediaScanner(
-                thumbnailGenerator: nil,
-                mediaRepository: mediaRepository
-            )
-            var errorCount = 0
-            for (index, source) in sources.enumerated() {
-                let summary = await scanner.scan(source: source, settings: AppSettings(), progress: { _ in })
-                errorCount += summary.errors.count
-                running.progress = sources.isEmpty ? 1 : Double(index + 1) / Double(sources.count)
-                _ = try? experienceRepository.saveJob(running)
-            }
-            running.state = errorCount == 0 ? .succeeded : .failed
-            running.progress = 1
-            let operation = job.kind == "metadata.refresh" ? "metadata" : "scan"
-            running.resultCode = errorCount == 0
-                ? (sources.isEmpty ? "\(operation).no-eligible-sources" : "\(operation).completed")
-                : "\(operation).completed-with-errors"
-            running.finishedAt = Date()
-            _ = try experienceRepository.saveJob(running)
-            try identityRepository.appendSecurityEvent(ServerSecurityEvent(
-                category: .authorization,
-                action: errorCount == 0 ? "maintenance.completed" : "maintenance.failed",
-                outcome: errorCount == 0 ? .success : .failure,
-                actorUserID: principal.userID,
-                sessionID: principal.sessionID,
-                deviceID: principal.deviceID,
-                detailCode: job.kind
-            ))
+            running = claimed
         } catch {
-            running.state = .failed
-            running.resultCode = "maintenance.failed"
-            running.finishedAt = Date()
-            _ = try? experienceRepository.saveJob(running)
-            try? identityRepository.appendSecurityEvent(ServerSecurityEvent(
+            try? experienceRepository.markLifecyclePersistenceFailure(
+                id: job.id,
+                expectedState: .queued,
+                resultCode: "job.start-persistence-failed"
+            )
+            pauseAfterLifecycleFailure(code: "job.start-persistence-failed")
+            return
+        }
+
+        let result: ServerMaintenanceOperationResult
+        do {
+            result = try await operation(running)
+        } catch {
+            result = failureResult
+        }
+        do {
+            try hooks.beforeTerminalPersistence(running)
+            _ = try experienceRepository.finishRunningJob(
+                id: running.id,
+                state: result.state,
+                resultCode: result.resultCode
+            ) {
+                try securityEventAppender(event(
+                    action: result.auditAction,
+                    outcome: result.auditOutcome,
+                    principal: principal,
+                    detailCode: result.auditDetailCode
+                ))
+            }
+        } catch {
+            try? experienceRepository.markLifecyclePersistenceFailure(
+                id: running.id,
+                expectedState: .running,
+                resultCode: "job.finalization-failed"
+            )
+            pauseAfterLifecycleFailure(code: "job.finalization-failed")
+        }
+    }
+
+    private func recoverInterruptedJobsFromPreviousExecutor() throws {
+        _ = try experienceRepository.interruptActiveJobs {
+            try securityEventAppender(ServerSecurityEvent(
                 category: .authorization,
-                action: "maintenance.failed",
+                action: "maintenance.recovered",
                 outcome: .failure,
-                actorUserID: principal.userID,
-                sessionID: principal.sessionID,
-                deviceID: principal.deviceID,
-                detailCode: job.kind
+                detailCode: "jobs.interrupted"
             ))
         }
     }
 
-    private func enqueueOperation(_ operation: @escaping @Sendable () async -> Void) {
-        operationLock.lock()
-        let predecessor = operationTail
-        let task = Task.detached(priority: .utility) {
-            _ = await predecessor?.value
-            await operation()
+    private func pauseAfterLifecycleFailure(code: String) {
+        operationLock.withLock {
+            acceptingJobs = false
+            storedDiagnosticCode = code
         }
-        operationTail = task
-        operationLock.unlock()
     }
 
-    private func appendAudit(
-        category: ServerSecurityEventCategory,
+    private func event(
         action: String,
         outcome: ServerSecurityEventOutcome,
         principal: ServerRequestPrincipal,
-        detailCode: String?
-    ) throws {
-        try identityRepository.appendSecurityEvent(ServerSecurityEvent(
-            category: category,
+        detailCode: String
+    ) throws -> ServerSecurityEvent {
+        let actorUserID = try identityRepository.user(id: principal.userID) == nil
+            ? nil
+            : principal.userID
+        return ServerSecurityEvent(
+            category: .authorization,
             action: action,
             outcome: outcome,
-            actorUserID: principal.userID,
+            actorUserID: actorUserID,
             sessionID: principal.sessionID,
             deviceID: principal.deviceID,
             detailCode: detailCode
-        ))
+        )
     }
 
     private func secureBackupDirectory() throws {
@@ -446,6 +553,9 @@ final class ServerMaintenanceService: @unchecked Sendable {
 enum ServerMaintenanceError: Error, Equatable {
     case unsupportedJob
     case queueFull
+    case exclusiveJobActive
+    case unavailable
+    case restoreHostActive
     case backupNotFound
     case invalidBackup
     case invalidQuery

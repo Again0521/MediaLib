@@ -1,5 +1,14 @@
 import Foundation
 
+/// Methods accepted by both HTTP transports before route-specific validation.
+/// Keep this list transport-level: individual handlers still decide which
+/// method is valid for a concrete path.
+enum ServerHTTPMethodContract {
+    static let orderedRawValues = ["GET", "HEAD", "POST", "PATCH", "PUT", "DELETE"]
+    static let allowedRawValues = Set(orderedRawValues)
+    static let mutatingRawValues: Set<String> = ["POST", "PATCH", "PUT", "DELETE"]
+}
+
 /// 当前回环 HTTP 入口的严格语法与来源校验。完整 HTTP 框架接入后，这些规则仍应作为
 /// 中间件和契约测试保留，不能依赖框架默认值来防止请求走私或 DNS 重绑定。
 struct HTTPRequestSecurityPolicy {
@@ -54,7 +63,7 @@ struct HTTPRequestSecurityPolicy {
         let method = String(requestParts[0])
         let target = String(requestParts[1])
         let path = target.split(separator: "?", maxSplits: 1).first.map(String.init) ?? target
-        guard Self.allowedMethods.contains(method),
+        guard ServerHTTPMethodContract.allowedRawValues.contains(method),
               target.utf8.count <= 2_048,
               target.first == "/",
               !target.hasPrefix("//"),
@@ -148,7 +157,7 @@ struct HTTPRequestSecurityPolicy {
         guard declaredBodyLength == bodyLength else { return .badRequest }
         if declaredBodyLength > 0 {
             guard declaredBodyLength <= 4_096 else { return .payloadTooLarge }
-            guard Self.mutatingMethods.contains(method),
+            guard ServerHTTPMethodContract.mutatingRawValues.contains(method),
                   let contentType = headers["content-type"]?.first?.lowercased(),
                   (Self.isJSONBodyPath(path) &&
                     (contentType == "application/json" || contentType == "application/json; charset=utf-8")) ||
@@ -165,7 +174,7 @@ struct HTTPRequestSecurityPolicy {
         if headers["sec-fetch-site"]?.first?.lowercased() == "cross-site", path != "/login" {
             return .forbidden
         }
-        if Self.mutatingMethods.contains(method) {
+        if ServerHTTPMethodContract.mutatingRawValues.contains(method) {
             if isVerifiedNativeMlinkRequest(headers, path: path) {
                 // 原生 Mlink 请求没有浏览器 Cookie，也不能携带 Origin；它通过 Bearer
                 // 令牌在路由层认证。例外仅限两条客户端状态同步端点，绝不能成为
@@ -294,8 +303,6 @@ struct HTTPRequestSecurityPolicy {
 
     // v30 的设置文档使用 PATCH/PUT/DELETE；它们与 POST 一样必须通过同源、CSRF、
     // Content-Type 和正文边界校验，不能因为方法不同而成为历史清理接口的旁路。
-    private static let allowedMethods: Set<String> = ["GET", "HEAD", "POST", "PATCH", "PUT", "DELETE"]
-    private static let mutatingMethods: Set<String> = ["POST", "PATCH", "PUT", "DELETE"]
     private static let jsonBodyPaths: Set<String> = [
         "/api/v1/auth/login",
         "/api/v1/auth/refresh"

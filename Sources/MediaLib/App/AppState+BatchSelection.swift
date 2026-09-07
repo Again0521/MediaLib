@@ -34,54 +34,60 @@ extension AppState {
     func batchSetWatchlist(_ watchlist: Bool) {
         let targets = currentSelectionItems.filter { $0.type != .music }
         guard !targets.isEmpty else { return }
-        guard let mediaRepository else { return }
-        var hadError = false
+        guard let database, let mediaRepository else { return }
         for item in targets {
             updateWatchlistInMemory(id: item.id, watchlist: watchlist)
-            do {
-                try mediaRepository.setWatchlist(id: item.id, watchlist: watchlist)
-            } catch {
-                hadError = true
-                logger?.log("批量更新想看状态失败：\(error.localizedDescription)", level: .warning)
-            }
-            // 与单条 toggleWatchlist 保持一致：批量改动也推送到 Trakt 想看清单。
-            syncTraktWatchlist(item, add: watchlist)
         }
-        if hadError {
-            alert = AppAlert(title: "部分更新失败", message: "有条目的想看状态未能更新。")
-        } else {
-            showFloatingNotice(
-                title: watchlist ? "已加入想看" : "已从想看移除",
-                message: "\(targets.count) 个内容",
-                kind: watchlist ? .success : .info,
-                duration: 3.2
-            )
+        Task { [weak self, database, mediaRepository] in
+            do {
+                try await database.transactionAsync {
+                    for item in targets {
+                        try mediaRepository.setWatchlist(id: item.id, watchlist: watchlist)
+                    }
+                }
+                guard let self else { return }
+                // 外部同步不放入可回滚数据库闭包，避免未来任何重试重复网络副作用。
+                targets.forEach { self.syncTraktWatchlist($0, add: watchlist) }
+                self.showFloatingNotice(
+                    title: watchlist ? "已加入想看" : "已从想看移除",
+                    message: "\(targets.count) 个内容",
+                    kind: watchlist ? .success : .info,
+                    duration: 3.2
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.showError("批量更新想看状态失败", error)
+            }
         }
     }
 
     func batchUpdateRating(_ rating: Double?) {
         let targets = currentSelectionItems
         guard !targets.isEmpty else { return }
-        guard let mediaRepository else { return }
-        var hadError = false
+        guard let database, let mediaRepository else { return }
         for item in targets {
             updateRatingInMemory(id: item.id, rating: rating)
-            do {
-                try mediaRepository.updateRating(id: item.id, rating: rating)
-            } catch {
-                hadError = true
-                logger?.log("批量更新评级失败：\(error.localizedDescription)", level: .warning)
-            }
         }
-        if hadError {
-            alert = AppAlert(title: "部分更新失败", message: "有条目的评级未能更新。")
-        } else {
-            showFloatingNotice(
-                title: rating == nil ? "已清除评级" : "评级已更新",
-                message: "\(targets.count) 个内容 · \(userRatingNoticeSuffix(rating))",
-                kind: .success,
-                duration: 3.2
-            )
+        Task { [weak self, database, mediaRepository] in
+            do {
+                try await database.transactionAsync {
+                    for item in targets {
+                        try mediaRepository.updateRating(id: item.id, rating: rating)
+                    }
+                }
+                guard let self else { return }
+                self.showFloatingNotice(
+                    title: rating == nil ? "已清除评级" : "评级已更新",
+                    message: "\(targets.count) 个内容 · \(self.userRatingNoticeSuffix(rating))",
+                    kind: .success,
+                    duration: 3.2
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.showError("批量更新评级失败", error)
+            }
         }
     }
 
@@ -95,12 +101,16 @@ extension AppState {
     func batchRemoveFromLibrary() {
         let ids = Array(selectedItemIDs)
         guard !ids.isEmpty, let mediaRepository else { return }
-        do {
-            try mediaRepository.deleteItems(ids: ids)
-            reload()
-            exitSelectionMode()
-        } catch {
-            showError("批量移除失败", error)
+        Task { [weak self, mediaRepository] in
+            do {
+                try await mediaRepository.deleteItemsAsync(ids: ids)
+                self?.reload()
+                self?.exitSelectionMode()
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.showError("批量移除失败", error)
+            }
         }
     }
 }

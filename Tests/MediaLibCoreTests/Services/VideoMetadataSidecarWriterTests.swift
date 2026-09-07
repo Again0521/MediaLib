@@ -26,8 +26,8 @@ final class VideoMetadataSidecarWriterTests: XCTestCase {
 
         XCTAssertTrue(xml.contains("<movie>"))
         XCTAssertTrue(xml.contains("<title>New &lt;Title&gt;</title>"))
-        XCTAssertTrue(xml.contains("<originaltitle>Original &quot;Quoted&quot;</originaltitle>"))
-        XCTAssertTrue(xml.contains("<plot>Plot with &apos;quotes&apos; &amp; symbols</plot>"))
+        XCTAssertTrue(xml.contains("<originaltitle>Original \"Quoted\"</originaltitle>"))
+        XCTAssertTrue(xml.contains("<plot>Plot with 'quotes' &amp; symbols</plot>"))
         XCTAssertTrue(xml.contains("<uniqueid type=\"tmdb\">123&amp;456</uniqueid>"))
         XCTAssertTrue(xml.contains("<genre>Drama &gt; Action</genre>"))
     }
@@ -81,14 +81,30 @@ final class VideoMetadataSidecarWriterTests: XCTestCase {
         XCTAssertTrue(highBoundary.contains("<rating>10.0</rating>"))
     }
 
-    func testXMLContentUsesTVShowRootForAllNonMovieVideoCollections() {
-        for type in [MediaType.tvShow, .anime, .documentary, .variety, .homeVideo, .episode] {
+    func testXMLContentUsesTVShowRootForCollectionsWithoutAFile() {
+        for type in [MediaType.tvShow, .anime, .documentary, .variety, .episode] {
             let item = MediaItem(id: "item-\(type.rawValue)", type: type, title: "Collection")
 
             let xml = VideoMetadataSidecarWriter.xmlContent(for: item, update: MediaMetadataUpdate())
 
             XCTAssertTrue(xml.contains("<tvshow>"), "Expected \(type) to use the tvshow root")
             XCTAssertTrue(xml.contains("</tvshow>"), "Expected \(type) to close the tvshow root")
+        }
+    }
+
+    func testXMLContentUsesMovieRootForFileBackedVideoCategories() {
+        for type in [MediaType.documentary, .variety, .homeVideo, .privateCollection] {
+            let item = MediaItem(
+                id: "item-\(type.rawValue)",
+                type: type,
+                title: "File Backed",
+                filePath: "/tmp/file-backed.mkv"
+            )
+
+            let xml = VideoMetadataSidecarWriter.xmlContent(for: item, update: MediaMetadataUpdate())
+
+            XCTAssertTrue(xml.contains("<movie>"), "Expected file-backed \(type) to use the movie root")
+            XCTAssertTrue(xml.contains("</movie>"), "Expected file-backed \(type) to close the movie root")
         }
     }
 
@@ -106,10 +122,18 @@ final class VideoMetadataSidecarWriterTests: XCTestCase {
         XCTAssertTrue(xml.contains("<plot>中文简介</plot>"))
     }
 
-    func testWriteOverwritesExistingSidecar() async throws {
+    func testWriteMergesSupportedFieldsAndPreservesUnknownContent() async throws {
         let directory = try temporaryDirectory()
         let targetURL = directory.appendingPathComponent("movie.nfo")
-        try "old".write(to: targetURL, atomically: true, encoding: .utf8)
+        try """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <movie custom="keep">
+          <title language="zh">Old Title</title>
+          <studio id="42">Keep Studio</studio>
+          <uniqueid type="imdb" default="true">tt123</uniqueid>
+          <rating source="legacy">4.0</rating>
+        </movie>
+        """.write(to: targetURL, atomically: true, encoding: .utf8)
         let item = MediaItem(id: "movie-4", type: .movie, title: "Replacement")
 
         let wrote = try await VideoMetadataSidecarWriter.write(
@@ -120,9 +144,133 @@ final class VideoMetadataSidecarWriterTests: XCTestCase {
 
         XCTAssertTrue(wrote)
         let xml = try String(contentsOf: targetURL, encoding: .utf8)
-        XCTAssertFalse(xml.contains("old"))
-        XCTAssertTrue(xml.contains("<title>Replacement</title>"))
-        XCTAssertTrue(xml.contains("<rating>9.25</rating>"))
+        XCTAssertTrue(xml.contains("<title language=\"zh\">Old Title</title>"))
+        XCTAssertTrue(xml.contains("<rating source=\"legacy\">9.25</rating>"))
+        XCTAssertTrue(xml.contains("custom=\"keep\""))
+        XCTAssertTrue(xml.contains("<studio id=\"42\">Keep Studio</studio>"))
+        XCTAssertTrue(xml.contains("<uniqueid type=\"imdb\" default=\"true\">tt123</uniqueid>"))
+    }
+
+    func testMalformedAndUnsafeExistingDocumentsAreNeverOverwritten() async throws {
+        let directory = try temporaryDirectory()
+        let targetURL = directory.appendingPathComponent("unsafe.nfo")
+        let item = MediaItem(id: "unsafe", type: .movie, title: "Safe")
+        let inputs: [(String, VideoMetadataSidecarWriteError)] = [
+            ("<movie><title>broken", .malformedExistingDocument),
+            ("<!DOCTYPE movie [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]><movie><title>&xxe;</title></movie>", .unsafeDocumentType),
+            ("<tvshow><title>Wrong Root</title></tvshow>", .incompatibleRoot(expected: "movie", found: "tvshow"))
+        ]
+
+        for (original, expectedError) in inputs {
+            try original.write(to: targetURL, atomically: true, encoding: .utf8)
+            do {
+                _ = try await VideoMetadataSidecarWriter.writeSafely(
+                    item: item,
+                    update: MediaMetadataUpdate(title: "Must Not Replace"),
+                    to: targetURL
+                )
+                XCTFail("expected unsafe existing NFO to be rejected")
+            } catch let error as VideoMetadataSidecarWriteError {
+                XCTAssertEqual(error, expectedError)
+            }
+            XCTAssertEqual(try String(contentsOf: targetURL, encoding: .utf8), original)
+        }
+    }
+
+    func testSymbolicLinkTargetIsRejectedWithoutChangingDestination() async throws {
+        let directory = try temporaryDirectory()
+        let destinationURL = directory.appendingPathComponent("destination.nfo")
+        let targetURL = directory.appendingPathComponent("linked.nfo")
+        let original = "<movie><title>Destination</title></movie>"
+        try original.write(to: destinationURL, atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: targetURL, withDestinationURL: destinationURL)
+
+        do {
+            _ = try await VideoMetadataSidecarWriter.writeSafely(
+                item: MediaItem(id: "linked", type: .movie, title: "Linked"),
+                update: MediaMetadataUpdate(title: "Must Not Write"),
+                to: targetURL
+            )
+            XCTFail("expected symbolic-link target rejection")
+        } catch let error as VideoMetadataSidecarWriteError {
+            XCTAssertEqual(error, .symbolicLinkTarget)
+        }
+        XCTAssertEqual(try String(contentsOf: destinationURL, encoding: .utf8), original)
+    }
+
+    func testConcurrentExternalModificationWinsAndLeavesNoTemporaryFiles() async throws {
+        let directory = try temporaryDirectory()
+        let targetURL = directory.appendingPathComponent("concurrent.nfo")
+        try "<movie><title>Original</title></movie>".write(to: targetURL, atomically: true, encoding: .utf8)
+        let externallyModified = "<movie><title>External Edit</title><custom>keep</custom></movie>"
+        let hooks = VideoMetadataSidecarWriteHooks(
+            beforeCommit: {
+                try externallyModified.write(to: targetURL, atomically: true, encoding: .utf8)
+            },
+            replaceExisting: VideoMetadataSidecarWriteHooks.live.replaceExisting
+        )
+
+        do {
+            _ = try await VideoMetadataSidecarWriter.writeSafely(
+                item: MediaItem(id: "concurrent", type: .movie, title: "Original"),
+                update: MediaMetadataUpdate(title: "MediaLIB Edit"),
+                to: targetURL,
+                hooks: hooks
+            )
+            XCTFail("expected concurrent modification rejection")
+        } catch let error as VideoMetadataSidecarWriteError {
+            XCTAssertEqual(error, .concurrentModification)
+        }
+        XCTAssertEqual(try String(contentsOf: targetURL, encoding: .utf8), externallyModified)
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains { $0.contains("medialib-nfo-") })
+    }
+
+    func testReplacementFailureRestoresOriginalAndLeavesNoBackup() async throws {
+        struct InjectedFailure: Error {}
+        let directory = try temporaryDirectory()
+        let targetURL = directory.appendingPathComponent("replace-failure.nfo")
+        let original = Data("<movie><title>Original</title><custom>keep</custom></movie>".utf8)
+        try original.write(to: targetURL)
+        let hooks = VideoMetadataSidecarWriteHooks(
+            beforeCommit: {},
+            replaceExisting: { targetURL, _, backupName in
+                let backupURL = targetURL.deletingLastPathComponent().appendingPathComponent(backupName)
+                try FileManager.default.moveItem(at: targetURL, to: backupURL)
+                throw InjectedFailure()
+            }
+        )
+
+        do {
+            _ = try await VideoMetadataSidecarWriter.writeSafely(
+                item: MediaItem(id: "failure", type: .movie, title: "Original"),
+                update: MediaMetadataUpdate(title: "Replacement"),
+                to: targetURL,
+                hooks: hooks
+            )
+            XCTFail("expected injected replacement failure")
+        } catch let error as VideoMetadataSidecarWriteError {
+            XCTAssertEqual(error, .replacementFailed)
+        }
+        XCTAssertEqual(try Data(contentsOf: targetURL), original)
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains { $0.contains("medialib-nfo-") })
+    }
+
+    func testReadOnlyExistingTargetReturnsDistinctNotWritableResult() async throws {
+        let directory = try temporaryDirectory()
+        let targetURL = directory.appendingPathComponent("read-only.nfo")
+        let original = Data("<movie><title>Read Only</title></movie>".utf8)
+        try original.write(to: targetURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o400], ofItemAtPath: targetURL.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: targetURL.path) }
+
+        let outcome = try await VideoMetadataSidecarWriter.writeSafely(
+            item: MediaItem(id: "read-only", type: .movie, title: "Read Only"),
+            update: MediaMetadataUpdate(title: "Must Not Write"),
+            to: targetURL
+        )
+
+        XCTAssertEqual(outcome, .skipped(.notWritable))
+        XCTAssertEqual(try Data(contentsOf: targetURL), original)
     }
 
     func testWriteReturnsFalseWhenDirectoryIsNotWritableTarget() async throws {

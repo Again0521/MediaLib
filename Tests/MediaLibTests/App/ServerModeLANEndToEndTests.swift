@@ -23,7 +23,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
         root = nil
     }
 
-    func testIndependentTrustedClientCanLoginMutateAndReadMediaRangeOverLANHTTPS() async throws {
+    func testIndependentTrustedClientCanLoginUseAllBusinessMethodsAndReadMediaRangeOverLANHTTPS() async throws {
         guard let address = LANNetworkAddressResolver.preferredPrivateIPv4Address() else {
             throw XCTSkip("当前测试机没有私有 IPv4 地址")
         }
@@ -128,6 +128,130 @@ final class ServerModeLANEndToEndTests: XCTestCase {
         let (_, stateResponse) = try await session.data(for: stateRequest)
         XCTAssertEqual((stateResponse as? HTTPURLResponse)?.statusCode, 200)
 
+        let preferencesURL = baseURL.appendingPathComponent("api/v1/me/preferences")
+        let (_, initialPreferencesResponse) = try await session.data(
+            for: URLRequest(url: preferencesURL)
+        )
+        XCTAssertEqual((initialPreferencesResponse as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(
+            (initialPreferencesResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "ETag"),
+            "\"0\""
+        )
+
+        var preferences = ServerUserExperiencePreferences()
+        preferences.preferredAudioLanguage = "zh-Hans"
+        preferences.subtitleMode = .preferForced
+        let preferencesBody = try JSONEncoder().encode(preferences)
+        var rejectedPatch = mutationRequest(
+            url: preferencesURL,
+            method: "PATCH",
+            body: preferencesBody,
+            origin: baseURL,
+            csrf: nil
+        )
+        rejectedPatch.setValue("\"0\"", forHTTPHeaderField: "If-Match")
+        let (_, rejectedPatchResponse) = try await session.data(for: rejectedPatch)
+        XCTAssertEqual((rejectedPatchResponse as? HTTPURLResponse)?.statusCode, 403)
+
+        let (_, unchangedPreferencesResponse) = try await session.data(
+            for: URLRequest(url: preferencesURL)
+        )
+        XCTAssertEqual(
+            (unchangedPreferencesResponse as? HTTPURLResponse)?.value(forHTTPHeaderField: "ETag"),
+            "\"0\"",
+            "被拒绝的 PATCH 不能修改偏好版本"
+        )
+
+        var patch = rejectedPatch
+        patch.setValue(csrf, forHTTPHeaderField: "X-MediaLIB-CSRF")
+        let (patchData, patchResponse) = try await session.data(for: patch)
+        let patchHTTP = try XCTUnwrap(patchResponse as? HTTPURLResponse)
+        XCTAssertEqual(patchHTTP.statusCode, 200, String(data: patchData, encoding: .utf8) ?? "")
+        XCTAssertEqual(patchHTTP.value(forHTTPHeaderField: "ETag"), "\"1\"")
+
+        let (_, stalePatchResponse) = try await session.data(for: patch)
+        XCTAssertEqual((stalePatchResponse as? HTTPURLResponse)?.statusCode, 409)
+        let unknownBody = Data(#"{"unknown":true}"#.utf8)
+        var unknownPatch = mutationRequest(
+            url: preferencesURL,
+            method: "PATCH",
+            body: unknownBody,
+            origin: baseURL,
+            csrf: csrf
+        )
+        unknownPatch.setValue("\"1\"", forHTTPHeaderField: "If-Match")
+        let (_, unknownPatchResponse) = try await session.data(for: unknownPatch)
+        XCTAssertEqual((unknownPatchResponse as? HTTPURLResponse)?.statusCode, 400)
+
+        let overrideURL = baseURL.appendingPathComponent(
+            "api/v1/me/playback-overrides/media/lan-e2e-movie"
+        )
+        let overrideBody = Data(#"{"audioFingerprint":"audio-main","subtitleDisabled":true}"#.utf8)
+        let rejectedPut = mutationRequest(
+            url: overrideURL,
+            method: "PUT",
+            body: overrideBody,
+            origin: baseURL,
+            csrf: nil
+        )
+        let (_, rejectedPutResponse) = try await session.data(for: rejectedPut)
+        XCTAssertEqual((rejectedPutResponse as? HTTPURLResponse)?.statusCode, 403)
+        XCTAssertNil(try experienceRepository().trackOverride(
+            userID: ServerIdentityRepository.initialAdministratorUserID,
+            scope: .media,
+            scopeID: "lan-e2e-movie"
+        ))
+
+        let put = mutationRequest(
+            url: overrideURL,
+            method: "PUT",
+            body: overrideBody,
+            origin: baseURL,
+            csrf: csrf
+        )
+        let (putData, putResponse) = try await session.data(for: put)
+        XCTAssertEqual(
+            (putResponse as? HTTPURLResponse)?.statusCode,
+            200,
+            String(data: putData, encoding: .utf8) ?? ""
+        )
+        XCTAssertNotNil(try experienceRepository().trackOverride(
+            userID: ServerIdentityRepository.initialAdministratorUserID,
+            scope: .media,
+            scopeID: "lan-e2e-movie"
+        ))
+
+        let invalidDeleteBody = Data("{}".utf8)
+        let rejectedDelete = mutationRequest(
+            url: overrideURL,
+            method: "DELETE",
+            body: invalidDeleteBody,
+            origin: baseURL,
+            csrf: csrf
+        )
+        let (_, rejectedDeleteResponse) = try await session.data(for: rejectedDelete)
+        XCTAssertEqual((rejectedDeleteResponse as? HTTPURLResponse)?.statusCode, 400)
+        XCTAssertNotNil(try experienceRepository().trackOverride(
+            userID: ServerIdentityRepository.initialAdministratorUserID,
+            scope: .media,
+            scopeID: "lan-e2e-movie"
+        ), "被拒绝的 DELETE 不能删除轨道偏好")
+
+        let delete = mutationRequest(
+            url: overrideURL,
+            method: "DELETE",
+            body: Data(),
+            origin: baseURL,
+            csrf: csrf
+        )
+        let (_, deleteResponse) = try await session.data(for: delete)
+        XCTAssertEqual((deleteResponse as? HTTPURLResponse)?.statusCode, 204)
+        XCTAssertNil(try experienceRepository().trackOverride(
+            userID: ServerIdentityRepository.initialAdministratorUserID,
+            scope: .media,
+            scopeID: "lan-e2e-movie"
+        ))
+
         var rangeRequest = URLRequest(
             url: baseURL.appendingPathComponent("api/v1/stream/lan-e2e-movie")
         )
@@ -173,6 +297,31 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             userID: ServerIdentityRepository.initialAdministratorUserID,
             argon2idEncodedHash: try hasher.hash(password: password)
         )
+    }
+
+    private func experienceRepository() throws -> ServerExperienceRepository {
+        ServerExperienceRepository(database: try DatabaseManager(
+            url: root.appendingPathComponent("medialib.sqlite"),
+            backupDirectory: root.appendingPathComponent("backups", isDirectory: true)
+        ))
+    }
+
+    private func mutationRequest(
+        url: URL,
+        method: String,
+        body: Data,
+        origin: URL,
+        csrf: String?
+    ) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.httpBody = body
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(origin.absoluteString, forHTTPHeaderField: "Origin")
+        if let csrf {
+            request.setValue(csrf, forHTTPHeaderField: "X-MediaLIB-CSRF")
+        }
+        return request
     }
 
     private func waitForResponse(

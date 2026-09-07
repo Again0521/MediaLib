@@ -308,18 +308,21 @@ extension AppState {
     }
 
     private func writeVideoMetadataSidecarIfPossible(item: MediaItem, update: MediaMetadataUpdate) async throws {
-        guard let source = source(for: item), source.sourceKind == .local else { return }
-        let targetURL: URL?
-        if item.type == .movie, let filePath = item.filePath {
-            targetURL = URL(fileURLWithPath: filePath).deletingLastPathComponent().appendingPathComponent("movie.nfo")
-        } else if item.type == .tvShow || item.type == .anime {
-            let firstEpisodeURL = children(for: item).first?.filePath.map { URL(fileURLWithPath: $0) }
-            targetURL = firstEpisodeURL?.deletingLastPathComponent().appendingPathComponent("tvshow.nfo")
-        } else {
-            targetURL = nil
+        guard let source = source(for: item) else { return }
+        switch try await VideoMetadataSidecarPolicy.writeIfAllowed(
+            item: item,
+            update: update,
+            source: source,
+            childItems: children(for: item),
+            vaultUnlocked: canDisplayPrivateItems
+        ) {
+        case let .written(report):
+            if let warning = report.warning {
+                logger?.log(warning, level: .warning)
+            }
+        case let .skipped(reason):
+            logger?.log("视频 NFO 写回已跳过：\(reason.rawValue)", level: .warning)
         }
-        guard let targetURL else { return }
-        _ = try await VideoMetadataSidecarWriter.write(item: item, update: update, to: targetURL)
     }
 
     func updateMetadataInMemory(id: String, metadata: MediaMetadataUpdate) {

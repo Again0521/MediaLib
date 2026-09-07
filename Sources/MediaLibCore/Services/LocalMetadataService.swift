@@ -109,9 +109,9 @@ public final class LocalMetadataService: @unchecked Sendable {
     private func parseNFO(near videoURL: URL) -> LocalMetadata {
         let directory = videoURL.deletingLastPathComponent()
         let candidates = [
+            videoURL.deletingPathExtension().appendingPathExtension("nfo"),
             directory.appendingPathComponent("movie.nfo"),
-            directory.appendingPathComponent("tvshow.nfo"),
-            videoURL.deletingPathExtension().appendingPathExtension("nfo")
+            directory.appendingPathComponent("tvshow.nfo")
         ]
 
         return parseNFO(candidates: candidates)

@@ -1681,6 +1681,8 @@ final class LocalHTTPRouterTests: XCTestCase {
 
         XCTAssertEqual(response.statusCode, 503)
         XCTAssertEqual(String(data: response.body, encoding: .utf8), "{\"error\":\"Service Unavailable\"}")
+        XCTAssertTrue(response.additionalHeaders.contains("Retry-After: 1"))
+        XCTAssertFalse(response.serialized().contains(Data("SELECT".utf8)))
     }
 
     func testMutatingMethodsAreRejected() {

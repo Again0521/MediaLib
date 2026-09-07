@@ -18,6 +18,16 @@ public enum ServerExperienceRepositoryError: Error, Equatable, Sendable {
     case notFound
 }
 
+public enum ServerJobAdmissionError: Error, Equatable, Sendable {
+    case invalidJob
+    case queueFull
+    case exclusiveJobConflict
+}
+
+public enum ServerJobLifecycleError: Error, Equatable, Sendable {
+    case invalidTransition
+}
+
 public enum ServerAppearancePreference: String, Codable, CaseIterable, Sendable {
     case system, light, dark
 }

@@ -292,6 +292,188 @@ public final class ServerExperienceRepository: @unchecked Sendable {
         })
     }
 
+    public func job(id: String) throws -> ServerJob? {
+        try database.query(
+            """
+            SELECT id, kind, state, progress, result_code, created_at, started_at, finished_at, requested_by_user_id
+            FROM server_jobs
+            WHERE id = ?
+            LIMIT 1
+            """,
+            bindings: [.text(id)],
+            map: Self.job(from:)
+        ).first
+    }
+
+    /// Atomically checks capacity, inserts the queued job and records its acceptance audit.
+    /// The audit closure must write through the same DatabaseManager connection.
+    @discardableResult
+    public func admitJob(
+        _ job: ServerJob,
+        maximumActiveJobs: Int = 8,
+        appendAcceptanceAudit: () throws -> Void
+    ) throws -> ServerJob {
+        guard job.state == .queued, (1...1_000).contains(maximumActiveJobs) else {
+            throw ServerJobAdmissionError.invalidJob
+        }
+        return try database.transaction {
+            let activeRows = try database.query(
+                """
+                SELECT kind, COUNT(*)
+                FROM server_jobs
+                WHERE state IN ('queued', 'running')
+                GROUP BY kind
+                """
+            ) { ($0.string(0) ?? "", Int($0.int(1) ?? 0)) }
+            let activeCount = activeRows.reduce(0) { $0 + max($1.1, 0) }
+            let restoreActive = activeRows.contains { $0.0 == "database.restore" && $0.1 > 0 }
+            if job.kind == "database.restore" {
+                guard activeCount == 0 else { throw ServerJobAdmissionError.exclusiveJobConflict }
+            } else {
+                guard !restoreActive else { throw ServerJobAdmissionError.exclusiveJobConflict }
+                guard activeCount < maximumActiveJobs else { throw ServerJobAdmissionError.queueFull }
+            }
+            _ = try saveJob(job)
+            try appendAcceptanceAudit()
+            return job
+        }
+    }
+
+    /// Claims a queued job. Returning nil means another lifecycle state already owns it.
+    public func beginJob(id: String, at date: Date = Date()) throws -> ServerJob? {
+        try database.transaction {
+            guard var job = try job(id: id), job.state == .queued else { return nil }
+            job.state = .running
+            job.startedAt = date
+            _ = try saveJob(job)
+            return job
+        }
+    }
+
+    public func updateRunningJobProgress(id: String, progress: Double) throws {
+        guard progress.isFinite, (0...1).contains(progress) else {
+            throw ServerExperienceRepositoryError.invalidValue
+        }
+        try database.transaction {
+            guard var job = try job(id: id), job.state == .running else {
+                throw ServerJobLifecycleError.invalidTransition
+            }
+            job.progress = progress
+            _ = try saveJob(job)
+        }
+    }
+
+    /// Persists a terminal state and its completion audit in one transaction.
+    @discardableResult
+    public func finishRunningJob(
+        id: String,
+        state: ServerJobState,
+        resultCode: String,
+        at date: Date = Date(),
+        appendCompletionAudit: () throws -> Void
+    ) throws -> ServerJob {
+        guard state == .succeeded || state == .failed || state == .cancelled else {
+            throw ServerJobLifecycleError.invalidTransition
+        }
+        return try database.transaction {
+            guard var job = try job(id: id), job.state == .running else {
+                throw ServerJobLifecycleError.invalidTransition
+            }
+            job.state = state
+            job.progress = 1
+            job.resultCode = resultCode
+            job.finishedAt = date
+            _ = try saveJob(job)
+            try appendCompletionAudit()
+            return job
+        }
+    }
+
+    /// Best-effort fallback after lifecycle persistence itself failed. The code deliberately
+    /// says the result is unknown rather than claiming the external operation did not happen.
+    public func markLifecyclePersistenceFailure(
+        id: String,
+        expectedState: ServerJobState,
+        resultCode: String,
+        at date: Date = Date()
+    ) throws {
+        try database.transaction {
+            guard var job = try job(id: id), job.state == expectedState else {
+                throw ServerJobLifecycleError.invalidTransition
+            }
+            job.state = .failed
+            job.resultCode = resultCode
+            job.finishedAt = date
+            _ = try saveJob(job)
+        }
+    }
+
+    /// Marks work left by a previous executor as interrupted. Completed history is untouched,
+    /// and the summary audit is written only when this call changes at least one row.
+    @discardableResult
+    public func interruptActiveJobs(
+        at date: Date = Date(),
+        appendRecoveryAudit: () throws -> Void
+    ) throws -> Int {
+        try database.transaction {
+            let activeCount = try database.query(
+                "SELECT COUNT(*) FROM server_jobs WHERE state IN ('queued', 'running')"
+            ) { Int($0.int(0) ?? 0) }.first ?? 0
+            guard activeCount > 0 else { return 0 }
+            try database.execute(
+                """
+                UPDATE server_jobs
+                SET state = 'failed', progress = 1, result_code = 'job.interrupted', finished_at = ?
+                WHERE state IN ('queued', 'running')
+                """,
+                bindings: [.optionalDate(date)]
+            )
+            try appendRecoveryAudit()
+            return activeCount
+        }
+    }
+
+    /// A restore swaps in an older database. Reconcile its active records and then recreate the
+    /// current restore job as running so the normal terminal transition can finish truthfully.
+    @discardableResult
+    public func reconcileAfterRestore(
+        currentRestoreJob: ServerJob,
+        at date: Date = Date(),
+        appendRecoveryAudit: (_ interruptedCount: Int) throws -> Void
+    ) throws -> Int {
+        try database.transaction {
+            let activeCount = try database.query(
+                "SELECT COUNT(*) FROM server_jobs WHERE state IN ('queued', 'running')"
+            ) { Int($0.int(0) ?? 0) }.first ?? 0
+            if activeCount > 0 {
+                try database.execute(
+                    """
+                    UPDATE server_jobs
+                    SET state = 'failed', progress = 1, result_code = 'job.interrupted', finished_at = ?
+                    WHERE state IN ('queued', 'running')
+                    """,
+                    bindings: [.optionalDate(date)]
+                )
+            }
+            try database.execute("DELETE FROM server_jobs WHERE id = ?", bindings: [.text(currentRestoreJob.id)])
+            var restoredJob = currentRestoreJob
+            restoredJob.state = .running
+            restoredJob.startedAt = restoredJob.startedAt ?? date
+            restoredJob.finishedAt = nil
+            restoredJob.resultCode = nil
+            if let requesterID = restoredJob.requestedByUserID {
+                let requesterStillExists = try database.query(
+                    "SELECT EXISTS(SELECT 1 FROM server_users WHERE id = ?)",
+                    bindings: [.text(requesterID)]
+                ) { $0.int(0) == 1 }.first ?? false
+                if !requesterStillExists { restoredJob.requestedByUserID = nil }
+            }
+            _ = try saveJob(restoredJob)
+            try appendRecoveryAudit(activeCount)
+            return activeCount
+        }
+    }
+
     @discardableResult
     public func saveJob(_ job: ServerJob) throws -> ServerJob {
         guard job.isValid else { throw ServerExperienceRepositoryError.invalidValue }
@@ -314,6 +496,20 @@ public final class ServerExperienceRepository: @unchecked Sendable {
             ]
         )
         return job
+    }
+
+    private static func job(from row: SQLiteRow) throws -> ServerJob {
+        ServerJob(
+            id: row.string(0) ?? UUID().uuidString,
+            kind: row.string(1) ?? "unknown",
+            state: ServerJobState(rawValue: row.string(2) ?? "") ?? .failed,
+            progress: row.double(3) ?? 0,
+            resultCode: row.string(4),
+            createdAt: row.date(5) ?? Date(),
+            startedAt: row.date(6),
+            finishedAt: row.date(7),
+            requestedByUserID: row.string(8)
+        )
     }
 
     private static func isValidJobQueryText(_ value: String?, maximumByteCount: Int) -> Bool {

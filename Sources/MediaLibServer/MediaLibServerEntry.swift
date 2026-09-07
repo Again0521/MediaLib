@@ -31,6 +31,8 @@ struct MediaLibServer {
                 database: defaultDirectories.database,
                 databaseBackups: defaultDirectories.databaseBackups
             )
+            let maintenanceExecutorLock = try ServerMaintenanceExecutorLock.acquire(in: dataDirectories.root)
+            defer { withExtendedLifetime(maintenanceExecutorLock) {} }
             let database = try DatabaseManager(
                 url: dataDirectories.database,
                 backupDirectory: dataDirectories.databaseBackups
@@ -69,13 +71,19 @@ struct MediaLibServer {
             let administrationCatalog = ServerAdministrationCatalog(database: database)
             let identityRepository = ServerIdentityRepository(database: database)
             let authentication = try ServerAuthenticationService(database: database)
+            let hostControlClient = ServerHostControlClient()
             let maintenanceService = ServerMaintenanceService(
                 database: database,
                 experienceRepository: experienceRepository,
                 backupDirectory: dataDirectories.databaseBackups,
-                transcodeCacheCleanup: { hlsPlaybackSessions.clearAllSessionsAndCache() }
+                transcodeCacheCleanup: { hlsPlaybackSessions.clearAllSessionsAndCache() },
+                // The current host protocol cannot pause desktop database writers. Refuse an
+                // online restore while the desktop host is reachable rather than claiming that
+                // cross-process coordination is safe.
+                restoreAllowed: { hostControlClient?.isAvailable != true }
             )
-            let hostControlClient = ServerHostControlClient()
+            try maintenanceService.prepareForServing()
+            defer { maintenanceService.shutdown() }
             let runtimeDiagnostics = ServerRuntimeDiagnostics(
                 databaseURL: dataDirectories.database,
                 volumeURL: dataDirectories.root,

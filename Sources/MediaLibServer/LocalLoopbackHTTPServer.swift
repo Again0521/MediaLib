@@ -2474,7 +2474,7 @@ struct LocalHTTPRouter {
 
 }
 
-struct LocalHTTPResponse {
+struct LocalHTTPResponse: @unchecked Sendable {
     let statusCode: Int
     let reason: String
     let contentType: String
@@ -2708,7 +2708,17 @@ struct LocalHTTPResponse {
             additionalHeaders: additionalHeaders
         )
     }
-    static func serviceUnavailable() -> Self { error(statusCode: 503, reason: "Service Unavailable") }
+    static func serviceUnavailable() -> Self {
+        let response = error(statusCode: 503, reason: "Service Unavailable")
+        return Self(
+            statusCode: response.statusCode,
+            reason: response.reason,
+            contentType: response.contentType,
+            payload: response.payload,
+            declaredContentLength: response.declaredContentLength,
+            additionalHeaders: ["Retry-After: 1"]
+        )
+    }
     static func preconditionRequired() -> Self {
         error(statusCode: 428, reason: "Precondition Required")
     }

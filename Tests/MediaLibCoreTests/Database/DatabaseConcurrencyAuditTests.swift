@@ -7,6 +7,23 @@ import Foundation
 /// 是否会引发 UI 主队列长久阻塞或由于调度交替发生死锁。
 /// 对应报告问题 ID：P0-1 (RISK-01)
 final class DatabaseConcurrencyAuditTests: XCTestCase {
+    private final class InvocationCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+
+        func increment() {
+            lock.lock()
+            count += 1
+            lock.unlock()
+        }
+
+        var value: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return count
+        }
+    }
+
     private var workDir: URL!
     private var dbURL: URL!
 
@@ -21,6 +38,184 @@ final class DatabaseConcurrencyAuditTests: XCTestCase {
         if let workDir {
             try? FileManager.default.removeItem(at: workDir)
         }
+    }
+
+    private func waitUntilContention(on database: DatabaseManager) async -> Bool {
+        for _ in 0..<200 {
+            if database.contentionMetrics().contentionCount > 0 { return true }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        return false
+    }
+
+    func testIndependentConnectionWaitsForWriterThenExecutesTransactionExactlyOnce() async throws {
+        let first = try DatabaseManager(url: dbURL)
+        let second = try DatabaseManager(
+            url: dbURL,
+            contentionConfiguration: .init(lockWaitMilliseconds: 800, retrySleepMilliseconds: 5)
+        )
+        try first.execute("CREATE TABLE lock_test (id TEXT PRIMARY KEY)")
+        let lockAcquired = DispatchSemaphore(value: 0)
+        let releaseLock = DispatchSemaphore(value: 0)
+        let holder = Task.detached {
+            try first.transaction {
+                try first.execute("INSERT INTO lock_test VALUES ('holder')")
+                lockAcquired.signal()
+                releaseLock.wait()
+            }
+        }
+        XCTAssertEqual(lockAcquired.wait(timeout: .now() + 2), .success)
+        defer { releaseLock.signal() }
+
+        let invocationCount = InvocationCounter()
+        let writer = Task {
+            try await second.transactionAsync {
+                invocationCount.increment()
+                try second.execute("INSERT INTO lock_test VALUES ('waiter')")
+            }
+        }
+        let observedContention = await waitUntilContention(on: second)
+        XCTAssertTrue(observedContention)
+        releaseLock.signal()
+        try await writer.value
+        try await holder.value
+
+        XCTAssertEqual(invocationCount.value, 1, "busy wait must not replay the transaction closure")
+        XCTAssertEqual(
+            try second.query("SELECT COUNT(*) FROM lock_test") { $0.int(0) ?? 0 }.first,
+            2
+        )
+        let metrics = second.contentionMetrics()
+        XCTAssertGreaterThanOrEqual(metrics.contentionCount, 1)
+        XCTAssertGreaterThan(metrics.waitedMilliseconds, 0)
+        XCTAssertEqual(metrics.timeoutCount, 0)
+    }
+
+    func testIndependentConnectionTimesOutWithStructuredCodeAndAtomicRollback() async throws {
+        let first = try DatabaseManager(url: dbURL)
+        let second = try DatabaseManager(
+            url: dbURL,
+            contentionConfiguration: .init(lockWaitMilliseconds: 60, retrySleepMilliseconds: 5)
+        )
+        try first.execute("CREATE TABLE timeout_test (id TEXT PRIMARY KEY)")
+        let lockAcquired = DispatchSemaphore(value: 0)
+        let releaseLock = DispatchSemaphore(value: 0)
+        let holder = Task.detached {
+            try first.transaction {
+                try first.execute("INSERT INTO timeout_test VALUES ('holder')")
+                lockAcquired.signal()
+                releaseLock.wait()
+            }
+        }
+        XCTAssertEqual(lockAcquired.wait(timeout: .now() + 2), .success)
+        defer { releaseLock.signal() }
+
+        do {
+            try await second.transactionAsync {
+                try second.execute("INSERT INTO timeout_test VALUES ('must-rollback')")
+            }
+            XCTFail("expected bounded contention failure")
+        } catch let error as DatabaseError {
+            guard case let .contention(operation, code, extendedCode) = error else {
+                return XCTFail("unexpected database error: \(error)")
+            }
+            XCTAssertEqual(operation, "step")
+            XCTAssertTrue(code == 5 || code == 6)
+            XCTAssertEqual(extendedCode & 0xff, code)
+            XCTAssertTrue(error.isRetryableContention)
+            XCTAssertFalse(error.localizedDescription.contains(dbURL.path))
+            XCTAssertFalse(error.localizedDescription.contains("INSERT"))
+        }
+        XCTAssertEqual(
+            try second.query("SELECT COUNT(*) FROM timeout_test WHERE id = 'must-rollback'") { $0.int(0) ?? 0 }.first,
+            0
+        )
+        let metrics = second.contentionMetrics()
+        XCTAssertGreaterThanOrEqual(metrics.contentionCount, 1)
+        XCTAssertGreaterThanOrEqual(metrics.timeoutCount, 1)
+        releaseLock.signal()
+        try await holder.value
+    }
+
+    @MainActor
+    func testMainActorRemainsSchedulableWhileAsyncDatabaseWriteWaits() async throws {
+        let first = try DatabaseManager(url: dbURL)
+        let second = try DatabaseManager(
+            url: dbURL,
+            contentionConfiguration: .init(lockWaitMilliseconds: 800, retrySleepMilliseconds: 5)
+        )
+        try first.execute("CREATE TABLE main_actor_test (id TEXT PRIMARY KEY)")
+        let lockAcquired = DispatchSemaphore(value: 0)
+        let releaseLock = DispatchSemaphore(value: 0)
+        let holder = Task.detached {
+            try first.transaction {
+                try first.execute("INSERT INTO main_actor_test VALUES ('holder')")
+                lockAcquired.signal()
+                releaseLock.wait()
+            }
+        }
+        XCTAssertEqual(lockAcquired.wait(timeout: .now() + 2), .success)
+        defer { releaseLock.signal() }
+        let writer = Task {
+            try await second.performAsync {
+                try second.execute("INSERT INTO main_actor_test VALUES ('waiter')")
+            }
+        }
+        let observedContention = await waitUntilContention(on: second)
+        XCTAssertTrue(observedContention)
+
+        let heartbeat = expectation(description: "main actor heartbeat")
+        DispatchQueue.main.async { heartbeat.fulfill() }
+        await fulfillment(of: [heartbeat], timeout: 1)
+
+        releaseLock.signal()
+        try await writer.value
+        try await holder.value
+    }
+
+    func testDesktopScanWriterAndServerPlaybackProgressSerializeAcrossConnections() async throws {
+        let desktop = try DatabaseManager(url: dbURL)
+        let server = try DatabaseManager(
+            url: dbURL,
+            contentionConfiguration: .init(lockWaitMilliseconds: 800, retrySleepMilliseconds: 5)
+        )
+        try MediaRepository(database: desktop).upsert(MediaItem(id: "movie-1", type: .movie, title: "Before Scan"))
+        let lockAcquired = DispatchSemaphore(value: 0)
+        let releaseLock = DispatchSemaphore(value: 0)
+        let scan = Task.detached {
+            try desktop.transaction {
+                try desktop.execute(
+                    "UPDATE media_items SET title = ? WHERE id = ?",
+                    bindings: [.text("After Scan"), .text("movie-1")]
+                )
+                lockAcquired.signal()
+                releaseLock.wait()
+            }
+        }
+        XCTAssertEqual(lockAcquired.wait(timeout: .now() + 2), .success)
+        defer { releaseLock.signal() }
+        let progress = Task {
+            try await server.performAsync {
+                try ServerUserMediaStateRepository(database: server).update(
+                    userID: ServerIdentityRepository.initialAdministratorUserID,
+                    mediaID: "movie-1",
+                    event: .progress,
+                    position: 30,
+                    duration: 100
+                )
+            }
+        }
+        let observedContention = await waitUntilContention(on: server)
+        XCTAssertTrue(observedContention)
+        releaseLock.signal()
+        let state = try await progress.value
+        try await scan.value
+
+        XCTAssertEqual(state.playProgress, 0.3, accuracy: 0.0001)
+        XCTAssertEqual(
+            try server.query("SELECT title FROM media_items WHERE id = 'movie-1'") { $0.string(0) }.first,
+            "After Scan"
+        )
     }
 
     /// 测试高并发多任务连续写和交叉读操作不崩溃、生死锁

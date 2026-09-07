@@ -57,7 +57,10 @@ struct LANHTTPSServer {
                 handler: requestHandler
             )
         }
-        for method in [HTTPRequest.Method.get, .head, .post] {
+        for rawMethod in ServerHTTPMethodContract.orderedRawValues {
+            guard let method = HTTPRequest.Method(rawValue: rawMethod) else {
+                preconditionFailure("Invalid server HTTP method contract: \(rawMethod)")
+            }
             router.on("/", method: method, use: responder)
             router.on("/**", method: method, use: responder)
         }
@@ -97,12 +100,17 @@ struct LANHTTPSServer {
         }
         let body = Data(bodyBuffer.readableBytesView)
         let requestHead = rawRequestHead(from: request)
-        let localResponse = handler.response(
-            for: requestHead,
-            body: body,
-            clientAddressKey: clientAddress,
-            isDirectTLS: true
-        )
+        // LocalLoopbackHTTPServer still owns synchronous database/file handlers. Move that
+        // work off Hummingbird's cooperative request task; B12 will add measured concurrency
+        // limits for the remaining blocking categories.
+        let localResponse = await BlockingIOExecutor.run {
+            handler.response(
+                for: requestHead,
+                body: body,
+                clientAddressKey: clientAddress,
+                isDirectTLS: true
+            )
+        }
         return response(from: localResponse)
     }
 

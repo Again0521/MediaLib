@@ -67,6 +67,99 @@ private func databaseChangeUpdateHook(
     tracker.record(tableName: String(cString: tableName))
 }
 
+private final class DatabaseContentionMetricsTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var contentionCount = 0
+    private var waitedMilliseconds: Int64 = 0
+    private var timeoutCount = 0
+
+    func recordContention() {
+        lock.lock()
+        contentionCount += 1
+        lock.unlock()
+    }
+
+    func recordWait(milliseconds: Int32) {
+        lock.lock()
+        waitedMilliseconds += Int64(milliseconds)
+        lock.unlock()
+    }
+
+    func recordTimeout() {
+        lock.lock()
+        timeoutCount += 1
+        lock.unlock()
+    }
+
+    func snapshot() -> DatabaseContentionMetrics {
+        lock.lock()
+        defer { lock.unlock() }
+        return DatabaseContentionMetrics(
+            contentionCount: contentionCount,
+            waitedMilliseconds: waitedMilliseconds,
+            timeoutCount: timeoutCount
+        )
+    }
+}
+
+private final class SQLiteBusyWaitController {
+    private let configuration: DatabaseContentionConfiguration
+    private let metrics: DatabaseContentionMetricsTracker
+    private var waitStartedAtNanoseconds: UInt64 = 0
+
+    init(configuration: DatabaseContentionConfiguration, metrics: DatabaseContentionMetricsTracker) {
+        self.configuration = configuration
+        self.metrics = metrics
+    }
+
+    func shouldRetry(priorAttemptCount: Int32) -> Int32 {
+        let now = DispatchTime.now().uptimeNanoseconds
+        if priorAttemptCount == 0 {
+            waitStartedAtNanoseconds = now
+            metrics.recordContention()
+        }
+        let elapsedMilliseconds = Int32(min(
+            (now &- waitStartedAtNanoseconds) / 1_000_000,
+            UInt64(Int32.max)
+        ))
+        let remaining = configuration.lockWaitMilliseconds - elapsedMilliseconds
+        guard remaining > 0 else {
+            metrics.recordTimeout()
+            return 0
+        }
+        let sleepMilliseconds = min(configuration.retrySleepMilliseconds, remaining)
+        metrics.recordWait(milliseconds: sleepMilliseconds)
+        sqlite3_sleep(sleepMilliseconds)
+        return 1
+    }
+}
+
+private func databaseBusyHandler(context: UnsafeMutableRawPointer?, priorAttemptCount: Int32) -> Int32 {
+    guard let context else { return 0 }
+    return Unmanaged<SQLiteBusyWaitController>
+        .fromOpaque(context)
+        .takeUnretainedValue()
+        .shouldRetry(priorAttemptCount: priorAttemptCount)
+}
+
+private final class DatabaseCancellationState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    func checkCancellation() throws {
+        lock.lock()
+        let cancelled = cancelled
+        lock.unlock()
+        if cancelled { throw CancellationError() }
+    }
+}
+
 // 内部所有可变状态（db 句柄）只通过私有串行 queue 访问，线程安全由队列约束保证，
 // 编译器无法静态验证这一点，因此显式标注 @unchecked Sendable（而非让调用处到处 @Sendable 警告）。
 public final class DatabaseManager: @unchecked Sendable {
@@ -77,30 +170,50 @@ public final class DatabaseManager: @unchecked Sendable {
     private let queueKey = DispatchSpecificKey<Bool>()
     private let backupTimestampProvider: () -> String
     private let changeRevisionTracker = DatabaseChangeRevisionTracker()
+    private let contentionConfiguration: DatabaseContentionConfiguration
+    private let contentionMetricsTracker = DatabaseContentionMetricsTracker()
+    private var busyWaitController: SQLiteBusyWaitController?
     public let url: URL
 
     private var isOnQueue: Bool {
         DispatchQueue.getSpecific(key: queueKey) == true
     }
 
-    public convenience init(url: URL, backupDirectory: URL? = nil) throws {
-        try self.init(url: url, backupDirectory: backupDirectory, backupTimestampProvider: Self.backupTimestamp)
+    public convenience init(
+        url: URL,
+        backupDirectory: URL? = nil,
+        contentionConfiguration: DatabaseContentionConfiguration = .default
+    ) throws {
+        try self.init(
+            url: url,
+            backupDirectory: backupDirectory,
+            backupTimestampProvider: Self.backupTimestamp,
+            contentionConfiguration: contentionConfiguration
+        )
     }
 
     init(
         url: URL,
         backupDirectory: URL? = nil,
-        backupTimestampProvider: @escaping () -> String
+        backupTimestampProvider: @escaping () -> String,
+        contentionConfiguration: DatabaseContentionConfiguration = .default
     ) throws {
         self.url = url
         self.backupTimestampProvider = backupTimestampProvider
+        self.contentionConfiguration = contentionConfiguration
         let existingDatabase = FileManager.default.fileExists(atPath: url.path) &&
             ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0
         queue.setSpecific(key: queueKey, value: true)
         let result = sqlite3_open_v2(url.path, &db, SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil)
         guard result == SQLITE_OK else {
-            throw DatabaseError.openFailed(Self.message(for: db))
+            throw Self.sqliteError(database: db, result: result, operation: "open-main") { .openFailed($0) }
         }
+        let busyWaitController = SQLiteBusyWaitController(
+            configuration: contentionConfiguration,
+            metrics: contentionMetricsTracker
+        )
+        self.busyWaitController = busyWaitController
+        try Self.configureConnection(db, busyWaitController: busyWaitController, operation: "open-main")
         sqlite3_update_hook(
             db,
             databaseChangeUpdateHook,
@@ -138,6 +251,10 @@ public final class DatabaseManager: @unchecked Sendable {
 
     public func changeRevision(namespace: DatabaseChangeNamespace, identifier: String) -> UInt64 {
         changeRevisionTracker.revision(namespace: namespace, identifier: identifier)
+    }
+
+    public func contentionMetrics() -> DatabaseContentionMetrics {
+        contentionMetricsTracker.snapshot()
     }
 
     public func execute(_ sql: String, bindings: [SQLiteValue] = []) throws {
@@ -186,22 +303,50 @@ public final class DatabaseManager: @unchecked Sendable {
     /// 适用于大批量写（如批量删除上千行），避免 `queue.sync` 在主线程上长时间阻塞。
     /// block 在队列线程上运行，其内部调用 execute/query 会检测到 isOnQueue 而直接执行，不会死锁。
     public func transactionAsync<T>(_ block: @escaping () throws -> T) async throws -> T {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
-            queue.async {
-                do {
-                    try self.unsafeExecute("BEGIN IMMEDIATE TRANSACTION")
+        let cancellation = DatabaseCancellationState()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+                queue.async {
                     do {
-                        let result = try block()
-                        try self.unsafeExecute("COMMIT")
-                        continuation.resume(returning: result)
+                        try cancellation.checkCancellation()
+                        try self.unsafeExecute("BEGIN IMMEDIATE TRANSACTION")
+                        do {
+                            try cancellation.checkCancellation()
+                            let result = try block()
+                            try cancellation.checkCancellation()
+                            try self.unsafeExecute("COMMIT")
+                            continuation.resume(returning: result)
+                        } catch {
+                            try? self.unsafeExecute("ROLLBACK")
+                            continuation.resume(throwing: error)
+                        }
                     } catch {
-                        try? self.unsafeExecute("ROLLBACK")
                         continuation.resume(throwing: error)
                     }
-                } catch {
-                    continuation.resume(throwing: error)
                 }
             }
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
+
+    /// 在数据库专属串行队列上执行一段同步仓储工作。调用者（包括 MainActor）仅异步等待，
+    /// 不承担 SQLite busy handler 的睡眠；与 transactionAsync 不同，这里不隐式开启事务。
+    public func performAsync<T>(_ block: @escaping () throws -> T) async throws -> T {
+        let cancellation = DatabaseCancellationState()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, Error>) in
+                queue.async {
+                    continuation.resume(with: Result {
+                        try cancellation.checkCancellation()
+                        let result = try block()
+                        try cancellation.checkCancellation()
+                        return result
+                    })
+                }
+            }
+        } onCancel: {
+            cancellation.cancel()
         }
     }
 
@@ -311,7 +456,9 @@ public final class DatabaseManager: @unchecked Sendable {
     private func unsafeExecute(_ sql: String, bindings: [SQLiteValue] = []) throws {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
-            throw DatabaseError.prepareFailed(Self.message(for: db))
+            throw Self.sqliteError(database: db, result: sqlite3_errcode(db), operation: "prepare") {
+                .prepareFailed($0)
+            }
         }
         defer { sqlite3_finalize(statement) }
         try bind(bindings, to: statement)
@@ -319,7 +466,7 @@ public final class DatabaseManager: @unchecked Sendable {
             let result = sqlite3_step(statement)
             if result == SQLITE_DONE { return }
             if result == SQLITE_ROW { continue }
-            throw DatabaseError.stepFailed(Self.message(for: db))
+            throw Self.sqliteError(database: db, result: result, operation: "step") { .stepFailed($0) }
         }
     }
 
@@ -330,7 +477,9 @@ public final class DatabaseManager: @unchecked Sendable {
     ) throws -> [T] {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
-            throw DatabaseError.prepareFailed(Self.message(for: db))
+            throw Self.sqliteError(database: db, result: sqlite3_errcode(db), operation: "prepare") {
+                .prepareFailed($0)
+            }
         }
         defer { sqlite3_finalize(statement) }
         try bind(bindings, to: statement)
@@ -342,7 +491,7 @@ public final class DatabaseManager: @unchecked Sendable {
             } else if result == SQLITE_DONE {
                 return rows
             } else {
-                throw DatabaseError.stepFailed(Self.message(for: db))
+                throw Self.sqliteError(database: db, result: result, operation: "step") { .stepFailed($0) }
             }
         }
     }
@@ -372,7 +521,7 @@ public final class DatabaseManager: @unchecked Sendable {
                 result = sqlite3_bind_int(statement, index, bool ? 1 : 0)
             }
             guard result == SQLITE_OK else {
-                throw DatabaseError.bindFailed(Self.message(for: db))
+                throw Self.sqliteError(database: db, result: result, operation: "bind") { .bindFailed($0) }
             }
         }
     }
@@ -1684,9 +1833,24 @@ public final class DatabaseManager: @unchecked Sendable {
         let openResult = sqlite3_open_v2(backupURL.path, &sourceDB, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
         guard openResult == SQLITE_OK, let sourceDB else {
             defer { sqlite3_close(sourceDB) }
-            throw DatabaseError.backupFailed(Self.message(for: sourceDB))
+            throw Self.sqliteError(database: sourceDB, result: openResult, operation: "open-backup-source") {
+                .backupFailed($0)
+            }
         }
-        defer { sqlite3_close(sourceDB) }
+        let sourceBusyWaitController = SQLiteBusyWaitController(
+            configuration: contentionConfiguration,
+            metrics: contentionMetricsTracker
+        )
+        defer {
+            sqlite3_busy_handler(sourceDB, nil, nil)
+            sqlite3_close(sourceDB)
+            withExtendedLifetime(sourceBusyWaitController) {}
+        }
+        try Self.configureConnection(
+            sourceDB,
+            busyWaitController: sourceBusyWaitController,
+            operation: "open-backup-source"
+        )
         let version = try Self.pragmaInt("user_version", database: sourceDB)
         guard version <= Self.currentSchemaVersion else {
             throw DatabaseError.incompatibleSchema(found: version, supported: Self.currentSchemaVersion)
@@ -1708,16 +1872,34 @@ public final class DatabaseManager: @unchecked Sendable {
         )
         guard openResult == SQLITE_OK, let destinationDB else {
             defer { sqlite3_close(destinationDB) }
-            throw DatabaseError.backupFailed(Self.message(for: destinationDB))
+            throw Self.sqliteError(database: destinationDB, result: openResult, operation: "open-backup-destination") {
+                .backupFailed($0)
+            }
         }
+        let destinationBusyWaitController = SQLiteBusyWaitController(
+            configuration: contentionConfiguration,
+            metrics: contentionMetricsTracker
+        )
+        try Self.configureConnection(
+            destinationDB,
+            busyWaitController: destinationBusyWaitController,
+            operation: "open-backup-destination"
+        )
         var openDestinationDB: OpaquePointer? = destinationDB
         defer {
             if let openDestinationDB {
+                sqlite3_busy_handler(openDestinationDB, nil, nil)
                 sqlite3_close(openDestinationDB)
             }
+            withExtendedLifetime(destinationBusyWaitController) {}
         }
         do {
-            try Self.copyDatabase(from: db, to: destinationDB)
+            try Self.copyDatabase(
+                from: db,
+                to: destinationDB,
+                configuration: contentionConfiguration,
+                metrics: contentionMetricsTracker
+            )
             let integrity = try Self.pragmaStrings("integrity_check", database: destinationDB)
             guard integrity.count == 1, integrity.first?.lowercased() == "ok" else {
                 throw DatabaseError.integrityCheckFailed(integrity.joined(separator: "; "))
@@ -1757,20 +1939,80 @@ public final class DatabaseManager: @unchecked Sendable {
         let openResult = sqlite3_open_v2(backupURL.path, &sourceDB, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
         guard openResult == SQLITE_OK, let sourceDB else {
             defer { sqlite3_close(sourceDB) }
-            throw DatabaseError.backupFailed(Self.message(for: sourceDB))
+            throw Self.sqliteError(database: sourceDB, result: openResult, operation: "open-restore-source") {
+                .backupFailed($0)
+            }
         }
-        defer { sqlite3_close(sourceDB) }
-        try Self.copyDatabase(from: sourceDB, to: db)
+        let sourceBusyWaitController = SQLiteBusyWaitController(
+            configuration: contentionConfiguration,
+            metrics: contentionMetricsTracker
+        )
+        defer {
+            sqlite3_busy_handler(sourceDB, nil, nil)
+            sqlite3_close(sourceDB)
+            withExtendedLifetime(sourceBusyWaitController) {}
+        }
+        try Self.configureConnection(
+            sourceDB,
+            busyWaitController: sourceBusyWaitController,
+            operation: "open-restore-source"
+        )
+        try Self.copyDatabase(
+            from: sourceDB,
+            to: db,
+            configuration: contentionConfiguration,
+            metrics: contentionMetricsTracker
+        )
     }
 
-    private static func copyDatabase(from source: OpaquePointer?, to destination: OpaquePointer?) throws {
+    private static func copyDatabase(
+        from source: OpaquePointer?,
+        to destination: OpaquePointer?,
+        configuration: DatabaseContentionConfiguration,
+        metrics: DatabaseContentionMetricsTracker
+    ) throws {
         guard let backup = sqlite3_backup_init(destination, "main", source, "main") else {
-            throw DatabaseError.backupFailed(Self.message(for: destination))
+            let result = sqlite3_errcode(destination)
+            throw sqliteError(database: destination, result: result, operation: "backup-init") {
+                .backupFailed($0)
+            }
         }
-        let stepResult = sqlite3_backup_step(backup, -1)
+        var waitStartedAt: UInt64?
+        var stepResult: Int32 = SQLITE_OK
+        var recordedContention = false
+        while stepResult == SQLITE_OK {
+            stepResult = sqlite3_backup_step(backup, 64)
+            guard stepResult == SQLITE_BUSY || stepResult == SQLITE_LOCKED else { continue }
+            if !recordedContention {
+                metrics.recordContention()
+                recordedContention = true
+                waitStartedAt = DispatchTime.now().uptimeNanoseconds
+            }
+            let waitStartedAt = waitStartedAt ?? DispatchTime.now().uptimeNanoseconds
+            let elapsedMilliseconds = Int32(min(
+                (DispatchTime.now().uptimeNanoseconds &- waitStartedAt) / 1_000_000,
+                UInt64(Int32.max)
+            ))
+            let remaining = configuration.backupStepWaitMilliseconds - elapsedMilliseconds
+            guard remaining > 0 else {
+                metrics.recordTimeout()
+                break
+            }
+            let sleepMilliseconds = min(configuration.retrySleepMilliseconds, remaining)
+            metrics.recordWait(milliseconds: sleepMilliseconds)
+            sqlite3_sleep(sleepMilliseconds)
+            stepResult = SQLITE_OK
+        }
         let finishResult = sqlite3_backup_finish(backup)
-        guard stepResult == SQLITE_DONE, finishResult == SQLITE_OK else {
-            throw DatabaseError.backupFailed(Self.message(for: destination))
+        guard stepResult == SQLITE_DONE else {
+            throw sqliteError(database: destination, result: stepResult, operation: "backup-step") {
+                .backupFailed($0)
+            }
+        }
+        guard finishResult == SQLITE_OK else {
+            throw sqliteError(database: destination, result: finishResult, operation: "backup-finish") {
+                .backupFailed($0)
+            }
         }
     }
 
@@ -1780,8 +2022,11 @@ public final class DatabaseManager: @unchecked Sendable {
 
     private static func pragmaStrings(_ name: String, database: OpaquePointer?) throws -> [String] {
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(database, "PRAGMA \(name)", -1, &statement, nil) == SQLITE_OK else {
-            throw DatabaseError.prepareFailed(message(for: database))
+        let prepareResult = sqlite3_prepare_v2(database, "PRAGMA \(name)", -1, &statement, nil)
+        guard prepareResult == SQLITE_OK else {
+            throw sqliteError(database: database, result: prepareResult, operation: "pragma-prepare") {
+                .prepareFailed($0)
+            }
         }
         defer { sqlite3_finalize(statement) }
         var result: [String] = []
@@ -1794,7 +2039,9 @@ public final class DatabaseManager: @unchecked Sendable {
             } else if step == SQLITE_DONE {
                 return result
             } else {
-                throw DatabaseError.stepFailed(message(for: database))
+                throw sqliteError(database: database, result: step, operation: "pragma-step") {
+                    .stepFailed($0)
+                }
             }
         }
     }
@@ -1843,6 +2090,47 @@ public final class DatabaseManager: @unchecked Sendable {
     private static func message(for db: OpaquePointer?) -> String {
         guard let message = sqlite3_errmsg(db) else { return "未知错误" }
         return String(cString: message)
+    }
+
+    private static func configureConnection(
+        _ database: OpaquePointer?,
+        busyWaitController: SQLiteBusyWaitController,
+        operation: String
+    ) throws {
+        let extendedResult = sqlite3_extended_result_codes(database, 1)
+        guard extendedResult == SQLITE_OK else {
+            throw sqliteError(database: database, result: extendedResult, operation: operation) {
+                .openFailed($0)
+            }
+        }
+        let busyResult = sqlite3_busy_handler(
+            database,
+            databaseBusyHandler,
+            Unmanaged.passUnretained(busyWaitController).toOpaque()
+        )
+        guard busyResult == SQLITE_OK else {
+            throw sqliteError(database: database, result: busyResult, operation: operation) {
+                .openFailed($0)
+            }
+        }
+    }
+
+    private static func sqliteError(
+        database: OpaquePointer?,
+        result: Int32,
+        operation: String,
+        fallback: (String) -> DatabaseError
+    ) -> DatabaseError {
+        let extendedCode = database.map(sqlite3_extended_errcode) ?? result
+        let primaryCode = extendedCode & 0xff
+        if primaryCode == SQLITE_BUSY || primaryCode == SQLITE_LOCKED {
+            return .contention(
+                operation: operation,
+                code: primaryCode,
+                extendedCode: extendedCode
+            )
+        }
+        return fallback(message(for: database))
     }
 }
 

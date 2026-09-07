@@ -2942,7 +2942,9 @@ final class AppState: ObservableObject {
                 return results
             }
             guard !Task.isCancelled, !updates.isEmpty else { return }
-            try? mediaRepository.updateLyricsPresence(updates)
+            try? await BlockingIOExecutor.run {
+                try mediaRepository.updateLyricsPresence(updates)
+            }
             guard !Task.isCancelled else { return }
             await MainActor.run { self?.reload() }
         }
@@ -5084,10 +5086,12 @@ final class AppState: ObservableObject {
                         serverURL: serverURL, accessToken: accessToken, itemID: externalID, update: update
                     )
                 }
-                guard let mediaRepository = self.mediaRepository else { return }
-                try mediaRepository.setFavorite(id: item.id, favorite: preference.isFavorite)
-                try mediaRepository.setWatchlist(id: item.id, watchlist: preference.isWatchlist)
-                try mediaRepository.updateRating(id: item.id, rating: preference.rating)
+                guard let database = self.database, let mediaRepository = self.mediaRepository else { return }
+                try await database.transactionAsync {
+                    try mediaRepository.setFavorite(id: item.id, favorite: preference.isFavorite)
+                    try mediaRepository.setWatchlist(id: item.id, watchlist: preference.isWatchlist)
+                    try mediaRepository.updateRating(id: item.id, rating: preference.rating)
+                }
                 await MainActor.run {
                     self.applyMlinkPreference(preference, itemID: item.id)
                 }
@@ -5149,11 +5153,13 @@ final class AppState: ObservableObject {
                         event: event, positionSeconds: 0, durationSeconds: nil
                     )
                 }
-                guard let mediaRepository = self.mediaRepository else { return }
-                if state.isWatched {
-                    try mediaRepository.markWatched(id: item.id, watched: true)
-                } else {
-                    try mediaRepository.clearPlaybackHistory(id: item.id)
+                guard let database = self.database, let mediaRepository = self.mediaRepository else { return }
+                try await database.performAsync {
+                    if state.isWatched {
+                        try mediaRepository.markWatched(id: item.id, watched: true)
+                    } else {
+                        try mediaRepository.clearPlaybackHistory(id: item.id)
+                    }
                 }
                 await MainActor.run { self.applyMlinkPlaybackState(state, itemID: item.id) }
             } catch {
@@ -8511,24 +8517,33 @@ final class AppState: ObservableObject {
     func updatePlayback(item: MediaItem, position: Double, duration: Double?, reloadLibrary: Bool = true) {
         guard settings.rememberPlaybackPosition else { return }
         guard !shouldIgnoreStalePlaybackSave(from: item) else { return }
-        do {
-            // 「播放完成自动标记已看」关闭时传一个不可达阈值：仍记录进度，
-            // 但永不自动置已看（此前该开关只有设置项、无任何行为）。
-            try mediaRepository?.updatePlayback(
-                id: item.id,
-                position: position,
-                duration: duration,
-                watchedThreshold: settings.autoMarkWatched ? settings.watchedThreshold : 2.0
-            )
-            playbackClearRevisionByItemID.removeValue(forKey: item.id)
-            if reloadLibrary {
-                reload()
-            } else if item.type != .music {
-                updatePlaybackInMemory(id: item.id, position: position, duration: duration)
-                scheduleVideoOfflineSubscriptionMaintenance(reason: "playback updated")
+        guard let database, let mediaRepository else { return }
+        let watchedThreshold = settings.autoMarkWatched ? settings.watchedThreshold : 2.0
+        Task { [weak self, database, mediaRepository] in
+            do {
+                // 「播放完成自动标记已看」关闭时传一个不可达阈值：仍记录进度，
+                // 但永不自动置已看（此前该开关只有设置项、无任何行为）。
+                try await database.performAsync {
+                    try mediaRepository.updatePlayback(
+                        id: item.id,
+                        position: position,
+                        duration: duration,
+                        watchedThreshold: watchedThreshold
+                    )
+                }
+                guard let self else { return }
+                self.playbackClearRevisionByItemID.removeValue(forKey: item.id)
+                if reloadLibrary {
+                    self.reload()
+                } else if item.type != .music {
+                    self.updatePlaybackInMemory(id: item.id, position: position, duration: duration)
+                    self.scheduleVideoOfflineSubscriptionMaintenance(reason: "playback updated")
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.logger?.log("播放进度保存失败：\(error.localizedDescription)", level: .warning)
             }
-        } catch {
-            logger?.log("播放进度保存失败：\(error.localizedDescription)", level: .warning)
         }
     }
 
@@ -8593,23 +8608,31 @@ final class AppState: ObservableObject {
         let ids = targetItems.map(\.id)
         guard !ids.isEmpty else { return }
         let staleRevisions = targetItems.map { (id: $0.id, updatedAt: currentSnapshot(for: $0).updatedAt) }
-        do {
-            try mediaRepository?.clearPlaybackHistory(ids: ids)
-            staleRevisions.forEach { recordPlaybackClearedRevision(id: $0.id, staleUntil: $0.updatedAt) }
-            clearPlaybackHistoryInMemory(ids: ids)
-            scheduleEmbyPlayedSync(targetItems, played: false)
-            if targetItems.count == 1, let item = targetItems.first {
-                showMediaStateNotice(title: "播放记录已删除", item: item, kind: .info)
-            } else {
-                showFloatingNotice(
-                    title: "播放记录已删除",
-                    message: "\(targetItems.count) 个内容",
-                    kind: .info,
-                    duration: 3.2
-                )
+        guard let database, let mediaRepository else { return }
+        Task { [weak self, database, mediaRepository] in
+            do {
+                try await database.performAsync {
+                    try mediaRepository.clearPlaybackHistory(ids: ids)
+                }
+                guard let self else { return }
+                staleRevisions.forEach { self.recordPlaybackClearedRevision(id: $0.id, staleUntil: $0.updatedAt) }
+                self.clearPlaybackHistoryInMemory(ids: ids)
+                self.scheduleEmbyPlayedSync(targetItems, played: false)
+                if targetItems.count == 1, let item = targetItems.first {
+                    self.showMediaStateNotice(title: "播放记录已删除", item: item, kind: .info)
+                } else {
+                    self.showFloatingNotice(
+                        title: "播放记录已删除",
+                        message: "\(targetItems.count) 个内容",
+                        kind: .info,
+                        duration: 3.2
+                    )
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.showError("播放记录删除失败", error)
             }
-        } catch {
-            showError("播放记录删除失败", error)
         }
     }
 
@@ -8886,26 +8909,31 @@ final class AppState: ObservableObject {
             kind: nextFavorite ? .success : .info
         )
 
-        guard let mediaRepository else { return }
-        Task(priority: .utility) { [weak self, mediaRepository] in
+        guard let database, let mediaRepository else { return }
+        Task(priority: .utility) { [weak self, database, mediaRepository] in
             do {
-                try mediaRepository.setFavorite(id: item.id, favorite: nextFavorite)
+                try await database.performAsync {
+                    try mediaRepository.setFavorite(id: item.id, favorite: nextFavorite)
+                }
                 try await self?.syncEmbyFavorite(item, favorite: nextFavorite)
                 await MainActor.run {
                     guard item.type == .music else { return }
                     self?.scheduleMusicProjectionMaintenance(reason: "music favorite changed", force: false, preferIncremental: true)
                 }
             } catch {
+                let originalError = error
+                do {
+                    try await database.performAsync {
+                        try mediaRepository.setFavorite(id: item.id, favorite: currentFavorite)
+                    }
+                } catch {
+                    self?.logger?.log("喜欢状态回滚写入失败(\(item.id))：\(error.localizedDescription)", level: .warning)
+                }
                 await MainActor.run {
                     guard let self else { return }
-                    do {
-                        try mediaRepository.setFavorite(id: item.id, favorite: currentFavorite)
-                    } catch {
-                        self.logger?.log("喜欢状态回滚写入失败(\(item.id))：\(error.localizedDescription)", level: .warning)
-                    }
                     self.updateFavoriteInMemory(id: item.id, favorite: currentFavorite)
                     let title = Self.isEmbyItem(item) ? "远程收藏同步失败" : "喜欢状态更新失败"
-                    let message = self.isPrivateItem(item) ? "状态已回滚，请解锁后重试。" : "\(item.cardTitle)：\(error.localizedDescription)"
+                    let message = self.isPrivateItem(item) ? "状态已回滚，请解锁后重试。" : "\(item.cardTitle)：\(originalError.localizedDescription)"
                     self.deliverTaskNotice(
                         title: title,
                         message: message,
@@ -8936,18 +8964,16 @@ final class AppState: ObservableObject {
             message: "\(ids.count) 张照片",
             kind: favorite ? .success : .info
         )
-        if let mediaRepository {
-            Task(priority: .utility) { [mediaRepository, logger] in
-                var failedCount = 0
-                for id in ids {
-                    do {
+        if let database, let mediaRepository {
+            Task(priority: .utility) { [database, mediaRepository, logger] in
+                do {
+                    try await database.transactionAsync {
+                        for id in ids {
                         try mediaRepository.setFavorite(id: id, favorite: favorite)
-                    } catch {
-                        failedCount += 1
+                        }
                     }
-                }
-                if failedCount > 0 {
-                    logger?.log("批量喜欢状态写入失败 \(failedCount)/\(ids.count) 项", level: .warning)
+                } catch {
+                    logger?.log("批量喜欢状态写入失败，事务已回滚：\(error.localizedDescription)", level: .warning)
                 }
             }
         }
@@ -9078,20 +9104,25 @@ final class AppState: ObservableObject {
 
         syncTraktWatchlist(item, add: nextWatchlist)
 
-        guard let mediaRepository else { return }
-        Task(priority: .utility) { [weak self, mediaRepository] in
+        guard let database, let mediaRepository else { return }
+        Task(priority: .utility) { [weak self, database, mediaRepository] in
             do {
-                try mediaRepository.setWatchlist(id: item.id, watchlist: nextWatchlist)
+                try await database.performAsync {
+                    try mediaRepository.setWatchlist(id: item.id, watchlist: nextWatchlist)
+                }
             } catch {
+                let originalError = error
+                do {
+                    try await database.performAsync {
+                        try mediaRepository.setWatchlist(id: item.id, watchlist: currentWatchlist)
+                    }
+                } catch {
+                    self?.logger?.log("待看状态回滚写入失败(\(item.id))：\(error.localizedDescription)", level: .warning)
+                }
                 await MainActor.run {
                     guard let self else { return }
-                    do {
-                        try mediaRepository.setWatchlist(id: item.id, watchlist: currentWatchlist)
-                    } catch {
-                        self.logger?.log("待看状态回滚写入失败(\(item.id))：\(error.localizedDescription)", level: .warning)
-                    }
                     self.updateWatchlistInMemory(id: item.id, watchlist: currentWatchlist)
-                    let message = self.isPrivateItem(item) ? "状态已回滚，请解锁后重试。" : "\(item.cardTitle)：\(error.localizedDescription)"
+                    let message = self.isPrivateItem(item) ? "状态已回滚，请解锁后重试。" : "\(item.cardTitle)：\(originalError.localizedDescription)"
                     self.deliverTaskNotice(
                         title: "想看状态更新失败",
                         message: message,
@@ -9168,33 +9199,41 @@ final class AppState: ObservableObject {
             updateMlinkWatched(item, source: source, watched: watched)
             return
         }
-        do {
-            let currentItem = currentSnapshot(for: item)
-            let shouldClearWatchlist = shouldClearWatchlistWhenMarkedWatched(currentItem, watched: watched)
-            let staleRevision = currentItem.updatedAt
-            try mediaRepository?.markWatched(
-                id: item.id,
-                watched: watched,
-                clearWatchlistWhenWatched: shouldClearWatchlist
-            )
-            if watched {
-                playbackClearRevisionByItemID.removeValue(forKey: item.id)
-            } else {
-                recordPlaybackClearedRevision(id: item.id, staleUntil: staleRevision)
+        guard let database, let mediaRepository else { return }
+        let currentItem = currentSnapshot(for: item)
+        let shouldClearWatchlist = shouldClearWatchlistWhenMarkedWatched(currentItem, watched: watched)
+        let staleRevision = currentItem.updatedAt
+        Task { [weak self, database, mediaRepository] in
+            do {
+                try await database.performAsync {
+                    try mediaRepository.markWatched(
+                        id: item.id,
+                        watched: watched,
+                        clearWatchlistWhenWatched: shouldClearWatchlist
+                    )
+                }
+                guard let self else { return }
+                if watched {
+                    self.playbackClearRevisionByItemID.removeValue(forKey: item.id)
+                } else {
+                    self.recordPlaybackClearedRevision(id: item.id, staleUntil: staleRevision)
+                }
+                self.reload()
+                self.scheduleEmbyPlayedSync([item], played: watched)
+                self.syncTraktHistory([item], watched: watched)
+                if shouldClearWatchlist {
+                    self.syncTraktWatchlist(currentItem, add: false)
+                }
+                self.showMediaStateNotice(
+                    title: watched ? "已标记为已观看" : "已标记为未观看",
+                    item: currentItem,
+                    kind: .success
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.showError("观看状态更新失败", error)
             }
-            reload()
-            scheduleEmbyPlayedSync([item], played: watched)
-            syncTraktHistory([item], watched: watched)
-            if shouldClearWatchlist {
-                syncTraktWatchlist(currentItem, add: false)
-            }
-            showMediaStateNotice(
-                title: watched ? "已标记为已观看" : "已标记为未观看",
-                item: currentItem,
-                kind: .success
-            )
-        } catch {
-            showError("观看状态更新失败", error)
         }
     }
 
@@ -9207,45 +9246,50 @@ final class AppState: ObservableObject {
         mlinkItems.forEach { markWatched($0, watched: watched) }
 
         guard !localItems.isEmpty else { return }
-        guard let mediaRepository else { return }
-        var hadError = false
-        var clearedWatchlistItems: [MediaItem] = []
-        for item in localItems {
-            do {
-                let currentItem = currentSnapshot(for: item)
-                let shouldClearWatchlist = shouldClearWatchlistWhenMarkedWatched(currentItem, watched: watched)
-                let staleRevision = currentItem.updatedAt
-                try mediaRepository.markWatched(
-                    id: item.id,
-                    watched: watched,
-                    clearWatchlistWhenWatched: shouldClearWatchlist
-                )
-                if watched {
-                    playbackClearRevisionByItemID.removeValue(forKey: item.id)
-                } else {
-                    recordPlaybackClearedRevision(id: item.id, staleUntil: staleRevision)
-                }
-                if shouldClearWatchlist {
-                    clearedWatchlistItems.append(currentItem)
-                }
-            } catch {
-                hadError = true
-                logger?.log("批量更新观看状态失败：\(error.localizedDescription)", level: .warning)
-            }
-        }
-        reload()
-        scheduleEmbyPlayedSync(localItems, played: watched)
-        syncTraktHistory(localItems, watched: watched)
-        clearedWatchlistItems.forEach { syncTraktWatchlist($0, add: false) }
-        if hadError {
-            alert = AppAlert(title: "部分更新失败", message: "有条目的观看状态未能更新，请检查数据库状态。")
-        } else {
-            showFloatingNotice(
-                title: watched ? "已标记为已观看" : "已标记为未观看",
-                message: "\(localItems.count) 个本地内容",
-                kind: .success,
-                duration: 3.2
+        guard let database, let mediaRepository else { return }
+        let updates = localItems.map { item in
+            let currentItem = currentSnapshot(for: item)
+            return (
+                item: item,
+                current: currentItem,
+                clearsWatchlist: shouldClearWatchlistWhenMarkedWatched(currentItem, watched: watched),
+                staleRevision: currentItem.updatedAt
             )
+        }
+        Task { [weak self, database, mediaRepository] in
+            do {
+                try await database.transactionAsync {
+                    for update in updates {
+                        try mediaRepository.markWatched(
+                            id: update.item.id,
+                            watched: watched,
+                            clearWatchlistWhenWatched: update.clearsWatchlist
+                        )
+                    }
+                }
+                guard let self else { return }
+                for update in updates {
+                    if watched {
+                        self.playbackClearRevisionByItemID.removeValue(forKey: update.item.id)
+                    } else {
+                        self.recordPlaybackClearedRevision(id: update.item.id, staleUntil: update.staleRevision)
+                    }
+                }
+                self.reload()
+                self.scheduleEmbyPlayedSync(localItems, played: watched)
+                self.syncTraktHistory(localItems, watched: watched)
+                updates.filter(\.clearsWatchlist).forEach { self.syncTraktWatchlist($0.current, add: false) }
+                self.showFloatingNotice(
+                    title: watched ? "已标记为已观看" : "已标记为未观看",
+                    message: "\(localItems.count) 个本地内容",
+                    kind: .success,
+                    duration: 3.2
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.showError("批量更新观看状态失败", error)
+            }
         }
     }
 
@@ -9281,10 +9325,12 @@ final class AppState: ObservableObject {
             suffix: userRatingNoticeSuffix(rating),
             kind: .success
         )
-        guard let mediaRepository else { return }
-        Task(priority: .utility) { [weak self, mediaRepository] in
+        guard let database, let mediaRepository else { return }
+        Task(priority: .utility) { [weak self, database, mediaRepository] in
             do {
-                try mediaRepository.updateRating(id: item.id, rating: rating)
+                try await database.performAsync {
+                    try mediaRepository.updateRating(id: item.id, rating: rating)
+                }
             } catch {
                 await MainActor.run {
                     self?.updateRatingInMemory(id: item.id, rating: previousRating)

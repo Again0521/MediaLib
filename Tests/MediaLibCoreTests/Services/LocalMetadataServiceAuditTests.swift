@@ -174,7 +174,7 @@ final class LocalMetadataServiceAuditTests: XCTestCase {
         XCTAssertNil(meta.backdropPath)
     }
 
-    func testNearVideoNFOCandidatePriorityUsesMovieThenTVShowThenVideoSpecific() throws {
+    func testNearVideoNFOCandidatePriorityUsesVideoSpecificBeforeDirectoryFallbacks() throws {
         try """
         <movie>
             <title>Movie Candidate</title>
@@ -197,7 +197,7 @@ final class LocalMetadataServiceAuditTests: XCTestCase {
             preferLocalArtwork: false
         )
 
-        XCTAssertEqual(meta.title, "Movie Candidate")
+        XCTAssertEqual(meta.title, "Video Specific Candidate")
     }
 
     func testNearVideoNFOPrefersVideoSpecificWhenSharedFilesAreAbsent() throws {

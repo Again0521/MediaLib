@@ -1640,7 +1640,13 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         adminHLSSessionsProvider: @escaping () -> [ServerAdminHLSPlaybackSession] = { [] },
         adminHLSCancellationProvider: @escaping (String, ServerRequestPrincipal) -> Bool = { _, _ in false }
     ) -> LocalHTTPRouter {
-        LocalHTTPRouter(
+        let maintenanceService = ServerMaintenanceService(
+            database: database,
+            backupDirectory: directory.appendingPathComponent("backups", isDirectory: true),
+            transcodeCacheCleanup: transcodeCacheCleanup
+        )
+        try! maintenanceService.prepareForServing()
+        return LocalHTTPRouter(
             serverID: "server",
             serverName: "Media & <script>alert(1)</script>",
             playbackTracksProvider: playbackTracksProvider,
@@ -1648,11 +1654,7 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
             adminHLSCancellationProvider: adminHLSCancellationProvider,
             administrationCatalog: catalog,
             experienceRepository: ServerExperienceRepository(database: database),
-            maintenanceService: ServerMaintenanceService(
-                database: database,
-                backupDirectory: directory.appendingPathComponent("backups", isDirectory: true),
-                transcodeCacheCleanup: transcodeCacheCleanup
-            ),
+            maintenanceService: maintenanceService,
             runtimeDiagnosticsProvider: runtimeDiagnosticsProvider,
             runtimeConfigurationApplyProvider: runtimeConfigurationApplyProvider,
             authenticationService: authenticationService,
