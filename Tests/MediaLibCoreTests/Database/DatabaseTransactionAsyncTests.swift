@@ -46,6 +46,91 @@ final class DatabaseTransactionAsyncTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
 
+    func testPerformAsyncTransactionRollsBackOnThrow() async throws {
+        struct Boom: Error {}
+
+        do {
+            try await database.performAsync {
+                try self.database.transaction {
+                    try self.database.execute("INSERT INTO t (v) VALUES ('partial')")
+                    throw Boom()
+                }
+            }
+            XCTFail("expected throw")
+        } catch is Boom {
+            // Expected: being on the queue is not mistaken for being in a transaction.
+        }
+
+        XCTAssertEqual(try rowCount(), 0)
+    }
+
+    func testPerformAsyncRepositoryTransactionRollsBackWhenSecondWriteFails() async throws {
+        let repository = VideoManualCollectionRepository(database: database)
+        let collection = VideoManualCollection(
+            id: "async-atomicity",
+            name: "must-roll-back",
+            itemIDs: ["missing-media-id"]
+        )
+
+        do {
+            _ = try await database.performAsync {
+                try repository.save(collection)
+            }
+            XCTFail("expected the item foreign-key write to fail")
+        } catch {
+            // The collection row is written first; the repository transaction must remove it.
+        }
+
+        XCTAssertNil(try repository.fetch(id: collection.id))
+    }
+
+    func testNestedTransactionReusesOuterTransactionWhenInnerErrorIsCaught() throws {
+        struct InnerFailure: Error {}
+
+        try database.transaction {
+            try database.execute("INSERT INTO t (v) VALUES ('outer')")
+            do {
+                try database.transaction {
+                    try database.execute("INSERT INTO t (v) VALUES ('inner')")
+                    throw InnerFailure()
+                }
+                XCTFail("expected inner throw")
+            } catch is InnerFailure {
+                // The documented contract reuses the outer transaction rather than a savepoint.
+            }
+        }
+
+        XCTAssertEqual(try rowCount(), 2)
+    }
+
+    func testCommitFailureRollsBackAndLeavesConnectionUsable() throws {
+        try database.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+        try database.execute("""
+            CREATE TABLE child (
+                parent_id INTEGER,
+                FOREIGN KEY(parent_id) REFERENCES parent(id)
+                    DEFERRABLE INITIALLY DEFERRED
+            )
+            """)
+
+        XCTAssertThrowsError(
+            try database.transaction {
+                try database.execute("INSERT INTO child (parent_id) VALUES (404)")
+            }
+        )
+        let childCount = try database.query("SELECT COUNT(*) FROM child") { $0.int(0) ?? 0 }.first
+        XCTAssertEqual(childCount, 0)
+
+        try database.transaction {
+            try database.execute("INSERT INTO parent (id) VALUES (1)")
+            try database.execute("INSERT INTO child (parent_id) VALUES (1)")
+        }
+        XCTAssertEqual(
+            try database.query("SELECT COUNT(*) FROM child") { $0.int(0) ?? 0 }.first,
+            1
+        )
+    }
+
     func testTransactionAsyncReturnsValue() async throws {
         let inserted = try await database.transactionAsync { () -> Int in
             try self.database.execute("INSERT INTO t (v) VALUES (?)", bindings: [.text("z")])
@@ -74,6 +159,57 @@ final class DatabaseTransactionAsyncTests: XCTestCase {
             XCTFail("expected cancellation")
         } catch is CancellationError {
             // Expected: cancellation is checked before COMMIT and the transaction rolls back.
+        }
+        XCTAssertEqual(try rowCount(), 0)
+    }
+
+    func testPerformAsyncCancellationAfterStartReturnsCommittedResult() async throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let task = Task {
+            try await database.performAsync {
+                try self.database.execute("INSERT INTO t (v) VALUES ('committed')")
+                entered.signal()
+                release.wait()
+                return 42
+            }
+        }
+
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        task.cancel()
+        release.signal()
+
+        let value = try await task.value
+        XCTAssertEqual(value, 42)
+        XCTAssertEqual(try rowCount(), 1)
+    }
+
+    func testPerformAsyncCancellationWhileQueuedDoesNotRunBlock() async throws {
+        let blockerEntered = DispatchSemaphore(value: 0)
+        let releaseBlocker = DispatchSemaphore(value: 0)
+        let blocker = Task {
+            try await database.performAsync {
+                blockerEntered.signal()
+                releaseBlocker.wait()
+            }
+        }
+        XCTAssertEqual(blockerEntered.wait(timeout: .now() + 2), .success)
+
+        let queued = Task {
+            try await database.performAsync {
+                try self.database.execute("INSERT INTO t (v) VALUES ('must-not-run')")
+            }
+        }
+        await Task.yield()
+        queued.cancel()
+        releaseBlocker.signal()
+        try await blocker.value
+
+        do {
+            try await queued.value
+            XCTFail("expected cancellation")
+        } catch is CancellationError {
+            // Expected before the queued closure starts.
         }
         XCTAssertEqual(try rowCount(), 0)
     }

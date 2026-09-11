@@ -151,6 +151,14 @@ final class ServerRemoteProxyStressTests: XCTestCase {
 
         XCTAssertFalse(succeeded)
         XCTAssertEqual(received, 0, "上游忽略 Range 时不得向客户端写出任何字节")
+
+        let outcome = LocalHTTPRemoteRange(
+            fetcher: fetcher,
+            url: upstream.url,
+            offset: 0,
+            length: 256 * 1_024
+        ).streamOutcome { _ in true }
+        XCTAssertEqual(outcome, .failed(.upstreamRejected, deliveredByteLength: 0))
     }
 
     /// 客户端中途断开（写 socket 返回失败）后必须立即停止读取上游。
@@ -169,6 +177,42 @@ final class ServerRemoteProxyStressTests: XCTestCase {
 
         XCTAssertFalse(succeeded)
         XCTAssertEqual(chunks, 1, "消费者拒绝首块后不得继续拉取上游")
+    }
+
+    func testRemoteRangeOutcomeRetainsShortReadByteCount() throws {
+        upstream.maximumResponseBodyByteCount = 64 * 1_024
+        let expectedLength: Int64 = 256 * 1_024
+        let payload = LocalHTTPRemoteRange(
+            fetcher: ServerRemoteAssetFetcher(),
+            url: upstream.url,
+            offset: 0,
+            length: expectedLength
+        )
+        var received: Int64 = 0
+
+        let outcome = payload.streamOutcome { chunk in
+            received += Int64(chunk.count)
+            return true
+        }
+
+        XCTAssertEqual(received, 64 * 1_024)
+        XCTAssertEqual(
+            outcome,
+            .failed(.shortRead(expectedByteLength: expectedLength), deliveredByteLength: received)
+        )
+    }
+
+    func testRemoteRangeOutcomeClassifiesConsumerStopAsCancellation() throws {
+        let payload = LocalHTTPRemoteRange(
+            fetcher: ServerRemoteAssetFetcher(),
+            url: upstream.url,
+            offset: 0,
+            length: 256 * 1_024
+        )
+
+        let outcome = payload.streamOutcome { _ in false }
+
+        XCTAssertEqual(outcome, .cancelled(deliveredByteLength: 0))
     }
 }
 
@@ -205,6 +249,8 @@ private final class LoopbackRangeUpstream: @unchecked Sendable {
     let url: URL
     /// 置为 true 时故意忽略 Range 并返回整片 200，用于验证服务端拒绝该行为。
     var ignoresRange = false
+    /// Advertise the requested length but close after this many bytes.
+    var maximumResponseBodyByteCount: Int?
 
     private let listener: Int32
     private let totalLength: Int
@@ -336,16 +382,20 @@ private final class LoopbackRangeUpstream: @unchecked Sendable {
             let header = "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             return send(header: header, body: Data(), on: client)
         }
-        let body = Data(repeating: payloadByte, count: end - start + 1)
+        let expectedBodyLength = end - start + 1
+        let actualBodyLength = min(expectedBodyLength, maximumResponseBodyByteCount ?? expectedBodyLength)
+        let body = Data(repeating: payloadByte, count: actualBodyLength)
+        let closesEarly = actualBodyLength < expectedBodyLength
         let header = """
         HTTP/1.1 206 Partial Content\r
         Content-Type: video/mp4\r
         Content-Range: bytes \(start)-\(end)/\(totalLength)\r
-        Content-Length: \(body.count)\r
-        Connection: keep-alive\r
+        Content-Length: \(expectedBodyLength)\r
+        Connection: \(closesEarly ? "close" : "keep-alive")\r
         \r\n
         """
-        return send(header: header, body: body, on: client)
+        let sent = send(header: header, body: body, on: client)
+        return sent && !closesEarly
     }
 
     private func send(header: String, body: Data, on client: Int32) -> Bool {

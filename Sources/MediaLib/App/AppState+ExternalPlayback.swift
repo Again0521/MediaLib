@@ -8,6 +8,7 @@ import MediaLibCore
 // triggerSakuraEasterEggIfNeeded 仅本组使用，随之搬来仍保持 private（仅本文件可见）。
 extension AppState {
     func presentBuiltInPlayer(_ item: MediaItem, preserveSelection: Bool = false) {
+        remotePlaybackPreparationCoordinator.cancel()
         if !preserveSelection {
             selectedItem = nil
         }
@@ -24,6 +25,7 @@ extension AppState {
     /// 从访达双击/「打开方式」进入的本地媒体文件：在库内则播放库内条目
     /// （保留进度、剧集队列等），否则构造临时条目直接播放，不写入媒体库。
     func playExternalFiles(_ urls: [URL]) {
+        remotePlaybackPreparationCoordinator.cancel()
         guard let url = urls.first(where: \.isFileURL) else { return }
         let path = url.path
         if let existing = items.first(where: { $0.filePath == path }) {
@@ -47,6 +49,7 @@ extension AppState {
     /// 直接播放网络串流地址（不入库）：构造临时 MediaItem 交给内置播放器，
     /// mpv 原生支持 http(s)/rtsp/rtmp 等协议；进度按未知 id 落库为 no-op，不污染媒体库。
     func playNetworkStream(_ urlString: String) {
+        remotePlaybackPreparationCoordinator.cancel()
         let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: trimmed),
               let scheme = url.scheme?.lowercased(),

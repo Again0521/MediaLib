@@ -118,6 +118,23 @@ final class ServerAdministrationHTTPRouteTests: XCTestCase {
         XCTAssertEqual(response(path: "/api/v1/admin/libraries", token: "administrator").statusCode, 200)
     }
 
+    func testMetadataRefreshPageStatesLocalOnlySemanticsAndMapsHistoricalResults() throws {
+        let page = response(path: "/admin/tasks", token: "library-manager")
+        let script = response(path: "/assets/operations.js", token: "library-manager")
+        XCTAssertEqual(page.statusCode, 200)
+        XCTAssertEqual(script.statusCode, 200)
+        let html = try XCTUnwrap(String(data: page.body, encoding: .utf8))
+        let javascript = try XCTUnwrap(String(data: script.body, encoding: .utf8))
+
+        XCTAssertTrue(html.contains("重新读取本地元数据"))
+        XCTAssertTrue(html.contains("不联网刮削"))
+        XCTAssertTrue(html.contains("不访问远程来源或保险库"))
+        XCTAssertTrue(html.contains("不写回媒体目录"))
+        XCTAssertTrue(javascript.contains("metadata.local-reload-no-changes"))
+        XCTAssertTrue(javascript.contains("metadata.completed-with-errors"))
+        XCTAssertTrue(javascript.contains("历史结果"))
+    }
+
     func testAdministratorCanListInspectAndTerminatePlaybackSessions() throws {
         let session = ServerAdminHLSPlaybackSession(
             sessionID: "0123456789abcdef0123456789abcdef",

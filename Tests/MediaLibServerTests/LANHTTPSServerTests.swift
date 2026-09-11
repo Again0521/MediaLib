@@ -1,10 +1,143 @@
 import Foundation
+import HummingbirdCore
 import HTTPTypes
 import MediaLibCore
+import NIOCore
 import XCTest
 @testable import MediaLibServer
 
 final class LANHTTPSServerTests: XCTestCase {
+    func testCallbackBodyFinishesOnlyAfterNormalProducerEOF() async throws {
+        guard #available(macOS 14.0, *) else { return }
+        let producerFinished = DispatchSemaphore(value: 0)
+        let stream = ServerBodyStream(cancel: {}) { consume in
+            defer { producerFinished.signal() }
+            guard consume(Data("first".utf8)), consume(Data("second".utf8)) else {
+                return .cancelled(deliveredByteLength: 0)
+            }
+            return .completed(deliveredByteLength: 11)
+        }
+        let state = RecordingBodyWriterState()
+
+        try await LANHTTPSServer.callbackBody(contentLength: 11, stream: stream)
+            .write(RecordingBodyWriter(state: state))
+
+        XCTAssertEqual(producerFinished.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(state.body, Data("firstsecond".utf8))
+        XCTAssertEqual(state.finishCount, 1)
+    }
+
+    func testCallbackBodyPropagatesProducerFailureBeforeFirstChunk() async {
+        guard #available(macOS 14.0, *) else { return }
+        let stream = ServerBodyStream(cancel: {}) { _ in
+            .failed(.upstreamTransport, deliveredByteLength: 0)
+        }
+        let state = RecordingBodyWriterState()
+
+        do {
+            try await LANHTTPSServer.callbackBody(contentLength: 32, stream: stream)
+                .write(RecordingBodyWriter(state: state))
+            XCTFail("生产者首块前失败不能被当作正常 EOF")
+        } catch let error as ServerStreamError {
+            XCTAssertEqual(error.failure, .upstreamTransport)
+            XCTAssertEqual(error.deliveredByteLength, 0)
+            XCTAssertFalse(String(describing: error).contains("token="))
+        } catch {
+            XCTFail("错误类型不正确：\(error)")
+        }
+        XCTAssertEqual(state.body.count, 0)
+        XCTAssertEqual(state.finishCount, 0)
+    }
+
+    func testCallbackBodyPropagatesProducerFailureAfterOneChunk() async {
+        guard #available(macOS 14.0, *) else { return }
+        let stream = ServerBodyStream(cancel: {}) { consume in
+            guard consume(Data("partial".utf8)) else {
+                return .cancelled(deliveredByteLength: 0)
+            }
+            return .failed(.shortRead(expectedByteLength: 32), deliveredByteLength: 7)
+        }
+        let state = RecordingBodyWriterState()
+
+        do {
+            try await LANHTTPSServer.callbackBody(contentLength: 32, stream: stream)
+                .write(RecordingBodyWriter(state: state))
+            XCTFail("短流不能被当作正常 EOF")
+        } catch let error as ServerStreamError {
+            XCTAssertEqual(error.failure, .shortRead(expectedByteLength: 32))
+            XCTAssertEqual(error.deliveredByteLength, 7)
+        } catch {
+            XCTFail("错误类型不正确：\(error)")
+        }
+        XCTAssertEqual(state.body, Data("partial".utf8))
+        XCTAssertEqual(state.finishCount, 0)
+    }
+
+    func testCallbackBodyPreservesWriterFailureAndStopsProducer() async {
+        guard #available(macOS 14.0, *) else { return }
+        let producerFinished = DispatchSemaphore(value: 0)
+        let cancelled = LockedBoolean()
+        let stream = ServerBodyStream(cancel: { cancelled.value = true }) { consume in
+            defer { producerFinished.signal() }
+            guard consume(Data("first".utf8)) else { return .cancelled(deliveredByteLength: 0) }
+            guard consume(Data("second".utf8)) else { return .cancelled(deliveredByteLength: 5) }
+            return .completed(deliveredByteLength: 11)
+        }
+        let state = RecordingBodyWriterState()
+
+        do {
+            try await LANHTTPSServer.callbackBody(contentLength: 11, stream: stream)
+                .write(RecordingBodyWriter(state: state, failAtWrite: 1))
+            XCTFail("writer 失败必须向上传播")
+        } catch is RecordingBodyWriterError {
+            // Expected: do not replace the socket/write error with a producer error.
+        } catch {
+            XCTFail("应保留 writer 错误，实际为：\(error)")
+        }
+        XCTAssertEqual(producerFinished.wait(timeout: .now() + 1), .success)
+        XCTAssertTrue(cancelled.value)
+        XCTAssertEqual(state.finishCount, 0)
+    }
+
+    func testCallbackBodyCancellationDuringBackpressureWakesProducer() async {
+        guard #available(macOS 14.0, *) else { return }
+        let firstWriteStarted = DispatchSemaphore(value: 0)
+        let secondProduceAttempted = DispatchSemaphore(value: 0)
+        let producerFinished = DispatchSemaphore(value: 0)
+        let cancelled = LockedBoolean()
+        let stream = ServerBodyStream(cancel: { cancelled.value = true }) { consume in
+            defer { producerFinished.signal() }
+            guard consume(Data("first".utf8)) else { return .cancelled(deliveredByteLength: 0) }
+            secondProduceAttempted.signal()
+            guard consume(Data("second".utf8)) else { return .cancelled(deliveredByteLength: 5) }
+            return .completed(deliveredByteLength: 11)
+        }
+        let state = RecordingBodyWriterState()
+        let task = Task {
+            try await LANHTTPSServer.callbackBody(contentLength: 11, stream: stream)
+                .write(RecordingBodyWriter(
+                    state: state,
+                    firstWriteStarted: firstWriteStarted,
+                    writeDelayNanoseconds: 5_000_000_000
+                ))
+        }
+
+        XCTAssertEqual(firstWriteStarted.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(secondProduceAttempted.wait(timeout: .now() + 1), .success)
+        task.cancel()
+        do {
+            try await task.value
+            XCTFail("取消的 body task 不得正常 finish")
+        } catch is CancellationError {
+            // Expected cancellation, not producer failure.
+        } catch {
+            XCTFail("应保留取消语义，实际为：\(error)")
+        }
+        XCTAssertEqual(producerFinished.wait(timeout: .now() + 1), .success)
+        XCTAssertTrue(cancelled.value)
+        XCTAssertEqual(state.finishCount, 0)
+    }
+
     func testTLSResponsePreservesDeclaredContentLengthForHEADBody() throws {
         guard #available(macOS 14.0, *) else { return }
         let local = LocalHTTPResponse(
@@ -19,6 +152,41 @@ final class LANHTTPSServerTests: XCTestCase {
 
         XCTAssertEqual(translated.headers[.contentLength], "4294967296")
         XCTAssertEqual(translated.headers[.acceptRanges], "bytes")
+    }
+
+    func testTLSFileRangeReadsThroughBoundedLaneAndClosesAfterWriting() async throws {
+        guard #available(macOS 14.0, *) else { return }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MediaLib-LAN-range-\(UUID().uuidString)")
+        let bytes = Data((0..<(600 * 1_024)).map { UInt8($0 % 251) })
+        try bytes.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let executor = ServerRequestWorkExecutor(
+            passwordLimit: 1,
+            generalLimit: 1,
+            fileReadLimit: 1,
+            mediaStreamLimit: 1
+        )
+        let local = LocalHTTPResponse(
+            statusCode: 206,
+            reason: "Partial Content",
+            contentType: "video/mp4",
+            payload: .fileRange(LocalHTTPFileRange(url: url, offset: 17, length: 530 * 1_024)),
+            declaredContentLength: 530 * 1_024,
+            additionalHeaders: []
+        )
+        let state = RecordingBodyWriterState()
+
+        try await LANHTTPSServer.response(from: local, workExecutor: executor).body
+            .write(RecordingBodyWriter(state: state))
+
+        XCTAssertEqual(state.body, bytes.subdata(in: 17..<(17 + 530 * 1_024)))
+        XCTAssertEqual(state.finishCount, 1)
+        let snapshot = await executor.snapshot().fileRead
+        XCTAssertEqual(snapshot.limit, 1)
+        XCTAssertEqual(snapshot.active, 0)
+        XCTAssertEqual(snapshot.queued, 0)
+        XCTAssertEqual(snapshot.completed, 4, "一次 open/seek 加三个至多 256 KiB 的分块读取")
     }
 
     func testMediaBackpressureGateBlocksUntilConsumerReleasesSlot() {
@@ -179,5 +347,75 @@ private final class LockedBoolean: @unchecked Sendable {
             storedValue = newValue
             lock.unlock()
         }
+    }
+}
+
+private enum RecordingBodyWriterError: Error {
+    case failed
+}
+
+private final class RecordingBodyWriterState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedBody = Data()
+    private var storedWriteCount = 0
+    private var storedFinishCount = 0
+
+    var body: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedBody
+    }
+
+    var finishCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedFinishCount
+    }
+
+    func record(_ buffer: ByteBuffer) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        let index = storedWriteCount
+        storedWriteCount += 1
+        storedBody.append(contentsOf: buffer.readableBytesView)
+        return index
+    }
+
+    func recordFinish() {
+        lock.lock()
+        storedFinishCount += 1
+        lock.unlock()
+    }
+}
+
+private struct RecordingBodyWriter: ResponseBodyWriter {
+    let state: RecordingBodyWriterState
+    var failAtWrite: Int?
+    var firstWriteStarted: DispatchSemaphore?
+    var writeDelayNanoseconds: UInt64?
+
+    init(
+        state: RecordingBodyWriterState,
+        failAtWrite: Int? = nil,
+        firstWriteStarted: DispatchSemaphore? = nil,
+        writeDelayNanoseconds: UInt64? = nil
+    ) {
+        self.state = state
+        self.failAtWrite = failAtWrite
+        self.firstWriteStarted = firstWriteStarted
+        self.writeDelayNanoseconds = writeDelayNanoseconds
+    }
+
+    mutating func write(_ buffer: ByteBuffer) async throws {
+        let writeIndex = state.record(buffer)
+        if writeIndex == 0 { firstWriteStarted?.signal() }
+        if failAtWrite == writeIndex { throw RecordingBodyWriterError.failed }
+        if let writeDelayNanoseconds {
+            try await Task.sleep(nanoseconds: writeDelayNanoseconds)
+        }
+    }
+
+    consuming func finish(_ trailingHeaders: HTTPFields?) async throws {
+        state.recordFinish()
     }
 }

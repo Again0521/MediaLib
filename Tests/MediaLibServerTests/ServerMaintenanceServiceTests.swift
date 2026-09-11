@@ -78,6 +78,117 @@ final class ServerMaintenanceServiceTests: XCTestCase {
         XCTAssertEqual(sideEffects.value, 0)
     }
 
+    func testMetadataRefreshRereadsChangedNFOAndReportsNoChangePrecisely() throws {
+        let mediaDirectory = directory.appendingPathComponent("metadata-source", isDirectory: true)
+        try FileManager.default.createDirectory(at: mediaDirectory, withIntermediateDirectories: true)
+        let movieURL = mediaDirectory.appendingPathComponent("Feature.mkv")
+        let nfoURL = mediaDirectory.appendingPathComponent("Feature.nfo")
+        try Data([0x01]).write(to: movieURL)
+        try "<movie><title>First Local Title</title></movie>".write(
+            to: nfoURL, atomically: true, encoding: .utf8
+        )
+        try SourceRepository(database: database).save(MediaSource(
+            id: "metadata-local",
+            name: "Local Metadata",
+            path: mediaDirectory.path,
+            mediaType: .movie,
+            minimumFileSize: 0,
+            readNFO: true,
+            preferLocalArtwork: true,
+            networkScrapingEnabled: true,
+            screenshotFallbackEnabled: true,
+            includeInMetadataFetch: true,
+            preferMetadataWriteToSource: true
+        ))
+        let service = try makeService()
+        let media = MediaRepository(database: database)
+
+        let initial = try service.enqueueLibraryJob(kind: "metadata.refresh", requestedBy: principal)
+        XCTAssertTrue(waitUntil { try self.experience.job(id: initial.id)?.state == .succeeded })
+        XCTAssertEqual(try experience.job(id: initial.id)?.resultCode, "metadata.local-reload-completed")
+        XCTAssertEqual(try media.fetchItems(sourcePath: mediaDirectory.path).first?.title, "First Local Title")
+
+        try "<movie><title>Second Local Title</title></movie>".write(
+            to: nfoURL, atomically: true, encoding: .utf8
+        )
+        let changed = try service.enqueueLibraryJob(kind: "metadata.refresh", requestedBy: principal)
+        XCTAssertTrue(waitUntil { try self.experience.job(id: changed.id)?.state == .succeeded })
+        XCTAssertEqual(try experience.job(id: changed.id)?.resultCode, "metadata.local-reload-completed")
+        XCTAssertEqual(try media.fetchItems(sourcePath: mediaDirectory.path).first?.title, "Second Local Title")
+
+        let unchanged = try service.enqueueLibraryJob(kind: "metadata.refresh", requestedBy: principal)
+        XCTAssertTrue(waitUntil { try self.experience.job(id: unchanged.id)?.state == .succeeded })
+        XCTAssertEqual(try experience.job(id: unchanged.id)?.resultCode, "metadata.local-reload-no-changes")
+        XCTAssertEqual(
+            try String(contentsOf: nfoURL, encoding: .utf8),
+            "<movie><title>Second Local Title</title></movie>",
+            "本地重读不得写回或改写 NFO"
+        )
+    }
+
+    func testMetadataRefreshExcludesRemoteVaultAndOptedOutSources() throws {
+        let sources = SourceRepository(database: database)
+        try sources.save(MediaSource(
+            id: "metadata-remote", name: "Remote", path: "emby://account/library",
+            mediaType: .movie, minimumFileSize: 0, includeInMetadataFetch: true
+        ))
+        try sources.save(MediaSource(
+            id: "metadata-vault", name: "Vault", path: directory.appendingPathComponent("vault").path,
+            mediaType: .privateCollection, minimumFileSize: 0, includeInMetadataFetch: true
+        ))
+        try sources.save(MediaSource(
+            id: "metadata-opted-out", name: "Opted Out", path: directory.path,
+            mediaType: .movie, minimumFileSize: 0, includeInMetadataFetch: false
+        ))
+        let service = try makeService()
+
+        let job = try service.enqueueLibraryJob(kind: "metadata.refresh", requestedBy: principal)
+
+        XCTAssertTrue(waitUntil { try self.experience.job(id: job.id)?.state == .succeeded })
+        XCTAssertEqual(try experience.job(id: job.id)?.resultCode, "metadata.no-eligible-sources")
+        XCTAssertEqual(try MediaRepository(database: database).fetchAll(), [])
+    }
+
+    func testMetadataRefreshReportsPartialFailureWithoutPruningMissingRows() throws {
+        let reachable = directory.appendingPathComponent("reachable", isDirectory: true)
+        try FileManager.default.createDirectory(at: reachable, withIntermediateDirectories: true)
+        let movieURL = reachable.appendingPathComponent("Available.mp4")
+        try Data([0x01]).write(to: movieURL)
+        try "<movie><title>Available Local Title</title></movie>".write(
+            to: reachable.appendingPathComponent("Available.nfo"), atomically: true, encoding: .utf8
+        )
+        let missingDirectory = directory.appendingPathComponent("missing", isDirectory: true)
+        let sources = SourceRepository(database: database)
+        try sources.save(MediaSource(
+            id: "metadata-reachable", name: "Reachable", path: reachable.path,
+            mediaType: .movie, minimumFileSize: 0, includeInMetadataFetch: true
+        ))
+        try sources.save(MediaSource(
+            id: "metadata-missing", name: "Missing", path: missingDirectory.path,
+            mediaType: .movie, minimumFileSize: 0, includeInMetadataFetch: true
+        ))
+        let media = MediaRepository(database: database)
+        let retained = MediaItem(
+            id: "retained-missing-file",
+            type: .movie,
+            title: "Retained",
+            sourcePath: reachable.path,
+            filePath: reachable.appendingPathComponent("Removed.mp4").path,
+            fileSize: 1
+        )
+        try media.upsert(retained)
+        let service = try makeService()
+
+        let job = try service.enqueueLibraryJob(kind: "metadata.refresh", requestedBy: principal)
+
+        XCTAssertTrue(waitUntil { try self.experience.job(id: job.id)?.state == .failed })
+        XCTAssertEqual(try experience.job(id: job.id)?.resultCode, "metadata.local-reload-partial")
+        XCTAssertEqual(try media.fetch(id: retained.id)?.title, "Retained")
+        XCTAssertTrue(try media.fetchItems(sourcePath: reachable.path).contains {
+            $0.title == "Available Local Title"
+        })
+    }
+
     func testRunningPersistenceFailureProducesNoExternalSideEffectAndPausesAdmission() throws {
         struct InjectedStartFailure: Error {}
         let sideEffects = LockedInteger()

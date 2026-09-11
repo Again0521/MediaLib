@@ -41,6 +41,67 @@ private struct ServerMaintenanceOperationResult: Sendable {
     let auditDetailCode: String
 }
 
+/// Fields owned by a local file/tag/NFO scan. User playback state, ratings,
+/// correction history, timestamps, and remote identifiers are deliberately
+/// excluded so a no-op reload is not reported as a metadata change.
+private struct ServerLocalMetadataSnapshot: Equatable, Sendable {
+    let type: MediaType
+    let title: String
+    let originalTitle: String?
+    let artist: String?
+    let album: String?
+    let trackNumber: Int?
+    let year: Int?
+    let overview: String?
+    let genre: String?
+    let posterPath: String?
+    let backdropPath: String?
+    let parentID: String?
+    let seasonNumber: Int?
+    let episodeNumber: Int?
+    let filePath: String?
+    let fileSize: Int64?
+    let videoCodec: String?
+    let audioCodec: String?
+    let resolution: String?
+    let duration: Double?
+    let loudnessTrackGainDB: Double?
+    let loudnessAlbumGainDB: Double?
+    let loudnessTrackPeak: Double?
+    let loudnessAlbumPeak: Double?
+    let metadataProvider: String?
+    let hasLyrics: Bool
+
+    init(_ item: MediaItem) {
+        type = item.type
+        title = item.title
+        originalTitle = item.originalTitle
+        artist = item.artist
+        album = item.album
+        trackNumber = item.trackNumber
+        year = item.year
+        overview = item.overview
+        genre = item.genre
+        posterPath = item.posterPath
+        backdropPath = item.backdropPath
+        parentID = item.parentID
+        seasonNumber = item.seasonNumber
+        episodeNumber = item.episodeNumber
+        filePath = item.filePath
+        fileSize = item.fileSize
+        videoCodec = item.videoCodec
+        audioCodec = item.audioCodec
+        resolution = item.resolution
+        duration = item.duration
+        loudnessTrackGainDB = item.loudnessTrackGainDB
+        loudnessAlbumGainDB = item.loudnessAlbumGainDB
+        loudnessTrackPeak = item.loudnessTrackPeak
+        loudnessAlbumPeak = item.loudnessAlbumPeak
+        metadataProvider = item.metadataProvider
+        hasLyrics = item.hasLyrics
+    }
+}
+
 /// 执行不会改变媒体源配置的本机维护操作。
 ///
 /// 文件系统路径永不跨过此边界；HTTP 层只能看到稳定的不透明 ID、时间和字节数。
@@ -279,6 +340,9 @@ final class ServerMaintenanceService: @unchecked Sendable {
         guard ["library.scan", "library.reindex", "metadata.refresh"].contains(kind) else {
             throw ServerMaintenanceError.unsupportedJob
         }
+        let failureCode = kind == "metadata.refresh"
+            ? "metadata.local-reload-failed"
+            : "maintenance.failed"
         let job = ServerJob(
             kind: kind,
             requestedByUserID: principal.userID
@@ -290,7 +354,7 @@ final class ServerMaintenanceService: @unchecked Sendable {
             requestedDetailCode: kind,
             failureResult: .init(
                 state: .failed,
-                resultCode: "maintenance.failed",
+                resultCode: failureCode,
                 auditAction: "maintenance.failed",
                 auditOutcome: .failure,
                 auditDetailCode: kind
@@ -354,24 +418,81 @@ final class ServerMaintenanceService: @unchecked Sendable {
             mediaRepository: mediaRepository
         )
         var errorCount = 0
+        var reloadedItemCount = 0
+        var changedItemCount = 0
         for (index, source) in sources.enumerated() {
-            let summary = await scanner.scan(source: source, settings: AppSettings(), progress: { _ in })
+            let isMetadataReload = job.kind == "metadata.refresh"
+            let before = isMetadataReload ? try localMetadataSnapshot(sourcePath: source.path) : [:]
+            var boundedSource = source
+            if isMetadataReload {
+                // The standalone server is authorized only to read local tags,
+                // NFO, and artwork. It never uses remote providers, source
+                // write-back, or generated thumbnails for this operation.
+                boundedSource.networkScrapingEnabled = false
+                boundedSource.screenshotFallbackEnabled = false
+                boundedSource.preferMetadataWriteToSource = false
+            }
+            let summary = await scanner.scan(
+                source: boundedSource,
+                options: isMetadataReload ? .localMetadataReload : .localLibraryScan,
+                progress: { _ in }
+            )
             errorCount += summary.errors.count
+            reloadedItemCount += summary.importedItems
+            if isMetadataReload {
+                let after = try localMetadataSnapshot(sourcePath: source.path)
+                changedItemCount += Self.changedMetadataItemCount(before: before, after: after)
+            }
             try experienceRepository.updateRunningJobProgress(
                 id: job.id,
                 progress: sources.isEmpty ? 1 : Double(index + 1) / Double(sources.count)
             )
         }
-        let operation = job.kind == "metadata.refresh" ? "metadata" : "scan"
+        if job.kind == "metadata.refresh" {
+            let resultCode: String
+            if sources.isEmpty {
+                resultCode = "metadata.no-eligible-sources"
+            } else if errorCount > 0 {
+                resultCode = reloadedItemCount > 0
+                    ? "metadata.local-reload-partial"
+                    : "metadata.local-reload-failed"
+            } else if changedItemCount > 0 {
+                resultCode = "metadata.local-reload-completed"
+            } else {
+                resultCode = "metadata.local-reload-no-changes"
+            }
+            return .init(
+                state: errorCount == 0 ? .succeeded : .failed,
+                resultCode: resultCode,
+                auditAction: errorCount == 0 ? "maintenance.completed" : "maintenance.failed",
+                auditOutcome: errorCount == 0 ? .success : .failure,
+                auditDetailCode: job.kind
+            )
+        }
         return .init(
             state: errorCount == 0 ? .succeeded : .failed,
             resultCode: errorCount == 0
-                ? (sources.isEmpty ? "\(operation).no-eligible-sources" : "\(operation).completed")
-                : "\(operation).completed-with-errors",
+                ? (sources.isEmpty ? "scan.no-eligible-sources" : "scan.completed")
+                : "scan.completed-with-errors",
             auditAction: errorCount == 0 ? "maintenance.completed" : "maintenance.failed",
             auditOutcome: errorCount == 0 ? .success : .failure,
             auditDetailCode: job.kind
         )
+    }
+
+    private func localMetadataSnapshot(sourcePath: String) throws -> [String: ServerLocalMetadataSnapshot] {
+        Dictionary(uniqueKeysWithValues: try mediaRepository.fetchItems(sourcePath: sourcePath).map {
+            ($0.id, ServerLocalMetadataSnapshot($0))
+        })
+    }
+
+    private static func changedMetadataItemCount(
+        before: [String: ServerLocalMetadataSnapshot],
+        after: [String: ServerLocalMetadataSnapshot]
+    ) -> Int {
+        Set(before.keys).union(after.keys).reduce(into: 0) { count, id in
+            if before[id] != after[id] { count += 1 }
+        }
     }
 
     private func admitAndSchedule(

@@ -298,6 +298,7 @@ final class ServerModeProcessController: ObservableObject {
         environment["MEDIALIB_SERVER_PORT"] = String(configuration.port)
         environment["MEDIALIB_SERVER_ID"] = configuration.serverID
         environment["MEDIALIB_SERVER_NAME"] = configuration.serverName
+        environment["MEDIALIB_SERVER_VERSION"] = AppVersion.current
         environment["MEDIALIB_SERVER_NETWORK_ACCESS_MODE"] = configuration.networkAccessMode.rawValue
         environment["MEDIALIB_SERVER_LIGHTWEIGHT"] = configuration.isLightweightMode ? "1" : "0"
         if let publicOrigin = configuration.effectivePublicOrigin {

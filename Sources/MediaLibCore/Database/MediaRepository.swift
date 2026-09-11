@@ -353,6 +353,18 @@ public final class MediaRepository {
         ).first
     }
 
+    /// Exact-source snapshot used by bounded maintenance operations. This is
+    /// intentionally not a prefix query: sibling sources may share a path
+    /// prefix, and a local metadata reload must not inspect either sibling or
+    /// remote account rows while deciding whether it changed anything.
+    public func fetchItems(sourcePath: String) throws -> [MediaItem] {
+        try database.query(
+            selectSQL + " WHERE source_path = ? ORDER BY id ASC",
+            bindings: [.text(sourcePath)],
+            map: map(row:)
+        )
+    }
+
     /// 供 HTTP/Mlink 服务端调用的有界资料库查询。授权来源在同一 SQLite 连接的临时表中
     /// 表达，避免把完整媒体库拉入内存后再筛选；FTS 参数始终由受限文本构造，绝不拼入 SQL。
     public func fetchServerLibraryPage(

@@ -14,11 +14,21 @@ mkdir -p "$OUT_DIR"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
 cd "$ROOT_DIR"
-swift build >/tmp/shelf_build.log 2>&1 || { echo "BUILD FAILED"; tail -40 /tmp/shelf_build.log; exit 1; }
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/medialib-shelf.XXXXXX")"
+APP_PID=""
+cleanup() {
+  if [[ -n "$APP_PID" ]]; then
+    kill "$APP_PID" 2>/dev/null || true
+    wait "$APP_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+echo "Logs: $RUN_DIR"
+swift build >"$RUN_DIR/build.log" 2>&1 || { echo "BUILD FAILED"; tail -40 "$RUN_DIR/build.log"; exit 1; }
 
-pkill -f "MediaLib --music" 2>/dev/null || true
-sleep 1
-.build/debug/MediaLib --music-player-visual-debug-dark --music-scheme-shelf ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} >/tmp/shelf_run.log 2>&1 &
+.build/debug/MediaLib --music-player-visual-debug-dark --music-scheme-shelf ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} >"$RUN_DIR/run.log" 2>&1 &
 APP_PID=$!
 sleep 9
 WID=$(swift "$ROOT_DIR/scripts/shelf_winid.swift" "$APP_PID" 2>/dev/null || true)
@@ -27,6 +37,5 @@ if [ -n "$WID" ]; then
   echo "Shelf shot: $OUT_DIR/$NAME (wid=$WID pid=$APP_PID)"
 else
   echo "WINDOW NOT FOUND (pid=$APP_PID)"
+  exit 1
 fi
-kill "$APP_PID" 2>/dev/null || true
-pkill -f "MediaLib --music" 2>/dev/null || true

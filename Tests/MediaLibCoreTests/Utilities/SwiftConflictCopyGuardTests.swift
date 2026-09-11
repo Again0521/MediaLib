@@ -44,6 +44,56 @@ final class SwiftConflictCopyGuardTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("RemoteSyncRepository Copy.swift"))
     }
 
+    func testGuardRejectsSyncConflictSwiftSources() throws {
+        let root = try makeTemporaryPackage()
+        try writeSwiftFile(
+            "Sources/MediaLibCore/Database/DatabaseManager.sync-conflict-20260908.swift",
+            in: root
+        )
+
+        let result = try runGuard(root: root)
+
+        XCTAssertNotEqual(result.status, 0)
+        XCTAssertTrue(result.stderr.contains("DatabaseManager.sync-conflict-20260908.swift"))
+        XCTAssertTrue(result.stderr.contains("Accidental Swift conflict copy detected"))
+    }
+
+    func testGuardRejectsOrdinaryDuplicateBasenamesWithinOneTarget() throws {
+        let root = try makeTemporaryPackage()
+        try writeSwiftFile("Tests/MediaLibCoreTests/Database/DatabaseManagerTests.swift", in: root)
+        try writeSwiftFile("Tests/MediaLibCoreTests/Legacy/DatabaseManagerTests.swift", in: root)
+
+        let result = try runGuard(root: root)
+
+        XCTAssertNotEqual(result.status, 0)
+        XCTAssertTrue(result.stderr.contains("Duplicate Swift basename in target Tests/MediaLibCoreTests"))
+        XCTAssertTrue(result.stderr.contains("Tests/MediaLibCoreTests/Database/DatabaseManagerTests.swift"))
+        XCTAssertTrue(result.stderr.contains("Tests/MediaLibCoreTests/Legacy/DatabaseManagerTests.swift"))
+    }
+
+    func testGuardAllowsSameBasenameInDifferentTargets() throws {
+        let root = try makeTemporaryPackage()
+        try writeSwiftFile("Sources/MediaLibCore/Models/SharedName.swift", in: root)
+        try writeSwiftFile("Sources/MediaLib/Models/SharedName.swift", in: root)
+
+        let result = try runGuard(root: root)
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+    }
+
+    func testGuardHandlesSpacesAndChinesePathsWithoutLeakingAbsoluteRoot() throws {
+        let root = try makeTemporaryPackage()
+        try writeSwiftFile("Tests/MediaLibCoreTests/目录 一/Shared Name.swift", in: root)
+        try writeSwiftFile("Tests/MediaLibCoreTests/目录 二/Shared Name.swift", in: root)
+
+        let result = try runGuard(root: root)
+
+        XCTAssertNotEqual(result.status, 0)
+        XCTAssertTrue(result.stderr.contains("Tests/MediaLibCoreTests/目录 一/Shared Name.swift"))
+        XCTAssertTrue(result.stderr.contains("Tests/MediaLibCoreTests/目录 二/Shared Name.swift"))
+        XCTAssertFalse(result.stderr.contains(root.path))
+    }
+
     func testGuardDoesNotScanOutsideSwiftPackageSourceRoots() throws {
         let root = try makeTemporaryPackage()
         try writeSwiftFile("doc/Examples/DatabaseManager 2.swift", in: root)

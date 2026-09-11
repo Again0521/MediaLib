@@ -15,7 +15,8 @@
 ![平台](https://img.shields.io/badge/平台-macOS%2013+-000000?style=flat-square&logo=apple&logoColor=white)
 ![界面](https://img.shields.io/badge/构建-SwiftUI-0A84FF?style=flat-square)
 ![播放内核](https://img.shields.io/badge/播放-libmpv-8E44AD?style=flat-square)
-![版本](https://img.shields.io/badge/版本-1.5.0-34C759?style=flat-square)
+<!-- release-version-badge: generated from config/release.json -->
+![版本](https://img.shields.io/badge/版本-1.8.0-34C759?style=flat-square)
 
 <br>
 
@@ -157,6 +158,17 @@
 
 ## 家庭服务器与网页播放
 
+在 MediaLIB 的“设置 → 服务器”中初始化本机管理员并开启服务，即可用浏览器访问与桌面端物理分离的播放站点和 `/admin/*` 管理站点。默认入口为设置页显示的 `http://127.0.0.1:<端口>`，只接受本机回环连接。
+
+局域网访问需要 **macOS 14 或更高版本**以及 Wi-Fi/有线网络上的私有 IPv4 地址。明确开启“局域网访问”后，应用只开放内建 HTTPS，不会降级为明文 LAN HTTP：
+
+1. 在设置页导出 `MediaLIB-LAN-CA.cer`，通过可信方式安装到要访问的设备；
+2. iPhone/iPad 还需在“设置 → 通用 → 关于本机 → 证书信任设置”中为该 CA 开启完全信任；
+3. 使用设置页显示的 `https://<私有地址>:<端口>` 访问，不要绕过证书警告。
+
+高级用户可让服务继续保持回环模式，并运行 `scripts/setup_lan_https_proxy.sh` 生成 Caddy/nginx 的 HTTPS 反向代理基线。代理必须终止 TLS、只从明确列出的本机可信代理转发，并保持脚本生成的 Host/转发头与流式配置；不要把回环 HTTP 端口直接暴露到局域网或公网，也不要把反向代理配置与内建 LAN HTTPS 模式混用。
+
+网页端按账号和资料库授权读取索引、播放媒体并更新逐用户状态，但没有媒体源增删改、真实路径或来源凭据接口。“重新读取本地元数据”只读取已授权普通本地来源的文件标签、NFO 和本地图片，不联网刮削、不访问保险库，也不写回源文件。任何文件标签/NFO 写回仍须在桌面端对应功能中显式授权。
 
 
 <br>
@@ -170,7 +182,16 @@ env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run MediaLibC
 scripts/package_dmg.sh
 ```
 
-产物为 `dist/MediaLIB.app` 与 `dist/MediaLib.dmg`。
+产品版本与 build 的唯一来源是 `config/release.json`。修改它后运行
+`python3 scripts/release_metadata.py --write` 更新开发兜底常量和三份 README 徽章；
+`python3 scripts/release_metadata.py --check` 会在本地和 CI 中拒绝漂移。该版本与数据库
+schema、API 版本及 `bump_versions.py` 管理的 Web 缓存号彼此独立。
+
+正式产物为 `dist/MediaLib.dmg`。打包默认是完整发行模式：缺少 libmpv、ffmpeg 或 ffprobe
+会立即失败，不会生成能力残缺的同名 DMG；脚本还会校验 arm64 架构、非系统动态依赖闭包、
+包内构建清单、只读挂载内容和严格签名。只有全部验证通过后才原子替换上一份 DMG，失败时
+保留上一份可用产物。默认使用可本地严格验证的 ad-hoc 签名；这不等同于 Developer ID
+签名或 Apple 公证，外部分发需另行配置并完成对应验证。
 
 <br>
 
@@ -195,13 +216,8 @@ scripts/package_dmg.sh
 
 ## 文档
 
-| 文档 | 内容 |
-| :-- | :-- |
-| [用户使用说明](doc/用户使用说明.md) | 面向普通用户的完整功能说明 |
-| [开发说明](doc/开发说明.md) | 架构、约束与验证 |
-| [设计系统标准](doc/MediaLIB_设计系统标准.md) | 页面与音乐展开页的视觉规范 |
-| [ROADMAP](doc/ROADMAP.md) | 后续计划 |
-| [CHANGELOG](doc/CHANGELOG.md) | 历史变更记录 |
+当前仓库公开、可随新 checkout 获得的安装、服务器和构建说明以这三份 README 为准。
+`doc/` 保存本地工程计划、验收记录和内部设计资料，默认被 Git 忽略；需要公开的文档应先逐项审阅并显式纳入版本控制，不能假定 README 中的本地路径会随仓库发布。
 
 <br>
 

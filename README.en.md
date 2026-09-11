@@ -15,7 +15,8 @@ A native macOS home media library. It gathers everything scattered across local 
 ![Platform](https://img.shields.io/badge/Platform-macOS%2013+-000000?style=flat-square&logo=apple&logoColor=white)
 ![Built with](https://img.shields.io/badge/Built%20with-SwiftUI-0A84FF?style=flat-square)
 ![Playback](https://img.shields.io/badge/Playback-libmpv-8E44AD?style=flat-square)
-![Version](https://img.shields.io/badge/Version-1.5.0-34C759?style=flat-square)
+<!-- release-version-badge: generated from config/release.json -->
+![Version](https://img.shields.io/badge/Version-1.8.0-34C759?style=flat-square)
 
 <br>
 
@@ -156,6 +157,22 @@ Once you have `MediaLib.dmg`:
 
 <br>
 
+## Home server and web playback
+
+Open **Settings → Server** in MediaLIB, initialize the local administrator, and enable the service. The web player and the `/admin/*` management site are separate surfaces with separate authorization. By default, the displayed `http://127.0.0.1:<port>` address accepts loopback connections from this Mac only.
+
+Built-in LAN access requires **macOS 14 or later** and a private IPv4 address on Wi-Fi or wired Ethernet. After explicitly enabling LAN access, MediaLIB exposes HTTPS only—never plaintext LAN HTTP:
+
+1. Export `MediaLIB-LAN-CA.cer` from Settings and install it on each client through a trusted channel.
+2. On iPhone/iPad, also enable full trust for the MediaLIB CA under **Settings → General → About → Certificate Trust Settings**.
+3. Open the `https://<private-address>:<port>` URL shown by MediaLIB; do not bypass certificate warnings.
+
+Advanced deployments can keep loopback mode and run `scripts/setup_lan_https_proxy.sh` for the supported Caddy/nginx HTTPS reverse-proxy baseline. The proxy must terminate TLS, forward only from explicitly trusted local proxy addresses, and preserve the generated Host/header and streaming rules. Never expose the loopback HTTP port directly to a LAN or the public internet, and do not combine proxy mode with built-in LAN HTTPS.
+
+The web service can read authorized indexes, stream media, and update per-user state. It cannot add or edit media sources, reveal source paths or credentials, or silently write source files. “Reload local metadata” reads tags, NFO, and local artwork from eligible ordinary local sources only; it performs no online scraping, Vault access, or source write-back. Tag/NFO write-back remains an explicitly authorized desktop action.
+
+<br>
+
 ## Build from source
 
 ```bash
@@ -165,7 +182,9 @@ env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run MediaLibC
 scripts/package_dmg.sh
 ```
 
-The outputs are `dist/MediaLIB.app` and `dist/MediaLib.dmg`.
+`config/release.json` is the single source for the product version and build number. After editing it, run `python3 scripts/release_metadata.py --write`; `python3 scripts/release_metadata.py --check` rejects drift locally and in CI. Product versioning stays independent from database schema, API versions, and the web cache number managed by `bump_versions.py`.
+
+The release artifact is `dist/MediaLib.dmg`. Packaging fails if libmpv, ffmpeg, or ffprobe is missing, validates the arm64 runtime dependency closure, mounts the image read-only, and replaces the previous DMG only after verification. The default ad-hoc signature is locally verifiable but is not Developer ID signing or Apple notarization.
 
 <br>
 
@@ -190,13 +209,7 @@ The outputs are `dist/MediaLIB.app` and `dist/MediaLib.dmg`.
 
 ## Documentation
 
-| Document | Contents |
-| :-- | :-- |
-| [User Guide](doc/用户使用说明.md) | Full feature guide for everyday users |
-| [Developer Notes](doc/开发说明.md) | Architecture, constraints, and verification |
-| [Design System](doc/MediaLIB_设计系统标准.md) | Visual standards for pages and the music player |
-| [ROADMAP](doc/ROADMAP.md) | What's next |
-| [CHANGELOG](doc/CHANGELOG.md) | Change history |
+These three tracked README files are the public installation, server, and build guide available in a fresh checkout. `doc/` contains local engineering plans, validation records, and internal design material and is Git-ignored by default. Any document intended for public distribution must be reviewed and tracked explicitly.
 
 <br>
 

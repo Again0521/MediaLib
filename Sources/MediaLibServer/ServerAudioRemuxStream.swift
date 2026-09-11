@@ -78,7 +78,29 @@ struct ServerAudioRemuxStream {
     /// 片尾的 ffmpeg。
     @discardableResult
     func stream(_ consume: @escaping (Data) -> Bool) -> Bool {
-        guard Self.slots.wait(timeout: .now() + 0.5) == .success else { return false }
+        streamOutcome(consume).isCompleted
+    }
+
+    func bodyStream() -> ServerBodyStream {
+        let cancellation = ServerBoundedProcess.Cancellation()
+        return ServerBodyStream(cancel: { cancellation.cancel() }) { consume in
+            streamOutcome(cancellation: cancellation, consume)
+        }
+    }
+
+    @discardableResult
+    func streamOutcome(
+        cancellation: ServerBoundedProcess.Cancellation? = nil,
+        _ consume: @escaping (Data) -> Bool
+    ) -> ServerStreamTermination {
+        guard cancellation?.isCancelled != true else {
+            return .cancelled(deliveredByteLength: 0)
+        }
+        guard Self.slots.wait(timeout: .now() + 0.5) == .success else {
+            return cancellation?.isCancelled == true
+                ? .cancelled(deliveredByteLength: 0)
+                : .failed(.producerUnavailable, deliveredByteLength: 0)
+        }
         defer { Self.slots.signal() }
 
         let process = Process()
@@ -89,7 +111,16 @@ struct ServerAudioRemuxStream {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
         process.standardInput = FileHandle.nullDevice
-        do { try process.run() } catch { return false }
+        guard cancellation?.bind(process) != false else {
+            return .cancelled(deliveredByteLength: 0)
+        }
+        defer { cancellation?.unbind(process) }
+        do { try process.run() } catch {
+            return .failed(.producerUnavailable, deliveredByteLength: 0)
+        }
+        if cancellation?.isCancelled == true {
+            ServerBoundedProcess.terminate(process, forceAfter: 0)
+        }
 
         // 标准错误一定要有人读干净：管道缓冲区写满后 ffmpeg 会阻塞在写日志上，
         // 表现为播放到某一处永远卡住。
@@ -113,18 +144,30 @@ struct ServerAudioRemuxStream {
                     clientLeft = true
                     break
                 }
+                delivered += end - offset
                 offset = end
             }
             if clientLeft { break }
-            delivered += chunk.count
         }
-        if clientLeft || process.isRunning {
-            process.terminate()
+        if clientLeft || cancellation?.isCancelled == true {
+            ServerBoundedProcess.terminate(process, forceAfter: 0.25)
             // 关掉读端，让还卡在写管道上的 ffmpeg 立刻收到 EPIPE 退出。
             try? handle.close()
         }
         process.waitUntilExit()
         drained.wait()
-        return !clientLeft && delivered > 0
+        if clientLeft || cancellation?.isCancelled == true {
+            return .cancelled(deliveredByteLength: Int64(delivered))
+        }
+        guard process.terminationStatus == 0 else {
+            return .failed(
+                .producerExited(exitCode: process.terminationStatus),
+                deliveredByteLength: Int64(delivered)
+            )
+        }
+        guard delivered > 0 else {
+            return .failed(.emptyOutput, deliveredByteLength: 0)
+        }
+        return .completed(deliveredByteLength: Int64(delivered))
     }
 }

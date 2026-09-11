@@ -29,7 +29,8 @@ struct LANHTTPSServer {
     init(
         configuration: ServerLaunchConfiguration,
         dataDirectory: URL,
-        requestHandler: LocalLoopbackHTTPServer
+        requestHandler: LocalLoopbackHTTPServer,
+        requestWorkExecutor: ServerRequestWorkExecutor = .shared
     ) throws {
         guard configuration.networkAccessMode == .lanHTTPS,
               let publicOrigin = configuration.publicOrigin,
@@ -54,7 +55,8 @@ struct LANHTTPSServer {
             try await Self.respond(
                 to: request,
                 context: context,
-                handler: requestHandler
+                handler: requestHandler,
+                workExecutor: requestWorkExecutor
             )
         }
         for rawMethod in ServerHTTPMethodContract.orderedRawValues {
@@ -84,7 +86,8 @@ struct LANHTTPSServer {
     private static func respond(
         to originalRequest: Request,
         context: Context,
-        handler: LocalLoopbackHTTPServer
+        handler: LocalLoopbackHTTPServer,
+        workExecutor: ServerRequestWorkExecutor
     ) async throws -> Response {
         let clientAddress = context.remoteAddress?.ipAddress ?? "unresolved-client"
         guard LANIPv4AddressPolicy.isPrivateOrLoopback(clientAddress) else {
@@ -100,10 +103,14 @@ struct LANHTTPSServer {
         }
         let body = Data(bodyBuffer.readableBytesView)
         let requestHead = rawRequestHead(from: request)
-        // LocalLoopbackHTTPServer still owns synchronous database/file handlers. Move that
-        // work off Hummingbird's cooperative request task; B12 will add measured concurrency
-        // limits for the remaining blocking categories.
-        let localResponse = await BlockingIOExecutor.run {
+        // The synchronous router remains off Hummingbird's cooperative task, but its
+        // blocking work is now bounded. Password hashing has an independent, tighter
+        // memory budget so it cannot starve general reads and management requests.
+        let workKind = ServerRequestWorkKind.classify(
+            method: request.method.rawValue,
+            target: "\(request.uri)"
+        )
+        let localResponse = try await workExecutor.run(kind: workKind) {
             handler.response(
                 for: requestHead,
                 body: body,
@@ -111,7 +118,7 @@ struct LANHTTPSServer {
                 isDirectTLS: true
             )
         }
-        return response(from: localResponse)
+        return response(from: localResponse, workExecutor: workExecutor)
     }
 
     static func rawRequestHead(from request: Request) -> String {
@@ -126,7 +133,10 @@ struct LANHTTPSServer {
         return value
     }
 
-    static func response(from local: LocalHTTPResponse) -> Response {
+    static func response(
+        from local: LocalHTTPResponse,
+        workExecutor: ServerRequestWorkExecutor = .shared
+    ) -> Response {
         var headers = HTTPFields()
         headers[.contentType] = local.contentType
         for line in local.additionalHeaders {
@@ -154,12 +164,17 @@ struct LANHTTPSServer {
             }
         case let .fileRange(range):
             body = .init(contentLength: contentLength) { writer in
-                let handle = try FileHandle(forReadingFrom: range.url)
-                defer { try? handle.close() }
-                try handle.seek(toOffset: UInt64(range.offset))
+                let reader = try await workExecutor.run(kind: .fileRead) {
+                    try LANFileRangeReader(url: range.url, offset: range.offset)
+                }
+                defer { reader.close() }
                 var remaining = range.length
                 while remaining > 0 {
-                    let data = try handle.read(upToCount: Int(min(remaining, 256 * 1024))) ?? Data()
+                    try Task.checkCancellation()
+                    let requestedLength = Int(min(remaining, 256 * 1024))
+                    let data = try await workExecutor.run(kind: .fileRead) {
+                        try reader.read(upToCount: requestedLength)
+                    }
                     guard !data.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
                     try await writer.write(ByteBuffer(bytes: data))
                     remaining -= Int64(data.count)
@@ -167,11 +182,23 @@ struct LANHTTPSServer {
                 try await writer.finish(nil)
             }
         case let .remoteRange(range):
-            body = callbackBody(contentLength: contentLength) { consume in range.stream(consume) }
+            body = callbackBody(
+                contentLength: contentLength,
+                stream: range.bodyStream(),
+                workExecutor: workExecutor
+            )
         case let .remoteFull(full):
-            body = callbackBody(contentLength: contentLength) { consume in full.stream(consume) }
+            body = callbackBody(
+                contentLength: contentLength,
+                stream: full.bodyStream(),
+                workExecutor: workExecutor
+            )
         case let .remuxStream(stream):
-            body = callbackBody(contentLength: nil) { consume in stream.stream(consume) }
+            body = callbackBody(
+                contentLength: nil,
+                stream: stream.bodyStream(),
+                workExecutor: workExecutor
+            )
         }
         return Response(
             status: .init(code: local.statusCode, reasonPhrase: local.reason),
@@ -184,45 +211,93 @@ struct LANHTTPSServer {
     /// async response body. A single buffered chunk bounds memory; an explicit
     /// gate blocks the producer until the async writer consumes that chunk.
     /// Slow clients therefore apply real backpressure without a polling loop.
-    private static func callbackBody(
+    static func callbackBody(
         contentLength: Int?,
-        produce: @escaping @Sendable (@escaping (Data) -> Bool) -> Bool
+        stream: ServerBodyStream,
+        workExecutor: ServerRequestWorkExecutor = .shared
     ) -> ResponseBody {
         ResponseBody(contentLength: contentLength) { writer in
             let flowControl = LANResponseBackpressureGate()
-            let sequence = AsyncStream<ByteBuffer>(bufferingPolicy: .bufferingOldest(1)) { continuation in
-                continuation.onTermination = { _ in flowControl.terminate() }
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let completed = produce { data in
-                        guard flowControl.acquire() else { return false }
-                        let buffer = ByteBuffer(bytes: data)
-                        switch continuation.yield(buffer) {
-                        case .enqueued:
-                            return true
-                        case .dropped, .terminated:
-                            flowControl.release()
-                            return false
-                        @unknown default:
-                            flowControl.release()
-                            return false
+            let (sequence, continuation) = AsyncThrowingStream<ByteBuffer, Error>.makeStream(
+                bufferingPolicy: .bufferingOldest(1)
+            )
+            continuation.onTermination = { termination in
+                flowControl.terminate()
+                if case .cancelled = termination { stream.cancel() }
+            }
+            let producerTask = Task(priority: .high) {
+                let outcome: ServerStreamTermination
+                do {
+                    outcome = try await workExecutor.run(kind: .mediaStream) {
+                        stream.run { data in
+                            guard flowControl.acquire() else { return false }
+                            let buffer = ByteBuffer(bytes: data)
+                            switch continuation.yield(buffer) {
+                            case .enqueued:
+                                return true
+                            case .dropped, .terminated:
+                                flowControl.release()
+                                return false
+                            @unknown default:
+                                flowControl.release()
+                                return false
+                            }
                         }
                     }
+                } catch {
+                    continuation.finish(throwing: error)
+                    return
+                }
+                switch outcome {
+                case .completed:
                     continuation.finish()
-                    _ = completed
+                case .cancelled:
+                    continuation.finish(throwing: CancellationError())
+                case let .failed(failure, deliveredByteLength):
+                    continuation.finish(throwing: ServerStreamError(
+                        failure: failure,
+                        deliveredByteLength: deliveredByteLength
+                    ))
                 }
             }
-            for await buffer in sequence {
-                do {
+            do {
+                for try await buffer in sequence {
                     try await writer.write(buffer)
                     flowControl.release()
-                } catch {
-                    flowControl.terminate()
-                    throw error
                 }
+                try Task.checkCancellation()
+                flowControl.terminate()
+                _ = await producerTask.result
+                try await writer.finish(nil)
+            } catch {
+                flowControl.terminate()
+                stream.cancel()
+                producerTask.cancel()
+                _ = await producerTask.result
+                throw error
             }
-            flowControl.terminate()
-            try await writer.finish(nil)
         }
+    }
+}
+
+/// A range body owns one handle and calls it serially, but every potentially
+/// blocking open/read is dispatched through the bounded file lane. Closing is
+/// idempotent and kept in `defer` so writer failure and cancellation cannot leak
+/// the descriptor.
+private final class LANFileRangeReader: @unchecked Sendable {
+    private let handle: FileHandle
+
+    init(url: URL, offset: Int64) throws {
+        handle = try FileHandle(forReadingFrom: url)
+        try handle.seek(toOffset: UInt64(offset))
+    }
+
+    func read(upToCount count: Int) throws -> Data {
+        try handle.read(upToCount: count) ?? Data()
+    }
+
+    func close() {
+        try? handle.close()
     }
 }
 

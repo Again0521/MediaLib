@@ -43,12 +43,73 @@ public enum VideoMetadataSidecarWriteError: Error, LocalizedError, Sendable, Equ
         case .generatedDocumentInvalid:
             return "生成的 NFO 未通过 XML 校验，未替换原文件。"
         case .concurrentModification:
-            return "NFO 在写入期间被其他程序修改，已保留外部修改。"
+            return "NFO 在写入期间被其他程序修改，已保留外部修改和安全副本。"
         case .replacementFailed:
             return "NFO 原子替换失败，原文件已恢复。"
         case .recoveryFailed:
             return "NFO 原子替换失败，且自动恢复未完成。"
         }
+    }
+}
+
+private actor VideoMetadataSidecarWriteCoordinator {
+    private struct Waiter {
+        var id: UUID
+        var continuation: CheckedContinuation<Void, Error>
+    }
+
+    private var activeTargets: Set<String> = []
+    private var waitersByTarget: [String: [Waiter]] = [:]
+
+    func acquire(target: String, waiterID: UUID) async throws {
+        try Task.checkCancellation()
+        if activeTargets.insert(target).inserted {
+            return
+        }
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    waitersByTarget[target, default: []].append(.init(
+                        id: waiterID,
+                        continuation: continuation
+                    ))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancel(target: target, waiterID: waiterID) }
+        }
+    }
+
+    func release(target: String) {
+        guard activeTargets.contains(target) else { return }
+        if var waiters = waitersByTarget[target], !waiters.isEmpty {
+            let next = waiters.removeFirst()
+            if waiters.isEmpty {
+                waitersByTarget.removeValue(forKey: target)
+            } else {
+                waitersByTarget[target] = waiters
+            }
+            next.continuation.resume()
+        } else {
+            activeTargets.remove(target)
+        }
+    }
+
+    private func cancel(target: String, waiterID: UUID) {
+        guard var waiters = waitersByTarget[target],
+              let index = waiters.firstIndex(where: { $0.id == waiterID }) else {
+            return
+        }
+        let waiter = waiters.remove(at: index)
+        if waiters.isEmpty {
+            waitersByTarget.removeValue(forKey: target)
+        } else {
+            waitersByTarget[target] = waiters
+        }
+        waiter.continuation.resume(throwing: CancellationError())
     }
 }
 
@@ -71,6 +132,7 @@ struct VideoMetadataSidecarWriteHooks: @unchecked Sendable {
 
 public enum VideoMetadataSidecarWriter {
     private static let maximumExistingDocumentBytes = 4 * 1024 * 1024
+    private static let writeCoordinator = VideoMetadataSidecarWriteCoordinator()
 
     public static func xmlContent(for item: MediaItem, update: MediaMetadataUpdate) -> String {
         let document = newDocument(rootTag: rootTag(for: item))
@@ -107,9 +169,27 @@ public enum VideoMetadataSidecarWriter {
         to targetURL: URL,
         hooks: VideoMetadataSidecarWriteHooks
     ) async throws -> VideoMetadataSidecarWriteOutcome {
-        try await BlockingIOExecutor.run {
-            try writeSynchronously(item: item, update: update, to: targetURL, hooks: hooks)
+        let targetKey = coordinatedTargetKey(targetURL)
+        let waiterID = UUID()
+        try await writeCoordinator.acquire(target: targetKey, waiterID: waiterID)
+        do {
+            try Task.checkCancellation()
+            let result = try await BlockingIOExecutor.run {
+                try writeSynchronously(item: item, update: update, to: targetURL, hooks: hooks)
+            }
+            await writeCoordinator.release(target: targetKey)
+            return result
+        } catch {
+            await writeCoordinator.release(target: targetKey)
+            throw error
         }
+    }
+
+    private static func coordinatedTargetKey(_ targetURL: URL) -> String {
+        targetURL.deletingLastPathComponent()
+            .resolvingSymlinksInPath()
+            .appendingPathComponent(targetURL.lastPathComponent)
+            .standardizedFileURL.path
     }
 
     private static func writeSynchronously(
@@ -184,7 +264,28 @@ public enum VideoMetadataSidecarWriter {
             do {
                 _ = try hooks.replaceExisting(targetURL, temporaryURL, backupName)
             } catch {
-                let recovered = recoverOriginalIfNeeded(
+                // Reconcile below. File replacement APIs may throw after changing
+                // one or more paths, so the filesystem is the source of truth.
+            }
+
+            let targetExists = fileManager.fileExists(atPath: targetURL.path)
+            let currentData = targetExists && !isSymbolicLink(targetURL, fileManager: fileManager)
+                ? try? Data(contentsOf: targetURL)
+                : nil
+            if currentData == outputData {
+                let warning = removeBackupIfPresent(backupURL, fileManager: fileManager)
+                return .written(.init(
+                    targetURL: targetURL,
+                    mergedExistingDocument: true,
+                    warning: warning
+                ))
+            }
+            if currentData == originalData {
+                _ = removeBackupIfPresent(backupURL, fileManager: fileManager)
+                throw VideoMetadataSidecarWriteError.replacementFailed
+            }
+            if !targetExists {
+                let recovered = restoreBackupToMissingTarget(
                     targetURL: targetURL,
                     backupURL: backupURL,
                     originalData: originalData,
@@ -195,23 +296,10 @@ public enum VideoMetadataSidecarWriter {
                     : VideoMetadataSidecarWriteError.recoveryFailed
             }
 
-            guard (try? Data(contentsOf: targetURL)) == outputData else {
-                let recovered = restoreBackup(
-                    targetURL: targetURL,
-                    backupURL: backupURL,
-                    originalData: originalData,
-                    fileManager: fileManager
-                )
-                throw recovered
-                    ? VideoMetadataSidecarWriteError.replacementFailed
-                    : VideoMetadataSidecarWriteError.recoveryFailed
-            }
-            let warning = removeBackupIfPresent(backupURL, fileManager: fileManager)
-            return .written(.init(
-                targetURL: targetURL,
-                mergedExistingDocument: true,
-                warning: warning
-            ))
+            // A target that exists but is neither the original nor our exact
+            // output may belong to another writer. Never delete or replace it;
+            // retain the uniquely named backup as recovery material.
+            throw VideoMetadataSidecarWriteError.concurrentModification
         }
 
         guard !fileManager.fileExists(atPath: targetURL.path) else {
@@ -316,36 +404,23 @@ public enum VideoMetadataSidecarWriter {
         return type == .typeSymbolicLink
     }
 
-    private static func recoverOriginalIfNeeded(
+    private static func restoreBackupToMissingTarget(
         targetURL: URL,
         backupURL: URL,
         originalData: Data,
         fileManager: FileManager
     ) -> Bool {
-        if (try? Data(contentsOf: targetURL)) == originalData {
-            return true
-        }
-        return restoreBackup(
-            targetURL: targetURL,
-            backupURL: backupURL,
-            originalData: originalData,
-            fileManager: fileManager
-        )
-    }
-
-    private static func restoreBackup(
-        targetURL: URL,
-        backupURL: URL,
-        originalData: Data,
-        fileManager: FileManager
-    ) -> Bool {
+        guard !fileManager.fileExists(atPath: targetURL.path) else { return false }
         guard fileManager.fileExists(atPath: backupURL.path) else { return false }
-        if fileManager.fileExists(atPath: targetURL.path) {
-            try? fileManager.removeItem(at: targetURL)
-        }
         do {
-            try fileManager.moveItem(at: backupURL, to: targetURL)
-            return (try? Data(contentsOf: targetURL)) == originalData
+            // Copy first so failed verification never consumes the only recovery material.
+            try fileManager.copyItem(at: backupURL, to: targetURL)
+            guard (try? Data(contentsOf: targetURL)) == originalData else {
+                try? fileManager.removeItem(at: targetURL)
+                return false
+            }
+            _ = removeBackupIfPresent(backupURL, fileManager: fileManager)
+            return true
         } catch {
             return false
         }

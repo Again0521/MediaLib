@@ -228,28 +228,6 @@ private struct OneClickCleanupResult: Sendable {
     }
 }
 
-private struct LibraryReloadSnapshot: Sendable {
-    var sources: [MediaSource]
-    var items: [MediaItem]
-    var musicPlaylists: [MusicPlaylist]
-    var musicSmartPlaylists: [MusicSmartPlaylist]
-    var videoSmartCollections: [VideoSmartCollection]
-    var videoManualCollections: [VideoManualCollection]
-    var videoOfflineSubscriptions: [VideoOfflineSubscription]
-    var metadataCorrectionCountsByMediaID: [String: Int]
-    var metadataCorrectionRecordCount: Int
-    var metadataCorrectionBatches: [MetadataCorrectionBatchSummary]
-    var pendingSyncConflictCount: Int
-    var pendingSyncConflicts: [SyncConflict]
-    var remoteConnectorAccounts: [RemoteConnectorAccount]
-    var musicProjectionSnapshot: MusicLibraryProjectionSnapshot
-    var detailMetadataGapsByMediaID: [String: Set<String>]
-    var detailSearchTermsByMediaID: [String: [String]]
-    var detailBackdropPathsByMediaID: [String: String]
-    var mediaExternalIDIndex: [String: String]
-    var mediaIDsByPersonID: [String: Set<String>]
-}
-
 enum MusicRepeatMode: String, CaseIterable, Identifiable {
     case sequential
     case repeatAll
@@ -412,7 +390,12 @@ final class AppState: ObservableObject {
     private var playbackSessionForwarding: AnyCancellable?
     var activePlayerItem: MediaItem? {
         get { playbackSession.activePlayerItem }
-        set { playbackSession.setActivePlayerItem(newValue) }
+        set {
+            if newValue == nil {
+                remotePlaybackPreparationCoordinator.cancel()
+            }
+            playbackSession.setActivePlayerItem(newValue)
+        }
     }
     /// 视频播放队列（播放器内剧集列表）：播放系列中的某一集时，
     /// 自动装入「当前集 + 之后的同系列剧集」；独立影片只含自身。
@@ -774,8 +757,11 @@ final class AppState: ObservableObject {
     private var automaticTMDBMatchTask: Task<Void, Never>?
     private var configuredAutomaticTMDBMatchInterval: AutomaticScanInterval?
     private var tmdbMatchTask: Task<Void, Never>?
-    private var libraryReloadTask: Task<Void, Never>?
-    private var libraryReloadGeneration = 0
+    private let libraryReloadCoordinator = LibraryReloadCoordinator<AppDirectories, LibraryReloadSnapshot>(
+        loader: { try await LibraryReloadSnapshotLoader.load(directories: $0) }
+    )
+    // internal：播放入口分布在 AppState+ExternalPlayback.swift，统一通过此对象取消旧准备请求。
+    let remotePlaybackPreparationCoordinator = RemotePlaybackPreparationCoordinator()
     private var detailEnrichmentTasks: [String: Task<TMDBEnrichment?, Never>] = [:]
     private var videoCacheJobs: [UUID: VideoCacheJob] = [:]
     private var videoOfflineSubscriptionMaintenanceTask: Task<Void, Never>?
@@ -1125,7 +1111,6 @@ final class AppState: ObservableObject {
     deinit {
         vaultUnlockRefreshTask?.cancel()
         version122MaintenanceTask?.cancel()
-        libraryReloadTask?.cancel()
         backgroundTaskPersistence.cancel()
         detailEnrichmentTasks.values.forEach { $0.cancel() }
         networkPathMonitor?.cancel()
@@ -2957,90 +2942,17 @@ final class AppState: ObservableObject {
 
     private func scheduleLibraryReload(reason: String, delayNanoseconds: UInt64 = 180_000_000) {
         guard let directories else { return }
-        libraryReloadGeneration += 1
-        let generation = libraryReloadGeneration
-        libraryReloadTask?.cancel()
-        libraryReloadTask = Task { @MainActor [weak self, directories] in
-            if delayNanoseconds > 0 {
-                try? await Task.sleep(nanoseconds: delayNanoseconds)
+        libraryReloadCoordinator.schedule(
+            input: directories,
+            delayNanoseconds: delayNanoseconds,
+            loadingChanged: { [weak self] in self?.isLibraryReloading = $0 },
+            apply: { [weak self] snapshot, reloadStart in
+                self?.applyLibraryReloadSnapshot(snapshot, reason: reason, reloadStart: reloadStart)
+            },
+            failure: { [weak self] error in
+                self?.showError("加载媒体库失败", error)
             }
-            guard let self, !Task.isCancelled else { return }
-            self.isLibraryReloading = true
-            let reloadStart = Date()
-            do {
-                let snapshot = try await Self.loadLibraryReloadSnapshot(directories: directories)
-                guard !Task.isCancelled else { return }
-                guard self.libraryReloadGeneration == generation else { return }
-                self.applyLibraryReloadSnapshot(snapshot, reason: reason, reloadStart: reloadStart)
-                self.isLibraryReloading = false
-            } catch is CancellationError {
-                if self.libraryReloadGeneration == generation {
-                    self.isLibraryReloading = false
-                }
-            } catch {
-                if self.libraryReloadGeneration == generation {
-                    self.isLibraryReloading = false
-                    self.showError("加载媒体库失败", error)
-                } else {
-                    self.logger?.log("已忽略过期媒体库刷新错误：\(error.localizedDescription)", level: .warning)
-                }
-            }
-        }
-    }
-
-    private nonisolated static func loadLibraryReloadSnapshot(directories: AppDirectories) async throws -> LibraryReloadSnapshot {
-        // 全量 SQLite 读取（本库约 5.8 秒）属长阻塞 I/O，走专用队列而非协作池。
-        try await BlockingIOExecutor.run {
-            try Task.checkCancellation()
-            ArtworkImageCache.invalidateMissingPaths()
-            let database = try DatabaseManager(url: directories.database, backupDirectory: directories.databaseBackups)
-            let sourceRepository = SourceRepository(database: database)
-            let mediaRepository = MediaRepository(database: database)
-            let musicPlaylistRepository = MusicPlaylistRepository(database: database)
-            let musicSmartPlaylistRepository = MusicSmartPlaylistRepository(database: database)
-            let videoSmartCollectionRepository = VideoSmartCollectionRepository(database: database)
-            let videoManualCollectionRepository = VideoManualCollectionRepository(database: database)
-            let videoOfflineSubscriptionRepository = VideoOfflineSubscriptionRepository(database: database)
-            let metadataCorrectionRepository = MetadataCorrectionRepository(database: database)
-            let syncConflictRepository = SyncConflictRepository(database: database)
-            let remoteConnectorAccountRepository = RemoteConnectorAccountRepository(database: database)
-            let mediaDetailRepository = MediaDetailRepository(database: database)
-            let musicProjectionRepository = MusicLibraryProjectionRepository(database: database)
-
-            let sources = try sourceRepository.fetchAll()
-            let items = try mediaRepository.fetchAll()
-            let detailCandidateIDs = items.compactMap { item -> String? in
-                guard item.parentID == nil,
-                      item.type != .music,
-                      item.type != .photo,
-                      item.type != .homeVideo,
-                      item.type != .privateCollection else { return nil }
-                return item.id
-            }
-            try Task.checkCancellation()
-
-            return LibraryReloadSnapshot(
-                sources: sources,
-                items: items,
-                musicPlaylists: try musicPlaylistRepository.fetchAll(),
-                musicSmartPlaylists: try musicSmartPlaylistRepository.fetchAll(),
-                videoSmartCollections: try videoSmartCollectionRepository.fetchAll(),
-                videoManualCollections: try videoManualCollectionRepository.fetchAll(),
-                videoOfflineSubscriptions: try videoOfflineSubscriptionRepository.fetchAll(),
-                metadataCorrectionCountsByMediaID: try metadataCorrectionRepository.activeCountsByMediaID(),
-                metadataCorrectionRecordCount: try metadataCorrectionRepository.activeRecordCount(),
-                metadataCorrectionBatches: try metadataCorrectionRepository.fetchActiveBatches(limit: 120),
-                pendingSyncConflictCount: try syncConflictRepository.pendingCount(),
-                pendingSyncConflicts: try syncConflictRepository.fetchPending(limit: 120),
-                remoteConnectorAccounts: try remoteConnectorAccountRepository.fetchAll(),
-                musicProjectionSnapshot: try musicProjectionRepository.fetchSnapshot(),
-                detailMetadataGapsByMediaID: try mediaDetailRepository.detailCompleteness(mediaIDs: detailCandidateIDs),
-                detailSearchTermsByMediaID: try mediaDetailRepository.searchTermsByMediaID(),
-                detailBackdropPathsByMediaID: try mediaDetailRepository.firstBackdropPathsByMediaID(),
-                mediaExternalIDIndex: try mediaDetailRepository.externalMediaIDIndex(),
-                mediaIDsByPersonID: try mediaDetailRepository.mediaIDsByPersonID()
-            )
-        }
+        )
     }
 
     private func applyLibraryReloadSnapshot(
@@ -3049,6 +2961,8 @@ final class AppState: ObservableObject {
         reloadStart: Date
     ) {
         let applyStart = Date()
+        // 只让通过 generation 检查的最新快照改变进程缓存；过期 loader 没有提交后副作用。
+        ArtworkImageCache.invalidateMissingPaths()
         libraryDomain.replaceLibrary(sources: snapshot.sources, items: snapshot.items)
         musicPlaylistStore.replaceLoaded(
             playlists: snapshot.musicPlaylists,
@@ -6206,6 +6120,7 @@ final class AppState: ObservableObject {
 
     func deleteSource(_ source: MediaSource) {
         do {
+            remotePlaybackPreparationCoordinator.cancel(sourceID: source.id)
             invalidateHealthCaches(forSourcePath: source.path, sourceID: source.id)
             try mediaRepository?.deleteItems(sourcePathPrefix: source.path)
             try sourceRepository?.delete(id: source.id)
@@ -7297,6 +7212,7 @@ final class AppState: ObservableObject {
     }
 
     func play(_ item: MediaItem, preserveSelection: Bool = false) {
+        remotePlaybackPreparationCoordinator.cancel()
         if item.filePath == nil, let firstEpisode = children(for: item).first {
             play(firstEpisode, preserveSelection: preserveSelection)
             return
@@ -7313,18 +7229,34 @@ final class AppState: ObservableObject {
             return
         }
         if Self.isEmbyItem(item) {
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    let preparedItem = try await self.prepareEmbyItemForPlayback(item)
-                    self.playPreparedItem(preparedItem, preserveSelection: preserveSelection)
-                } catch {
-                    let host = self.embySource(for: item).map(AppState.embyServerHost(for:)) ?? (item.sourcePath ?? "远程服务器")
-                    if !self.presentEmbyRestrictionIfNeeded(error, serverHost: host) {
+            guard let source = embySource(for: item) else {
+                playPreparedItem(item, preserveSelection: preserveSelection)
+                return
+            }
+            let request = RemotePlaybackPreparationRequest(
+                item: item,
+                sourceID: source.id,
+                preserveSelection: preserveSelection
+            )
+            let serverHost = Self.embyServerHost(for: source)
+            remotePlaybackPreparationCoordinator.start(
+                request,
+                prepare: { [weak self] request in
+                    guard let self else { throw CancellationError() }
+                    return try await self.prepareEmbyItemForPlayback(request.item)
+                },
+                apply: { [weak self] preparedItem, request in
+                    guard let self,
+                          self.sources.contains(where: { $0.id == request.sourceID }) else { return }
+                    self.playPreparedItem(preparedItem, preserveSelection: request.preserveSelection)
+                },
+                failure: { [weak self] error, _ in
+                    guard let self else { return }
+                    if !self.presentEmbyRestrictionIfNeeded(error, serverHost: serverHost) {
                         self.showError("远程播放准备失败", error)
                     }
                 }
-            }
+            )
             return
         }
         playPreparedItem(item, preserveSelection: preserveSelection)
@@ -8290,6 +8222,7 @@ final class AppState: ObservableObject {
     }
 
     func replaceMusicQueueAndPlay(_ tracks: [MediaItem], startingAt requestedStart: MediaItem? = nil) {
+        remotePlaybackPreparationCoordinator.cancel()
         let playableTracks = uniqueMusicTracks(tracks)
         guard !playableTracks.isEmpty else {
             alert = AppAlert(title: "无法播放", message: "这个分组里没有可播放的歌曲。")

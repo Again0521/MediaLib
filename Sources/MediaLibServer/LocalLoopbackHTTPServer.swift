@@ -450,25 +450,20 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         // A client that has already gone away must not trigger an upstream NAS
         // read just because the router prepared a lazy remote Range payload.
         guard write(data: response.serializedHeaders(keepAlive: effectiveKeepAlive), to: client) else { return false }
+        let bodyCompleted: Bool
         switch response.payload {
         case let .data(body):
-            write(data: body, to: client)
+            bodyCompleted = write(data: body, to: client)
         case let .fileRange(range):
-            write(fileRange: range, to: client)
+            bodyCompleted = write(fileRange: range, to: client)
         case let .remoteRange(range):
-            write(remoteRange: range, to: client)
+            bodyCompleted = write(bodyStream: range.bodyStream(), to: client).isCompleted
         case let .remoteFull(full):
-            _ = full.stream { [weak self] chunk in
-                guard let self else { return false }
-                return self.write(data: chunk, to: client)
-            }
+            bodyCompleted = write(bodyStream: full.bodyStream(), to: client).isCompleted
         case let .remuxStream(stream):
-            stream.stream { [weak self] chunk in
-                guard let self else { return false }
-                return self.write(data: chunk, to: client)
-            }
+            bodyCompleted = write(bodyStream: stream.bodyStream(), to: client).isCompleted
         }
-        return effectiveKeepAlive
+        return effectiveKeepAlive && bodyCompleted
     }
 
     @discardableResult
@@ -496,7 +491,7 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         }
     }
 
-    private func write(fileRange: LocalHTTPFileRange, to client: Int32) {
+    private func write(fileRange: LocalHTTPFileRange, to client: Int32) -> Bool {
         // 本地/网络挂载直放也要计量：NAS 挂载卷的分块读取一样会成为首帧瓶颈，
         // 只量远程上游会让"慢在磁盘还是慢在上游"这个问题无从回答。
         let telemetry = ServerPlaybackTelemetry.shared
@@ -533,10 +528,11 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             upstreamTimeToFirstByte: nil,
             totalDuration: Date().timeIntervalSince(startedAt)
         )
+        return outcome == .completed
     }
 
-    private func write(remoteRange: LocalHTTPRemoteRange, to client: Int32) {
-        _ = remoteRange.stream { [weak self] chunk in
+    private func write(bodyStream: ServerBodyStream, to client: Int32) -> ServerStreamTermination {
+        bodyStream.run { [weak self] chunk in
             guard let self else { return false }
             return self.write(data: chunk, to: client)
         }
@@ -2880,7 +2876,27 @@ struct LocalHTTPRemoteRange {
     let length: Int64
 
     func stream(_ consume: @escaping (Data) -> Bool) -> Bool {
-        fetcher.streamMediaBytes(url: url, offset: offset, length: length, consume: consume)
+        streamOutcome(consume: consume).isCompleted
+    }
+
+    func bodyStream() -> ServerBodyStream {
+        let cancellation = ServerRemoteAssetFetcher.Cancellation()
+        return ServerBodyStream(cancel: { cancellation.cancel() }) { consume in
+            streamOutcome(cancellation: cancellation, consume: consume)
+        }
+    }
+
+    func streamOutcome(
+        cancellation: ServerRemoteAssetFetcher.Cancellation? = nil,
+        consume: @escaping (Data) -> Bool
+    ) -> ServerStreamTermination {
+        fetcher.streamMediaBytesOutcome(
+            url: url,
+            offset: offset,
+            length: length,
+            cancellation: cancellation,
+            consume: consume
+        )
     }
 
     func materializedBody() -> Data {
@@ -2902,22 +2918,51 @@ struct LocalHTTPRemoteFull {
     let byteLength: Int64
 
     func stream(_ consume: @escaping (Data) -> Bool) -> Bool {
-        guard byteLength > 0 else { return false }
+        streamOutcome(consume: consume).isCompleted
+    }
+
+    func bodyStream() -> ServerBodyStream {
+        let cancellation = ServerRemoteAssetFetcher.Cancellation()
+        return ServerBodyStream(cancel: { cancellation.cancel() }) { consume in
+            streamOutcome(cancellation: cancellation, consume: consume)
+        }
+    }
+
+    func streamOutcome(
+        cancellation: ServerRemoteAssetFetcher.Cancellation? = nil,
+        consume: @escaping (Data) -> Bool
+    ) -> ServerStreamTermination {
+        guard byteLength > 0 else {
+            return .failed(.shortRead(expectedByteLength: byteLength), deliveredByteLength: 0)
+        }
         var offset: Int64 = 0
         while offset < byteLength {
+            if cancellation?.isCancelled == true {
+                return .cancelled(deliveredByteLength: offset)
+            }
             let length = min(
                 byteLength - offset,
                 Int64(ServerRemoteAssetFetcher.maximumMediaRangeByteLength)
             )
-            guard fetcher.streamMediaBytes(
+            let range = LocalHTTPRemoteRange(
+                fetcher: fetcher,
                 url: url,
                 offset: offset,
-                length: length,
-                consume: consume
-            ) else { return false }
-            offset += length
+                length: length
+            ).streamOutcome(cancellation: cancellation, consume: consume)
+            switch range {
+            case let .completed(deliveredByteLength):
+                offset += deliveredByteLength
+            case let .cancelled(deliveredByteLength):
+                return .cancelled(deliveredByteLength: offset + deliveredByteLength)
+            case let .failed(_, deliveredByteLength):
+                return .failed(
+                    .shortRead(expectedByteLength: byteLength),
+                    deliveredByteLength: offset + deliveredByteLength
+                )
+            }
         }
-        return true
+        return .completed(deliveredByteLength: offset)
     }
 }
 

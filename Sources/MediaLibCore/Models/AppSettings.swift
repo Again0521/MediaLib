@@ -80,7 +80,7 @@ public enum AppLanguage: String, Codable, CaseIterable, Identifiable, Sendable {
     }
 }
 
-public enum ArtworkFallbackMode: String, Codable, CaseIterable, Identifiable {
+public enum ArtworkFallbackMode: String, Codable, CaseIterable, Identifiable, Sendable {
     case videoFrame
     case generatedDefault
     case none

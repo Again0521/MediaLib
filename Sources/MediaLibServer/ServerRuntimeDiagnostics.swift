@@ -1,5 +1,6 @@
 import Foundation
 import MediaLibCore
+import MediaLibServerProtocol
 
 #if canImport(VideoToolbox)
 import VideoToolbox
@@ -52,9 +53,16 @@ final class ServerRuntimeDiagnostics: @unchecked Sendable {
         self.publicOrigin = publicOrigin
         self.trustedProxyAddresses = trustedProxyAddresses.sorted()
         self.hostControlAvailable = hostControlAvailable
-        serviceVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-            ?? ProcessInfo.processInfo.environment["MEDIALIB_SERVER_VERSION"]
-            ?? "development"
+        serviceVersion = Self.resolveServiceVersion(
+            bundleValue: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            environmentValue: ProcessInfo.processInfo.environment["MEDIALIB_SERVER_VERSION"]
+        )
+    }
+
+    static func resolveServiceVersion(bundleValue: String?, environmentValue: String?) -> String {
+        normalizedVersion(bundleValue)
+            ?? normalizedVersion(environmentValue)
+            ?? GeneratedReleaseMetadata.productVersion
     }
 
     func snapshot(at date: Date = Date()) -> ServerRuntimeDiagnosticsSnapshot {
@@ -86,4 +94,10 @@ final class ServerRuntimeDiagnostics: @unchecked Sendable {
     private static let videoToolboxH264Available = false
     private static let videoToolboxHEVCAvailable = false
     #endif
+
+    private static func normalizedVersion(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
 }

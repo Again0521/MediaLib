@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import MediaLibServerProtocol
 
 /// 一个可用的新版本（来自 GitHub Releases）。
 struct AppUpdateInfo: Identifiable, Equatable {
@@ -27,14 +28,21 @@ struct AppUpdateAssetCandidate: Equatable {
 enum AppVersion {
     /// 打包版从 Info.plist 读取；swift run 裸二进制兜底用当前发布版本。
     static var current: String {
-        (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.5.5"
+        normalizedBundleValue(for: "CFBundleShortVersionString")
+            ?? GeneratedReleaseMetadata.productVersion
     }
 
-    /// 内部构建号用于区分同一营销版本下的增量安装包；它不参与远端发布版本比较。
+    /// 内部构建号用于区分同一营销版本下的增量安装包。
     static var build: String? {
-        guard let value = Bundle.main.infoDictionary?["CFBundleVersion"] as? String else { return nil }
-        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return normalized.isEmpty ? nil : normalized
+        normalizedBundleValue(for: "CFBundleVersion")
+            ?? GeneratedReleaseMetadata.buildNumber
+    }
+
+    static var isPrerelease: Bool {
+        guard let channel = normalizedBundleValue(for: "MediaLibReleaseChannel") else {
+            return GeneratedReleaseMetadata.isPrerelease
+        }
+        return channel == "prerelease"
     }
 
     static var displayString: String {
@@ -55,18 +63,77 @@ enum AppVersion {
     /// 数字化版本比较：按小数点分段，逐段比较整数大小（越靠前权重越大）。
     /// 例：1.20.01 < 1.20.10（第三段 1 < 10），1.1.2 < 1.1.11。
     static func isVersion(_ candidate: String, newerThan baseline: String) -> Bool {
+        compareNumericVersion(candidate, baseline) == .orderedDescending
+    }
+
+    /// Stable installations never receive prerelease builds. A prerelease may
+    /// move to a stable build with the same marketing version, and an explicit
+    /// build number can order two packages with that same version/channel.
+    static func isRelease(
+        version candidateVersion: String,
+        build candidateBuild: String?,
+        prerelease candidateIsPrerelease: Bool,
+        newerThan baselineVersion: String,
+        build baselineBuild: String?,
+        prerelease baselineIsPrerelease: Bool
+    ) -> Bool {
+        if candidateIsPrerelease && !baselineIsPrerelease {
+            return false
+        }
+        switch compareNumericVersion(candidateVersion, baselineVersion) {
+        case .orderedDescending:
+            return true
+        case .orderedAscending:
+            return false
+        case .orderedSame:
+            if candidateIsPrerelease != baselineIsPrerelease {
+                return baselineIsPrerelease && !candidateIsPrerelease
+            }
+            guard let candidateBuild = positiveBuild(candidateBuild),
+                  let baselineBuild = positiveBuild(baselineBuild) else {
+                return false
+            }
+            return candidateBuild > baselineBuild
+        }
+    }
+
+    static func shouldOffer(_ release: AppUpdateInfo) -> Bool {
+        isRelease(
+            version: release.version,
+            build: nil,
+            prerelease: release.prerelease,
+            newerThan: current,
+            build: build,
+            prerelease: isPrerelease
+        )
+    }
+
+    private static func compareNumericVersion(_ candidate: String, _ baseline: String) -> ComparisonResult {
         let lhs = components(of: candidate)
         let rhs = components(of: baseline)
         for index in 0..<max(lhs.count, rhs.count) {
             let a = index < lhs.count ? lhs[index] : 0
             let b = index < rhs.count ? rhs[index] : 0
-            if a != b { return a > b }
+            if a != b { return a > b ? .orderedDescending : .orderedAscending }
         }
-        return false
+        return .orderedSame
     }
 
     private static func components(of version: String) -> [Int] {
         version.split(separator: ".").map { Int($0) ?? 0 }
+    }
+
+    private static func positiveBuild(_ value: String?) -> Int? {
+        guard let value,
+              value.allSatisfy(\.isNumber),
+              let number = Int(value), number > 0 else { return nil }
+        return number
+    }
+
+    private static func normalizedBundleValue(for key: String) -> String? {
+        guard let value = Bundle.main.infoDictionary?[key] as? String else { return nil }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
     }
 }
 
@@ -104,9 +171,12 @@ enum AppUpdateChecker {
         }
     }
 
-    static func latestReleaseInfo(fromGitHubReleasesJSON data: Data) throws -> AppUpdateInfo? {
+    static func latestReleaseInfo(
+        fromGitHubReleasesJSON data: Data,
+        includePrereleases: Bool = AppVersion.isPrerelease
+    ) throws -> AppUpdateInfo? {
         let releases = try JSONDecoder().decode([GitHubRelease].self, from: data)
-        return latestReleaseInfo(from: releases)
+        return latestReleaseInfo(from: releases, includePrereleases: includePrereleases)
     }
 
     static func releaseVersion(
@@ -136,7 +206,10 @@ enum AppUpdateChecker {
         parseReleaseDate(text)
     }
 
-    static func fallbackReleaseInfo(fromReleasePageHTML html: String) -> AppUpdateInfo? {
+    static func fallbackReleaseInfo(
+        fromReleasePageHTML html: String,
+        includePrereleases: Bool = AppVersion.isPrerelease
+    ) -> AppUpdateInfo? {
         var seen = Set<String>()
         let tags = regexCaptures(pattern: #"/Again0521/MediaLib/releases/tag/([^"?#<]+)"#, in: html).compactMap { raw -> String? in
             let tag = raw.removingPercentEncoding ?? raw
@@ -145,6 +218,11 @@ enum AppUpdateChecker {
         }
         for tag in tags {
             guard let version = AppVersion.extractVersion(from: tag) else { continue }
+            let prerelease = tag.range(
+                of: #"(?i)(?:^|[-._])(alpha|beta|rc)(?:[-._]|[0-9]|$)"#,
+                options: .regularExpression
+            ) != nil
+            guard includePrereleases || !prerelease else { continue }
             let releaseURL = URL(string: "https://github.com/Again0521/MediaLib/releases/tag/\(tag)") ?? repositoryPage
             let assetPattern = #"/Again0521/MediaLib/releases/download/\#(NSRegularExpression.escapedPattern(for: tag))/([^"?#<]+?\.(?:dmg|zip))"#
             let rawAssetName = regexCaptures(pattern: assetPattern, in: html).first
@@ -160,7 +238,7 @@ enum AppUpdateChecker {
                 assetName: assetName,
                 assetSize: nil,
                 publishedAt: nil,
-                prerelease: tag.localizedCaseInsensitiveContains("beta")
+                prerelease: prerelease
             )
         }
         return nil
@@ -176,9 +254,17 @@ enum AppUpdateChecker {
             do {
                 guard let candidate = try await fetchLatestRelease(from: source) else { continue }
                 if let current = best {
-                    if AppVersion.isVersion(candidate.version, newerThan: current.version) {
+                    if AppVersion.isRelease(
+                        version: candidate.version,
+                        build: nil,
+                        prerelease: candidate.prerelease,
+                        newerThan: current.version,
+                        build: nil,
+                        prerelease: current.info.prerelease
+                    ) {
                         best = (candidate.version, candidate)
                     } else if candidate.version == current.version,
+                              candidate.prerelease == current.info.prerelease,
                               let currentDate = current.info.publishedAt,
                               let candidateDate = candidate.publishedAt,
                               candidateDate > currentDate {
@@ -223,10 +309,14 @@ enum AppUpdateChecker {
         return try latestReleaseInfo(fromGitHubReleasesJSON: data)
     }
 
-    private static func latestReleaseInfo(from releases: [GitHubRelease]) -> AppUpdateInfo? {
+    private static func latestReleaseInfo(
+        from releases: [GitHubRelease],
+        includePrereleases: Bool
+    ) -> AppUpdateInfo? {
         var best: (version: String, info: AppUpdateInfo)?
         for release in releases {
-            guard !release.draft else { continue }
+            guard !release.draft,
+                  includePrereleases || !release.prerelease else { continue }
             guard let version = version(for: release),
                   let asset = preferredAsset(in: release.assets),
                   let pageURL = URL(string: release.htmlURL) else { continue }
@@ -244,9 +334,17 @@ enum AppUpdateChecker {
                 prerelease: release.prerelease
             )
             if let current = best {
-                if AppVersion.isVersion(version, newerThan: current.version) {
+                if AppVersion.isRelease(
+                    version: version,
+                    build: nil,
+                    prerelease: info.prerelease,
+                    newerThan: current.version,
+                    build: nil,
+                    prerelease: current.info.prerelease
+                ) {
                     best = (version, info)
                 } else if version == current.version,
+                          info.prerelease == current.info.prerelease,
                           let currentDate = current.info.publishedAt,
                           let publishedAt,
                           publishedAt > currentDate {

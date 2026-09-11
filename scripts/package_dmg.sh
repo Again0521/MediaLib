@@ -18,8 +18,6 @@ APP_NAME="MediaLib"
 SERVER_NAME="MediaLibServer"
 DISPLAY_NAME="MediaLIB"
 BUNDLE_ID="com.local.MediaLib"
-VERSION="1.5.5"
-BUILD="97"
 DIST_DIR="$ROOT_DIR/dist"
 ROOT_HASH="$(printf '%s' "$ROOT_DIR" | shasum -a 256 | awk '{print substr($1, 1, 12)}')"
 PACKAGE_INSTANCE="${MEDIALIB_PACKAGE_INSTANCE:-default}"
@@ -34,7 +32,11 @@ LEGACY_APP_COPY="$DIST_DIR/$APP_NAME.app"
 DMG_ROOT="$BUILD_ROOT/dmg-root"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
 DMG_RW_PATH="$BUILD_ROOT/$APP_NAME-rw.dmg"
+TEMP_DMG_PATH="$BUILD_ROOT/$APP_NAME.dmg"
+CANDIDATE_DMG_PATH="$DIST_DIR/.$APP_NAME-$PACKAGE_INSTANCE.candidate.dmg"
+PACKAGE_LOCK_PATH="$DIST_DIR/.medialib-package.lock"
 DMG_MOUNT="$BUILD_ROOT/dmg-mount"
+VERIFY_MOUNT="$BUILD_ROOT/verify-mount"
 DMG_BACKGROUND="$DMG_ROOT/.background/dmg-background.png"
 DMG_VOLUME_ICON="$DMG_ROOT/.VolumeIcon.icns"
 SWIFT_MODULE_CACHE="/private/tmp/MediaLib-package-module-cache-$(id -u)-$ROOT_HASH-$PACKAGE_INSTANCE"
@@ -43,6 +45,10 @@ SWIFTPM_CACHE_ROOT="/private/tmp/MediaLib-swiftpm-cache-$(id -u)-$ROOT_HASH-$PAC
 SWIFTPM_CONFIG_ROOT="/private/tmp/MediaLib-swiftpm-config-$(id -u)-$ROOT_HASH-$PACKAGE_INSTANCE"
 SWIFTPM_SECURITY_ROOT="/private/tmp/MediaLib-swiftpm-security-$(id -u)-$ROOT_HASH-$PACKAGE_INSTANCE"
 PACKAGE_JOBS="${MEDIALIB_PACKAGE_JOBS:-2}"
+if [[ ! "$PACKAGE_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: MEDIALIB_PACKAGE_JOBS must be a positive integer" >&2
+  exit 2
+fi
 SEED_LOCAL_REPOSITORIES="${MEDIALIB_PACKAGE_SEED_LOCAL_REPOSITORIES:-0}"
 if [[ "$SEED_LOCAL_REPOSITORIES" != "0" && "$SEED_LOCAL_REPOSITORIES" != "1" ]]; then
   echo "error: MEDIALIB_PACKAGE_SEED_LOCAL_REPOSITORIES must be 0 or 1" >&2
@@ -55,6 +61,81 @@ if [[ "${MEDIALIB_PACKAGE_DMG_PRINT_PATHS_ONLY:-0}" == "1" ]]; then
   printf 'BUILD_ROOT=%s\n' "$BUILD_ROOT"
   printf 'SWIFT_MODULE_CACHE=%s\n' "$SWIFT_MODULE_CACHE"
   printf 'SWIFT_BUILD_DIR=%s\n' "$SWIFT_BUILD_DIR"
+  exit 0
+fi
+
+RELEASE_METADATA_TOOL="$ROOT_DIR/scripts/release_metadata.py"
+/usr/bin/python3 "$RELEASE_METADATA_TOOL" --root "$ROOT_DIR" --check
+VERSION="$(/usr/bin/python3 "$RELEASE_METADATA_TOOL" --root "$ROOT_DIR" --get productVersion)"
+BUILD="$(/usr/bin/python3 "$RELEASE_METADATA_TOOL" --root "$ROOT_DIR" --get buildNumber)"
+
+required_runtime_path() {
+  local label="$1"
+  local kind="$2"
+  shift 2
+  local explicitly_configured="0"
+  local configured_path=""
+
+  case "$label" in
+    libmpv)
+      if [[ "${MEDIALIB_LIBMPV_PATH+x}" == "x" ]]; then
+        explicitly_configured="1"
+        configured_path="$MEDIALIB_LIBMPV_PATH"
+      fi
+      ;;
+    ffmpeg)
+      if [[ "${MEDIALIB_FFMPEG_PATH+x}" == "x" ]]; then
+        explicitly_configured="1"
+        configured_path="$MEDIALIB_FFMPEG_PATH"
+      fi
+      ;;
+    ffprobe)
+      if [[ "${MEDIALIB_FFPROBE_PATH+x}" == "x" ]]; then
+        explicitly_configured="1"
+        configured_path="$MEDIALIB_FFPROBE_PATH"
+      fi
+      ;;
+  esac
+
+  local candidate=""
+  if [[ "$explicitly_configured" == "1" ]]; then
+    candidate="$configured_path"
+    if [[ "$kind" == "executable" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    if [[ "$kind" == "file" && -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  else
+    for candidate in "$@"; do
+      if [[ "$kind" == "executable" && -x "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      if [[ "$kind" == "file" && -f "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+  fi
+
+  echo "error: required $label was not found; complete MediaLIB packages must bundle libmpv, ffmpeg, and ffprobe" >&2
+  return 1
+}
+
+LIBMPV_SOURCE="$(required_runtime_path libmpv file \
+  /opt/homebrew/lib/libmpv.2.dylib \
+  /usr/local/lib/libmpv.2.dylib \
+  /opt/homebrew/lib/libmpv.dylib \
+  /usr/local/lib/libmpv.dylib)"
+FFMPEG_SOURCE="$(required_runtime_path ffmpeg executable /opt/homebrew/bin/ffmpeg /usr/local/bin/ffmpeg)"
+FFPROBE_SOURCE="$(required_runtime_path ffprobe executable /opt/homebrew/bin/ffprobe /usr/local/bin/ffprobe)"
+
+if [[ "${MEDIALIB_PACKAGE_DMG_PREFLIGHT_ONLY:-0}" == "1" ]]; then
+  printf 'runtime-preflight: complete\nlibmpv=%s\nffmpeg=%s\nffprobe=%s\n' \
+    "$LIBMPV_SOURCE" "$FFMPEG_SOURCE" "$FFPROBE_SOURCE"
   exit 0
 fi
 
@@ -87,15 +168,27 @@ if [[ "$REUSE_EXISTING_RELEASE_BUILD" != "0" && "$REUSE_EXISTING_RELEASE_BUILD" 
   echo "error: MEDIALIB_PACKAGE_REUSE_BUILD must be 0 or 1" >&2
   exit 2
 fi
+# Acquire ownership before touching instance scratch paths or registering cleanup.
+# A rejected concurrent invocation must leave the active build and mounts alone.
+mkdir -p "$DIST_DIR"
+if ! /usr/bin/shlock -p "$$" -f "$PACKAGE_LOCK_PATH"; then
+  echo "error: another MediaLIB package operation owns $PACKAGE_LOCK_PATH" >&2
+  exit 1
+fi
+cleanup_release_artifacts() {
+  hdiutil detach "$DMG_MOUNT" -quiet 2>/dev/null || true
+  hdiutil detach "$VERIFY_MOUNT" -quiet 2>/dev/null || true
+  rm -f "$CANDIDATE_DMG_PATH" "$PACKAGE_LOCK_PATH"
+}
+trap cleanup_release_artifacts EXIT
 if [[ "$REUSE_EXISTING_RELEASE_BUILD" == "0" ]]; then
   rm -rf "$SWIFT_MODULE_CACHE" "$BUILD_ROOT"
 else
   # 复用已成功的 release 二进制时，只清理本次 app/DMG 封装中间物；
   # 保留 swiftpm-build，避免重跑数分钟的全模块优化编译。
-  rm -rf "$APP_BUNDLE" "$DMG_ROOT" "$DMG_RW_PATH" "$DMG_MOUNT"
+  rm -rf "$APP_BUNDLE" "$DMG_ROOT" "$DMG_RW_PATH" "$TEMP_DMG_PATH" "$DMG_MOUNT" "$VERIFY_MOUNT"
 fi
-mkdir -p "$DIST_DIR"
-rm -rf "$APP_COPY" "$LEGACY_APP_COPY" "$DMG_PATH"
+rm -f "$CANDIDATE_DMG_PATH"
 mkdir -p "$SWIFT_MODULE_CACHE" "$SWIFT_BUILD_DIR" "$SWIFTPM_CACHE_ROOT" "$SWIFTPM_CONFIG_ROOT" "$SWIFTPM_SECURITY_ROOT"
 # CI and release machines may already have complete bare SwiftPM repositories
 # under the package's ordinary scratch directory. Opt-in seeding copies only
@@ -103,7 +196,9 @@ mkdir -p "$SWIFT_MODULE_CACHE" "$SWIFT_BUILD_DIR" "$SWIFTPM_CACHE_ROOT" "$SWIFTP
 # products and checkouts are still rebuilt from Package.resolved. This avoids
 # restarting a large GitHub clone after a transient early EOF without turning
 # the release build into a reuse of debug or previous release binaries.
-if [[ "$SEED_LOCAL_REPOSITORIES" == "1" && -d "$ROOT_DIR/.build/repositories" ]]; then
+if [[ "$REUSE_EXISTING_RELEASE_BUILD" == "0" \
+  && "$SEED_LOCAL_REPOSITORIES" == "1" \
+  && -d "$ROOT_DIR/.build/repositories" ]]; then
   mkdir -p "$SWIFT_BUILD_DIR/repositories"
   cp -R "$ROOT_DIR/.build/repositories/." "$SWIFT_BUILD_DIR/repositories/"
 fi
@@ -124,7 +219,13 @@ swift_package_args=(
 
 cd "$ROOT_DIR"
 
-swift "$ROOT_DIR/scripts/generate_icon.swift"
+# Icons are versioned build inputs. Regenerate them explicitly when artwork changes.
+for icon in AppIcon.icns AppIcon.png AppIconDark.png; do
+  if [[ ! -s "$ROOT_DIR/Sources/MediaLib/Resources/$icon" ]]; then
+    echo "error: missing app icon $icon; run scripts/generate_icon.swift from the project root" >&2
+    exit 1
+  fi
+done
 
 # macOS 会给源码里的图标资源(PNG/icns)悄悄挂上 com.apple.macl / com.apple.provenance 等扩展属性
 # （TCC 访问、下载来源标记等），SPM 打包资源 bundle 时会连同这些属性一起拷进 .build，随后
@@ -155,11 +256,6 @@ cp "$SWIFT_SERVER_BINARY" "$APP_BUNDLE/Contents/MacOS/$SERVER_NAME"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIcon.png" "$APP_BUNDLE/Contents/Resources/AppIcon.png"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIconDark.png" "$APP_BUNDLE/Contents/Resources/AppIconDark.png"
-# The web implementation takes the approved system-page document as its visual
-# source of truth.  Ship the original, self-contained design bundle so the
-# packaged server can generate fixed-viewport reference screenshots without
-# reaching outside the app bundle or depending on a developer checkout.
-cp "$ROOT_DIR/doc/MediaLIB 系统页面.html" "$APP_BUNDLE/Contents/Resources/MediaLIB 系统页面.html"
 
 bundle_libmpv_runtime() {
   local frameworks_dir="$APP_BUNDLE/Contents/Frameworks"
@@ -170,7 +266,8 @@ bundle_libmpv_runtime() {
     local new_path="$2"
     local target_binary="$3"
     if ! install_name_tool -change "$old_path" "$new_path" "$target_binary"; then
-      echo "warning: failed to rewrite dependency $old_path in $target_binary" >&2
+      echo "error: failed to rewrite dependency $old_path in $target_binary" >&2
+      return 1
     fi
   }
 
@@ -221,6 +318,7 @@ bundle_libmpv_runtime() {
           "$framework_copy/Versions/"*/lib \
           "$framework_copy/Versions/"*/share \
           "$framework_copy/Versions/"*/_CodeSignature \
+          "$framework_copy/Versions/"*/Resources/Python.app \
           2>/dev/null || true
         ;;
     esac
@@ -267,81 +365,76 @@ bundle_libmpv_runtime() {
     local child_dep=""
     while IFS= read -r child_dep; do
       [[ "$child_dep" == /System/* || "$child_dep" == /usr/lib/* || "$child_dep" == @* ]] && continue
-      [[ -f "$child_dep" ]] || continue
+      if [[ ! -f "$child_dep" ]]; then
+        echo "error: unresolved dependency $child_dep required by $source_path" >&2
+        return 1
+      fi
       copy_dependency "$child_dep"
       rewrite_dependency_path "$child_dep" "$(bundled_dependency_reference "$child_dep" "no")" "$target_path"
-    done < <(otool -L "$target_path" | awk 'NR > 1 {print $1}')
+    done < <(otool -L "$target_path" | sed -E '1d; s/^[[:space:]]+//; s/ \(compatibility version.*$//')
 
     install_name_tool -id "$(bundled_dependency_reference "$source_path" "no")" "$target_path" 2>/dev/null || true
   }
 
-  local libmpv_source=""
-  if [[ -f "/opt/homebrew/lib/libmpv.2.dylib" ]]; then
-    libmpv_source="/opt/homebrew/lib/libmpv.2.dylib"
-  elif [[ -f "/usr/local/lib/libmpv.2.dylib" ]]; then
-    libmpv_source="/usr/local/lib/libmpv.2.dylib"
-  elif [[ -f "/opt/homebrew/lib/libmpv.dylib" ]]; then
-    libmpv_source="/opt/homebrew/lib/libmpv.dylib"
-  elif [[ -f "/usr/local/lib/libmpv.dylib" ]]; then
-    libmpv_source="/usr/local/lib/libmpv.dylib"
-  fi
+  copy_dependency "$LIBMPV_SOURCE"
 
-  if [[ -n "$libmpv_source" ]]; then
-    copy_dependency "$libmpv_source"
-  else
-    echo "warning: libmpv was not found; embedded liquid-glass player will require libmpv on the target Mac." >&2
-  fi
+  local tool_source=""
+  local tool_name=""
+  for tool_name in ffmpeg ffprobe; do
+    if [[ "$tool_name" == "ffmpeg" ]]; then
+      tool_source="$FFMPEG_SOURCE"
+    else
+      tool_source="$FFPROBE_SOURCE"
+    fi
+    local tool_target="$APP_BUNDLE/Contents/MacOS/$tool_name"
+    cp -L "$tool_source" "$tool_target"
+    chmod u+w,a+x "$tool_target"
+    codesign --remove-signature "$tool_target" >/dev/null 2>&1 || true
 
-  local ffmpeg_source=""
-  if [[ -x "/opt/homebrew/bin/ffmpeg" ]]; then
-    ffmpeg_source="/opt/homebrew/bin/ffmpeg"
-  elif [[ -x "/usr/local/bin/ffmpeg" ]]; then
-    ffmpeg_source="/usr/local/bin/ffmpeg"
-  fi
-
-  if [[ -n "$ffmpeg_source" ]]; then
-    local ffmpeg_target="$APP_BUNDLE/Contents/MacOS/ffmpeg"
-    cp -L "$ffmpeg_source" "$ffmpeg_target"
-    chmod u+w,a+x "$ffmpeg_target"
-    codesign --remove-signature "$ffmpeg_target" >/dev/null 2>&1 || true
-
-    local ffmpeg_dep=""
-    while IFS= read -r ffmpeg_dep; do
-      [[ "$ffmpeg_dep" == /System/* || "$ffmpeg_dep" == /usr/lib/* || "$ffmpeg_dep" == @* ]] && continue
-      [[ -f "$ffmpeg_dep" ]] || continue
-      copy_dependency "$ffmpeg_dep"
-      rewrite_dependency_path "$ffmpeg_dep" "$(bundled_dependency_reference "$ffmpeg_dep" "yes")" "$ffmpeg_target"
-    done < <(otool -L "$ffmpeg_target" | awk 'NR > 1 {print $1}')
-  else
-    echo "warning: ffmpeg was not found; MKV video-frame artwork fallback will use system ffmpeg only if available on the target Mac." >&2
-  fi
-
-  local ffprobe_source=""
-  if [[ -x "/opt/homebrew/bin/ffprobe" ]]; then
-    ffprobe_source="/opt/homebrew/bin/ffprobe"
-  elif [[ -x "/usr/local/bin/ffprobe" ]]; then
-    ffprobe_source="/usr/local/bin/ffprobe"
-  fi
-
-  if [[ -n "$ffprobe_source" ]]; then
-    local ffprobe_target="$APP_BUNDLE/Contents/MacOS/ffprobe"
-    cp -L "$ffprobe_source" "$ffprobe_target"
-    chmod u+w,a+x "$ffprobe_target"
-    codesign --remove-signature "$ffprobe_target" >/dev/null 2>&1 || true
-
-    local ffprobe_dep=""
-    while IFS= read -r ffprobe_dep; do
-      [[ "$ffprobe_dep" == /System/* || "$ffprobe_dep" == /usr/lib/* || "$ffprobe_dep" == @* ]] && continue
-      [[ -f "$ffprobe_dep" ]] || continue
-      copy_dependency "$ffprobe_dep"
-      rewrite_dependency_path "$ffprobe_dep" "$(bundled_dependency_reference "$ffprobe_dep" "yes")" "$ffprobe_target"
-    done < <(otool -L "$ffprobe_target" | awk 'NR > 1 {print $1}')
-  else
-    echo "warning: ffprobe was not found; MediaLIB Server will not be able to inspect media streams on the target Mac." >&2
-  fi
+    local tool_dep=""
+    while IFS= read -r tool_dep; do
+      [[ "$tool_dep" == /System/* || "$tool_dep" == /usr/lib/* || "$tool_dep" == @* ]] && continue
+      if [[ ! -f "$tool_dep" ]]; then
+        echo "error: unresolved dependency $tool_dep required by $tool_name" >&2
+        return 1
+      fi
+      copy_dependency "$tool_dep"
+      rewrite_dependency_path "$tool_dep" "$(bundled_dependency_reference "$tool_dep" "yes")" "$tool_target"
+    done < <(otool -L "$tool_target" | sed -E '1d; s/^[[:space:]]+//; s/ \(compatibility version.*$//')
+  done
 }
 
 bundle_libmpv_runtime
+
+PACKAGE_ARCHITECTURE="${MEDIALIB_PACKAGE_ARCHITECTURE:-$(uname -m)}"
+"$ROOT_DIR/scripts/check_bundle_runtime.sh" "$APP_BUNDLE" "$PACKAGE_ARCHITECTURE"
+
+DEPENDENCY_INVENTORY="$BUILD_ROOT/dependency-inventory.txt"
+while IFS= read -r -d '' dependency; do
+  relative_path="${dependency#$APP_BUNDLE/}"
+  printf '%s  %s\n' "$(shasum -a 256 "$dependency" | awk '{print $1}')" "$relative_path"
+done < <(find "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Frameworks" -type f -print0) \
+  | LC_ALL=C sort > "$DEPENDENCY_INVENTORY"
+DEPENDENCY_DIGEST="$(shasum -a 256 "$DEPENDENCY_INVENTORY" | awk '{print $1}')"
+cp "$DEPENDENCY_INVENTORY" "$APP_BUNDLE/Contents/Resources/MediaLibDependencyInventory.txt"
+GIT_COMMIT="$(git -C "$ROOT_DIR" rev-parse --verify HEAD)"
+if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]]; then
+  GIT_DIRTY="true"
+else
+  GIT_DIRTY="false"
+fi
+SWIFT_TOOLCHAIN_VERSION="$(swift --version | head -n 1)"
+LIBMPV_VERSION="$(otool -L "$LIBMPV_SOURCE" | sed -n '2s/.*current version \([^)]*\)).*/ABI \1/p')"
+if [[ -z "$LIBMPV_VERSION" ]]; then
+  LIBMPV_VERSION="$(basename "$LIBMPV_SOURCE")"
+fi
+FFMPEG_VERSION="$("$FFMPEG_SOURCE" -version | awk 'NR == 1 {print $3}')"
+FFPROBE_VERSION="$("$FFPROBE_SOURCE" -version | awk 'NR == 1 {print $3}')"
+"$ROOT_DIR/scripts/generate_build_manifest.swift" \
+  "$APP_BUNDLE/Contents/Resources/MediaLibBuildManifest.json" \
+  "$VERSION" "$BUILD" "$GIT_COMMIT" "$GIT_DIRTY" "$PACKAGE_ARCHITECTURE" \
+  "$SWIFT_TOOLCHAIN_VERSION" "$LIBMPV_VERSION" "$FFMPEG_VERSION" "$FFPROBE_VERSION" \
+  "$DEPENDENCY_DIGEST"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -364,10 +457,6 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <string>$DISPLAY_NAME</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
-  <key>CFBundleShortVersionString</key>
-  <string>$VERSION</string>
-  <key>CFBundleVersion</key>
-  <string>$BUILD</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>LSApplicationCategoryType</key>
@@ -427,6 +516,8 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+/usr/bin/python3 "$RELEASE_METADATA_TOOL" --root "$ROOT_DIR" \
+  --write-info-plist "$APP_BUNDLE/Contents/Info.plist"
 
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$SERVER_NAME"
@@ -456,10 +547,6 @@ DMG_SIZE_MB=$((DMG_SIZE_MB + 96))
 run_hdiutil create "$DMG_RW_PATH" -volname "$DISPLAY_NAME" -size "${DMG_SIZE_MB}m" -fs HFS+ -ov
 mkdir -p "$DMG_MOUNT"
 hdiutil attach "$DMG_RW_PATH" -mountpoint "$DMG_MOUNT" -nobrowse -quiet
-cleanup_dmg_mount() {
-  hdiutil detach "$DMG_MOUNT" -quiet 2>/dev/null || true
-}
-trap cleanup_dmg_mount EXIT
 ditto --noextattr --noqtn "$DMG_ROOT/" "$DMG_MOUNT/"
 python3 "$ROOT_DIR/scripts/write_dmg_ds_store.py" "$DMG_MOUNT"
 SetFile -a V "$DMG_MOUNT/.background" 2>/dev/null || true
@@ -468,9 +555,26 @@ SetFile -a V "$DMG_MOUNT/.VolumeIcon.icns" 2>/dev/null || true
 bless --folder "$DMG_MOUNT" --openfolder "$DMG_MOUNT" 2>/dev/null || true
 sync
 hdiutil detach "$DMG_MOUNT" -quiet
-trap - EXIT
-run_hdiutil convert "$DMG_RW_PATH" -format UDZO -imagekey zlib-level=9 -ov -o "$DMG_PATH"
-hdiutil verify "$DMG_PATH"
+run_hdiutil convert "$DMG_RW_PATH" -format UDZO -imagekey zlib-level=9 -ov -o "$TEMP_DMG_PATH"
+hdiutil verify "$TEMP_DMG_PATH"
+
+# Release evidence must come from the immutable image, not the mutable staging
+# bundle. Mount read-only and repeat runtime closure, manifest, plist and strict
+# signature validation before the official artifact can be replaced.
+mkdir -p "$VERIFY_MOUNT"
+hdiutil attach "$TEMP_DMG_PATH" -mountpoint "$VERIFY_MOUNT" -nobrowse -readonly -quiet
+MOUNTED_APP="$VERIFY_MOUNT/$DISPLAY_NAME.app"
+"$ROOT_DIR/scripts/check_bundle_runtime.sh" "$MOUNTED_APP" "$PACKAGE_ARCHITECTURE"
+plutil -lint "$MOUNTED_APP/Contents/Info.plist"
+/usr/bin/python3 -m json.tool \
+  "$MOUNTED_APP/Contents/Resources/MediaLibBuildManifest.json" >/dev/null
+codesign --verify --deep --strict "$MOUNTED_APP"
+hdiutil detach "$VERIFY_MOUNT" -quiet
+
+# Keep the last known-good public DMG until every validation above succeeds.
+# The candidate is copied onto dist's filesystem and renamed over the public
+# path so the final replacement is atomic for readers of dist/MediaLib.dmg.
+"$ROOT_DIR/scripts/publish_verified_dmg.sh" "$TEMP_DMG_PATH" "$CANDIDATE_DMG_PATH" "$DMG_PATH"
 # The signed application is delivered only inside the verified DMG. A loose
 # .app copied to the workspace can acquire Finder metadata asynchronously,
 # which makes it unverifiable after the fact and creates a misleading second

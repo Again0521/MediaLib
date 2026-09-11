@@ -15,7 +15,8 @@ macOS ネイティブのホームメディアライブラリ。ローカルデ�
 ![プラットフォーム](https://img.shields.io/badge/プラットフォーム-macOS%2013+-000000?style=flat-square&logo=apple&logoColor=white)
 ![構築](https://img.shields.io/badge/構築-SwiftUI-0A84FF?style=flat-square)
 ![再生](https://img.shields.io/badge/再生-libmpv-8E44AD?style=flat-square)
-![バージョン](https://img.shields.io/badge/バージョン-1.5.0-34C759?style=flat-square)
+<!-- release-version-badge: generated from config/release.json -->
+![バージョン](https://img.shields.io/badge/バージョン-1.8.0-34C759?style=flat-square)
 
 <br>
 
@@ -156,6 +157,22 @@ macOS ネイティブのホームメディアライブラリ。ローカルデ�
 
 <br>
 
+## ホームサーバーと Web 再生
+
+MediaLIB の **設定 → サーバー**でローカル管理者を初期化し、サービスを有効にします。Web プレイヤーと `/admin/*` 管理サイトは、DOM と権限が分離された別の画面です。初期状態の `http://127.0.0.1:<ポート>` は、この Mac のループバック接続だけを受け付けます。
+
+内蔵 LAN アクセスには **macOS 14 以降**と、Wi-Fi または有線 LAN のプライベート IPv4 が必要です。LAN アクセスを明示的に有効にすると HTTPS のみを公開し、平文 LAN HTTP へは降格しません：
+
+1. 設定から `MediaLIB-LAN-CA.cer` を書き出し、信頼できる方法で各端末にインストールします。
+2. iPhone/iPad では「設定 → 一般 → 情報 → 証明書信頼設定」で MediaLIB CA の完全な信頼も有効にします。
+3. MediaLIB に表示された `https://<プライベートアドレス>:<ポート>` を開き、証明書警告を回避しないでください。
+
+上級者はループバックモードを維持し、`scripts/setup_lan_https_proxy.sh` で対応済みの Caddy/nginx HTTPS リバースプロキシ基準を生成できます。TLS 終端、明示したローカルプロキシだけからの転送、生成された Host/ヘッダーとストリーミング設定が必須です。ループバック HTTP ポートを LAN やインターネットへ直接公開せず、内蔵 LAN HTTPS とプロキシモードを混在させないでください。
+
+Web サービスは許可されたインデックスの閲覧、再生、ユーザー別状態の更新ができますが、メディアソースの追加・編集、実パスや認証情報の公開、暗黙のソース書き戻しは行いません。「ローカルメタデータを再読み込み」は対象となる通常のローカルソースからタグ、NFO、ローカル画像だけを読み、オンライン取得、保管庫アクセス、ソース書き戻しを行いません。タグ/NFO の書き戻しはデスクトップ側で明示的に許可した操作に限られます。
+
+<br>
+
 ## ソースからビルド
 
 ```bash
@@ -165,7 +182,9 @@ env DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift run MediaLibC
 scripts/package_dmg.sh
 ```
 
-生成物は `dist/MediaLIB.app` と `dist/MediaLib.dmg` です。
+製品バージョンと build 番号の唯一の情報源は `config/release.json` です。変更後は `python3 scripts/release_metadata.py --write` を実行し、`python3 scripts/release_metadata.py --check` でローカルと CI のずれを検出します。製品バージョンは、データベース schema、API バージョン、`bump_versions.py` が管理する Web キャッシュ番号とは独立です。
+
+リリース成果物は `dist/MediaLib.dmg` です。libmpv、ffmpeg、ffprobe のいずれかがなければパッケージングは失敗し、arm64 の依存関係、読み取り専用マウント、署名を検証した後にだけ以前の DMG を置き換えます。標準の ad-hoc 署名はローカル検証用であり、Developer ID 署名や Apple 公証ではありません。
 
 <br>
 
@@ -190,13 +209,7 @@ scripts/package_dmg.sh
 
 ## ドキュメント
 
-| ドキュメント | 内容 |
-| :-- | :-- |
-| [ユーザーガイド](doc/用户使用说明.md) | 一般ユーザー向けの機能説明 |
-| [開発ノート](doc/开发说明.md) | アーキテクチャ、制約、検証 |
-| [デザインシステム](doc/MediaLIB_设计系统标准.md) | ページと音楽プレイヤーの視覚基準 |
-| [ROADMAP](doc/ROADMAP.md) | 今後の予定 |
-| [CHANGELOG](doc/CHANGELOG.md) | 変更履歴 |
+新しい checkout で利用できる公開のインストール、サーバー、ビルド手順は、追跡対象の 3 つの README にまとめています。`doc/` はローカルの工程計画、検証記録、内部設計資料で、初期状態では Git の追跡対象外です。公開する文書は個別に確認して明示的に追跡する必要があります。
 
 <br>
 

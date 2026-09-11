@@ -13,7 +13,8 @@ public enum BlockingIOExecutor {
     private static let queueSpecificValue = "MediaLib.blockingIO"
 
     /// 并发队列：互不相关的阻塞 I/O（健康检查、封面清点、可达性探测）可以并行，
-    /// 单个慢 NAS 探测不会卡住其他 I/O。使用方数量有限，不会触发线程爆炸。
+    /// 单个慢 NAS 探测不会卡住其他 I/O。此底层桥接器本身不提供并发上限；面向网络
+    /// 或其它无界输入的调用方必须先经过自己的异步许可门，不能把排队工作直接提交到 GCD。
     private static let queue: DispatchQueue = {
         let queue = DispatchQueue(
             label: queueSpecificValue,

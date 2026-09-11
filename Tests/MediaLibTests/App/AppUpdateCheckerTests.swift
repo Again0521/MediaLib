@@ -23,6 +23,36 @@ final class AppUpdateCheckerTests: XCTestCase {
         XCTAssertFalse(AppVersion.isVersion("2.0", newerThan: "10.0"))
     }
 
+    func testReleaseComparisonOrdersBuildsWithinSameMarketingVersion() {
+        XCTAssertTrue(AppVersion.isRelease(
+            version: "1.5.5", build: "98", prerelease: false,
+            newerThan: "1.5.5", build: "97", prerelease: false
+        ))
+        XCTAssertFalse(AppVersion.isRelease(
+            version: "1.5.5", build: "97", prerelease: false,
+            newerThan: "1.5.5", build: "97", prerelease: false
+        ))
+        XCTAssertFalse(AppVersion.isRelease(
+            version: "1.5.5", build: nil, prerelease: false,
+            newerThan: "1.5.5", build: "97", prerelease: false
+        ))
+    }
+
+    func testReleaseComparisonKeepsStableChannelOutOfPrereleases() {
+        XCTAssertFalse(AppVersion.isRelease(
+            version: "2.0.0", build: "1", prerelease: true,
+            newerThan: "1.5.5", build: "97", prerelease: false
+        ))
+        XCTAssertTrue(AppVersion.isRelease(
+            version: "1.5.5", build: "97", prerelease: false,
+            newerThan: "1.5.5", build: "96", prerelease: true
+        ))
+        XCTAssertTrue(AppVersion.isRelease(
+            version: "1.6.0", build: "1", prerelease: true,
+            newerThan: "1.5.5", build: "97", prerelease: true
+        ))
+    }
+
     func testReleaseVersionUsesTagNameBeforeTitleBodyAndAssets() {
         let version = AppUpdateChecker.releaseVersion(
             tagName: "v1.4.0",
@@ -212,7 +242,7 @@ final class AppUpdateCheckerTests: XCTestCase {
         XCTAssertFalse(info.prerelease)
     }
 
-    func testLatestReleaseInfoUsesPublishedDateAsTieBreakerForSameVersion() throws {
+    func testLatestReleaseInfoPrefersStableOverPrereleaseWithSameVersion() throws {
         let info = try XCTUnwrap(AppUpdateChecker.latestReleaseInfo(fromGitHubReleasesJSON: jsonData("""
         [
           {
@@ -253,9 +283,9 @@ final class AppUpdateCheckerTests: XCTestCase {
         """)))
 
         XCTAssertEqual(info.version, "1.5.0")
-        XCTAssertEqual(info.tagName, "MediaLIB_V1.5.0")
-        XCTAssertEqual(info.downloadURL?.absoluteString, "https://example.test/newer.dmg")
-        XCTAssertTrue(info.prerelease)
+        XCTAssertEqual(info.tagName, "v1.5.0")
+        XCTAssertEqual(info.downloadURL?.absoluteString, "https://example.test/older.dmg")
+        XCTAssertFalse(info.prerelease)
     }
 
     func testLatestReleaseInfoFindsVersionFromAssetAndFallsBackToVersionTagWhenTagIsEmpty() throws {
@@ -327,7 +357,10 @@ final class AppUpdateCheckerTests: XCTestCase {
         <a href="/Again0521/MediaLib/releases/download/v1.7.0/MediaLib%201.7.0.dmg">Download</a>
         """
 
-        let info = try XCTUnwrap(AppUpdateChecker.fallbackReleaseInfo(fromReleasePageHTML: html))
+        let info = try XCTUnwrap(AppUpdateChecker.fallbackReleaseInfo(
+            fromReleasePageHTML: html,
+            includePrereleases: true
+        ))
 
         XCTAssertEqual(info.version, "1.7.0")
         XCTAssertEqual(info.tagName, "v1.7.0")
@@ -345,13 +378,31 @@ final class AppUpdateCheckerTests: XCTestCase {
         <a href="/Again0521/MediaLib/releases/tag/v1.8.0-beta.1">v1.8.0-beta.1</a>
         """
 
-        let info = try XCTUnwrap(AppUpdateChecker.fallbackReleaseInfo(fromReleasePageHTML: html))
+        let info = try XCTUnwrap(AppUpdateChecker.fallbackReleaseInfo(
+            fromReleasePageHTML: html,
+            includePrereleases: true
+        ))
 
         XCTAssertEqual(info.version, "1.8.0")
         XCTAssertEqual(info.tagName, "v1.8.0-beta.1")
         XCTAssertNil(info.downloadURL)
         XCTAssertNil(info.assetName)
         XCTAssertTrue(info.prerelease)
+    }
+
+    func testFallbackReleaseInfoSkipsPrereleasesForStableChannel() {
+        let html = """
+        <a href="/Again0521/MediaLib/releases/tag/v2.0.0-rc.1">v2.0.0-rc.1</a>
+        <a href="/Again0521/MediaLib/releases/tag/v1.9.0">v1.9.0</a>
+        """
+
+        let info = AppUpdateChecker.fallbackReleaseInfo(
+            fromReleasePageHTML: html,
+            includePrereleases: false
+        )
+
+        XCTAssertEqual(info?.version, "1.9.0")
+        XCTAssertFalse(info?.prerelease ?? true)
     }
 
     func testFallbackReleaseInfoReturnsNilWhenPageHasNoVersionedReleaseLinks() {

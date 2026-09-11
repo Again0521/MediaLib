@@ -688,4 +688,99 @@ final class ServerAudioRemuxStreamTests: XCTestCase {
         XCTAssertNil(ServerAudioRemuxStream.make(asset: local, audioTrackID: 0, startSeconds: -1))
         XCTAssertNil(ServerAudioRemuxStream.make(asset: local, audioTrackID: 0, startSeconds: .infinity))
     }
+
+    func testStreamReportsNonzeroProcessExitAfterPartialOutputAsFailure() throws {
+        let executable = try makeExecutableScript("printf partial; exit 7")
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+        let value = ServerAudioRemuxStream(
+            asset: ServerMediaAsset(id: "item", fileURL: URL(fileURLWithPath: "/media/item.mkv"), byteLength: 1),
+            audioTrackID: 0,
+            startSeconds: 0,
+            executableURL: executable
+        )
+        var body = Data()
+
+        let outcome = value.streamOutcome { chunk in
+            body.append(chunk)
+            return true
+        }
+
+        XCTAssertEqual(body, Data("partial".utf8))
+        XCTAssertEqual(
+            outcome,
+            .failed(.producerExited(exitCode: 7), deliveredByteLength: 7)
+        )
+    }
+
+    func testStreamReportsSuccessfulProcessWithoutOutputAsFailure() throws {
+        let executable = try makeExecutableScript("exit 0")
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+        let value = ServerAudioRemuxStream(
+            asset: ServerMediaAsset(id: "item", fileURL: URL(fileURLWithPath: "/media/item.mkv"), byteLength: 1),
+            audioTrackID: 0,
+            startSeconds: 0,
+            executableURL: executable
+        )
+
+        let outcome = value.streamOutcome { _ in
+            XCTFail("零输出进程不应产生正文分块")
+            return true
+        }
+
+        XCTAssertEqual(outcome, .failed(.emptyOutput, deliveredByteLength: 0))
+    }
+
+    func testStreamCancellationForceStopsProducerWithoutOutput() throws {
+        let executable = try makeExecutableScript("trap \"\" TERM; while true; do sleep 1; done")
+        defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
+        let value = ServerAudioRemuxStream(
+            asset: ServerMediaAsset(id: "item", fileURL: URL(fileURLWithPath: "/media/item.mkv"), byteLength: 1),
+            audioTrackID: 0,
+            startSeconds: 0,
+            executableURL: executable
+        )
+        let cancellation = ServerBoundedProcess.Cancellation()
+        let finished = DispatchSemaphore(value: 0)
+        let result = LockedStreamOutcome()
+        DispatchQueue.global(qos: .userInitiated).async {
+            result.value = value.streamOutcome(cancellation: cancellation) { _ in true }
+            finished.signal()
+        }
+
+        Thread.sleep(forTimeInterval: 0.1)
+        let cancelledAt = Date()
+        cancellation.cancel()
+
+        XCTAssertEqual(finished.wait(timeout: .now() + 2), .success)
+        XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 1)
+        XCTAssertEqual(result.value, .cancelled(deliveredByteLength: 0))
+    }
+
+    private func makeExecutableScript(_ command: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MediaLib-remux-fixture-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("fake-ffmpeg")
+        try Data("#!/bin/sh\n\(command)\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        return executable
+    }
+}
+
+private final class LockedStreamOutcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: ServerStreamTermination?
+
+    var value: ServerStreamTermination? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return storedValue
+        }
+        set {
+            lock.lock()
+            storedValue = newValue
+            lock.unlock()
+        }
+    }
 }

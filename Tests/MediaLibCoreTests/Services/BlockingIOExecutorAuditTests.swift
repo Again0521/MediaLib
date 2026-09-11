@@ -6,7 +6,8 @@ import Foundation
 /// 审计目标：验证 `BlockingIOExecutor` 能否严格将长时间同步阻塞（如大目录 stat、网络探测、全表读取）
 /// 彻底从 Swift 并发全局协作线程池（宽度仅等于 CPU 核数）剥离并派发至底层的 concurrent utility 队列，
 /// 防止同池排队的 UI 渲染计算任务与 async 挂起点被死锁或卡死；
-/// 同时验证其在高并发排队压测下的线程池抗暴与异常抛错透传能力。
+/// 同时验证其在并发提交下不死锁以及异常抛错透传。执行器只是底层桥接器，面向
+/// 无界网络输入的资源预算由上层有界执行器负责，本测试不把 GCD 调度误写成限流证明。
 /// 对应报告问题 ID：TC-PERF-003 / RISK-02
 final class BlockingIOExecutorAuditTests: XCTestCase {
 

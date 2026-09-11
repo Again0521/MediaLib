@@ -1603,6 +1603,7 @@ enum ServerWebMediaDetailPage {
       var activePlaybackQuality = 'auto';
       var qualityChoiceLocked = false;
       var currentHLSSessionID = '';
+      const pendingHLSSessionIDs = new Set();
       var currentHLSClient = null;
       var hlsCancellationBarrier = Promise.resolve();
       var lastHLSMediaRecoveryAt = 0;
@@ -3247,6 +3248,7 @@ enum ServerWebMediaDetailPage {
           const provisionalMediaURL = typeof descriptor?.mediaURL === 'string' ? descriptor.mediaURL : '';
           if (!provisionalSessionID || !provisionalMediaURL.startsWith('/api/v1/playback/hls/')) throw new Error('invalid');
           pendingHLSSessionID = provisionalSessionID;
+          pendingHLSSessionIDs.add(provisionalSessionID);
           descriptor = await waitForHLSReady(descriptor, sourceRevision);
           const sessionID = typeof descriptor?.sessionID === 'string' ? descriptor.sessionID : '';
           const mediaURL = typeof descriptor?.mediaURL === 'string' ? descriptor.mediaURL : '';
@@ -3259,6 +3261,7 @@ enum ServerWebMediaDetailPage {
           }
           const previousSessionID = currentHLSSessionID;
           currentHLSSessionID = sessionID;
+          pendingHLSSessionIDs.delete(sessionID);
           playbackMode = 'hls';
           publishPlaybackMode('hls', descriptor.mode);
           activePlaybackQuality = requestedQuality;
@@ -3299,6 +3302,7 @@ enum ServerWebMediaDetailPage {
           if (shouldPlay) await player.play();
           return true;
         } catch (error) {
+          if (pendingHLSSessionID) pendingHLSSessionIDs.delete(pendingHLSSessionID);
           if (pendingHLSSessionID && pendingHLSSessionID !== currentHLSSessionID) cancelHLSSession(pendingHLSSessionID);
           sourceTransitionPending = false;
           if (sourceRevision !== playbackSourceRevision || (!player.paused && player.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA)) return;
@@ -3596,6 +3600,8 @@ enum ServerWebMediaDetailPage {
         if (currentHLSClient) { currentHLSClient.destroy(); currentHLSClient = null; }
         if (playbackStartedReported) void reportPlaybackState('stopped', true, lastKnownPlaybackPosition);
         if (currentHLSSessionID) cancelHLSSession(currentHLSSessionID, true);
+        for (const sessionID of pendingHLSSessionIDs) cancelHLSSession(sessionID, true);
+        pendingHLSSessionIDs.clear();
       }, { signal: lifecycle.signal });
       document.addEventListener('medialib:pagewillunload', () => {
         if (autoplayTimer !== null) { window.clearTimeout(autoplayTimer); autoplayTimer = null; }
@@ -3603,6 +3609,8 @@ enum ServerWebMediaDetailPage {
         if (transportFrame !== null) window.cancelAnimationFrame(transportFrame);
         if (playbackStartedReported) void reportPlaybackState('stopped', true, lastKnownPlaybackPosition);
         if (currentHLSSessionID) cancelHLSSession(currentHLSSessionID, true);
+        for (const sessionID of pendingHLSSessionIDs) cancelHLSSession(sessionID, true);
+        pendingHLSSessionIDs.clear();
         subtitleLoadRevision += 1;
         releaseActiveSubtitle();
         lifecycle.abort();

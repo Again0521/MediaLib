@@ -63,7 +63,7 @@ extension AppState {
             }
             do {
                 guard let info = try await AppUpdateChecker.fetchLatestRelease(),
-                      AppVersion.isVersion(info.version, newerThan: AppVersion.current) else {
+                      AppVersion.shouldOffer(info) else {
                 self.markUpdateCheckSucceeded()
                 if manual {
                     self.alert = AppAlert(

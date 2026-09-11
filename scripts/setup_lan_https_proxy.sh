@@ -1,10 +1,8 @@
 #!/bin/bash
 # 为局域网访问生成本机 HTTPS 反向代理配置。
 #
-# 服务端刻意只监听 127.0.0.1，而且会话 Cookie 带 `Secure`——所以"把监听地址改成
-# 0.0.0.0"得到的是一个能连上但登录不进去的服务（LAN IP 不是安全上下文，浏览器
-# 不会存 Secure cookie）。唯一被支持的远程路径是：本机反向代理终止 TLS，再转发
-# 到回环服务。
+# 应用支持原生局域网 HTTPS；此脚本供需要外部代理终止 TLS 的部署使用。
+# 代理连接回环服务，并通过配置的公开 Origin 与可信代理地址建立信任。
 #
 # 这个脚本只生成证书与配置，不启动任何东西、不改系统设置。
 #
@@ -20,6 +18,11 @@ OUT_DIR="$HOME/Library/Application Support/MediaLib/lan-proxy"
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --https-port|--server-port|--out)
+      [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || { echo "error: $1 需要参数" >&2; exit 2; }
+      ;;
+  esac
+  case "$1" in
     --https-port) HTTPS_PORT="$2"; shift 2 ;;
     --server-port) SERVER_PORT="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
@@ -27,6 +30,19 @@ while [ $# -gt 0 ]; do
     *) echo "未知参数: $1" >&2; exit 2 ;;
   esac
 done
+
+for port in "$HTTPS_PORT" "$SERVER_PORT"; do
+  [[ "$port" =~ ^[0-9]{1,5}$ ]] && (( 10#$port >= 1 && 10#$port <= 65535 )) || {
+    echo "error: 端口必须为 1–65535" >&2; exit 2;
+  }
+done
+HTTPS_PORT=$((10#$HTTPS_PORT))
+SERVER_PORT=$((10#$SERVER_PORT))
+# Paths are quoted in both generated formats; reject characters requiring format-specific escaping.
+case "$OUT_DIR" in
+  *['"\$']*|*$'\n'*|*$'\r'*) echo "error: 输出路径包含不支持的配置字符" >&2; exit 2 ;;
+esac
+umask 077
 
 command -v openssl >/dev/null 2>&1 || { echo "error: 需要 openssl" >&2; exit 2; }
 
@@ -44,6 +60,7 @@ HOST_NAME="$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
 
 mkdir -p "$OUT_DIR"
 chmod 700 "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd -P)"
 CERT="$OUT_DIR/medialib-lan.crt"
 KEY="$OUT_DIR/medialib-lan.key"
 
@@ -78,7 +95,7 @@ cat > "$OUT_DIR/Caddyfile" <<CADDY
 }
 
 $PUBLIC_ORIGIN {
-	tls $CERT $KEY
+	tls "$CERT" "$KEY"
 
 	reverse_proxy 127.0.0.1:$SERVER_PORT {
 		header_up X-Forwarded-Proto https
@@ -99,16 +116,16 @@ CADDY
 cat > "$OUT_DIR/medialib-lan.nginx.conf" <<NGINX
 # nginx -c "$OUT_DIR/medialib-lan.nginx.conf"
 worker_processes 1;
-error_log $OUT_DIR/nginx-error.log;
-pid $OUT_DIR/nginx.pid;
+error_log "$OUT_DIR/nginx-error.log";
+pid "$OUT_DIR/nginx.pid";
 events { worker_connections 256; }
 http {
     access_log off;
     server {
         listen $HTTPS_PORT ssl;
         server_name $LAN_IP;
-        ssl_certificate     $CERT;
-        ssl_certificate_key $KEY;
+        ssl_certificate     "$CERT";
+        ssl_certificate_key "$KEY";
 
         location / {
             proxy_pass http://127.0.0.1:$SERVER_PORT;

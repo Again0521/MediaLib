@@ -19,7 +19,8 @@
 //
 // 退出码：0 全部样本完成脚本流程（含"预期无法直放"的样本），1 出现意外失败。
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -39,6 +40,7 @@ function parseArguments(argv) {
     // 夹具数据库里的初始管理员用户名就是 `admin`。
     username: 'admin',
     password: '',
+    passwordFile: '',
     manifest: '',
     out: '',
     browser: 'chromium',
@@ -56,6 +58,7 @@ function parseArguments(argv) {
       case '--server': options.server = value; index += 1; break;
       case '--username': options.username = value; index += 1; break;
       case '--password': options.password = value; index += 1; break;
+      case '--password-file': options.passwordFile = value; index += 1; break;
       case '--manifest': options.manifest = value; index += 1; break;
       case '--out': options.out = value; index += 1; break;
       case '--browser': options.browser = value; index += 1; break;
@@ -71,7 +74,7 @@ function parseArguments(argv) {
       case '--samples-only': options.samplesOnly = true; break;
       case '--workflows-only': options.workflowsOnly = true; break;
       case '--headed': options.headless = false; break;
-      default: break;
+      default: throw new Error(`未知参数: ${flag}`);
     }
   }
   if (!['chromium', 'firefox', 'webkit'].includes(options.browser)) {
@@ -79,6 +82,12 @@ function parseArguments(argv) {
   }
   if (options.ignoreHTTPSErrors && options.browser === 'chromium') {
     throw new Error('--ignore-https-errors 只用于 Playwright Firefox/WebKit 隔离夹具');
+  }
+  if (options.password && options.passwordFile) {
+    throw new Error('--password 与 --password-file 不能同时使用');
+  }
+  if (options.passwordFile) {
+    options.password = readFileSync(options.passwordFile, 'utf8').trim();
   }
   return options;
 }
@@ -236,6 +245,10 @@ async function launchChrome(options) {
   return {
     child,
     port: endpoint.port,
+    metadata: {
+      browserVersion: execFileSync(executable, ['--version'], { encoding:'utf8' }).trim(),
+      harnessVersion: 'built-in-cdp'
+    },
     dispose() {
       try { child.kill('SIGTERM'); } catch { /* 已退出 */ }
       try { rmSync(profile, { recursive: true, force: true }); } catch { /* 忽略 */ }
@@ -280,6 +293,10 @@ async function launchPlaywright(options) {
   const page = await context.newPage();
   return {
     session:new PlaywrightSession(page),
+    metadata: {
+      browserVersion: browser.version(),
+      harnessVersion: require('playwright/package.json').version
+    },
     dispose:async () => {
       await context.close().catch(() => {});
       await browser.close().catch(() => {});
@@ -301,6 +318,7 @@ async function launchSession(options) {
   }
   return {
     session:page.session,
+    metadata:chrome.metadata,
     dispose:async () => chrome.dispose()
   };
 }
@@ -880,6 +898,86 @@ async function measureAutoNext(session, options, episodeIDs) {
   };
 }
 
+/** HLS 取消：启动真实会话，离开播放页，再从新页面确认旧会话已被删除。 */
+async function measureHLSCancellation(session, options, itemID) {
+  if (!itemID) return { supported:false, reason:'fixture-has-no-hls-candidate' };
+  await navigate(session, `${options.server}/play/${encodeURIComponent(itemID)}#play`);
+  const armed = await session.evaluate(`
+    (() => {
+      const button = document.getElementById('direct-play');
+      if (!button) return false;
+      const originalFetch = window.fetch.bind(window);
+      window.__medialibCancellationProbe = { sessionID:'', mode:'' };
+      window.fetch = async (...args) => {
+        const request = args[0];
+        const url = typeof request === 'string' ? request : String(request?.url || '');
+        const method = String(args[1]?.method || request?.method || 'GET').toUpperCase();
+        const response = await originalFetch(...args);
+        if (url === '/api/v1/playback/sessions' && method === 'POST') {
+          try {
+            const payload = await response.clone().json();
+            if (typeof payload?.sessionID === 'string') {
+              window.__medialibCancellationProbe.sessionID = payload.sessionID;
+              window.__medialibCancellationProbe.mode = typeof payload?.mode === 'string'
+                ? payload.mode.slice(0, 80) : '';
+            }
+          } catch (_) { /* readiness polling below will time out honestly */ }
+        }
+        return response;
+      };
+      return true;
+    })();
+  `, { awaitPromise:false });
+  if (!armed) return { supported:true, sessionCreated:false, reason:'missing-play-control' };
+  await session.click('#direct-play');
+
+  const created = await session.evaluate(`
+    new Promise(resolve => {
+      const startedAt = performance.now();
+      const poll = () => {
+        const probe = window.__medialibCancellationProbe;
+        const media = document.querySelector('video, audio');
+        if (probe?.sessionID) {
+          return resolve({ sessionID:probe.sessionID, mode:probe.mode || media?.dataset.serverPlaybackMode || '' });
+        }
+        if (performance.now() - startedAt >= 20000) return resolve(null);
+        setTimeout(poll, 50);
+      };
+      poll();
+    });
+  `, { timeoutMs:22_000 });
+  if (!created?.sessionID) {
+    return { supported:true, sessionCreated:false, reason:'hls-session-not-created' };
+  }
+
+  const statusPath = `/api/v1/playback/sessions/${encodeURIComponent(created.sessionID)}`;
+  const activeStatus = await session.evaluate(`
+    fetch(${JSON.stringify(statusPath)}, { credentials:'same-origin' }).then(response => response.status)
+  `);
+  await navigate(session, `${options.server}/library`);
+  const removed = await session.evaluate(`
+    new Promise(resolve => {
+      const startedAt = performance.now();
+      const poll = async () => {
+        const status = await fetch(${JSON.stringify(statusPath)}, { credentials:'same-origin' })
+          .then(response => response.status).catch(() => 0);
+        if (status === 404) return resolve({ ok:true, status });
+        if (performance.now() - startedAt >= 10000) return resolve({ ok:false, status });
+        setTimeout(poll, 100);
+      };
+      poll();
+    });
+  `, { timeoutMs:12_000 });
+  return {
+    supported:true,
+    sessionCreated:true,
+    negotiatedMode:created.mode || null,
+    activeBeforeNavigation:activeStatus === 200,
+    removedAfterNavigation:removed?.ok === true,
+    finalStatus:removed?.status ?? null
+  };
+}
+
 /** 离页续播：播到中途离开，再回来看服务端是否记住了位置。 */
 async function measureResumeAcrossNavigation(session, options, itemID) {
   await navigate(session, `${options.server}/play/${encodeURIComponent(itemID)}#play`);
@@ -937,7 +1035,8 @@ async function main() {
   const options = parseArguments(process.argv.slice(2));
   if (!options.password) throw new Error('必须提供 --password');
   if (!options.manifest) throw new Error('必须提供 --manifest');
-  const manifest = JSON.parse(readFileSync(options.manifest, 'utf8'));
+  const manifestBytes = readFileSync(options.manifest);
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
 
   const launched = await launchSession(options);
   let session;
@@ -966,19 +1065,77 @@ async function main() {
     const autoNext = options.samplesOnly
       ? { supported: false, reason: 'samples-only' }
       : await measureAutoNext(session, options, manifest.episodeItemIDs ?? []);
+    const hlsCandidate = samples.find(sample =>
+      typeof sample.negotiatedPlayback?.serverPlaybackMode === 'string' &&
+      sample.negotiatedPlayback.serverPlaybackMode.startsWith('hls')
+    ) ?? manifest.items.find(item => item.file === 'matrix-04-hevc-truehd.mkv');
+    const hlsCancellation = options.samplesOnly
+      ? { supported:false, reason:'samples-only' }
+      : await measureHLSCancellation(session, options, hlsCandidate?.itemID ?? '');
     const resume = options.samplesOnly
       ? { supported: false, reason: 'samples-only' }
       : await measureResumeAcrossNavigation(session, options, manifest.items[0]?.itemID ?? '');
     const telemetry = await fetchTelemetry(session, options);
 
+    const acceptanceFailures = samples.filter(sample =>
+      sample.harnessError || sample.directPlayed !== true || sample.pauseResumeOK !== true ||
+      sample.seek?.completed !== sample.seek?.attempted || sample.mediaError !== null ||
+      sample.audioSignal?.audible === false ||
+      sample.hlsErrors?.some(error => error.fatal === true) ||
+      sample.layout?.horizontalOverflow === true ||
+      (options.viewport && options.viewport.width <= 719 &&
+        sample.layout?.undersizedInteractiveTargets?.length > 0)
+    );
+    const workflowFailures = [];
+    if (!options.samplesOnly && autoNext.supported === true && autoNext.advanced?.ok !== true) {
+      workflowFailures.push('automatic-next');
+    }
+    if (!options.samplesOnly && (
+      hlsCancellation.supported !== true || hlsCancellation.sessionCreated !== true ||
+      hlsCancellation.activeBeforeNavigation !== true || hlsCancellation.removedAfterNavigation !== true
+    )) {
+      workflowFailures.push('hls-cancellation');
+    }
+    if (!options.samplesOnly && (!resume || !resume.afterReturning)) {
+      workflowFailures.push('resume-across-navigation');
+    }
+    const skippedWorkflows = [
+      autoNext?.supported === false ? `automatic-next:${autoNext.reason || 'unsupported'}` : null,
+      options.samplesOnly ? 'hls-cancellation:samples-only' : null,
+      options.samplesOnly ? 'resume-across-navigation:samples-only' : null
+    ].filter(Boolean);
+
     const report = {
       capturedAt: new Date().toISOString(),
+      revision: process.env.MEDIALIB_ACCEPTANCE_REVISION || null,
       browser: options.browser,
+      browserVersion: launched.metadata?.browserVersion || null,
+      harnessVersion: launched.metadata?.harnessVersion || null,
       headless: options.headless,
       viewport: options.viewport,
       ignoredHTTPSErrors:options.ignoreHTTPSErrors,
+      environment: {
+        node: process.version,
+        os: process.env.MEDIALIB_ACCEPTANCE_OS_VERSION || null,
+        xcode: process.env.MEDIALIB_ACCEPTANCE_XCODE_VERSION || null,
+        ffmpeg: process.env.MEDIALIB_ACCEPTANCE_FFMPEG_VERSION || null,
+        playwright: process.env.MEDIALIB_PLAYWRIGHT_VERSION || null
+      },
+      sampleSet: {
+        manifestSHA256:createHash('sha256').update(manifestBytes).digest('hex'),
+        count:Array.isArray(manifest.items) ? manifest.items.length : 0,
+        files:Array.isArray(manifest.items) ? manifest.items.map(item => item.file) : []
+      },
+      summary: {
+        sampleCount:samples.length,
+        passedSampleCount:samples.length - acceptanceFailures.length,
+        failedSampleCount:acceptanceFailures.length,
+        workflowFailures,
+        skippedWorkflows
+      },
       samples,
       autoNext,
+      hlsCancellation,
       resumeAcrossNavigation: resume,
       serverTelemetry: telemetry
     };
@@ -1013,22 +1170,14 @@ async function main() {
       for (const sample of silentVideo) console.log(`  ${sample.file}`);
     }
 
-    const acceptanceFailures = samples.filter(sample =>
-      sample.harnessError || sample.directPlayed !== true || sample.pauseResumeOK !== true ||
-      sample.seek?.completed !== sample.seek?.attempted || sample.mediaError !== null ||
-      sample.audioSignal?.audible === false ||
-      sample.hlsErrors?.some(error => error.fatal === true) ||
-      sample.layout?.horizontalOverflow === true ||
-      (options.viewport && options.viewport.width <= 719 &&
-        sample.layout?.undersizedInteractiveTargets?.length > 0)
-    );
-    if (acceptanceFailures.length > 0) {
+    if (acceptanceFailures.length > 0 || workflowFailures.length > 0) {
       console.log('\n验收失败样本：');
       for (const sample of acceptanceFailures) {
         console.log(`  ${sample.file}: ${sample.harnessError || sample.failureReason || '播放、音频、seek 或移动布局未满足基线'}`);
       }
+      for (const workflow of workflowFailures) console.log(`  workflow: ${workflow}`);
     }
-    process.exitCode = acceptanceFailures.length > 0 ? 1 : 0;
+    process.exitCode = acceptanceFailures.length > 0 || workflowFailures.length > 0 ? 1 : 0;
   } finally {
     session?.close();
     await launched.dispose();

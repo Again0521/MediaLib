@@ -1,0 +1,11 @@
+{
+  "name": "medialib-browser-acceptance",
+  "private": true,
+  "description": "Pinned browser harness used only by CI acceptance workflows.",
+  "engines": {
+    "node": "22.23.2"
+  },
+  "devDependencies": {
+    "playwright": "1.63.0"
+  }
+}

@@ -154,8 +154,8 @@ enum ServerWebOperationsPage {
             </form>
             """
         case .tasks:
-            return card("资料库任务", "只触发已有本地普通媒体库，不提供来源增删改。", id: "task-actions", controls: """
-              <div class="operations-button-row"><button class="ui-btn ui-btn-primary" type="button" id="task-scan">扫描资料库</button><button class="ui-btn ui-btn-secondary" type="button" id="task-reindex">重建索引</button><button class="ui-btn ui-btn-secondary" type="button" id="task-metadata">刷新本地元数据</button></div>
+            return card("资料库任务", "只触发已有本地普通媒体库，不提供来源增删改。重新读取本地元数据仅读取文件标签、NFO 和本地图片，不联网刮削、不访问远程来源或保险库、不写回媒体目录。", id: "task-actions", controls: """
+              <div class="operations-button-row"><button class="ui-btn ui-btn-primary" type="button" id="task-scan">扫描资料库</button><button class="ui-btn ui-btn-secondary" type="button" id="task-reindex">重建索引</button><button class="ui-btn ui-btn-secondary" type="button" id="task-metadata">重新读取本地元数据</button></div>
             """) + card(
               "任务队列",
               "显示持久化进度与稳定结果代码；筛选与计数均在数据库内完成。",
@@ -169,7 +169,7 @@ enum ServerWebOperationsPage {
                   action: "/admin/tasks",
                   formID: "task-search-form"
                 ))
-                <div class="ui-field"><label class="ui-label" for="task-kind">类型</label><select class="ui-select" id="task-kind"><option value="">全部</option><option value="library.scan">资料库扫描</option><option value="library.reindex">重建索引</option><option value="metadata.refresh">刷新元数据</option></select></div>
+                <div class="ui-field"><label class="ui-label" for="task-kind">类型</label><select class="ui-select" id="task-kind"><option value="">全部</option><option value="library.scan">资料库扫描</option><option value="library.reindex">重建索引</option><option value="metadata.refresh">重新读取本地元数据</option></select></div>
                 <div class="ui-field"><label class="ui-label" for="task-state">状态</label><select class="ui-select" id="task-state"><option value="">全部</option><option value="queued">排队中</option><option value="running">进行中</option><option value="succeeded">已完成</option><option value="failed">失败</option><option value="cancelled">已取消</option></select></div>
               </div>
               """,
@@ -380,11 +380,23 @@ enum ServerWebOperationsPage {
       const jobTitle = kind => ({
         'library.scan':'资料库扫描',
         'library.reindex':'重建索引',
-        'metadata.refresh':'刷新本地元数据',
+        'metadata.refresh':'重新读取本地元数据',
         'database.backup':'创建数据库备份',
         'database.restore':'恢复数据库',
         'transcode-cache.clear':'清理转码缓存'
       })[kind] || '维护任务';
+      const jobResultLabel = code => ({
+        'metadata.local-reload-completed':'本地元数据已重新读取并更新',
+        'metadata.local-reload-no-changes':'本地元数据已重新读取，无变化',
+        'metadata.local-reload-partial':'本地元数据部分重新读取，部分来源失败',
+        'metadata.local-reload-failed':'本地元数据重新读取失败',
+        'metadata.no-eligible-sources':'没有可重新读取的本地媒体源',
+        // Historical jobs retain their stored codes, but the current UI makes
+        // their actual local-only semantics explicit.
+        'metadata.completed':'本地元数据重新读取完成（历史结果）',
+        'metadata.completed-with-errors':'本地元数据重新读取完成但有错误（历史结果）',
+        'metadata.failed':'本地元数据重新读取失败（历史结果）'
+      })[code] || code;
       const renderJobs = () => {
         const isStorage = content.dataset.section === 'storage';
         const target = byID(isStorage ? 'storage-job-list' : 'task-list');
@@ -404,7 +416,7 @@ enum ServerWebOperationsPage {
           title.textContent = jobTitle(String(job.kind || ''));
           const progress = Math.round(Math.min(1, Math.max(0, Number(job.progress) || 0)) * 100);
           const created = new Date(job.createdAt);
-          detail.textContent = `${Number.isNaN(created.valueOf()) ? '时间未知' : created.toLocaleString()} · ${stateLabel(job.state)} · ${progress}%${job.resultCode ? ` · ${String(job.resultCode)}` : ''}`;
+          detail.textContent = `${Number.isNaN(created.valueOf()) ? '时间未知' : created.toLocaleString()} · ${stateLabel(job.state)} · ${progress}%${job.resultCode ? ` · ${jobResultLabel(String(job.resultCode))}` : ''}`;
           const progressTrack = document.createElement('span');
           progressTrack.className = 'ui-progress operations-job-progress';
           progressTrack.setAttribute('role', 'progressbar');

@@ -173,6 +173,9 @@ public final class DatabaseManager: @unchecked Sendable {
     private let contentionConfiguration: DatabaseContentionConfiguration
     private let contentionMetricsTracker = DatabaseContentionMetricsTracker()
     private var busyWaitController: SQLiteBusyWaitController?
+    /// Only accessed on `queue`. Being on the queue and being inside a SQLite
+    /// transaction are separate states: `performAsync` also runs on this queue.
+    private var transactionDepth = 0
     public let url: URL
 
     private var isOnQueue: Bool {
@@ -279,22 +282,13 @@ public final class DatabaseManager: @unchecked Sendable {
 
     /// 在单次 queue.sync 内以 BEGIN IMMEDIATE/COMMIT 包裹 block，保证原子性。
     /// block 内可继续调用 execute/query，检测到已在队列上后直接执行，不会死锁。
-    /// 若 block 抛出异常则自动 ROLLBACK。
+    /// 嵌套调用复用最外层事务；若错误传播出最外层 block，则整体 ROLLBACK。
     public func transaction<T>(_ block: () throws -> T) throws -> T {
         if isOnQueue {
-            // 嵌套调用：已在事务上下文中，直接执行
-            return try block()
+            return try unsafeTransaction(block)
         }
         return try queue.sync {
-            try self.unsafeExecute("BEGIN IMMEDIATE TRANSACTION")
-            do {
-                let result = try block()
-                try self.unsafeExecute("COMMIT")
-                return result
-            } catch {
-                try? self.unsafeExecute("ROLLBACK")
-                throw error
-            }
+            try self.unsafeTransaction(block)
         }
     }
 
@@ -309,17 +303,13 @@ public final class DatabaseManager: @unchecked Sendable {
                 queue.async {
                     do {
                         try cancellation.checkCancellation()
-                        try self.unsafeExecute("BEGIN IMMEDIATE TRANSACTION")
-                        do {
+                        let result = try self.unsafeTransaction {
                             try cancellation.checkCancellation()
                             let result = try block()
                             try cancellation.checkCancellation()
-                            try self.unsafeExecute("COMMIT")
-                            continuation.resume(returning: result)
-                        } catch {
-                            try? self.unsafeExecute("ROLLBACK")
-                            continuation.resume(throwing: error)
+                            return result
                         }
+                        continuation.resume(returning: result)
                     } catch {
                         continuation.resume(throwing: error)
                     }
@@ -332,6 +322,8 @@ public final class DatabaseManager: @unchecked Sendable {
 
     /// 在数据库专属串行队列上执行一段同步仓储工作。调用者（包括 MainActor）仅异步等待，
     /// 不承担 SQLite busy handler 的睡眠；与 transactionAsync 不同，这里不隐式开启事务。
+    /// 排队期间取消会阻止 block 开始；block 一旦开始便返回其真实结果，不会在已提交非事务
+    /// 写入后改报 CancellationError。需要取消时原子回滚的多步写入应使用 transactionAsync。
     public func performAsync<T>(_ block: @escaping () throws -> T) async throws -> T {
         let cancellation = DatabaseCancellationState()
         return try await withTaskCancellationHandler {
@@ -339,14 +331,35 @@ public final class DatabaseManager: @unchecked Sendable {
                 queue.async {
                     continuation.resume(with: Result {
                         try cancellation.checkCancellation()
-                        let result = try block()
-                        try cancellation.checkCancellation()
-                        return result
+                        return try block()
                     })
                 }
             }
         } onCancel: {
             cancellation.cancel()
+        }
+    }
+
+    /// Must run on `queue`. Nested transactions deliberately reuse the outer
+    /// SQLite transaction, preserving the pre-existing contract without a
+    /// savepoint or a second BEGIN.
+    private func unsafeTransaction<T>(_ block: () throws -> T) throws -> T {
+        precondition(isOnQueue)
+        if transactionDepth > 0 {
+            return try block()
+        }
+
+        try unsafeExecute("BEGIN IMMEDIATE TRANSACTION")
+        transactionDepth = 1
+        do {
+            let result = try block()
+            try unsafeExecute("COMMIT")
+            transactionDepth = 0
+            return result
+        } catch {
+            try? unsafeExecute("ROLLBACK")
+            transactionDepth = 0
+            throw error
         }
     }
 

@@ -154,7 +154,7 @@ enum ServerBoundedProcess {
             }
         }
 
-        fileprivate func bind(_ process: Process) -> Bool {
+        func bind(_ process: Process) -> Bool {
             lock.lock()
             defer { lock.unlock() }
             guard !cancelled else { return false }
@@ -162,7 +162,7 @@ enum ServerBoundedProcess {
             return true
         }
 
-        fileprivate func unbind(_ process: Process) {
+        func unbind(_ process: Process) {
             lock.lock()
             if self.process === process { self.process = nil }
             lock.unlock()

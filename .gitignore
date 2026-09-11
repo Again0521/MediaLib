@@ -30,6 +30,7 @@ playground.xcworkspace
 # .swiftpm
 
 .build/
+node_modules/
 
 # CocoaPods
 #
@@ -66,6 +67,4 @@ dist/icons/AppIcon.iconset/icon_16x16@2x.png
 /doc
 /.agents
 /assets
-scripts/generate_media_matrix.sh
-scripts/generate_media_matrix.sh
 scripts/generate_media_matrix.sh

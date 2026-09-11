@@ -113,6 +113,7 @@ final class ServerModeProcessControllerTests: XCTestCase {
 
         XCTAssertEqual(environment["UNCHANGED"], "yes")
         XCTAssertEqual(environment["MEDIALIB_SERVER_NETWORK_ACCESS_MODE"], "lan-https")
+        XCTAssertEqual(environment["MEDIALIB_SERVER_VERSION"], AppVersion.current)
         XCTAssertEqual(environment["MEDIALIB_SERVER_PUBLIC_ORIGIN"], "https://192.168.31.100:8098")
         XCTAssertNil(environment["MEDIALIB_SERVER_TRUSTED_PROXIES"])
     }

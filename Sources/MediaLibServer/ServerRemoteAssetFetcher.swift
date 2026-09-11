@@ -115,6 +115,22 @@ final class ServerRemoteAssetFetcher {
         cancellation: Cancellation? = nil,
         consume: @escaping (Data) -> Bool
     ) -> Bool {
+        streamMediaBytesOutcome(
+            url: url,
+            offset: offset,
+            length: length,
+            cancellation: cancellation,
+            consume: consume
+        ).isCompleted
+    }
+
+    func streamMediaBytesOutcome(
+        url: URL,
+        offset: Int64,
+        length: Int64,
+        cancellation: Cancellation? = nil,
+        consume: @escaping (Data) -> Bool
+    ) -> ServerStreamTermination {
         // Keep the complete Range arithmetic representable before interpolating
         // it into a header. Callers normally resolve against a known entity
         // length, but this boundary must still fail closed for direct/internal
@@ -128,20 +144,26 @@ final class ServerRemoteAssetFetcher {
               // Int64.max because no Int64 total can contain that byte.
               offset <= Int64.max - length
         else {
-            return false
+            return cancellation?.isCancelled == true
+                ? .cancelled(deliveredByteLength: 0)
+                : .failed(.invalidUpstreamRange, deliveredByteLength: 0)
         }
         if let responseOverride {
             guard let data = responseOverride(url, offset, length), data.count == Int(length) else {
-                return false
+                return .failed(.shortRead(expectedByteLength: length), deliveredByteLength: 0)
             }
             var start = 0
             while start < data.count {
-                guard cancellation?.isCancelled != true else { return false }
+                guard cancellation?.isCancelled != true else {
+                    return .cancelled(deliveredByteLength: Int64(start))
+                }
                 let end = min(start + Self.mediaTransferChunkLength, data.count)
-                guard consume(data.subdata(in: start..<end)) else { return false }
+                guard consume(data.subdata(in: start..<end)) else {
+                    return .cancelled(deliveredByteLength: Int64(start))
+                }
                 start = end
             }
-            return true
+            return .completed(deliveredByteLength: Int64(start))
         }
 
         var request = URLRequest(url: url)
@@ -404,7 +426,7 @@ final class ServerRemoteAssetFetcher {
         expectedLength: Int64,
         cancellation: Cancellation?,
         consume: @escaping (Data) -> Bool
-    ) -> Bool {
+    ) -> ServerStreamTermination {
         let telemetry = self.telemetry
         let startedAt = Date()
         telemetry.rangeBegan()
@@ -427,7 +449,9 @@ final class ServerRemoteAssetFetcher {
                 upstreamTimeToFirstByte: nil,
                 totalDuration: Date().timeIntervalSince(startedAt)
             )
-            return false
+            return cancellation?.isCancelled == true
+                ? .cancelled(deliveredByteLength: 0)
+                : .failed(.upstreamTimedOut, deliveredByteLength: 0)
         }
         defer { slots.signal() }
 
@@ -457,7 +481,7 @@ final class ServerRemoteAssetFetcher {
                 upstreamTimeToFirstByte: nil,
                 totalDuration: Date().timeIntervalSince(startedAt)
             )
-            return false
+            return .cancelled(deliveredByteLength: 0)
         }
         defer { cancellation?.unbind(task) }
         task.resume()
@@ -478,7 +502,29 @@ final class ServerRemoteAssetFetcher {
             upstreamTimeToFirstByte: handler.timeToFirstByte,
             totalDuration: Date().timeIntervalSince(startedAt)
         )
-        return succeeded
+        let deliveredByteLength = handler.deliveredByteLength
+        if succeeded {
+            return .completed(deliveredByteLength: deliveredByteLength)
+        }
+        let outcome = wasCancelled ? ServerRangeOutcome.clientDisconnected
+            : (finished ? handler.outcome : .upstreamStalled)
+        if outcome == .clientDisconnected {
+            return .cancelled(deliveredByteLength: deliveredByteLength)
+        }
+        let failure: ServerStreamFailure
+        switch outcome {
+        case .upstreamRejected:
+            failure = .upstreamRejected
+        case .contentRangeMismatch:
+            failure = .invalidUpstreamRange
+        case .upstreamStalled:
+            failure = .upstreamTimedOut
+        case .transportFailed where handler.hasAcceptedResponse && deliveredByteLength < expectedLength:
+            failure = .shortRead(expectedByteLength: expectedLength)
+        default:
+            failure = .upstreamTransport
+        }
+        return .failed(failure, deliveredByteLength: deliveredByteLength)
     }
 
     /// 只在上游**完全没有推进**时才放弃。固定的"总时长 = 一次请求超时"会把
@@ -785,6 +831,12 @@ final class StreamingMediaHandler {
         stateLock.lock()
         defer { stateLock.unlock() }
         return receivedLength
+    }
+
+    var hasAcceptedResponse: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return acceptedResponse
     }
 
     /// 上游响应头到达的耗时。只有真正收到并接受了响应才有值。

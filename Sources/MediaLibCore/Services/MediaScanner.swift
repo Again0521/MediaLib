@@ -24,6 +24,63 @@ public struct ScanSummary: Equatable {
     public var errors: [String]
 }
 
+/// Only the non-sensitive runtime choices that the scanner itself consumes.
+/// Provider credentials, write-back preferences, account state, and unrelated
+/// playback/UI settings never need to cross into a scan operation.
+public struct MediaScannerOptions: Equatable, Sendable {
+    public var enableThumbnailFallback: Bool
+    public var artworkFallbackMode: ArtworkFallbackMode
+    public var thumbnailCaptureRatio: Double
+    public var avoidBlackFrames: Bool
+    public var pruneMissingItems: Bool
+
+    public init(
+        enableThumbnailFallback: Bool,
+        artworkFallbackMode: ArtworkFallbackMode,
+        thumbnailCaptureRatio: Double,
+        avoidBlackFrames: Bool,
+        pruneMissingItems: Bool = true
+    ) {
+        self.enableThumbnailFallback = enableThumbnailFallback
+        self.artworkFallbackMode = artworkFallbackMode
+        self.thumbnailCaptureRatio = thumbnailCaptureRatio
+        self.avoidBlackFrames = avoidBlackFrames
+        self.pruneMissingItems = pruneMissingItems
+    }
+
+    public init(settings: AppSettings, pruneMissingItems: Bool = true) {
+        self.init(
+            enableThumbnailFallback: settings.enableThumbnailFallback,
+            artworkFallbackMode: settings.artworkFallbackMode,
+            thumbnailCaptureRatio: settings.thumbnailCaptureRatio,
+            avoidBlackFrames: settings.avoidBlackFrames,
+            pruneMissingItems: pruneMissingItems
+        )
+    }
+
+    /// The standalone server has no thumbnail generator or trusted desktop
+    /// settings provider. Its local scan policy is therefore explicit instead
+    /// of being inherited from a freshly initialized `AppSettings` value.
+    public static let localLibraryScan = MediaScannerOptions(
+        enableThumbnailFallback: false,
+        artworkFallbackMode: .none,
+        thumbnailCaptureRatio: 0,
+        avoidBlackFrames: false,
+        pruneMissingItems: true
+    )
+
+    /// A server-side metadata reload re-reads file tags, NFO, and local
+    /// artwork, but does not turn a metadata operation into missing-file
+    /// reconciliation.
+    public static let localMetadataReload = MediaScannerOptions(
+        enableThumbnailFallback: false,
+        artworkFallbackMode: .none,
+        thumbnailCaptureRatio: 0,
+        avoidBlackFrames: false,
+        pruneMissingItems: false
+    )
+}
+
 #if os(macOS)
 
 enum MediaScannerPathKind: Sendable, Equatable {
@@ -221,6 +278,20 @@ public final class MediaScanner {
         progress: @escaping (ScanProgress) -> Void,
         onImportedIDs: @escaping (Set<String>) -> Void = { _ in }
     ) async -> ScanSummary {
+        await scan(
+            source: source,
+            options: MediaScannerOptions(settings: settings),
+            progress: progress,
+            onImportedIDs: onImportedIDs
+        )
+    }
+
+    public func scan(
+        source: MediaSource,
+        options: MediaScannerOptions,
+        progress: @escaping (ScanProgress) -> Void,
+        onImportedIDs: @escaping (Set<String>) -> Void = { _ in }
+    ) async -> ScanSummary {
         guard await FileAccessService.isReachableDirectoryAsync(source.path) else {
             let message = inaccessibleSourceMessage(source, incremental: false)
             logger?.log(message, level: .warning)
@@ -245,7 +316,7 @@ public final class MediaScanner {
                     skipped += 1
                     continue
                 }
-                let ids = try await importFile(fileURL, fileSize: fileSize, source: source, settings: settings)
+                let ids = try await importFile(fileURL, fileSize: fileSize, source: source, options: options)
                 importedIDs.formUnion(ids)
                 imported += 1
                 onImportedIDs(ids)
@@ -258,7 +329,7 @@ public final class MediaScanner {
             }
         }
 
-        if !Task.isCancelled && errors.isEmpty {
+        if options.pruneMissingItems && !Task.isCancelled && errors.isEmpty {
             do {
                 try mediaRepository.deleteItems(sourcePath: source.path, excludingIDs: importedIDs)
             } catch {
@@ -278,6 +349,22 @@ public final class MediaScanner {
         source: MediaSource,
         changedPaths: [String],
         settings: AppSettings,
+        progress: @escaping (ScanProgress) -> Void,
+        onImportedIDs: @escaping (Set<String>) -> Void = { _ in }
+    ) async -> ScanSummary {
+        await scanChanges(
+            source: source,
+            changedPaths: changedPaths,
+            options: MediaScannerOptions(settings: settings),
+            progress: progress,
+            onImportedIDs: onImportedIDs
+        )
+    }
+
+    public func scanChanges(
+        source: MediaSource,
+        changedPaths: [String],
+        options: MediaScannerOptions,
         progress: @escaping (ScanProgress) -> Void,
         onImportedIDs: @escaping (Set<String>) -> Void = { _ in }
     ) async -> ScanSummary {
@@ -373,7 +460,7 @@ public final class MediaScanner {
                     progress(ScanProgress(sourceID: source.id, status: "running", totalFiles: totalWork, processedFiles: processed, currentPath: source.mediaType == .privateCollection ? nil : fileURL.path, errorMessage: errors.first))
                     continue
                 }
-                let ids = try await importFile(fileURL, fileSize: fileSize, source: source, settings: settings)
+                let ids = try await importFile(fileURL, fileSize: fileSize, source: source, options: options)
                 imported += 1
                 onImportedIDs(ids)
             } catch {
@@ -399,10 +486,10 @@ public final class MediaScanner {
         return ScanSummary(scannedFiles: files.count, importedItems: imported, skippedFiles: skipped, errors: errors)
     }
 
-    private func importFile(_ fileURL: URL, fileSize: Int64, source: MediaSource, settings: AppSettings) async throws -> Set<String> {
+    private func importFile(_ fileURL: URL, fileSize: Int64, source: MediaSource, options: MediaScannerOptions) async throws -> Set<String> {
         // 相册源：图片→.photo，视频→.homeVideo（归属由源决定，独立于视频库），不做剧集/电影解析。
         if source.mediaType == .photo {
-            return try await importAlbumFile(fileURL, fileSize: fileSize, source: source, settings: settings)
+            return try await importAlbumFile(fileURL, fileSize: fileSize, source: source, options: options)
         }
 
         let parsed = parser.parse(url: fileURL, preferredType: source.mediaType, sourcePath: source.path)
@@ -430,7 +517,7 @@ public final class MediaScanner {
                     title: title,
                     mediaType: .music,
                     source: source,
-                    settings: settings,
+                    options: options,
                     mediaInfo: mediaInfo
                 )
             }
@@ -479,7 +566,7 @@ public final class MediaScanner {
                     title: title,
                     mediaType: itemType,
                     source: source,
-                    settings: settings,
+                    options: options,
                     mediaInfo: mediaInfo
                 )
             }
@@ -526,7 +613,7 @@ public final class MediaScanner {
                     title: "\(showTitle) \(parsed.episodeNumber.map { "E\($0)" } ?? "")",
                     mediaType: .episode,
                     source: source,
-                    settings: settings,
+                    options: options,
                     mediaInfo: mediaInfo
                 )
             }
@@ -565,7 +652,7 @@ public final class MediaScanner {
 
     /// 相册条目导入：单文件即一个顶层条目。图片用原图作缩略图来源，视频生成缩略图；
     /// 拍摄日期取文件创建/修改日期（EXIF 留待后续轮），用于相册按时间排序。
-    private func importAlbumFile(_ fileURL: URL, fileSize: Int64, source: MediaSource, settings: AppSettings) async throws -> Set<String> {
+    private func importAlbumFile(_ fileURL: URL, fileSize: Int64, source: MediaSource, options: MediaScannerOptions) async throws -> Set<String> {
         let canonicalURL = canonicalMediaURL(fileURL)
         let isImage = parser.isImageFile(canonicalURL)
         let id = StableID.make(prefix: isImage ? "photo" : "albumvideo", value: canonicalURL.path)
@@ -590,7 +677,7 @@ public final class MediaScanner {
                 title: title,
                 mediaType: .homeVideo,
                 source: source,
-                settings: settings,
+                options: options,
                 mediaInfo: mediaInfo
             )
         }
@@ -619,14 +706,14 @@ public final class MediaScanner {
         title: String,
         mediaType: MediaType,
         source: MediaSource,
-        settings: AppSettings,
+        options: MediaScannerOptions,
         mediaInfo: (duration: Double?, resolution: String?)?
     ) async -> String? {
-        guard source.screenshotFallbackEnabled, settings.enableThumbnailFallback else {
+        guard source.screenshotFallbackEnabled, options.enableThumbnailFallback else {
             return nil
         }
 
-        switch settings.artworkFallbackMode {
+        switch options.artworkFallbackMode {
         case .videoFrame:
             if mediaType == .music {
                 return await thumbnailGenerator?.generateDefaultArtwork(
@@ -639,8 +726,8 @@ public final class MediaScanner {
             return await thumbnailGenerator?.generateThumbnail(
                 for: fileURL,
                 mediaID: mediaID,
-                ratio: settings.thumbnailCaptureRatio,
-                avoidBlackFrames: settings.avoidBlackFrames
+                ratio: options.thumbnailCaptureRatio,
+                avoidBlackFrames: options.avoidBlackFrames
             )?.path
         case .generatedDefault:
             return await thumbnailGenerator?.generateDefaultArtwork(
