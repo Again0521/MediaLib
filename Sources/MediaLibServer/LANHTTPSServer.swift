@@ -33,8 +33,7 @@ struct LANHTTPSServer {
         requestWorkExecutor: ServerRequestWorkExecutor = .shared
     ) throws {
         guard configuration.networkAccessMode == .lanHTTPS,
-              let publicOrigin = configuration.publicOrigin,
-              let publicHost = publicOrigin.host,
+              let publicHost = configuration.lanAddress ?? configuration.publicOrigin?.host,
               LANIPv4AddressPolicy.isPrivateOrLoopback(publicHost)
         else {
             throw LANHTTPSServerError.missingPrivateHTTPSOrigin
@@ -56,7 +55,8 @@ struct LANHTTPSServer {
                 to: request,
                 context: context,
                 handler: requestHandler,
-                workExecutor: requestWorkExecutor
+                workExecutor: requestWorkExecutor,
+                allowsWANAccess: configuration.allowsWANAccess
             )
         }
         for rawMethod in ServerHTTPMethodContract.orderedRawValues {
@@ -87,10 +87,11 @@ struct LANHTTPSServer {
         to originalRequest: Request,
         context: Context,
         handler: LocalLoopbackHTTPServer,
-        workExecutor: ServerRequestWorkExecutor
+        workExecutor: ServerRequestWorkExecutor,
+        allowsWANAccess: Bool
     ) async throws -> Response {
         let clientAddress = context.remoteAddress?.ipAddress ?? "unresolved-client"
-        guard LANIPv4AddressPolicy.isPrivateOrLoopback(clientAddress) else {
+        guard acceptsClientAddress(clientAddress, allowsWANAccess: allowsWANAccess) else {
             return response(from: .forbidden())
         }
 
@@ -119,6 +120,10 @@ struct LANHTTPSServer {
             )
         }
         return response(from: localResponse, workExecutor: workExecutor)
+    }
+
+    static func acceptsClientAddress(_ address: String, allowsWANAccess: Bool) -> Bool {
+        allowsWANAccess || LANIPv4AddressPolicy.isPrivateOrLoopback(address)
     }
 
     static func rawRequestHead(from request: Request) -> String {

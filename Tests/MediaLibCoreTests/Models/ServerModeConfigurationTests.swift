@@ -2,6 +2,21 @@ import XCTest
 @testable import MediaLibCore
 
 final class ServerModeConfigurationTests: XCTestCase {
+    func testWANOptInPreservesLANAndPublishesProxyConfiguration() throws {
+        var configuration = ServerModeConfiguration(networkAccessMode: .lanHTTPS,
+            lanAddress: "192.168.1.10", publicOrigin: "https://media.example.com",
+            trustedProxyAddresses: ["192.168.1.2"])
+        XCTAssertFalse(configuration.allowsWANAccess)
+        XCTAssertEqual(configuration.effectivePublicOrigin, "https://192.168.1.10:8098")
+        XCTAssertTrue(configuration.effectiveTrustedProxyAddresses.isEmpty)
+        configuration.allowsWANAccess = true
+        XCTAssertEqual(configuration.effectivePublicOrigin, "https://media.example.com")
+        XCTAssertEqual(configuration.effectiveTrustedProxyAddresses, ["192.168.1.2"])
+        XCTAssertEqual(configuration.lanHTTPSBaseURL?.host, "192.168.1.10")
+        XCTAssertEqual(try JSONDecoder().decode(ServerModeConfiguration.self,
+            from: JSONEncoder().encode(configuration)), configuration)
+    }
+
     func testDefaultsProduceStableLoopbackEndpoint() {
         let configuration = ServerModeConfiguration(serverID: "server-a")
 

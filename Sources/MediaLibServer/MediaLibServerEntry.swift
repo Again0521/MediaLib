@@ -457,6 +457,8 @@ enum ServerCommandOutput {
 }
 
 struct ServerLaunchConfiguration: Sendable {
+    var allowsWANAccess: Bool = false
+    var lanAddress: String? = nil
     let host: String
     let port: Int
     let networkAccessMode: ServerNetworkAccessMode
@@ -540,6 +542,8 @@ struct ServerLaunchConfiguration: Sendable {
             throw ServerConfigurationError.invalidLanDirectPlayConfiguration
         }
         return Self(
+            allowsWANAccess: ["1", "true", "yes"].contains(environment["MEDIALIB_SERVER_ALLOW_WAN"]?.lowercased() ?? ""),
+            lanAddress: environment["MEDIALIB_SERVER_LAN_ADDRESS"],
             host: normalizedHost,
             port: port,
             networkAccessMode: networkAccessMode,

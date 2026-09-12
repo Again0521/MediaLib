@@ -300,6 +300,8 @@ final class ServerModeProcessController: ObservableObject {
         environment["MEDIALIB_SERVER_NAME"] = configuration.serverName
         environment["MEDIALIB_SERVER_VERSION"] = AppVersion.current
         environment["MEDIALIB_SERVER_NETWORK_ACCESS_MODE"] = configuration.networkAccessMode.rawValue
+        environment["MEDIALIB_SERVER_ALLOW_WAN"] = configuration.allowsWANAccess ? "1" : "0"
+        environment["MEDIALIB_SERVER_LAN_ADDRESS"] = configuration.lanAddress
         environment["MEDIALIB_SERVER_LIGHTWEIGHT"] = configuration.isLightweightMode ? "1" : "0"
         if let publicOrigin = configuration.effectivePublicOrigin {
             environment["MEDIALIB_SERVER_PUBLIC_ORIGIN"] = publicOrigin

@@ -1303,7 +1303,16 @@ struct SettingsView: View {
                 SettingsDescription(
                     text: "把导出的 MediaLIB-LAN-CA.cer 发送到同一局域网内的手机、平板或电脑并设为信任，然后使用上方 https 地址访问。证书只用于验证这台 MediaLIB 服务器，不包含管理员密码或媒体信息。"
                 )
-            } else {
+            }
+            SettingsRow(title: "广域网访问", systemImage: "globe") {
+                Toggle("允许广域网访问", isOn: Binding(
+                    get: { appState.serverModeConfiguration.allowsWANAccess },
+                    set: { appState.setServerWANAccessEnabled($0) }
+                ))
+                .disabled(appState.serverModeConfiguration.networkAccessMode != .lanHTTPS)
+            }
+            SettingsDescription(text: "开启局域网及广域网访问后，可在路由器、NAS 或其他设备部署反代，回源到本机 HTTPS 地址。填写公开 HTTPS 域名及反代设备的 IPv4 地址；反代需信任导出的 CA，并保留公开 Host。公网域名证书由反代配置。")
+            if appState.serverModeConfiguration.networkAccessMode != .lanHTTPS || appState.serverModeConfiguration.allowsWANAccess {
                 SettingsRow(title: "公开 HTTPS 地址", systemImage: "lock.shield") {
                     TextField("https://media.example.com", text: $serverModePublicOriginDraft)
                         .onSubmit {

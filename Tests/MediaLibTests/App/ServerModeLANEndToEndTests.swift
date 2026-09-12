@@ -24,6 +24,14 @@ final class ServerModeLANEndToEndTests: XCTestCase {
     }
 
     func testIndependentTrustedClientCanLoginUseAllBusinessMethodsAndReadMediaRangeOverLANHTTPS() async throws {
+        try await exerciseHTTPS(proxy: false)
+    }
+
+    func testWANProxyCanLoginMutateAndReadMediaWhileLANReadinessWorks() async throws {
+        try await exerciseHTTPS(proxy: true)
+    }
+
+    private func exerciseHTTPS(proxy: Bool) async throws {
         guard let address = LANNetworkAddressResolver.preferredPrivateIPv4Address() else {
             if ProcessInfo.processInfo.environment["MEDIALIB_REQUIRE_LAN_E2E"] == "1" {
                 XCTFail("MEDIALIB_REQUIRE_LAN_E2E=1 but the runner has no private IPv4 address")
@@ -42,7 +50,10 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             serverName: "MediaLIB LAN E2E",
             port: port,
             networkAccessMode: .lanHTTPS,
-            lanAddress: address
+            lanAddress: address,
+            publicOrigin: proxy ? "https://media.example.test" : nil,
+            trustedProxyAddresses: proxy ? [address] : [],
+            allowsWANAccess: proxy
         )
         let process = Process()
         process.executableURL = executable
@@ -74,6 +85,10 @@ final class ServerModeLANEndToEndTests: XCTestCase {
         sessionConfiguration.httpCookieAcceptPolicy = .always
         sessionConfiguration.timeoutIntervalForRequest = 10
         sessionConfiguration.timeoutIntervalForResource = 15
+        if proxy {
+            sessionConfiguration.httpAdditionalHeaders = ["Host": "media.example.test",
+                "X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.7"]
+        }
         let session = URLSession(
             configuration: sessionConfiguration,
             delegate: delegate,
@@ -87,6 +102,12 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             process: process
         )
         XCTAssertEqual(loginPage.response.statusCode, 200)
+        if proxy {
+            let ready = await ServerModeProcessController.checkLANHTTPSReadiness(
+                configuration, certificateAuthorityURL: certificateAuthority)
+            XCTAssertTrue(ready)
+        }
+
         let loginHTML = try XCTUnwrap(String(data: loginPage.data, encoding: .utf8))
         let csrf = try csrfToken(in: loginHTML)
 
@@ -101,7 +122,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
         loginRequest.httpMethod = "POST"
         loginRequest.httpBody = loginBody
         loginRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        loginRequest.setValue(baseURL.absoluteString, forHTTPHeaderField: "Origin")
+        loginRequest.setValue((proxy ? "https://media.example.test" : baseURL.absoluteString), forHTTPHeaderField: "Origin")
         loginRequest.setValue(csrf, forHTTPHeaderField: "X-MediaLIB-CSRF")
         let (loginData, loginResponse) = try await session.data(for: loginRequest)
         let loginHTTP = try XCTUnwrap(loginResponse as? HTTPURLResponse)
@@ -123,7 +144,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
         missingCSRF.httpMethod = "POST"
         missingCSRF.httpBody = stateBody
         missingCSRF.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        missingCSRF.setValue(baseURL.absoluteString, forHTTPHeaderField: "Origin")
+        missingCSRF.setValue((proxy ? "https://media.example.test" : baseURL.absoluteString), forHTTPHeaderField: "Origin")
         let (_, rejectedResponse) = try await session.data(for: missingCSRF)
         XCTAssertEqual((rejectedResponse as? HTTPURLResponse)?.statusCode, 403)
 

@@ -7,6 +7,13 @@ import XCTest
 @testable import MediaLibServer
 
 final class LANHTTPSServerTests: XCTestCase {
+    func testPublicPeersRequireExplicitWANOptIn() {
+        guard #available(macOS 14.0, *) else { return }
+        XCTAssertFalse(LANHTTPSServer.acceptsClientAddress("203.0.113.7", allowsWANAccess: false))
+        XCTAssertTrue(LANHTTPSServer.acceptsClientAddress("203.0.113.7", allowsWANAccess: true))
+        XCTAssertTrue(LANHTTPSServer.acceptsClientAddress("192.168.1.2", allowsWANAccess: false))
+    }
+
     func testCallbackBodyFinishesOnlyAfterNormalProducerEOF() async throws {
         guard #available(macOS 14.0, *) else { return }
         let producerFinished = DispatchSemaphore(value: 0)

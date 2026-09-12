@@ -110,6 +110,9 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
            let publicHost = configuration.publicOrigin?.host?.lowercased() {
             allowedHosts.insert(publicHost)
         }
+        if configuration.networkAccessMode == .lanHTTPS, let address = configuration.lanAddress {
+            allowedHosts.insert(address)
+        }
         self.configuration = configuration
         self.requestSecurityPolicy = HTTPRequestSecurityPolicy(
             allowedHosts: allowedHosts,

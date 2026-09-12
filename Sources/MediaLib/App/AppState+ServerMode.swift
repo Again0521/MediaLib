@@ -10,7 +10,7 @@ extension AppState {
     var serverModeStatusDisplayTitle: String {
         if case .running = serverModeStatus,
            serverModeConfiguration.networkAccessMode == .lanHTTPS {
-            return "局域网 HTTPS 运行中"
+            return serverModeConfiguration.allowsWANAccess ? "广域网 HTTPS 运行中" : "局域网 HTTPS 运行中"
         }
         return serverModeStatus.title
     }
@@ -111,6 +111,12 @@ extension AppState {
     func updateServerModeTrustedProxyAddresses(_ value: String) {
         var configuration = serverModeConfiguration
         configuration.updateTrustedProxyAddresses(value.split(separator: ",").map(String.init))
+        applyServerModeConfiguration(configuration)
+    }
+
+    func setServerWANAccessEnabled(_ enabled: Bool) {
+        var configuration = serverModeConfiguration
+        configuration.allowsWANAccess = enabled
         applyServerModeConfiguration(configuration)
     }
 

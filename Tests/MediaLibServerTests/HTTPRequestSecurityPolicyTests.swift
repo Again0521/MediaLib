@@ -16,6 +16,18 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
         publicOrigin: URL(string: "https://media.example.test")!
     )
 
+    func testRemoteProxyAndLocalTLSRemainUsableTogether() {
+        let policy = HTTPRequestSecurityPolicy(allowedHosts: ["192.168.1.10"],
+            allowedPort: 8098, csrfToken: "token", trustedProxyAddresses: ["192.168.1.2"],
+            publicOrigin: URL(string: "https://media.example.com"))
+        let request = "GET /health HTTP/1.1\r\nHost: media.example.com\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: 203.0.113.7\r\n\r\n"
+        XCTAssertNil(policy.validate(request, clientAddressKey: "192.168.1.2", isDirectTLS: true))
+        XCTAssertEqual(policy.validate(request, clientAddressKey: "192.168.1.3", isDirectTLS: true), .forbidden)
+        XCTAssertNil(policy.validate("GET /health HTTP/1.1\r\nHost: 192.168.1.10:8098\r\n\r\n", isDirectTLS: true))
+        XCTAssertEqual(policy.validate("GET /health HTTP/1.1\r\nHost: media.example.com:8098\r\n\r\n", isDirectTLS: true), .forbidden)
+        XCTAssertEqual(policy.validate("GET /health HTTP/1.1\r\nHost: attacker.example\r\n\r\n", isDirectTLS: true), .forbidden)
+    }
+
     func testAcceptsStrictSameOriginProbe() {
         XCTAssertNil(policy.validate("GET /health HTTP/1.1\r\nHost: localhost:8098\r\n\r\n"))
     }

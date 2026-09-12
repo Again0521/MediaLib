@@ -25,12 +25,14 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
     /// The current private IPv4 address selected by the desktop app for the
     /// built-in LAN HTTPS listener. It is refreshed before every launch.
     public var lanAddress: String?
-    /// Optional public HTTPS origin when a local reverse proxy terminates TLS.
-    /// Empty means the service is loopback-only and never trusts forwarded headers.
+    /// Optional public HTTPS origin for a reverse proxy. LAN mode uses it only
+    /// when WAN access is explicitly enabled.
     public var publicOrigin: String?
     /// Exact IPv4 peers allowed to assert `X-Forwarded-Proto: https` and
     /// `X-Forwarded-For`; this is intentionally not a CIDR or hostname field.
     public var trustedProxyAddresses: [String]
+    /// Explicit opt-in for public peers and an external reverse proxy in LAN HTTPS mode.
+    public var allowsWANAccess: Bool
     /// 仅在服务模式运行时生效：桌面端停止非必要视觉预热，服务子进程采用 utility QoS。
     /// 索引、认证、扫描和媒体分发仍保持可用，不能把轻量模式实现成停掉服务功能。
     public var isLightweightMode: Bool
@@ -44,7 +46,8 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         lanAddress: String? = nil,
         publicOrigin: String? = nil,
         trustedProxyAddresses: [String] = [],
-        isLightweightMode: Bool = false
+        isLightweightMode: Bool = false,
+        allowsWANAccess: Bool = false
     ) {
         self.isEnabled = isEnabled
         self.serverID = Self.normalizedServerID(serverID)
@@ -58,6 +61,7 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
             ? []
             : Self.normalizedTrustedProxyAddresses(trustedProxyAddresses)
         self.isLightweightMode = isLightweightMode
+        self.allowsWANAccess = allowsWANAccess
     }
 
     public var loopbackBaseURL: URL {
@@ -75,17 +79,20 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
     }
 
     public var effectiveBaseURL: URL {
+        if networkAccessMode == .lanHTTPS, allowsWANAccess, let publicOriginURL { return publicOriginURL }
         if let lanHTTPSBaseURL { return lanHTTPSBaseURL }
         return publicOriginURL ?? loopbackBaseURL
     }
 
     public var effectivePublicOrigin: String? {
-        if networkAccessMode == .lanHTTPS { return lanHTTPSBaseURL?.absoluteString }
+        if networkAccessMode == .lanHTTPS {
+            return allowsWANAccess ? (publicOrigin ?? lanHTTPSBaseURL?.absoluteString) : lanHTTPSBaseURL?.absoluteString
+        }
         return publicOrigin
     }
 
     public var effectiveTrustedProxyAddresses: [String] {
-        networkAccessMode == .lanHTTPS ? [] : trustedProxyAddresses
+        networkAccessMode == .lanHTTPS && !allowsWANAccess ? [] : trustedProxyAddresses
     }
 
     public mutating func updateNetworkAccessMode(_ mode: ServerNetworkAccessMode) {
@@ -137,6 +144,7 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         case publicOrigin
         case trustedProxyAddresses
         case isLightweightMode
+        case allowsWANAccess
     }
 
     public init(from decoder: Decoder) throws {
@@ -153,7 +161,8 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
             lanAddress: try container.decodeIfPresent(String.self, forKey: .lanAddress),
             publicOrigin: try container.decodeIfPresent(String.self, forKey: .publicOrigin),
             trustedProxyAddresses: try container.decodeIfPresent([String].self, forKey: .trustedProxyAddresses) ?? [],
-            isLightweightMode: try container.decodeIfPresent(Bool.self, forKey: .isLightweightMode) ?? false
+            isLightweightMode: try container.decodeIfPresent(Bool.self, forKey: .isLightweightMode) ?? false,
+            allowsWANAccess: try container.decodeIfPresent(Bool.self, forKey: .allowsWANAccess) ?? false
         )
     }
 

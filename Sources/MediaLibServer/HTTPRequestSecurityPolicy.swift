@@ -1,4 +1,5 @@
 import Foundation
+import MediaLibCore
 
 /// Methods accepted by both HTTP transports before route-specific validation.
 /// Keep this list transport-level: individual handlers still decide which
@@ -217,8 +218,10 @@ struct HTTPRequestSecurityPolicy {
                   let publicHost = components.host?.lowercased(),
                   let hostAndPort = Self.hostAndPort(from: normalized)
             else { return false }
-            return hostAndPort.host == publicHost &&
-                (hostAndPort.port ?? 443) == (components.port ?? 443)
+            if hostAndPort.host == publicHost &&
+                (hostAndPort.port ?? 443) == (components.port ?? 443) { return true }
+            guard allowedHosts.contains(hostAndPort.host),
+                  LANIPv4AddressPolicy.isPrivate(hostAndPort.host) else { return false }
         }
         guard let hostAndPort = Self.hostAndPort(from: normalized),
               allowedHosts.contains(hostAndPort.host)
@@ -240,9 +243,12 @@ struct HTTPRequestSecurityPolicy {
         }
         if allowPublicOrigin, let publicOrigin,
            let publicComponents = URLComponents(url: publicOrigin, resolvingAgainstBaseURL: false) {
-            return components.scheme?.lowercased() == "https" &&
+            if components.scheme?.lowercased() == "https" &&
                 components.host?.lowercased() == publicComponents.host?.lowercased() &&
-                (components.port ?? 443) == (publicComponents.port ?? 443)
+                (components.port ?? 443) == (publicComponents.port ?? 443) { return true }
+            return components.scheme?.lowercased() == "https" &&
+                components.host.map { allowedHosts.contains($0.lowercased()) && LANIPv4AddressPolicy.isPrivate($0) } == true &&
+                (components.port ?? 443) == allowedPort
         }
         return components.scheme?.lowercased() == "http" &&
             components.host.map { allowedHosts.contains($0.lowercased()) } == true &&
