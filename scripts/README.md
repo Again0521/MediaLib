@@ -9,6 +9,7 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 ## 构建与发布
 
 - `package_dmg.sh`：构建 release 应用、收集 libmpv/ffmpeg/ffprobe 及动态库、签名、校验后发布 `dist/MediaLib.dmg`。终端的 `APP=` 是临时应用路径，不是 `dist` 下的长期产物。使用 `MEDIALIB_PACKAGE_INSTANCE` 隔离构建目录，发布仍由同一把锁串行保护。
+- 如独立打包时依赖下载发生临时 `early EOF`，可在已有 `.build/repositories` 的工作树中设置 `MEDIALIB_PACKAGE_SEED_LOCAL_REPOSITORIES=1` 并使用新的 `MEDIALIB_PACKAGE_INSTANCE` 重试；该选项只预置 Git 对象，依赖版本仍由 `Package.resolved` 决定，release 产品仍全新编译，不等于复用旧安装包。
 - `check_bundle_runtime.sh <app> <架构>`：按入口可执行文件和 `LC_RPATH` 链检查应用架构与动态库闭包；打包自动调用，也可独立运行。
 - `check_bundle_launch.sh <app>`：在清除本机 DYLD 覆盖后执行包内 Server、ffmpeg、ffprobe，并让 MediaLIB 主程序实际加载 bundled libmpv；在签名后及只读镜像挂载后运行。
 - `publish_verified_dmg.sh`：打包内部的候选镜像发布助手。

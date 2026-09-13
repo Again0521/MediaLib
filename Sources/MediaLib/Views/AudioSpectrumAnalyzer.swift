@@ -11,6 +11,7 @@ enum AudioSpectrumAnalyzer {
 
     static func bands(filePath: String, time: Double, bandCount: Int) async -> [CGFloat] {
         guard bandCount > 0 else { return [] }
+        guard !Task.isCancelled else { return silenceBands.prefixBands(bandCount) }
         let url = URL(fileURLWithPath: filePath)
         guard url.isFileURL else { return silenceBands.prefixBands(bandCount) }
 
@@ -19,6 +20,7 @@ enum AudioSpectrumAnalyzer {
               let reader = try? AVAssetReader(asset: asset) else {
             return silenceBands.prefixBands(bandCount)
         }
+        guard !Task.isCancelled else { return silenceBands.prefixBands(bandCount) }
 
         let output = AVAssetReaderTrackOutput(
             track: track,
@@ -37,11 +39,16 @@ enum AudioSpectrumAnalyzer {
             duration: CMTime(seconds: 0.16, preferredTimescale: 600)
         )
         guard reader.startReading() else { return silenceBands.prefixBands(bandCount) }
+        if Task.isCancelled {
+            reader.cancelReading()
+            return silenceBands.prefixBands(bandCount)
+        }
 
         var samples: [Float] = []
         samples.reserveCapacity(4096)
         while let sampleBuffer = output.copyNextSampleBuffer(), samples.count < 4096 {
             defer { CMSampleBufferInvalidate(sampleBuffer) }
+            if Task.isCancelled { break }
             guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { continue }
             let byteCount = CMBlockBufferGetDataLength(blockBuffer)
             guard byteCount >= MemoryLayout<Float>.size else { continue }
@@ -58,6 +65,8 @@ enum AudioSpectrumAnalyzer {
             samples.append(contentsOf: floats.prefix(max(0, 4096 - samples.count)))
         }
         reader.cancelReading()
+
+        guard !Task.isCancelled else { return silenceBands.prefixBands(bandCount) }
 
         return normalizedFrequencyBands(from: samples, bandCount: bandCount)
     }

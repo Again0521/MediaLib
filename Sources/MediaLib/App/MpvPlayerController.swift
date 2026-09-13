@@ -204,7 +204,7 @@ final class MpvPlayerController: ObservableObject {
     private var baseVideoFilter: String?
     private var videoMemoryBufferingEnabled = true
     private var initialRedrawTask: Task<Void, Never>?
-    private var audioSpectrumTask: Task<Void, Never>?
+    private let musicSpectrumSampleCoordinator = MusicSpectrumSampleCoordinator()
     private var audioTransitionTask: Task<Void, Never>?
     private let musicPlaybackLoadCoordinator = MusicPlaybackLoadCoordinator<PreparedMusicPlayerItem>()
     private let musicPreloadCoordinator = MusicPreloadCoordinator<MusicPreloadRequest, PreparedMusicPlayerItem>()
@@ -247,6 +247,7 @@ final class MpvPlayerController: ObservableObject {
     func configure(item: MediaItem, settings: AppSettings) {
         guard libMpvClient == nil, audioPlayer == nil, !isPreparing else { return }
         playbackGeneration += 1
+        musicSpectrumSampleCoordinator.cancel()
         videoQualityResumeCoordinator.cancel()
         clearVideoRouteProxy()
         self.item = item
@@ -612,6 +613,7 @@ final class MpvPlayerController: ObservableObject {
             fail("音频文件不存在，可能是 NAS 未挂载、移动硬盘断开，或文件已被移动。")
             return
         }
+        musicSpectrumSampleCoordinator.cancel()
 
         let queuedPreload: PreloadedMusicItem? = preloadedMusicItem.flatMap { preloaded -> PreloadedMusicItem? in
             guard preloaded.itemID == nextItem.id,
@@ -2126,8 +2128,7 @@ final class MpvPlayerController: ObservableObject {
     func setAudioSpectrumVisualizationActive(_ active: Bool) {
         audioSpectrumVisualizationActive = active
         if !active {
-            audioSpectrumTask?.cancel()
-            audioSpectrumTask = nil
+            musicSpectrumSampleCoordinator.cancel()
         } else if isPlaying {
             refreshAudioSpectrumIfNeeded(at: currentTime)
         }
@@ -2711,8 +2712,7 @@ final class MpvPlayerController: ObservableObject {
         subtitleTracks = []
         chapters = []
         subtitleAutoLoadEnabled = false
-        audioSpectrumTask?.cancel()
-        audioSpectrumTask = nil
+        musicSpectrumSampleCoordinator.cancel()
         audioSpectrumBands = AudioSpectrumAnalyzer.silenceBands
         playbackTimelineOffset = 0
         activeVideoQualityOption = nil
@@ -2774,8 +2774,7 @@ final class MpvPlayerController: ObservableObject {
         subtitleTracks = []
         chapters = []
         subtitleAutoLoadEnabled = false
-        audioSpectrumTask?.cancel()
-        audioSpectrumTask = nil
+        musicSpectrumSampleCoordinator.cancel()
         audioSpectrumBands = AudioSpectrumAnalyzer.silenceBands
         playbackTimelineOffset = 0
         activeVideoQualityOption = nil
@@ -3054,7 +3053,7 @@ final class MpvPlayerController: ObservableObject {
     private func refreshAudioSpectrumIfNeeded(at time: Double) {
         guard audioSpectrumVisualizationActive,
               isPlaying,
-              audioSpectrumTask == nil,
+              !musicSpectrumSampleCoordinator.isSampling,
               // 性能：窗口正被拖动/缩放时跳过频谱的 AVAssetReader 解码（每 0.34s 一次的 PCM 解码+FFT 是
               // 播放期间持续的 CPU 开销，在无风扇机型上与拖窗合成抢资源）。跳过时频谱柱定格，拖动结束即恢复，
               // 拖动中肉眼不可见，零观感牺牲。拖动进度条/seek 期间同样跳过，避免与 seek 解码抢 NAS I/O 造成转圈。
@@ -3068,17 +3067,15 @@ final class MpvPlayerController: ObservableObject {
               Date().timeIntervalSince(lastAudioSpectrumSampleDate) > 0.34 else { return }
         lastAudioSpectrumSampleDate = Date()
         let generation = playbackGeneration
-        audioSpectrumTask = Task { @MainActor [weak self] in
-            let bands = await Task.detached(priority: .utility) {
-                await AudioSpectrumAnalyzer.bands(filePath: filePath, time: time, bandCount: 5)
-            }.value
-            guard let self,
-                  !Task.isCancelled,
-                  self.playbackGeneration == generation,
-                  self.item?.type == .music else { return }
-            self.audioSpectrumBands = bands
-            self.audioSpectrumTask = nil
-        }
+        musicSpectrumSampleCoordinator.start(
+            sample: { await AudioSpectrumAnalyzer.bands(filePath: filePath, time: time, bandCount: 5) },
+            apply: { [weak self] bands in
+                guard let self,
+                      self.playbackGeneration == generation,
+                      self.item?.type == .music else { return }
+                self.audioSpectrumBands = bands
+            }
+        )
     }
 
     private func mpvTimelineTime(for absoluteTime: Double) -> Double {

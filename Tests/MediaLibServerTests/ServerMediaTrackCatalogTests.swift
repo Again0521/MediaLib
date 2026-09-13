@@ -730,8 +730,11 @@ final class ServerAudioRemuxStreamTests: XCTestCase {
         XCTAssertEqual(outcome, .failed(.emptyOutput, deliveredByteLength: 0))
     }
 
-    func testStreamCancellationForceStopsProducerWithoutOutput() throws {
-        let executable = try makeExecutableScript("trap \"\" TERM; while true; do sleep 1; done")
+    func testStreamCancellationForceStopsRunningProducer() throws {
+        // `exec` keeps one process owning the pipe. A shell loop spawning `sleep`
+        // leaves a child with the write end open after the shell is killed, so
+        // that fixture measures the child's one-second sleep instead of remux cancellation.
+        let executable = try makeExecutableScript("trap '' TERM; printf ready; exec /bin/sleep 30")
         defer { try? FileManager.default.removeItem(at: executable.deletingLastPathComponent()) }
         let value = ServerAudioRemuxStream(
             asset: ServerMediaAsset(id: "item", fileURL: URL(fileURLWithPath: "/media/item.mkv"), byteLength: 1),
@@ -740,20 +743,26 @@ final class ServerAudioRemuxStreamTests: XCTestCase {
             executableURL: executable
         )
         let cancellation = ServerBoundedProcess.Cancellation()
+        let started = DispatchSemaphore(value: 0)
         let finished = DispatchSemaphore(value: 0)
         let result = LockedStreamOutcome()
         DispatchQueue.global(qos: .userInitiated).async {
-            result.value = value.streamOutcome(cancellation: cancellation) { _ in true }
+            var observed = Data()
+            result.value = value.streamOutcome(cancellation: cancellation) { chunk in
+                observed.append(chunk)
+                if observed.count == 5 { started.signal() }
+                return true
+            }
             finished.signal()
         }
 
-        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertEqual(started.wait(timeout: .now() + 2), .success)
         let cancelledAt = Date()
         cancellation.cancel()
 
         XCTAssertEqual(finished.wait(timeout: .now() + 2), .success)
         XCTAssertLessThan(Date().timeIntervalSince(cancelledAt), 1)
-        XCTAssertEqual(result.value, .cancelled(deliveredByteLength: 0))
+        XCTAssertEqual(result.value, .cancelled(deliveredByteLength: 5))
     }
 
     private func makeExecutableScript(_ command: String) throws -> URL {
