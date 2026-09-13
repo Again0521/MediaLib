@@ -187,6 +187,7 @@ final class MpvPlayerController: ObservableObject {
     private var lastPlaybackProgressReportDate = Date.distantPast
     private var filePath: String?
     private var videoStartRetryCount = 0
+    private var videoStartRetryWorkItem: DispatchWorkItem?
     private var volumeBeforeMute: Float = 0.8
     private var playbackGeneration = 0
     private var keepLocalAudioWithAirPlay = false
@@ -247,6 +248,7 @@ final class MpvPlayerController: ObservableObject {
     func configure(item: MediaItem, settings: AppSettings) {
         guard libMpvClient == nil, audioPlayer == nil, !isPreparing else { return }
         playbackGeneration += 1
+        cancelVideoStartRetry()
         musicSpectrumSampleCoordinator.cancel()
         videoQualityResumeCoordinator.cancel()
         clearVideoRouteProxy()
@@ -429,18 +431,25 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func startMpv() {
-        guard libMpvClient == nil, let filePath else { return }
+        guard isPreparing, libMpvClient == nil, let filePath else { return }
         guard let renderView, renderView.isSurfaceInWindow, let openGLContext = renderView.mpvGLContext else {
+            guard videoStartRetryWorkItem == nil else { return }
             videoStartRetryCount += 1
             if videoStartRetryCount <= 40 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                    self?.startMpv()
+                let generation = playbackGeneration
+                let workItem = DispatchWorkItem { [weak self] in
+                    guard let self, self.playbackGeneration == generation else { return }
+                    self.videoStartRetryWorkItem = nil
+                    self.startMpv()
                 }
+                videoStartRetryWorkItem = workItem
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: workItem)
             } else {
                 fail("播放器视图没有准备完成，无法创建视频渲染上下文。")
             }
             return
         }
+        cancelVideoStartRetry()
 
         do {
             let client = try LibMpvClient(
@@ -483,6 +492,11 @@ final class MpvPlayerController: ObservableObject {
             fail("libmpv 播放核心启动失败：\(error.localizedDescription)")
             return
         }
+    }
+
+    private func cancelVideoStartRetry() {
+        videoStartRetryWorkItem?.cancel()
+        videoStartRetryWorkItem = nil
     }
 
     func render(width: Int, height: Int, fbo: Int = 0, flipY: Bool = true) {
@@ -2661,6 +2675,7 @@ final class MpvPlayerController: ObservableObject {
 
     func teardown() {
         playbackGeneration += 1
+        cancelVideoStartRetry()
         videoQualityResumeCoordinator.cancel()
         timer?.invalidate()
         timer = nil
@@ -2727,6 +2742,7 @@ final class MpvPlayerController: ObservableObject {
 
     private func fail(_ message: String) {
         playbackGeneration += 1
+        cancelVideoStartRetry()
         videoQualityResumeCoordinator.cancel()
         initialRedrawTask?.cancel()
         initialRedrawTask = nil
