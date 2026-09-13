@@ -122,7 +122,7 @@ load_rpaths() {
   local expanded=""
 
   : > "$output_file"
-  if ! raw="$($OTOOL -l "$consumer" 2>/dev/null)"; then
+  if ! raw="$("$OTOOL" -l "$consumer" 2>/dev/null)"; then
     fail "unable to inspect LC_RPATH commands: $(relative_to_bundle "$consumer")"
     return 0
   fi
@@ -131,10 +131,6 @@ load_rpaths() {
     [[ -n "$rpath" ]] || continue
     if ! expanded="$(expand_runtime_path "$rpath" "$consumer" "$executable")"; then
       fail "unsupported LC_RPATH in $(relative_to_bundle "$consumer"): $rpath"
-      continue
-    fi
-    if [[ "$expanded" != "/usr/lib/swift" ]] && ! is_inside_bundle "$expanded"; then
-      fail "LC_RPATH escapes application bundle in $(relative_to_bundle "$consumer"): $rpath"
       continue
     fi
     printf '%s\n' "$expanded" >> "$output_file"
@@ -193,9 +189,12 @@ resolve_dependency() {
         else
           RESOLVED_RPATHS="$rpath"
         fi
-        if [[ "$rpath" == "/usr/lib/swift" && "$suffix" == libswift*.dylib ]]; then
-          RESOLVED_DEPENDENCY="system"
-          return 0
+        if [[ "$rpath" == "/usr/lib/swift" ]]; then
+          if [[ "$suffix" == libswift*.dylib ]]; then
+            RESOLVED_DEPENDENCY="system"
+            return 0
+          fi
+          continue
         fi
         candidate="$rpath/$suffix"
         if canonical="$(canonical_existing_path "$candidate" 2>/dev/null)"; then
@@ -214,7 +213,7 @@ resolve_dependency() {
 check_architecture() {
   local binary="$1"
   local architectures=""
-  if ! architectures="$($LIPO -archs "$binary" 2>/dev/null)"; then
+  if ! architectures="$("$LIPO" -archs "$binary" 2>/dev/null)"; then
     fail "unable to inspect architecture: $(relative_to_bundle "$binary")"
   elif [[ " $architectures " != *" $REQUIRED_ARCH "* ]]; then
     fail "$(relative_to_bundle "$binary") is missing required architecture $REQUIRED_ARCH (found: $architectures)"
@@ -225,7 +224,9 @@ walk_dependencies() {
   local consumer="$1"
   local executable="$2"
   local inherited_file="$3"
-  local context_key="$executable|$consumer"
+  local inherited_digest=""
+  inherited_digest="$(shasum -a 256 "$inherited_file" | awk '{print $1}')"
+  local context_key="$executable|$consumer|$inherited_digest"
   local dependencies=""
   local install_id=""
   local rpaths_file=""
@@ -238,14 +239,14 @@ walk_dependencies() {
   printf '%s\n' "$consumer" >> "$ALL_REACHED"
 
   check_architecture "$consumer"
-  if ! dependencies="$($OTOOL -L "$consumer" 2>/dev/null)"; then
+  if ! dependencies="$("$OTOOL" -L "$consumer" 2>/dev/null)"; then
     fail "unable to inspect Mach-O dependencies: $(relative_to_bundle "$consumer")"
     return 0
   fi
 
   rpaths_file="$WORK_DIR/rpaths-$(printf '%s' "$context_key" | shasum -a 256 | awk '{print $1}')"
   load_rpaths "$consumer" "$executable" "$inherited_file" "$rpaths_file"
-  install_id="$($OTOOL -D "$consumer" 2>/dev/null | awk 'NR == 2 {print}' || true)"
+  install_id="$("$OTOOL" -D "$consumer" 2>/dev/null | awk 'NR == 2 {print}' || true)"
 
   while IFS= read -r dependency; do
     [[ -n "$dependency" ]] || continue
@@ -288,17 +289,21 @@ for executable in MediaLib MediaLibServer ffmpeg ffprobe; do
   [[ -e "$binary" ]] && walk_dependencies "$binary" "$binary" "$EMPTY_RPATHS"
 done
 
-if [[ -n "$LIBMPV_PATH" && -e "$MACOS_DIR/MediaLib" ]]; then
-  MEDIA_LIB_RPATHS="$WORK_DIR/medialib-entry-rpaths.txt"
+MEDIA_LIB_RPATHS="$WORK_DIR/medialib-entry-rpaths.txt"
+if [[ -e "$MACOS_DIR/MediaLib" ]]; then
   load_rpaths "$MACOS_DIR/MediaLib" "$MACOS_DIR/MediaLib" "$EMPTY_RPATHS" "$MEDIA_LIB_RPATHS"
+else
+  : > "$MEDIA_LIB_RPATHS"
+fi
+if [[ -n "$LIBMPV_PATH" && -e "$MACOS_DIR/MediaLib" ]]; then
   walk_dependencies "$LIBMPV_PATH" "$MACOS_DIR/MediaLib" "$MEDIA_LIB_RPATHS"
 fi
 
 if [[ -d "$FRAMEWORKS_DIR" ]]; then
   while IFS= read -r -d '' binary; do
-    if [[ "$($FILE_TOOL -b "$binary" 2>/dev/null || true)" == Mach-O* ]] \
+    if [[ "$("$FILE_TOOL" -b "$binary" 2>/dev/null || true)" == Mach-O* ]] \
       && ! grep -Fqx "$binary" "$ALL_REACHED"; then
-      check_architecture "$binary"
+      walk_dependencies "$binary" "$MACOS_DIR/MediaLib" "$MEDIA_LIB_RPATHS"
     fi
   done < <(find "$FRAMEWORKS_DIR" -type f -print0)
 fi

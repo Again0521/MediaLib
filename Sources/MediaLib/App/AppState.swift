@@ -3018,7 +3018,8 @@ final class AppState: ObservableObject {
         scheduleVideoOfflineSubscriptionMaintenance(reason: "library reload")
         resumeRestoredArtworkWarmupTasksIfNeeded()
         scheduleMusicProjectionMaintenanceIfNeeded(reason: reason)
-        logPerformance("reload.total[\(reason)]: \(Self.milliseconds(since: reloadStart))ms revision=\(libraryRevision) posterRevision=\(posterRevision)")
+        let queueWaitMilliseconds = Double(snapshot.blockingQueueWaitNanoseconds) / 1_000_000
+        logPerformance("reload.total[\(reason)]: \(Self.milliseconds(since: reloadStart))ms blockingQueueWait=\(queueWaitMilliseconds)ms revision=\(libraryRevision) posterRevision=\(posterRevision)")
     }
 
     private func applyMusicProjectionSnapshot(_ snapshot: MusicLibraryProjectionSnapshot) {

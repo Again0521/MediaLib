@@ -9,10 +9,12 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 ## 构建与发布
 
 - `package_dmg.sh`：构建 release 应用、收集 libmpv/ffmpeg/ffprobe 及动态库、签名、校验后发布 `dist/MediaLib.dmg`。终端的 `APP=` 是临时应用路径，不是 `dist` 下的长期产物。使用 `MEDIALIB_PACKAGE_INSTANCE` 隔离构建目录，发布仍由同一把锁串行保护。
-- `check_bundle_runtime.sh <app> <架构>`：检查应用架构与动态库依赖；打包自动调用，也可独立运行。
+- `check_bundle_runtime.sh <app> <架构>`：按入口可执行文件和 `LC_RPATH` 链检查应用架构与动态库闭包；打包自动调用，也可独立运行。
+- `check_bundle_launch.sh <app>`：在清除本机 DYLD 覆盖后执行包内 Server、ffmpeg、ffprobe，并让 MediaLIB 主程序实际加载 bundled libmpv；在签名后及只读镜像挂载后运行。
 - `publish_verified_dmg.sh`：打包内部的候选镜像发布助手。
 - `release_metadata.py --check`：检查 `config/release.json` 与生成版本信息；修改版本后运行 `release_metadata.py --write` 同步生成文件。
-- `generate_build_manifest.swift`：生成包内构建清单，由打包脚本调用。
+- `check_dependency_inventory.py`：签名后生成并校验运行时文件哈希；对暂存 App、镜像布局和只读挂载产物逐文件验证。
+- `generate_build_manifest.swift`：生成 DMG 根目录的构建清单；清单与依赖 inventory 放在已签名 App 外，避免修改 App 资源造成签名/哈希循环。
 - `generate_dmg_background.swift`、`write_dmg_ds_store.py`、`vendor/`：生成安装镜像布局，由打包脚本调用。
 - `generate_icon.swift`：手动从 `Resources/AppIconSource.png` 生成图标。打包使用已有图标，不自动改写源资源。
 

@@ -45,6 +45,109 @@ final class LibraryReloadCoordinatorTests: XCTestCase {
         XCTAssertTrue(snapshot.detailMetadataGapsByMediaID.keys.contains("movie-1"))
     }
 
+    func testLiveSnapshotLoaderDoesNotMixCommitsBetweenRepositories() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("library-reload-interleaving-\(UUID().uuidString)", isDirectory: true)
+        let backups = root.appendingPathComponent("Backups", isDirectory: true)
+        let cache = root.appendingPathComponent("Cache", isDirectory: true)
+        let thumbnails = cache.appendingPathComponent("Thumbnails", isDirectory: true)
+        let previews = cache.appendingPathComponent("PreviewFrames", isDirectory: true)
+        let logs = root.appendingPathComponent("Logs", isDirectory: true)
+        for directory in [root, backups, cache, thumbnails, previews, logs] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directories = AppDirectories(
+            applicationSupport: root,
+            database: root.appendingPathComponent("MediaLib.sqlite"),
+            databaseBackups: backups,
+            cache: cache,
+            thumbnails: thumbnails,
+            previewFrames: previews,
+            logs: logs
+        )
+        let writer = try DatabaseManager(url: directories.database, backupDirectory: backups)
+        let original = MediaSource(id: "source-original", name: "Original", path: "/Original", mediaType: .movie)
+        let later = MediaSource(id: "source-later", name: "Later", path: "/Later", mediaType: .movie)
+        try SourceRepository(database: writer).save(original)
+        try MediaRepository(database: writer).upsert(MediaItem(
+            id: "movie-original", type: .movie, title: "Original", sourcePath: original.path
+        ))
+
+        let first = try await LibraryReloadSnapshotLoader.load(
+            directories: directories,
+            afterSourcesRead: {
+                try writer.transaction {
+                    try SourceRepository(database: writer).save(later)
+                    try MediaRepository(database: writer).upsert(MediaItem(
+                        id: "movie-later", type: .movie, title: "Later", sourcePath: later.path
+                    ))
+                }
+            }
+        )
+        XCTAssertEqual(first.sources.map(\.id), ["source-original"])
+        XCTAssertEqual(first.items.map(\.id), ["movie-original"])
+        XCTAssertFalse(first.detailMetadataGapsByMediaID.keys.contains("movie-later"))
+
+        let next = try await LibraryReloadSnapshotLoader.load(directories: directories)
+        XCTAssertEqual(Set(next.sources.map(\.id)), ["source-original", "source-later"])
+        XCTAssertEqual(Set(next.items.map(\.id)), ["movie-original", "movie-later"])
+    }
+
+    func testLiveSnapshotLoaderCancelsBetweenRepositoryReadsAndCanRetry() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("library-reload-cancellation-\(UUID().uuidString)", isDirectory: true)
+        let backups = root.appendingPathComponent("Backups", isDirectory: true)
+        let cache = root.appendingPathComponent("Cache", isDirectory: true)
+        let thumbnails = cache.appendingPathComponent("Thumbnails", isDirectory: true)
+        let previews = cache.appendingPathComponent("PreviewFrames", isDirectory: true)
+        let logs = root.appendingPathComponent("Logs", isDirectory: true)
+        for directory in [root, backups, cache, thumbnails, previews, logs] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directories = AppDirectories(
+            applicationSupport: root,
+            database: root.appendingPathComponent("MediaLib.sqlite"),
+            databaseBackups: backups,
+            cache: cache,
+            thumbnails: thumbnails,
+            previewFrames: previews,
+            logs: logs
+        )
+        let writer = try DatabaseManager(url: directories.database, backupDirectory: backups)
+        try SourceRepository(database: writer).save(MediaSource(
+            id: "source-1", name: "Fixture", path: "/Fixture", mediaType: .movie
+        ))
+
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let task = Task {
+            try await LibraryReloadSnapshotLoader.load(
+                directories: directories,
+                afterSourcesRead: {
+                    entered.signal()
+                    release.wait()
+                }
+            )
+        }
+        let didEnter = await BlockingIOExecutor.run {
+            entered.wait(timeout: .now() + 3) == .success
+        }
+        XCTAssertTrue(didEnter)
+        task.cancel()
+        release.signal()
+        do {
+            _ = try await task.value
+            XCTFail("cancelled reload must not publish a partial snapshot")
+        } catch is CancellationError {
+            // The explicit token crosses the Task -> GCD queue boundary.
+        }
+
+        let retry = try await LibraryReloadSnapshotLoader.load(directories: directories)
+        XCTAssertEqual(retry.sources.map(\.id), ["source-1"])
+    }
+
     func testNewRequestDiscardsOlderResultEvenWhenLoaderIgnoresCancellation() async {
         let gate = AsyncGate()
         let coordinator = LibraryReloadCoordinator<Int, Int> { input in

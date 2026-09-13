@@ -219,7 +219,7 @@ final class PackageDMGScriptPathTests: XCTestCase {
             ]
         )
         XCTAssertNotEqual(unresolvedRPath.status, 0, unresolvedRPath.stdout + unresolvedRPath.stderr)
-        XCTAssertTrue(unresolvedRPath.stderr.contains("unresolved bundled dependency"), unresolvedRPath.stderr)
+        XCTAssertTrue(unresolvedRPath.stderr.contains("unresolved @rpath dependency"), unresolvedRPath.stderr)
     }
 
     func testBuildManifestIsDeterministicAndDoesNotLeakPaths() throws {
@@ -254,6 +254,55 @@ final class PackageDMGScriptPathTests: XCTestCase {
         XCTAssertTrue(text.contains("\"dependencyDigest\""), text)
     }
 
+    func testSignedDependencyInventoryDetectsMutationAndUnlistedRuntime() throws {
+        let checker = try repositoryScriptURL(named: "check_dependency_inventory.py")
+        let root = try makeTemporaryDirectory(name: "MediaLib signed inventory")
+        let app = root.appendingPathComponent("MediaLIB.app")
+        let macOS = app.appendingPathComponent("Contents/MacOS")
+        let frameworks = app.appendingPathComponent("Contents/Frameworks")
+        try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: frameworks, withIntermediateDirectories: true)
+        let executable = macOS.appendingPathComponent("MediaLib")
+        let library = frameworks.appendingPathComponent("libmpv.2.dylib")
+        try Data("signed-executable".utf8).write(to: executable)
+        try Data("signed-library".utf8).write(to: library)
+
+        let inventory = root.appendingPathComponent("MediaLibDependencyInventory.txt")
+        let manifest = root.appendingPathComponent("MediaLibBuildManifest.json")
+        let generated = try runProcess(
+            executable: URL(fileURLWithPath: "/usr/bin/python3"),
+            arguments: [checker.path, "generate", app.path, inventory.path]
+        )
+        XCTAssertEqual(generated.status, 0, generated.stderr)
+        let digest = try runProcess(
+            executable: URL(fileURLWithPath: "/usr/bin/shasum"),
+            arguments: ["-a", "256", inventory.path]
+        )
+        XCTAssertEqual(digest.status, 0, digest.stderr)
+        let inventoryDigest = String(digest.stdout.prefix(64))
+        try Data("{\"dependencyDigest\":\"\(inventoryDigest)\"}".utf8).write(to: manifest)
+
+        func verify() throws -> (status: Int32, stdout: String, stderr: String) {
+            try runProcess(
+                executable: URL(fileURLWithPath: "/usr/bin/python3"),
+                arguments: [checker.path, "verify", app.path, inventory.path, manifest.path]
+            )
+        }
+        XCTAssertEqual(try verify().status, 0)
+
+        try Data("changed-after-signing".utf8).write(to: library)
+        let mutated = try verify()
+        XCTAssertNotEqual(mutated.status, 0)
+        XCTAssertTrue(mutated.stderr.contains("differs from inventory"), mutated.stderr)
+
+        try Data("signed-library".utf8).write(to: library)
+        let unlisted = frameworks.appendingPathComponent("unlisted.dylib")
+        try Data("unlisted".utf8).write(to: unlisted)
+        let extra = try verify()
+        XCTAssertNotEqual(extra.status, 0)
+        XCTAssertTrue(extra.stderr.contains("file set differs"), extra.stderr)
+    }
+
     func testPackagePublishesOnlyAfterCandidateAndMountedValidation() throws {
         let script = try String(contentsOf: repositoryPackageScriptURL(), encoding: .utf8)
         let publisher = try String(
@@ -263,6 +312,14 @@ final class PackageDMGScriptPathTests: XCTestCase {
 
         XCTAssertTrue(script.contains("CANDIDATE_DMG_PATH"))
         XCTAssertTrue(script.contains("check_bundle_runtime.sh"))
+        XCTAssertEqual(script.components(separatedBy: "check_bundle_launch.sh").count - 1, 2)
+        XCTAssertTrue(script.contains("BUILD_MANIFEST=\"$DMG_ROOT/MediaLibBuildManifest.json\""))
+        XCTAssertTrue(script.contains("DEPENDENCY_INVENTORY=\"$DMG_ROOT/MediaLibDependencyInventory.txt\""))
+        XCTAssertEqual(script.components(separatedBy: "check_dependency_inventory.py").count - 1, 4)
+        XCTAssertLessThan(
+            try XCTUnwrap(script.range(of: "codesign --force --deep --sign")?.lowerBound),
+            try XCTUnwrap(script.range(of: "DEPENDENCY_INVENTORY=\"$DMG_ROOT/")?.lowerBound)
+        )
         XCTAssertTrue(script.contains("hdiutil attach \"$TEMP_DMG_PATH\""))
         XCTAssertTrue(script.contains("publish_verified_dmg.sh"))
         XCTAssertTrue(publisher.contains("mv -f \"$CANDIDATE_DMG_PATH\" \"$DMG_PATH\""))
@@ -397,6 +454,150 @@ final class PackageDMGScriptPathTests: XCTestCase {
                 "MEDIALIB_OTOOL": otool.path, "MEDIALIB_LIPO": lipo.path,
                 "FAKE_DEPENDENCY": "@loader_path/../Frameworks/codec library.dylib",
             ]
+        )
+        XCTAssertEqual(result.status, 0, result.stderr)
+    }
+
+    func testRuntimeValidatorFollowsRealMachORunpathChain() throws {
+        let validator = try repositoryScriptURL(named: "check_bundle_runtime.sh")
+
+        for (label, rpath, missingLeaf, shouldPass) in [
+            ("missing-rpath", nil, false, false),
+            ("wrong-rpath", "@executable_path/../WrongFrameworks", false, false),
+            ("missing-nested-library", "@executable_path/../Frameworks", true, false),
+            ("correct-rpath", "@executable_path/../Frameworks", false, true),
+        ] {
+            let bundle = try makeRealMachORuntimeFixture(name: label, rpath: rpath)
+            if missingLeaf {
+                try FileManager.default.removeItem(
+                    at: bundle.appendingPathComponent("Contents/Frameworks/libfixture-leaf.dylib")
+                )
+            }
+            let result = try runProcess(
+                executable: URL(fileURLWithPath: "/bin/bash"),
+                arguments: [validator.path, bundle.path, "arm64"]
+            )
+
+            if shouldPass {
+                XCTAssertEqual(result.status, 0, "\(label): \(result.stderr)")
+                XCTAssertTrue(result.stdout.contains("runpath closure complete"), result.stdout)
+                let launch = try runProcess(
+                    executable: bundle.appendingPathComponent("Contents/MacOS/MediaLib"),
+                    arguments: []
+                )
+                XCTAssertEqual(launch.status, 0, "\(label): \(launch.stderr)")
+            } else {
+                XCTAssertNotEqual(result.status, 0, "\(label) should fail")
+                XCTAssertTrue(result.stderr.contains("unresolved @rpath dependency"), result.stderr)
+            }
+        }
+    }
+
+    func testBundleLaunchCheckLoadsRealFixtureAndRejectsBrokenNestedDependency() throws {
+        let bundle = try makeRealMachORuntimeFixture(
+            name: "launch check",
+            rpath: "@executable_path/../Frameworks"
+        )
+        let checker = try repositoryScriptURL(named: "check_bundle_launch.sh")
+        let good = try runProcess(
+            executable: URL(fileURLWithPath: "/bin/bash"),
+            arguments: [checker.path, bundle.path]
+        )
+        XCTAssertEqual(good.status, 0, good.stderr)
+        XCTAssertTrue(good.stdout.contains("libmpv loaded"), good.stdout)
+
+        try FileManager.default.removeItem(
+            at: bundle.appendingPathComponent("Contents/Frameworks/libfixture-leaf.dylib")
+        )
+        let broken = try runProcess(
+            executable: URL(fileURLWithPath: "/bin/bash"),
+            arguments: [checker.path, bundle.path]
+        )
+        XCTAssertNotEqual(broken.status, 0)
+    }
+
+    private func makeRealMachORuntimeFixture(name: String, rpath: String?) throws -> URL {
+        let bundle = try makeTemporaryDirectory(name: "MediaLib real runpath \(name)")
+            .appendingPathComponent("MediaLIB.app", isDirectory: true)
+        let macOS = bundle.appendingPathComponent("Contents/MacOS", isDirectory: true)
+        let frameworks = bundle.appendingPathComponent("Contents/Frameworks", isDirectory: true)
+        try FileManager.default.createDirectory(at: macOS, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: frameworks, withIntermediateDirectories: true)
+
+        let leafSource = bundle.appendingPathComponent("leaf.c")
+        let middleSource = bundle.appendingPathComponent("middle.c")
+        let mainSource = bundle.appendingPathComponent("main.c")
+        let helperSource = bundle.appendingPathComponent("helper.c")
+        let mpvSource = bundle.appendingPathComponent("mpv.c")
+        try Data("int fixture_leaf(void) { return 7; }\n".utf8).write(to: leafSource)
+        try Data("extern int fixture_leaf(void); int fixture_middle(void) { return fixture_leaf(); }\n".utf8)
+            .write(to: middleSource)
+        try Data("""
+            #include <dlfcn.h>
+            #include <limits.h>
+            #include <stdio.h>
+            #include <string.h>
+            extern int fixture_middle(void);
+            int main(int argc, char **argv) {
+                if (argc == 2 && strcmp(argv[1], "--check-bundled-libmpv") == 0) {
+                    char library[PATH_MAX];
+                    const char *slash = strrchr(argv[0], '/');
+                    if (!slash) return 1;
+                    snprintf(library, sizeof(library), "%.*s/../Frameworks/libmpv.2.dylib", (int)(slash - argv[0]), argv[0]);
+                    void *handle = dlopen(library, RTLD_NOW | RTLD_LOCAL);
+                    if (!handle || !dlsym(handle, "mpv_client_api_version")) return 1;
+                    dlclose(handle);
+                    puts("bundle-libmpv: loaded");
+                    return 0;
+                }
+                return fixture_middle() == 7 ? 0 : 1;
+            }
+            """.utf8).write(to: mainSource)
+        try Data("""
+            #include <stdio.h>
+            #include <string.h>
+            int main(int argc, char **argv) {
+                if (argc != 2) return 2;
+                if (strcmp(argv[1], "--health") == 0) {
+                    puts("{\\"status\\":\\"ok\\",\\"apiVersion\\":\\"v1\\"}");
+                    return 0;
+                }
+                if (strcmp(argv[1], "--describe") == 0) {
+                    puts("{\\"apiVersion\\":\\"v1\\",\\"capabilities\\":[\\"health\\"]}");
+                    return 0;
+                }
+                if (strcmp(argv[1], "-version") == 0) {
+                    puts(strstr(argv[0], "ffprobe") ? "ffprobe version fixture" : "ffmpeg version fixture");
+                    return 0;
+                }
+                return 2;
+            }
+            """.utf8).write(to: helperSource)
+        try Data("extern int fixture_leaf(void); unsigned long mpv_client_api_version(void) { return (unsigned long)fixture_leaf(); }\n".utf8)
+            .write(to: mpvSource)
+
+        let leaf = frameworks.appendingPathComponent("libfixture-leaf.dylib")
+        let middle = frameworks.appendingPathComponent("libfixture-middle.dylib")
+        let libmpv = frameworks.appendingPathComponent("libmpv.2.dylib")
+        try compileMachO(["-dynamiclib", "-Wl,-install_name,@rpath/libfixture-leaf.dylib", leafSource.path, "-o", leaf.path])
+        try compileMachO(["-dynamiclib", "-Wl,-install_name,@rpath/libfixture-middle.dylib", middleSource.path, leaf.path, "-o", middle.path])
+        try compileMachO(["-dynamiclib", "-Wl,-install_name,@rpath/libmpv.2.dylib", mpvSource.path, leaf.path, "-o", libmpv.path])
+
+        var appArguments = [mainSource.path, middle.path, "-o", macOS.appendingPathComponent("MediaLib").path]
+        if let rpath {
+            appArguments.append("-Wl,-rpath,\(rpath)")
+        }
+        try compileMachO(appArguments)
+        for name in ["MediaLibServer", "ffmpeg", "ffprobe"] {
+            try compileMachO([helperSource.path, "-o", macOS.appendingPathComponent(name).path])
+        }
+        return bundle
+    }
+
+    private func compileMachO(_ arguments: [String]) throws {
+        let result = try runProcess(
+            executable: URL(fileURLWithPath: "/usr/bin/clang"),
+            arguments: arguments
         )
         XCTAssertEqual(result.status, 0, result.stderr)
     }

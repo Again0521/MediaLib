@@ -60,4 +60,76 @@ final class BlockingIOExecutorAuditTests: XCTestCase {
         
         await fulfillment(of: [expectation], timeout: 5.0)
     }
+
+    func testCancelledQueuedBlockingWorkNeverStarts() async throws {
+        let serialQueue = DispatchQueue(label: "test.blocking-io-queued-cancel")
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let workStarted = DispatchSemaphore(value: 0)
+        serialQueue.async {
+            entered.signal()
+            release.wait()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+
+        let queued = Task {
+            try await BlockingIOExecutor.runCancellable(on: serialQueue) { _ in
+                workStarted.signal()
+                return 1
+            }
+        }
+        await Task.yield()
+        queued.cancel()
+        release.signal()
+
+        do {
+            _ = try await queued.value
+            XCTFail("cancelled queued work must not run")
+        } catch is CancellationError {
+            // Cancellation is checked on the GCD queue before invoking work.
+        }
+        XCTAssertEqual(workStarted.wait(timeout: .now()), .timedOut)
+    }
+
+    func testRunningBlockingWorkObservesCancellationAtNextBoundary() async throws {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let task = Task {
+            try await BlockingIOExecutor.runCancellable { cancellation in
+                entered.signal()
+                release.wait()
+                try cancellation.checkCancellation()
+                return 1
+            }
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        task.cancel()
+        release.signal()
+
+        do {
+            _ = try await task.value
+            XCTFail("the cancellation boundary must throw")
+        } catch is CancellationError {
+            // Synchronous I/O cannot be preempted, but it is not published after cancellation.
+        }
+    }
+
+    func testCancellableWorkReportsTimeWaitingForGCDQueue() async throws {
+        let serialQueue = DispatchQueue(label: "test.blocking-io-queue-wait")
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        serialQueue.async {
+            entered.signal()
+            release.wait()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 2), .success)
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(80)) {
+            release.signal()
+        }
+
+        let queueWait = try await BlockingIOExecutor.runCancellable(on: serialQueue) { context in
+            context.queueWaitNanoseconds
+        }
+        XCTAssertGreaterThan(queueWait, 20_000_000)
+    }
 }

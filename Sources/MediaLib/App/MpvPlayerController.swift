@@ -156,8 +156,7 @@ final class MpvPlayerController: ObservableObject {
     private var videoLoopCommandEngine: VideoLoopCommandEngine?
     private var videoAudioDeviceReader: VideoAudioDeviceReading?
     private var mpvSnapshotReader: MpvVideoSnapshotReader?
-    private var mpvSnapshotReadInFlight = false
-    private var pendingForcedTrackSnapshot = false
+    private let mpvSnapshotReadCoordinator = MpvSnapshotReadCoordinator()
     private var trackSnapshotRefreshCount = 0
     private var chapterSnapshotRefreshCount = 0
     private var audioPlayer: AVQueuePlayer?
@@ -207,11 +206,12 @@ final class MpvPlayerController: ObservableObject {
     private var initialRedrawTask: Task<Void, Never>?
     private var audioSpectrumTask: Task<Void, Never>?
     private var audioTransitionTask: Task<Void, Never>?
-    private var musicMemoryLoadTask: Task<Void, Never>?
-    private var musicPreloadTask: Task<Void, Never>?
+    private let musicPlaybackLoadCoordinator = MusicPlaybackLoadCoordinator<PreparedMusicPlayerItem>()
+    private let musicPreloadCoordinator = MusicPreloadCoordinator<MusicPreloadRequest, PreparedMusicPlayerItem>()
     private var preloadedMusicItem: PreloadedMusicItem?
     private var currentMemoryAudioAsset: MemoryAudioAsset?
     private var seekSyncCorrectionTask: Task<Void, Never>?
+    private let videoQualityResumeCoordinator = VideoQualityResumeCoordinator()
     private var clearSeekStateTask: Task<Void, Never>?
     private var pendingTimelineSeek: PendingPlaybackSeek?
     private var audioSpectrumVisualizationActive = false
@@ -247,6 +247,7 @@ final class MpvPlayerController: ObservableObject {
     func configure(item: MediaItem, settings: AppSettings) {
         guard libMpvClient == nil, audioPlayer == nil, !isPreparing else { return }
         playbackGeneration += 1
+        videoQualityResumeCoordinator.cancel()
         clearVideoRouteProxy()
         self.item = item
         didApplyTrackPreference = false
@@ -355,9 +356,6 @@ final class MpvPlayerController: ObservableObject {
     }
 
     func preloadNextMusicItem(_ nextItem: MediaItem?) {
-        musicPreloadTask?.cancel()
-        musicPreloadTask = nil
-
         guard let nextItem,
               nextItem.type == .music,
               musicTransitionMode == .immediate,
@@ -369,18 +367,32 @@ final class MpvPlayerController: ObservableObject {
             clearPreloadedMusicItem()
             return
         }
-        if preloadedMusicItem?.itemID == nextItem.id {
+        if let preloadedMusicItem,
+           preloadedMusicItem.itemID == nextItem.id,
+           player.items().contains(where: { $0 === preloadedMusicItem.playerItem }) {
             return
         }
 
+        let request = MusicPreloadRequest(
+            currentItemID: item?.id ?? "",
+            nextItemID: nextItem.id,
+            nextPath: nextPath,
+            playbackGeneration: playbackGeneration,
+            playerIdentity: ObjectIdentifier(player)
+        )
+        if musicPreloadCoordinator.pendingRequest == request { return }
         clearPreloadedMusicItem()
         let generation = playbackGeneration
         let nextURL = URL(fileURLWithPath: nextPath)
         let nextIsNetwork = isNetworkMountedFileURL(nextURL)
-        musicPreloadTask = Task { @MainActor [weak self, weak player] in
-            guard let self, let player else { return }
-            do {
-                let prepared = try await self.prepareMusicPlayerItem(url: nextURL, preloaded: true)
+        musicPreloadCoordinator.start(
+            request,
+            prepare: { [weak self] in
+                guard let self else { throw CancellationError() }
+                return try await self.prepareMusicPlayerItem(url: nextURL, preloaded: true)
+            },
+            apply: { [weak self, weak player] prepared in
+                guard let self, let player else { return }
                 // 本地内存源可大幅前向缓冲；网络挂载盘只预读受控提前量，避免预缓冲整首歌占满网络。
                 prepared.playerItem.preferredForwardBufferDuration = nextIsNetwork
                     ? MusicPlaybackBufferPolicy.preferredForwardBufferDuration(isNetwork: true, preloaded: true)
@@ -398,11 +410,8 @@ final class MpvPlayerController: ObservableObject {
                     playerItem: playerItem,
                     memoryAsset: prepared.memoryAsset
                 )
-            } catch {
-                return
             }
-            self.musicPreloadTask = nil
-        }
+        )
     }
 
     func attach(to view: any MpvRenderSurface) {
@@ -457,8 +466,7 @@ final class MpvPlayerController: ObservableObject {
             videoLoopCommandEngine = loopCommandEngine
             videoAudioDeviceReader = audioDeviceReader
             mpvSnapshotReader = MpvVideoSnapshotReader(handle: client.makePropertyReadHandle())
-            mpvSnapshotReadInFlight = false
-            pendingForcedTrackSnapshot = false
+            mpvSnapshotReadCoordinator.invalidate()
             renderView.installRenderHandle(client.makeRenderCallHandle())
             isPreparing = false
             isReady = true
@@ -495,30 +503,38 @@ final class MpvPlayerController: ObservableObject {
         if url.isFileURL {
             let isNetwork = isNetworkMountedFileURL(url)
             statusMessage = isNetwork ? "正在从网络载入歌曲。" : "正在将歌曲载入内存。"
-            musicMemoryLoadTask?.cancel()
-            musicMemoryLoadTask = Task { @MainActor [weak self] in
-                guard let self else { return }
-                do {
-                    let prepared = try await self.prepareMusicPlayerItem(url: url)
-                    guard !Task.isCancelled,
+            musicPlaybackLoadCoordinator.start(
+                MusicPlaybackLoadRequest(
+                    itemID: item?.id ?? "",
+                    path: filePath,
+                    playbackGeneration: generation,
+                    playerIdentity: nil
+                ),
+                prepare: { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    return try await self.prepareMusicPlayerItem(url: url)
+                },
+                apply: { [weak self] prepared in
+                    guard let self,
                           self.playbackGeneration == generation,
                           self.audioPlayer == nil,
                           self.libMpvClient == nil else { return }
-                    self.musicMemoryLoadTask = nil
                     self.installInitialNativeAudioPlayer(
                         playerItem: prepared.playerItem,
                         generation: generation,
                         memoryAsset: prepared.memoryAsset,
                         isNetwork: isNetwork
                     )
-                } catch {
-                    guard self.playbackGeneration == generation else { return }
+                },
+                fail: { [weak self] error in
+                    guard let self, self.playbackGeneration == generation else { return }
                     self.fail("音频载入失败：\(error.localizedDescription)")
                 }
-            }
+            )
             return
         }
 
+        musicPlaybackLoadCoordinator.cancel()
         let playerItem = makeAudioPlayerItem(url: url)
         installInitialNativeAudioPlayer(playerItem: playerItem, generation: generation, memoryAsset: nil, isNetwork: true)
     }
@@ -611,7 +627,6 @@ final class MpvPlayerController: ObservableObject {
            !nextItem.isRemoteResource,
            url.isFileURL {
             let loadGeneration = playbackGeneration
-            musicMemoryLoadTask?.cancel()
             musicPlaybackEngine?.pause()
             audioLocalMirrorPlayer?.pause()
             audioRouteProxyPlayer?.pause()
@@ -620,36 +635,43 @@ final class MpvPlayerController: ObservableObject {
             // 网络挂载盘走流式（prepareMusicPlayerItem 内部不再整文件进内存），文案据此区分。
             statusMessage = isNetworkMountedFileURL(url) ? "正在从网络载入歌曲。" : "正在将歌曲载入内存。"
             updateSystemNowPlaying()
-            musicMemoryLoadTask = Task { @MainActor [weak self, weak player] in
-                guard let self, let player else { return }
-                do {
-                    let prepared = try await self.prepareMusicPlayerItem(url: url)
-                    guard !Task.isCancelled,
+            musicPlaybackLoadCoordinator.start(
+                MusicPlaybackLoadRequest(
+                    itemID: nextItem.id,
+                    path: nextPath,
+                    playbackGeneration: loadGeneration,
+                    playerIdentity: ObjectIdentifier(player)
+                ),
+                prepare: { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    return try await self.prepareMusicPlayerItem(url: url)
+                },
+                apply: { [weak self, weak player] prepared in
+                    guard let self, let player,
                           self.playbackGeneration == loadGeneration,
                           self.audioPlayer === player else { return }
-                    self.musicMemoryLoadTask = nil
                     self.switchNativeAudio(to: nextItem, settings: settings, preparedOverride: prepared)
-                } catch {
-                    guard self.playbackGeneration == loadGeneration else { return }
+                },
+                fail: { [weak self] error in
+                    guard let self, self.playbackGeneration == loadGeneration else { return }
                     self.fail("音频载入失败：\(error.localizedDescription)")
                 }
-            }
+            )
             return
         }
 
         reportPlayback(.stopped, force: true)
         didReachAudioEnd = false
         playbackGeneration += 1
+        videoQualityResumeCoordinator.cancel()
         let generation = playbackGeneration
         removeAudioEndObserver()
         seekSyncCorrectionTask?.cancel()
         seekSyncCorrectionTask = nil
         musicOutputRecoveryTask?.cancel()
         musicOutputRecoveryTask = nil
-        musicMemoryLoadTask?.cancel()
-        musicMemoryLoadTask = nil
-        musicPreloadTask?.cancel()
-        musicPreloadTask = nil
+        musicPlaybackLoadCoordinator.cancel()
+        musicPreloadCoordinator.cancel()
         if alreadyAdvancedToPreload {
             preloadedMusicItem = nil
         } else {
@@ -968,8 +990,7 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func clearPreloadedMusicItem() {
-        musicPreloadTask?.cancel()
-        musicPreloadTask = nil
+        musicPreloadCoordinator.cancel()
         guard let preloadedMusicItem else { return }
         if audioPlayer?.currentItem !== preloadedMusicItem.playerItem {
             audioPlayer?.remove(preloadedMusicItem.playerItem)
@@ -2265,6 +2286,7 @@ final class MpvPlayerController: ObservableObject {
         guard item?.type != .music,
               let libMpvClient,
               let videoPlaybackEngine else { return }
+        videoQualityResumeCoordinator.cancel()
         if option.appliesInPlace {
             baseVideoFilter = option.videoFilter
             rebuildVideoFilterChain(to: libMpvClient)
@@ -2320,6 +2342,7 @@ final class MpvPlayerController: ObservableObject {
 
     private func reloadRemoteQualityStream(_ option: VideoStreamQualityOption, at target: Double, wasPlaying: Bool) {
         guard let libMpvClient, let videoPlaybackEngine else { return }
+        videoQualityResumeCoordinator.cancel()
         let clampedTarget = PlaybackTimelinePolicy.clampedTime(target, duration: duration)
         let targetURL = option.playbackURLString(startTime: clampedTarget)
         filePath = targetURL
@@ -2352,25 +2375,30 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func enforceQualityResumeTime(_ resumeTime: Double, for option: VideoStreamQualityOption) {
-        let generation = playbackGeneration
-        Task { @MainActor [weak self] in
-            for attempt in 0..<8 {
-                do {
-                    try await Task.sleep(nanoseconds: UInt64(120_000_000 + attempt * 55_000_000))
-                } catch {
-                    return
-                }
-                guard let self,
-                      self.playbackGeneration == generation,
-                      self.activeVideoQualityOption?.id == option.id,
-                      let videoPlaybackEngine = self.videoPlaybackEngine else { return }
-                if self.currentTime >= resumeTime - 0.75 {
-                    return
-                }
-                try? videoPlaybackEngine.seek(toMpvTime: resumeTime, precision: .keyframes)
-                self.currentTime = resumeTime
+        guard let videoPlaybackEngine else { return }
+        let request = VideoQualityResumeRequest(
+            playbackGeneration: playbackGeneration,
+            optionID: option.id,
+            playbackURL: filePath ?? "",
+            targetTime: resumeTime,
+            engineIdentity: ObjectIdentifier(videoPlaybackEngine)
+        )
+        videoQualityResumeCoordinator.start(
+            request,
+            isCurrent: { [weak self] in
+                guard let self, let engine = self.videoPlaybackEngine else { return false }
+                return self.playbackGeneration == request.playbackGeneration
+                    && self.activeVideoQualityOption?.id == request.optionID
+                    && self.filePath == request.playbackURL
+                    && ObjectIdentifier(engine) == request.engineIdentity
+            },
+            observedTime: { [weak self] in self?.currentTime },
+            seek: { [weak self] target in
+                guard let self, let engine = self.videoPlaybackEngine else { return }
+                try? engine.seek(toMpvTime: target, precision: .keyframes)
+                self.currentTime = target
             }
-        }
+        )
     }
 
     func toggleMute() {
@@ -2615,8 +2643,7 @@ final class MpvPlayerController: ObservableObject {
     }
 
     private func stopMpvSnapshotReader() {
-        mpvSnapshotReadInFlight = false
-        pendingForcedTrackSnapshot = false
+        mpvSnapshotReadCoordinator.invalidate()
         mpvSnapshotReader?.invalidateAndDrain()
         mpvSnapshotReader = nil
     }
@@ -2633,6 +2660,7 @@ final class MpvPlayerController: ObservableObject {
 
     func teardown() {
         playbackGeneration += 1
+        videoQualityResumeCoordinator.cancel()
         timer?.invalidate()
         timer = nil
         initialRedrawTask?.cancel()
@@ -2641,8 +2669,7 @@ final class MpvPlayerController: ObservableObject {
         audioTransitionTask = nil
         musicOutputRecoveryTask?.cancel()
         musicOutputRecoveryTask = nil
-        musicMemoryLoadTask?.cancel()
-        musicMemoryLoadTask = nil
+        musicPlaybackLoadCoordinator.cancel()
         clearPreloadedMusicItem()
         currentMemoryAudioAsset = nil
         seekSyncCorrectionTask?.cancel()
@@ -2700,14 +2727,14 @@ final class MpvPlayerController: ObservableObject {
 
     private func fail(_ message: String) {
         playbackGeneration += 1
+        videoQualityResumeCoordinator.cancel()
         initialRedrawTask?.cancel()
         initialRedrawTask = nil
         audioTransitionTask?.cancel()
         audioTransitionTask = nil
         musicOutputRecoveryTask?.cancel()
         musicOutputRecoveryTask = nil
-        musicMemoryLoadTask?.cancel()
-        musicMemoryLoadTask = nil
+        musicPlaybackLoadCoordinator.cancel()
         clearPreloadedMusicItem()
         currentMemoryAudioAsset = nil
         seekSyncCorrectionTask?.cancel()
@@ -2812,10 +2839,11 @@ final class MpvPlayerController: ObservableObject {
 
     private func scheduleVideoSnapshotRead(forceTrackRefresh: Bool = false) {
         guard let reader = mpvSnapshotReader else { return }
-        if forceTrackRefresh {
-            pendingForcedTrackSnapshot = true
-        }
-        guard !mpvSnapshotReadInFlight else { return }
+        guard let ticket = mpvSnapshotReadCoordinator.begin(
+            reader: reader,
+            playbackGeneration: playbackGeneration,
+            forceTrackRefresh: forceTrackRefresh
+        ) else { return }
 
         let now = Date()
         let includeDuration = duration <= 0 ||
@@ -2827,7 +2855,7 @@ final class MpvPlayerController: ObservableObject {
             statusMessage?.hasPrefix("正在切换到 ") == true ||
             statusMessage?.hasPrefix("正在定位到 ") == true ||
             now.timeIntervalSince(lastBufferingSnapshotDate) > 1.0
-        let forceTracks = pendingForcedTrackSnapshot
+        let forceTracks = ticket.forceTrackRefresh
         let includeTracks = forceTracks ||
             now.timeIntervalSince(lastTrackRefreshDate) > periodicTrackRefreshInterval()
         let includeChapters = includeTracks && shouldIncludeChapterSnapshot(now: now)
@@ -2848,8 +2876,6 @@ final class MpvPlayerController: ObservableObject {
             lastChapterSnapshotDate = now
             chapterSnapshotRefreshCount += 1
         }
-        pendingForcedTrackSnapshot = false
-        mpvSnapshotReadInFlight = true
         let request = MpvVideoSnapshotRequest(
             includeDuration: includeDuration,
             includeAspect: includeAspect,
@@ -2857,17 +2883,16 @@ final class MpvPlayerController: ObservableObject {
             includeTracks: includeTracks,
             includeChapters: includeChapters
         )
-        let generation = playbackGeneration
         let timelineOffset = playbackTimelineOffset
-        reader.read(request: request, timelineOffset: timelineOffset) { [weak self, weak reader] snapshot in
+        reader.read(request: request, timelineOffset: timelineOffset) { [weak self] snapshot in
             guard let self else { return }
-            self.mpvSnapshotReadInFlight = false
-            guard self.playbackGeneration == generation,
-                  let reader,
-                  self.mpvSnapshotReader === reader,
-                  self.libMpvClient != nil else { return }
+            guard self.mpvSnapshotReadCoordinator.complete(
+                ticket,
+                currentReader: self.mpvSnapshotReader,
+                playbackGeneration: self.playbackGeneration
+            ), self.libMpvClient != nil else { return }
             self.applyVideoSnapshot(snapshot)
-            if self.pendingForcedTrackSnapshot {
+            if self.mpvSnapshotReadCoordinator.forceTrackRefreshPending {
                 self.scheduleVideoSnapshotRead()
             }
         }

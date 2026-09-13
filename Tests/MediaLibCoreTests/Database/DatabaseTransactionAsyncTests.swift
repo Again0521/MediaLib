@@ -131,6 +131,33 @@ final class DatabaseTransactionAsyncTests: XCTestCase {
         )
     }
 
+    func testReadSnapshotKeepsOneWALVersionWhileAnotherConnectionCommits() throws {
+        let reader = try DatabaseManager(url: dbURL)
+        let writer = try XCTUnwrap(database)
+
+        let pair = try reader.readSnapshot { () -> (Int, Int) in
+            let before = try reader.query("SELECT COUNT(*) FROM t") { $0.int(0) ?? 0 }.first ?? -1
+            try writer.execute("INSERT INTO t (v) VALUES ('committed-during-read')")
+            let after = try reader.query("SELECT COUNT(*) FROM t") { $0.int(0) ?? 0 }.first ?? -1
+            return (before, after)
+        }
+
+        XCTAssertEqual(pair.0, 0)
+        XCTAssertEqual(pair.1, 0)
+        XCTAssertEqual(try reader.query("SELECT COUNT(*) FROM t") { $0.int(0) ?? 0 }.first, 1)
+    }
+
+    func testReadSnapshotRejectsWritesAndRestoresConnectionAfterError() throws {
+        let reader = try DatabaseManager(url: dbURL)
+        XCTAssertThrowsError(try reader.readSnapshot {
+            _ = try reader.query("SELECT COUNT(*) FROM t") { $0.int(0) ?? 0 }
+            try reader.execute("INSERT INTO t (v) VALUES ('not-read-only')")
+        })
+        XCTAssertEqual(try reader.query("SELECT COUNT(*) FROM t") { $0.int(0) ?? 0 }.first, 0)
+        try reader.execute("INSERT INTO t (v) VALUES ('later-write')")
+        XCTAssertEqual(try reader.query("SELECT COUNT(*) FROM t") { $0.int(0) ?? 0 }.first, 1)
+    }
+
     func testTransactionAsyncReturnsValue() async throws {
         let inserted = try await database.transactionAsync { () -> Int in
             try self.database.execute("INSERT INTO t (v) VALUES (?)", bindings: [.text("z")])

@@ -409,33 +409,6 @@ bundle_libmpv_runtime
 PACKAGE_ARCHITECTURE="${MEDIALIB_PACKAGE_ARCHITECTURE:-$(uname -m)}"
 "$ROOT_DIR/scripts/check_bundle_runtime.sh" "$APP_BUNDLE" "$PACKAGE_ARCHITECTURE"
 
-DEPENDENCY_INVENTORY="$BUILD_ROOT/dependency-inventory.txt"
-while IFS= read -r -d '' dependency; do
-  relative_path="${dependency#$APP_BUNDLE/}"
-  printf '%s  %s\n' "$(shasum -a 256 "$dependency" | awk '{print $1}')" "$relative_path"
-done < <(find "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Frameworks" -type f -print0) \
-  | LC_ALL=C sort > "$DEPENDENCY_INVENTORY"
-DEPENDENCY_DIGEST="$(shasum -a 256 "$DEPENDENCY_INVENTORY" | awk '{print $1}')"
-cp "$DEPENDENCY_INVENTORY" "$APP_BUNDLE/Contents/Resources/MediaLibDependencyInventory.txt"
-GIT_COMMIT="$(git -C "$ROOT_DIR" rev-parse --verify HEAD)"
-if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]]; then
-  GIT_DIRTY="true"
-else
-  GIT_DIRTY="false"
-fi
-SWIFT_TOOLCHAIN_VERSION="$(swift --version | head -n 1)"
-LIBMPV_VERSION="$(otool -L "$LIBMPV_SOURCE" | sed -n '2s/.*current version \([^)]*\)).*/ABI \1/p')"
-if [[ -z "$LIBMPV_VERSION" ]]; then
-  LIBMPV_VERSION="$(basename "$LIBMPV_SOURCE")"
-fi
-FFMPEG_VERSION="$("$FFMPEG_SOURCE" -version | awk 'NR == 1 {print $3}')"
-FFPROBE_VERSION="$("$FFPROBE_SOURCE" -version | awk 'NR == 1 {print $3}')"
-"$ROOT_DIR/scripts/generate_build_manifest.swift" \
-  "$APP_BUNDLE/Contents/Resources/MediaLibBuildManifest.json" \
-  "$VERSION" "$BUILD" "$GIT_COMMIT" "$GIT_DIRTY" "$PACKAGE_ARCHITECTURE" \
-  "$SWIFT_TOOLCHAIN_VERSION" "$LIBMPV_VERSION" "$FFMPEG_VERSION" "$FFPROBE_VERSION" \
-  "$DEPENDENCY_DIGEST"
-
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -535,9 +508,40 @@ else
 fi
 codesign --force --deep --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE" >/dev/null
 codesign --verify --deep --strict "$APP_BUNDLE"
+"$ROOT_DIR/scripts/check_bundle_launch.sh" "$APP_BUNDLE"
+
+# These hashes describe the signed binaries. Keep the inventory and manifest
+# outside the sealed .app to avoid a signature/resource-hash cycle.
+DEPENDENCY_INVENTORY="$DMG_ROOT/MediaLibDependencyInventory.txt"
+BUILD_MANIFEST="$DMG_ROOT/MediaLibBuildManifest.json"
+/usr/bin/python3 "$ROOT_DIR/scripts/check_dependency_inventory.py" \
+  generate "$APP_BUNDLE" "$DEPENDENCY_INVENTORY"
+DEPENDENCY_DIGEST="$(shasum -a 256 "$DEPENDENCY_INVENTORY" | awk '{print $1}')"
+GIT_COMMIT="$(git -C "$ROOT_DIR" rev-parse --verify HEAD)"
+if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]]; then
+  GIT_DIRTY="true"
+else
+  GIT_DIRTY="false"
+fi
+SWIFT_TOOLCHAIN_VERSION="$(swift --version | head -n 1)"
+LIBMPV_VERSION="$(otool -L "$LIBMPV_SOURCE" | sed -n '2s/.*current version \([^)]*\)).*/ABI \1/p')"
+if [[ -z "$LIBMPV_VERSION" ]]; then
+  LIBMPV_VERSION="$(basename "$LIBMPV_SOURCE")"
+fi
+FFMPEG_VERSION="$("$FFMPEG_SOURCE" -version | awk 'NR == 1 {print $3}')"
+FFPROBE_VERSION="$("$FFPROBE_SOURCE" -version | awk 'NR == 1 {print $3}')"
+"$ROOT_DIR/scripts/generate_build_manifest.swift" \
+  "$BUILD_MANIFEST" \
+  "$VERSION" "$BUILD" "$GIT_COMMIT" "$GIT_DIRTY" "$PACKAGE_ARCHITECTURE" \
+  "$SWIFT_TOOLCHAIN_VERSION" "$LIBMPV_VERSION" "$FFMPEG_VERSION" "$FFPROBE_VERSION" \
+  "$DEPENDENCY_DIGEST"
+/usr/bin/python3 "$ROOT_DIR/scripts/check_dependency_inventory.py" \
+  verify "$APP_BUNDLE" "$DEPENDENCY_INVENTORY" "$BUILD_MANIFEST"
 
 cp -R "$APP_BUNDLE" "$DMG_ROOT/$DISPLAY_NAME.app"
 strip_bundle_metadata "$DMG_ROOT/$DISPLAY_NAME.app"
+/usr/bin/python3 "$ROOT_DIR/scripts/check_dependency_inventory.py" \
+  verify "$DMG_ROOT/$DISPLAY_NAME.app" "$DEPENDENCY_INVENTORY" "$BUILD_MANIFEST"
 ln -s /Applications "$DMG_ROOT/Applications"
 cp "$ROOT_DIR/Sources/MediaLib/Resources/AppIcon.icns" "$DMG_VOLUME_ICON"
 swift "$ROOT_DIR/scripts/generate_dmg_background.swift" "$DMG_BACKGROUND"
@@ -566,9 +570,12 @@ hdiutil attach "$TEMP_DMG_PATH" -mountpoint "$VERIFY_MOUNT" -nobrowse -readonly 
 MOUNTED_APP="$VERIFY_MOUNT/$DISPLAY_NAME.app"
 "$ROOT_DIR/scripts/check_bundle_runtime.sh" "$MOUNTED_APP" "$PACKAGE_ARCHITECTURE"
 plutil -lint "$MOUNTED_APP/Contents/Info.plist"
-/usr/bin/python3 -m json.tool \
-  "$MOUNTED_APP/Contents/Resources/MediaLibBuildManifest.json" >/dev/null
+/usr/bin/python3 "$ROOT_DIR/scripts/check_dependency_inventory.py" \
+  verify "$MOUNTED_APP" \
+  "$VERIFY_MOUNT/MediaLibDependencyInventory.txt" \
+  "$VERIFY_MOUNT/MediaLibBuildManifest.json"
 codesign --verify --deep --strict "$MOUNTED_APP"
+"$ROOT_DIR/scripts/check_bundle_launch.sh" "$MOUNTED_APP"
 hdiutil detach "$VERIFY_MOUNT" -quiet
 
 # Keep the last known-good public DMG until every validation above succeeds.

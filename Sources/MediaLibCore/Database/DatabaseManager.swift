@@ -292,6 +292,19 @@ public final class DatabaseManager: @unchecked Sendable {
         }
     }
 
+    /// Read several repository results from one WAL snapshot without taking a
+    /// writer reservation. The first SQLite read fixes the snapshot until the
+    /// closure commits; concurrent connections may still commit new writes.
+    /// Callers must only perform reads in this closure.
+    public func readSnapshot<T>(_ block: () throws -> T) throws -> T {
+        if isOnQueue {
+            return try unsafeReadSnapshot(block)
+        }
+        return try queue.sync {
+            try self.unsafeReadSnapshot(block)
+        }
+    }
+
     /// `transaction(_:)` 的异步版本：在数据库串行队列上以 `queue.async` 执行（**不阻塞调用方线程**，
     /// 因此从 @MainActor 调用时不会卡住主线程），并以 BEGIN IMMEDIATE/COMMIT 包裹保证原子性。
     /// 适用于大批量写（如批量删除上千行），避免 `queue.sync` 在主线程上长时间阻塞。
@@ -350,6 +363,35 @@ public final class DatabaseManager: @unchecked Sendable {
         }
 
         try unsafeExecute("BEGIN IMMEDIATE TRANSACTION")
+        transactionDepth = 1
+        do {
+            let result = try block()
+            try unsafeExecute("COMMIT")
+            transactionDepth = 0
+            return result
+        } catch {
+            try? unsafeExecute("ROLLBACK")
+            transactionDepth = 0
+            throw error
+        }
+    }
+
+    private func unsafeReadSnapshot<T>(_ block: () throws -> T) throws -> T {
+        precondition(isOnQueue)
+        if transactionDepth > 0 {
+            return try block()
+        }
+
+        let wasQueryOnly = try unsafeQuery("PRAGMA query_only") { $0.int(0) ?? 0 }.first == 1
+        if !wasQueryOnly {
+            try unsafeExecute("PRAGMA query_only = ON")
+        }
+        defer {
+            if !wasQueryOnly {
+                try? unsafeExecute("PRAGMA query_only = OFF")
+            }
+        }
+        try unsafeExecute("BEGIN DEFERRED TRANSACTION")
         transactionDepth = 1
         do {
             let result = try block()

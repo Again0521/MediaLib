@@ -517,6 +517,18 @@ final class LibMpvClient {
         }
         throw LibMpvError.libraryMissing
     }
+
+    /// Release validation uses the actual app executable as the dyld entry
+    /// point. It deliberately does not fall back to a developer-machine copy.
+    static func verifyBundledLibraryForRelease() -> Bool {
+        let libraryURL = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Frameworks/libmpv.2.dylib")
+        guard let handle = dlopen(libraryURL.path, RTLD_NOW | RTLD_LOCAL) else {
+            return false
+        }
+        defer { dlclose(handle) }
+        return dlsym(handle, "mpv_client_api_version") != nil
+    }
 }
 
 private enum LibMpvError: LocalizedError {

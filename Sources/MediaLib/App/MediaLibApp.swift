@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 final class MediaLibAppDelegate: NSObject, NSApplicationDelegate {
@@ -110,6 +111,11 @@ struct MediaLibApp: App {
     @StateObject private var appState = AppState()
 
     init() {
+        if ProcessInfo.processInfo.arguments.contains("--check-bundled-libmpv") {
+            let loaded = LibMpvClient.verifyBundledLibraryForRelease()
+            print(loaded ? "bundle-libmpv: loaded" : "bundle-libmpv: failed")
+            Darwin.exit(loaded ? 0 : 1)
+        }
         LiveTitleIconDebugTool.prepareInitialSelectionIfRequested()
 #if DEBUG
         TitleIconDebugTool.runAndExitIfRequested()

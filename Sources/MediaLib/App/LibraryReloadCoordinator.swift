@@ -3,6 +3,7 @@ import MediaLibCore
 
 /// 一次媒体库 reload 的只读输出。它是数据库快照，不拥有任何 UI 状态，也不触发后续任务。
 struct LibraryReloadSnapshot: Sendable {
+    let blockingQueueWaitNanoseconds: UInt64
     let sources: [MediaSource]
     let items: [MediaItem]
     let musicPlaylists: [MusicPlaylist]
@@ -26,10 +27,14 @@ struct LibraryReloadSnapshot: Sendable {
 
 /// 从独立数据库连接读取完整 reload 快照。所有阻塞 I/O 都留在 BlockingIOExecutor，
 /// 调用者只接收一个不可变结果，不需要知道仓储组合或 SQLite 生命周期。
+/// `afterSourcesRead` 只供确定性交错测试注入另一个连接的提交。
 enum LibraryReloadSnapshotLoader {
-    nonisolated static func load(directories: AppDirectories) async throws -> LibraryReloadSnapshot {
-        try await BlockingIOExecutor.run {
-            try Task.checkCancellation()
+    nonisolated static func load(
+        directories: AppDirectories,
+        afterSourcesRead: (@Sendable () throws -> Void)? = nil
+    ) async throws -> LibraryReloadSnapshot {
+        try await BlockingIOExecutor.runCancellable { cancellation in
+            try cancellation.checkCancellation()
             let database = try DatabaseManager(url: directories.database, backupDirectory: directories.databaseBackups)
             let sourceRepository = SourceRepository(database: database)
             let mediaRepository = MediaRepository(database: database)
@@ -44,39 +49,65 @@ enum LibraryReloadSnapshotLoader {
             let mediaDetailRepository = MediaDetailRepository(database: database)
             let musicProjectionRepository = MusicLibraryProjectionRepository(database: database)
 
-            let sources = try sourceRepository.fetchAll()
-            let items = try mediaRepository.fetchAll()
-            let detailCandidateIDs = items.compactMap { item -> String? in
-                guard item.parentID == nil,
-                      item.type != .music,
-                      item.type != .photo,
-                      item.type != .homeVideo,
-                      item.type != .privateCollection else { return nil }
-                return item.id
-            }
-            try Task.checkCancellation()
+            return try database.readSnapshot {
+                try cancellation.checkCancellation()
+                let sources = try sourceRepository.fetchAll()
+                try afterSourcesRead?()
+                try cancellation.checkCancellation()
+                let items = try mediaRepository.fetchAll()
+                let detailCandidateIDs = items.compactMap { item -> String? in
+                    guard item.parentID == nil,
+                          item.type != .music,
+                          item.type != .photo,
+                          item.type != .homeVideo,
+                          item.type != .privateCollection else { return nil }
+                    return item.id
+                }
+                try cancellation.checkCancellation()
+                let musicPlaylists = try musicPlaylistRepository.fetchAll()
+                let musicSmartPlaylists = try musicSmartPlaylistRepository.fetchAll()
+                let videoSmartCollections = try videoSmartCollectionRepository.fetchAll()
+                let videoManualCollections = try videoManualCollectionRepository.fetchAll()
+                let videoOfflineSubscriptions = try videoOfflineSubscriptionRepository.fetchAll()
+                try cancellation.checkCancellation()
+                let metadataCorrectionCountsByMediaID = try metadataCorrectionRepository.activeCountsByMediaID()
+                let metadataCorrectionRecordCount = try metadataCorrectionRepository.activeRecordCount()
+                let metadataCorrectionBatches = try metadataCorrectionRepository.fetchActiveBatches(limit: 120)
+                let pendingSyncConflictCount = try syncConflictRepository.pendingCount()
+                let pendingSyncConflicts = try syncConflictRepository.fetchPending(limit: 120)
+                let remoteConnectorAccounts = try remoteConnectorAccountRepository.fetchAll()
+                try cancellation.checkCancellation()
+                let musicProjectionSnapshot = try musicProjectionRepository.fetchSnapshot()
+                let detailMetadataGapsByMediaID = try mediaDetailRepository.detailCompleteness(mediaIDs: detailCandidateIDs)
+                let detailSearchTermsByMediaID = try mediaDetailRepository.searchTermsByMediaID()
+                let detailBackdropPathsByMediaID = try mediaDetailRepository.firstBackdropPathsByMediaID()
+                let mediaExternalIDIndex = try mediaDetailRepository.externalMediaIDIndex()
+                let mediaIDsByPersonID = try mediaDetailRepository.mediaIDsByPersonID()
+                try cancellation.checkCancellation()
 
-            return LibraryReloadSnapshot(
-                sources: sources,
-                items: items,
-                musicPlaylists: try musicPlaylistRepository.fetchAll(),
-                musicSmartPlaylists: try musicSmartPlaylistRepository.fetchAll(),
-                videoSmartCollections: try videoSmartCollectionRepository.fetchAll(),
-                videoManualCollections: try videoManualCollectionRepository.fetchAll(),
-                videoOfflineSubscriptions: try videoOfflineSubscriptionRepository.fetchAll(),
-                metadataCorrectionCountsByMediaID: try metadataCorrectionRepository.activeCountsByMediaID(),
-                metadataCorrectionRecordCount: try metadataCorrectionRepository.activeRecordCount(),
-                metadataCorrectionBatches: try metadataCorrectionRepository.fetchActiveBatches(limit: 120),
-                pendingSyncConflictCount: try syncConflictRepository.pendingCount(),
-                pendingSyncConflicts: try syncConflictRepository.fetchPending(limit: 120),
-                remoteConnectorAccounts: try remoteConnectorAccountRepository.fetchAll(),
-                musicProjectionSnapshot: try musicProjectionRepository.fetchSnapshot(),
-                detailMetadataGapsByMediaID: try mediaDetailRepository.detailCompleteness(mediaIDs: detailCandidateIDs),
-                detailSearchTermsByMediaID: try mediaDetailRepository.searchTermsByMediaID(),
-                detailBackdropPathsByMediaID: try mediaDetailRepository.firstBackdropPathsByMediaID(),
-                mediaExternalIDIndex: try mediaDetailRepository.externalMediaIDIndex(),
-                mediaIDsByPersonID: try mediaDetailRepository.mediaIDsByPersonID()
-            )
+                return LibraryReloadSnapshot(
+                    blockingQueueWaitNanoseconds: cancellation.queueWaitNanoseconds,
+                    sources: sources,
+                    items: items,
+                    musicPlaylists: musicPlaylists,
+                    musicSmartPlaylists: musicSmartPlaylists,
+                    videoSmartCollections: videoSmartCollections,
+                    videoManualCollections: videoManualCollections,
+                    videoOfflineSubscriptions: videoOfflineSubscriptions,
+                    metadataCorrectionCountsByMediaID: metadataCorrectionCountsByMediaID,
+                    metadataCorrectionRecordCount: metadataCorrectionRecordCount,
+                    metadataCorrectionBatches: metadataCorrectionBatches,
+                    pendingSyncConflictCount: pendingSyncConflictCount,
+                    pendingSyncConflicts: pendingSyncConflicts,
+                    remoteConnectorAccounts: remoteConnectorAccounts,
+                    musicProjectionSnapshot: musicProjectionSnapshot,
+                    detailMetadataGapsByMediaID: detailMetadataGapsByMediaID,
+                    detailSearchTermsByMediaID: detailSearchTermsByMediaID,
+                    detailBackdropPathsByMediaID: detailBackdropPathsByMediaID,
+                    mediaExternalIDIndex: mediaExternalIDIndex,
+                    mediaIDsByPersonID: mediaIDsByPersonID
+                )
+            }
         }
     }
 }
