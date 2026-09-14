@@ -195,11 +195,43 @@ final class ServerRemoteProxyStressTests: XCTestCase {
             return true
         }
 
-        XCTAssertEqual(received, 64 * 1_024)
+        // URLSession may report a premature Content-Length failure before it
+        // delivers any body callback. The live-socket assertion must use the
+        // bytes actually handed to the consumer, not the fixture's send count.
+        XCTAssertLessThanOrEqual(received, 64 * 1_024)
         XCTAssertEqual(
             outcome,
             .failed(.shortRead(expectedByteLength: expectedLength), deliveredByteLength: received)
         )
+    }
+
+    func testStreamingHandlerRetainsDeliveredBytesAfterShortRead() throws {
+        let expectedLength: Int64 = 256 * 1_024
+        let deliveredLength = 64 * 1_024
+        var received: Int64 = 0
+        let handler = StreamingMediaHandler(
+            expectedOrigin: upstream.url,
+            expectedOffset: 0,
+            expectedLength: expectedLength
+        ) { chunk in
+            received += Int64(chunk.count)
+            return true
+        }
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: upstream.url,
+            statusCode: 206,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Range": "bytes 0-\(expectedLength - 1)/\(64 * 1_024 * 1_024)"]
+        ))
+
+        XCTAssertTrue(handler.accept(response))
+        XCTAssertTrue(handler.receive(Data(repeating: 0x5A, count: deliveredLength)))
+        handler.finish(error: URLError(.networkConnectionLost))
+
+        XCTAssertEqual(received, Int64(deliveredLength))
+        XCTAssertEqual(handler.deliveredByteLength, Int64(deliveredLength))
+        XCTAssertEqual(handler.outcome, .transportFailed)
+        XCTAssertFalse(handler.succeeded)
     }
 
     func testRemoteRangeOutcomeClassifiesConsumerStopAsCancellation() throws {
