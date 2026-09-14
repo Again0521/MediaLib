@@ -41,6 +41,8 @@ final class ServerModeLANEndToEndTests: XCTestCase {
         }
         let executable = try serverExecutable()
         let port = try availableTCPPort()
+        var websitePort = try availableTCPPort()
+        while websitePort == port { websitePort = try availableTCPPort() }
         let password = "LAN fixture password 123"
         try prepareFixture(password: password)
 
@@ -49,6 +51,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             serverID: "server-lan-e2e",
             serverName: "MediaLIB LAN E2E",
             port: port,
+            websitePort: proxy ? nil : websitePort,
             networkAccessMode: .lanHTTPS,
             lanAddress: address,
             publicOrigin: proxy ? "https://media.example.test" : nil,
@@ -103,6 +106,14 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             process: process
         )
         XCTAssertEqual(loginPage.response.statusCode, 200)
+        if !proxy, let websiteURL = configuration.websiteBaseURL {
+            let websiteHealth = try await waitForResponse(
+                session: .shared,
+                request: URLRequest(url: websiteURL.appendingPathComponent("health")),
+                process: process
+            )
+            XCTAssertEqual(websiteHealth.response.statusCode, 200)
+        }
         if proxy {
             let ready = await ServerModeProcessController.checkLANHTTPSReadiness(
                 configuration, certificateAuthorityURL: certificateAuthority)
@@ -128,6 +139,29 @@ final class ServerModeLANEndToEndTests: XCTestCase {
         let (loginData, loginResponse) = try await session.data(for: loginRequest)
         let loginHTTP = try XCTUnwrap(loginResponse as? HTTPURLResponse)
         XCTAssertEqual(loginHTTP.statusCode, 200, String(data: loginData, encoding: .utf8) ?? "")
+        if !proxy, let websiteURL = configuration.websiteBaseURL {
+            let browserConfiguration = URLSessionConfiguration.ephemeral
+            browserConfiguration.httpShouldSetCookies = true
+            browserConfiguration.httpCookieAcceptPolicy = .always
+            let websiteSession = URLSession(configuration: browserConfiguration)
+            defer { websiteSession.finishTasksAndInvalidate() }
+            let websiteLoginPage = try await websiteSession.data(
+                for: URLRequest(url: websiteURL.appendingPathComponent("login"))
+            )
+            XCTAssertEqual((websiteLoginPage.1 as? HTTPURLResponse)?.statusCode, 200)
+            let websiteLoginHTML = try XCTUnwrap(String(data: websiteLoginPage.0, encoding: .utf8))
+            var websiteLogin = URLRequest(url: websiteURL.appendingPathComponent("api/v1/auth/login"))
+            websiteLogin.httpMethod = "POST"
+            websiteLogin.httpBody = loginBody
+            websiteLogin.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            websiteLogin.setValue(websiteURL.absoluteString, forHTTPHeaderField: "Origin")
+            websiteLogin.setValue(try csrfToken(in: websiteLoginHTML), forHTTPHeaderField: "X-MediaLIB-CSRF")
+            let websiteLoginResult = try await websiteSession.data(for: websiteLogin)
+            XCTAssertEqual((websiteLoginResult.1 as? HTTPURLResponse)?.statusCode, 200)
+            XCTAssertTrue(browserConfiguration.httpCookieStorage?.cookies?.contains {
+                $0.name == "MediaLIBAccess" && !$0.isSecure
+            } == true)
+        }
         let cookies = sessionConfiguration.httpCookieStorage?.cookies ?? []
         XCTAssertTrue(cookies.contains { $0.name == "MediaLIBAccess" && $0.isSecure })
         XCTAssertTrue(cookies.contains { $0.name == "MediaLIBRefresh" && $0.isSecure })

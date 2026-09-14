@@ -61,6 +61,19 @@ final class ServerModeConfigurationTests: XCTestCase {
         )
     }
 
+    func testLegacyTLSKeepsItsPortWhileWebsitePortPersistsSeparately() throws {
+        var legacy = ServerModeConfiguration(serverID: "legacy", port: 8098,
+            networkAccessMode: .lanHTTPS, lanAddress: "192.168.1.10")
+        XCTAssertNil(legacy.websiteBaseURL)
+        legacy.websitePort = 8099
+        XCTAssertEqual(legacy.lanHTTPSBaseURL?.absoluteString, "https://192.168.1.10:8098")
+        XCTAssertEqual(legacy.websiteBaseURL?.absoluteString, "http://127.0.0.1:8099")
+        XCTAssertEqual(try JSONDecoder().decode(ServerModeConfiguration.self,
+            from: JSONEncoder().encode(legacy)), legacy)
+        legacy.updatePort(8099)
+        XCTAssertNil(legacy.websitePort)
+    }
+
     func testLANHTTPSUsesPrivateAddressAndTracksPortChanges() {
         var configuration = ServerModeConfiguration(
             serverID: "server-a",

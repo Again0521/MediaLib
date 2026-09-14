@@ -10,13 +10,17 @@ extension AppState {
     var serverModeStatusDisplayTitle: String {
         if case .running = serverModeStatus,
            serverModeConfiguration.networkAccessMode == .lanHTTPS {
-            return serverModeConfiguration.allowsWANAccess ? "广域网 HTTPS 运行中" : "局域网 HTTPS 运行中"
+            if serverModeConfiguration.websitePort == nil {
+                return serverModeConfiguration.allowsWANAccess ? "广域网 HTTPS 运行中" : "局域网 HTTPS 运行中"
+            }
+            return serverModeConfiguration.allowsWANAccess
+                ? "网站与广域网 HTTPS 运行中" : "网站与局域网 HTTPS 运行中"
         }
         return serverModeStatus.title
     }
 
     var serverModeEndpointDisplayText: String {
-        serverModeConfiguration.effectiveBaseURL.absoluteString
+        serverModeConfiguration.websiteBaseURL?.absoluteString ?? "本机网站端口尚未分配"
     }
 
     var serverModeCertificateAuthorityURL: URL? {
@@ -33,11 +37,18 @@ extension AppState {
     /// App 场景出现后恢复用户此前明确开启的本机服务模式。
     func restoreServerModeIfNeeded() {
         guard serverModeConfiguration.isEnabled else { return }
+        let previous = serverModeConfiguration
         do {
+            let migrated = try prepareServerWebsitePortIfNeeded()
             try refreshLANAddressBeforeLaunch()
             try serverModeController.start(configuration: serverModeConfiguration)
             applyServerLightweightPolicyIfNeeded()
+            if migrated {
+                showWebsitePortMigrationNotice()
+                monitorServerConfigurationHealth(candidate: serverModeConfiguration, previous: previous)
+            }
         } catch {
+            if startLegacyTLSAfterMigrationFailure(previous: previous, cause: error) { return }
             serverModeConfiguration.isEnabled = false
             serverModeSettingsStore.save(serverModeConfiguration)
             showFloatingNotice(
@@ -50,18 +61,25 @@ extension AppState {
 
     func setServerModeEnabled(_ isEnabled: Bool) {
         if isEnabled {
+            let previous = serverModeConfiguration
             do {
+                let migrated = try prepareServerWebsitePortIfNeeded()
                 try refreshLANAddressBeforeLaunch()
                 try serverModeController.start(configuration: serverModeConfiguration)
                 serverModeConfiguration.isEnabled = true
                 serverModeSettingsStore.save(serverModeConfiguration)
                 applyServerLightweightPolicyIfNeeded()
+                if migrated {
+                    showWebsitePortMigrationNotice()
+                    monitorServerConfigurationHealth(candidate: serverModeConfiguration, previous: previous)
+                }
                 showFloatingNotice(
                     title: "服务模式已启动",
                     message: "正在确认 Web 健康状态；就绪后可通过 \(serverModeEndpointDisplayText) 登录并访问。",
                     kind: .success
                 )
             } catch {
+                if startLegacyTLSAfterMigrationFailure(previous: previous, cause: error) { return }
                 serverModeConfiguration.isEnabled = false
                 serverModeSettingsStore.save(serverModeConfiguration)
                 showFloatingNotice(title: "服务模式未启动", message: error.localizedDescription, kind: .error)
@@ -272,6 +290,11 @@ extension AppState {
               candidate.trustedProxyAddresses == proposed.trustedProxyAddresses
         else { return }
 
+        if candidate.networkAccessMode == .lanHTTPS, candidate.websitePort == nil {
+            guard let port = ServerWebsitePortAllocator.availablePort(excluding: candidate.port) else { return }
+            candidate.websitePort = port
+        }
+
         serverModeController.stop()
         serverModeConfiguration = candidate
         serverModeSettingsStore.save(candidate)
@@ -317,17 +340,108 @@ extension AppState {
     }
 
     private func applyServerModeConfiguration(_ configuration: ServerModeConfiguration) {
+        var configuration = configuration
+        if configuration.networkAccessMode == .lanHTTPS, configuration.websitePort == nil {
+            guard let port = ServerWebsitePortAllocator.availablePort(excluding: configuration.port) else {
+                showFloatingNotice(title: "本机网站端口不可用", message: "请释放 8098–10097 中的端口后重试。", kind: .error)
+                return
+            }
+            configuration.websitePort = port
+        }
         guard configuration != serverModeConfiguration else { return }
-        let shouldRestart = serverModeConfiguration.isEnabled
+        let previous = serverModeConfiguration
+        let shouldRestart = previous.isEnabled
         if shouldRestart {
             serverModeController.stop()
         }
         serverModeConfiguration = configuration
         serverModeSettingsStore.save(configuration)
         if shouldRestart {
-            restoreServerModeIfNeeded()
+            do {
+                try refreshLANAddressBeforeLaunch()
+                try serverModeController.start(configuration: serverModeConfiguration)
+                monitorServerConfigurationHealth(candidate: serverModeConfiguration, previous: previous)
+            } catch {
+                serverModeController.stop()
+                serverModeConfiguration = previous
+                serverModeSettingsStore.save(previous)
+                do {
+                    try serverModeController.start(configuration: previous)
+                    showFloatingNotice(title: "服务配置已回滚",
+                                       message: "新监听未能启动，已恢复此前配置。",
+                                       kind: .error)
+                } catch {
+                    showFloatingNotice(title: "服务恢复失败", message: error.localizedDescription, kind: .error)
+                }
+            }
         }
         applyServerLightweightPolicyIfNeeded()
+    }
+
+    private func monitorServerConfigurationHealth(
+        candidate: ServerModeConfiguration,
+        previous: ServerModeConfiguration
+    ) {
+        Task { [weak self] in
+            guard let self, !(await waitForServerRuntimeHealth(timeout: 7)),
+                  serverModeConfiguration == candidate, candidate.isEnabled else { return }
+            serverModeController.stop()
+            var fallback = previous
+            fallback.isEnabled = true
+            serverModeConfiguration = fallback
+            serverModeSettingsStore.save(fallback)
+            do {
+                try serverModeController.start(configuration: fallback)
+                guard await waitForServerRuntimeHealth(timeout: 7) else {
+                    throw ServerModeHostApplyError.healthCheckFailed
+                }
+                showFloatingNotice(title: "服务配置已回滚",
+                                   message: "新入口未通过健康检查，已恢复此前监听配置。",
+                                   kind: .error)
+            } catch {
+                showFloatingNotice(title: "服务恢复失败", message: error.localizedDescription, kind: .error)
+            }
+        }
+    }
+
+    @discardableResult
+    private func prepareServerWebsitePortIfNeeded() throws -> Bool {
+        guard serverModeConfiguration.networkAccessMode == .lanHTTPS,
+              serverModeConfiguration.websitePort == nil else { return false }
+        guard let port = ServerWebsitePortAllocator.availablePort(excluding: serverModeConfiguration.port) else {
+            throw ServerModeHostApplyError.websitePortUnavailable
+        }
+        serverModeConfiguration.websitePort = port
+        serverModeSettingsStore.save(serverModeConfiguration)
+        return true
+    }
+
+    private func showWebsitePortMigrationNotice() {
+        guard let websiteURL = serverModeConfiguration.websiteBaseURL else { return }
+        showFloatingNotice(title: "本机网站端口已分配",
+                           message: "服务就绪后可通过 \(websiteURL.absoluteString) 打开网站；原局域网 HTTPS 端口和证书继续保留。",
+                           kind: .success)
+    }
+
+    private func startLegacyTLSAfterMigrationFailure(
+        previous: ServerModeConfiguration,
+        cause: Error
+    ) -> Bool {
+        guard previous.networkAccessMode == .lanHTTPS, previous.websitePort == nil else { return false }
+        serverModeController.stop()
+        var fallback = previous
+        fallback.isEnabled = true
+        serverModeConfiguration = fallback
+        serverModeSettingsStore.save(fallback)
+        do {
+            try serverModeController.start(configuration: fallback)
+            showFloatingNotice(title: "本机网站入口暂不可用",
+                               message: "原局域网 HTTPS 入口继续运行；新端口未启用：\(cause.localizedDescription)",
+                               kind: .warning)
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func refreshLANAddressBeforeLaunch() throws {
@@ -388,6 +502,14 @@ private enum ServerModeLANConfigurationError: LocalizedError {
     }
 }
 
-private enum ServerModeHostApplyError: Error {
+private enum ServerModeHostApplyError: LocalizedError {
     case healthCheckFailed
+    case websitePortUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .healthCheckFailed: return "服务健康检查失败。"
+        case .websitePortUnavailable: return "无法分配本机网站端口；原局域网 HTTPS 配置已保留。"
+        }
+    }
 }

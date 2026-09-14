@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import MediaLibCore
 import MediaLibServerProtocol
 
@@ -336,6 +337,20 @@ struct MediaLibServer {
                     dataDirectory: dataDirectories.root,
                     requestHandler: server
                 )
+                if let websitePort = configuration.websitePort {
+                    // Bind synchronously so a port conflict fails the launch before
+                    // the legacy TLS listener is reported healthy.
+                    let listeners = try server.prepareLegacyWebsiteListener(port: websitePort)
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        do {
+                            try server.serveHTTP(listeners: listeners)
+                        } catch {
+                            FileHandle.standardError.write(Data("本机网站监听已退出：\(error.localizedDescription)\n".utf8))
+                            exit(EXIT_FAILURE)
+                        }
+                    }
+                    print("MediaLibServer 本机网站正在监听 http://127.0.0.1:\(websitePort)")
+                }
                 print("MediaLibServer 正在监听 \(configuration.publicOrigin?.absoluteString ?? "https://0.0.0.0:\(configuration.port)")")
                 try await lanServer.run()
             }
@@ -462,6 +477,7 @@ struct ServerLaunchConfiguration: Sendable {
     let host: String
     let listenAddresses: [String]
     let port: Int
+    let websitePort: Int?
     let networkAccessMode: ServerNetworkAccessMode
     let serverID: String
     let serverName: String
@@ -484,6 +500,18 @@ struct ServerLaunchConfiguration: Sendable {
             throw ServerConfigurationError.invalidPort(portValue ?? "")
         }
 
+        let websitePortValue = environment["MEDIALIB_SERVER_WEBSITE_PORT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let websitePort: Int?
+        if let websitePortValue {
+            guard let parsed = Int(websitePortValue), (1...65_535).contains(parsed), parsed != port else {
+                throw ServerConfigurationError.invalidWebsitePort(websitePortValue)
+            }
+            websitePort = parsed
+        } else {
+            websitePort = nil
+        }
+
         let networkAccessModeValue = environment["MEDIALIB_SERVER_NETWORK_ACCESS_MODE"]?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let networkAccessMode: ServerNetworkAccessMode
@@ -494,6 +522,9 @@ struct ServerLaunchConfiguration: Sendable {
             networkAccessMode = .lanHTTPS
         default:
             throw ServerConfigurationError.invalidNetworkAccessMode(networkAccessModeValue)
+        }
+        if websitePort != nil && networkAccessMode != .lanHTTPS {
+            throw ServerConfigurationError.invalidWebsitePort(websitePortValue ?? "")
         }
 
         let listenAddresses: [String]
@@ -572,6 +603,7 @@ struct ServerLaunchConfiguration: Sendable {
             host: normalizedHost,
             listenAddresses: listenAddresses,
             port: port,
+            websitePort: websitePort,
             networkAccessMode: networkAccessMode,
             // App/容器必须注入持久化 ID；默认值只用于开发命令和本机健康探测。
             serverID: serverID?.isEmpty == false ? serverID! : "medialib-development",
@@ -587,6 +619,7 @@ struct ServerLaunchConfiguration: Sendable {
 
 enum ServerConfigurationError: LocalizedError, Equatable {
     case invalidPort(String)
+    case invalidWebsitePort(String)
     case invalidNetworkAccessMode(String)
     case nonLoopbackHost(String)
     case invalidListenAddresses(String)
@@ -601,6 +634,8 @@ enum ServerConfigurationError: LocalizedError, Equatable {
         switch self {
         case let .invalidPort(value):
             return "MEDIALIB_SERVER_PORT 无效：\(value)。端口必须在 1 到 65535 之间。"
+        case let .invalidWebsitePort(value):
+            return "MEDIALIB_SERVER_WEBSITE_PORT 无效：\(value)。旧 HTTPS 模式需使用不同的 HTTP 端口。"
         case let .invalidNetworkAccessMode(value):
             return "MEDIALIB_SERVER_NETWORK_ACCESS_MODE 无效：\(value)。只接受 loopback 或 lan-https。"
         case let .nonLoopbackHost(host):

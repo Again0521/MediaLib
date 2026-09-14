@@ -48,6 +48,25 @@ final class ServerLaunchConfigurationTests: XCTestCase {
         ]))
     }
 
+    func testLegacyTLSCanExposeSeparateLoopbackWebsiteWithoutPortCollision() throws {
+        let configuration = try ServerLaunchConfiguration.load(environment: [
+            "MEDIALIB_SERVER_NETWORK_ACCESS_MODE": "lan-https",
+            "MEDIALIB_SERVER_PORT": "8098",
+            "MEDIALIB_SERVER_WEBSITE_PORT": "8099"
+        ])
+        XCTAssertEqual(configuration.port, 8098)
+        XCTAssertEqual(configuration.websitePort, 8099)
+        for invalid in ["8098", "0", "65536", "invalid"] {
+            XCTAssertThrowsError(try ServerLaunchConfiguration.load(environment: [
+                "MEDIALIB_SERVER_NETWORK_ACCESS_MODE": "lan-https",
+                "MEDIALIB_SERVER_WEBSITE_PORT": invalid
+            ]))
+        }
+        XCTAssertThrowsError(try ServerLaunchConfiguration.load(environment: [
+            "MEDIALIB_SERVER_WEBSITE_PORT": "8099"
+        ]))
+    }
+
     func testRawLoopbackRunFailsClosedForLanHTTPSMode() throws {
         let lan = try ServerLaunchConfiguration.load(environment: [
             "MEDIALIB_SERVER_NETWORK_ACCESS_MODE": "lan-https"

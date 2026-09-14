@@ -194,15 +194,31 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         guard configuration.networkAccessMode == .loopbackOnly else {
             throw ServerConfigurationError.lanHTTPSRuntimeUnavailable
         }
+        try serveHTTP(listeners: prepareHTTPListeners(port: configuration.port,
+                                                    addresses: configuration.listenAddresses))
+    }
+
+    func prepareLegacyWebsiteListener(port: Int) throws -> [Int32] {
+        guard configuration.networkAccessMode == .lanHTTPS, port != configuration.port else {
+            throw ServerConfigurationError.invalidWebsitePort(String(port))
+        }
+        return try prepareHTTPListeners(port: port, addresses: ["127.0.0.1"])
+    }
+
+    private func prepareHTTPListeners(port: Int, addresses: [String]) throws -> [Int32] {
         var listeners: [Int32] = []
         do {
-            for address in configuration.listenAddresses {
-                listeners.append(try makeListener(address: address))
+            for address in addresses {
+                listeners.append(try makeListener(address: address, port: port))
             }
         } catch {
             listeners.forEach { _ = close($0) }
             throw error
         }
+        return listeners
+    }
+
+    func serveHTTP(listeners: [Int32]) throws {
         defer { listeners.forEach { _ = close($0) } }
         var ready = listeners.map { pollfd(fd: $0, events: Int16(POLLIN), revents: 0) }
 
@@ -247,7 +263,7 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         }
     }
 
-    private func makeListener(address host: String) throws -> Int32 {
+    private func makeListener(address host: String, port: Int) throws -> Int32 {
         let family = host.contains(":") ? AF_INET6 : AF_INET
         let descriptor = socket(family, streamSocketType(), 0)
         guard descriptor >= 0 else {
@@ -284,7 +300,7 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
             #endif
             address.sin6_family = sa_family_t(AF_INET6)
-            address.sin6_port = in_port_t(UInt16(configuration.port).bigEndian)
+            address.sin6_port = in_port_t(UInt16(port).bigEndian)
             guard inet_pton(AF_INET6, host, &address.sin6_addr) == 1 else {
                 _ = close(descriptor)
                 throw LocalHTTPServerError.loopbackAddressCreationFailed
@@ -300,7 +316,7 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         #endif
             address.sin_family = sa_family_t(AF_INET)
-            address.sin_port = in_port_t(UInt16(configuration.port).bigEndian)
+            address.sin_port = in_port_t(UInt16(port).bigEndian)
             guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
                 _ = close(descriptor)
                 throw LocalHTTPServerError.loopbackAddressCreationFailed
@@ -314,7 +330,7 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         guard bindResult == 0 else {
             let error = errno
             _ = close(descriptor)
-            throw LocalHTTPServerError.bindFailed(address: host, port: configuration.port, errno: error)
+            throw LocalHTTPServerError.bindFailed(address: host, port: port, errno: error)
         }
         guard listen(descriptor, SOMAXCONN) == 0 else {
             let error = errno

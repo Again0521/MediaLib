@@ -130,6 +130,18 @@ final class ServerModeProcessControllerTests: XCTestCase {
         XCTAssertEqual(environment["MEDIALIB_SERVER_TRUSTED_PROXIES"], "")
     }
 
+    func testLegacyTLSPassesDistinctWebsitePortAndAllocatorSkipsTLSAndOccupiedPorts() {
+        let configuration = ServerModeConfiguration(serverID: "legacy", port: 8098,
+            websitePort: 8099, networkAccessMode: .lanHTTPS, lanAddress: "192.168.31.100")
+        let environment = ServerModeProcessController.processEnvironment(configuration: configuration)
+        XCTAssertEqual(environment["MEDIALIB_SERVER_PORT"], "8098")
+        XCTAssertEqual(environment["MEDIALIB_SERVER_WEBSITE_PORT"], "8099")
+        XCTAssertEqual(ServerWebsitePortAllocator.selectPort(excluding: 8098,
+            isAvailable: { $0 == 8100 }), 8100)
+        XCTAssertNil(ServerWebsitePortAllocator.selectPort(excluding: 8098,
+            isAvailable: { _ in false }))
+    }
+
     func testRealLANRuntimePassesPinnedCAHealthCheck() async throws {
         guard let address = LANNetworkAddressResolver.preferredPrivateIPv4Address() else {
             throw XCTSkip("当前测试机没有私有 IPv4 地址")

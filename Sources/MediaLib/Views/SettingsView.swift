@@ -1248,7 +1248,8 @@ struct SettingsView: View {
                 )
             }
 
-            SettingsRow(title: "本机端口", systemImage: "number") {
+            SettingsRow(title: appState.serverModeConfiguration.networkAccessMode == .lanHTTPS
+                        ? "原 HTTPS 端口" : "本机端口", systemImage: "number") {
                 TextField("8098", text: $serverModePortDraft)
                     .onSubmit {
                         let port = Int(serverModePortDraft) ?? ServerModeConfiguration.defaultPort
@@ -1261,22 +1262,20 @@ struct SettingsView: View {
                     )
             }
 
-            SettingsRow(
-                title: appState.serverModeConfiguration.networkAccessMode == .lanHTTPS
-                    ? "局域网地址"
-                    : "本机地址",
-                systemImage: "link"
-            ) {
+            SettingsRow(title: "网站地址", systemImage: "link") {
                 Text(appState.serverModeEndpointDisplayText)
                     .font(.callout.monospaced())
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                 Button("打开 Web") {
-                    NSWorkspace.shared.open(appState.serverModeConfiguration.effectiveBaseURL)
+                    if let websiteURL = appState.serverModeConfiguration.websiteBaseURL {
+                        NSWorkspace.shared.open(websiteURL)
+                    }
                 }
                 .settingsActionButton()
                 .disabled(
-                    appState.serverModeStatus != .running ||
+                    appState.serverModeConfiguration.websiteBaseURL == nil ||
+                        appState.serverModeStatus != .running ||
                         appState.serverAdministrationStore.requiresInitialPassword
                 )
                 Button("复制地址") {
@@ -1287,9 +1286,16 @@ struct SettingsView: View {
                     )
                 }
                 .settingsActionButton()
+                .disabled(appState.serverModeConfiguration.websiteBaseURL == nil)
             }
 
             if appState.serverModeConfiguration.networkAccessMode == .lanHTTPS {
+                SettingsRow(title: "原局域网 HTTPS 地址", systemImage: "lock.shield") {
+                    Text(appState.serverModeConfiguration.lanHTTPSBaseURL?.absoluteString ?? "未就绪")
+                        .font(.callout.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
                 SettingsRow(title: "设备信任证书", systemImage: "checkmark.shield") {
                     Text("其他设备首次访问前需要安装一次")
                         .font(.callout)
@@ -1301,7 +1307,7 @@ struct SettingsView: View {
                     .disabled(appState.serverModeStatus != .running)
                 }
                 SettingsDescription(
-                    text: "把导出的 MediaLIB-LAN-CA.cer 发送到同一局域网内的手机、平板或电脑并设为信任，然后使用上方 https 地址访问。证书只用于验证这台 MediaLIB 服务器，不包含管理员密码或媒体信息。"
+                    text: "旧局域网 HTTPS 地址继续可用。其他设备首次使用该地址前，需要安装并信任导出的 MediaLIB-LAN-CA.cer。"
                 )
             }
             SettingsRow(title: "广域网访问", systemImage: "globe") {
@@ -1311,7 +1317,7 @@ struct SettingsView: View {
                 ))
                 .disabled(appState.serverModeConfiguration.networkAccessMode != .lanHTTPS)
             }
-            SettingsDescription(text: "开启局域网及广域网访问后，可在路由器、NAS 或其他设备部署反代，回源到本机 HTTPS 地址。填写公开 HTTPS 域名及反代设备的 IPv4 地址；反代需信任导出的 CA，并保留公开 Host。公网域名证书由反代配置。")
+            SettingsDescription(text: "普通反向代理可回源到上方本机 HTTP 网站地址；此处的局域网和广域网开关只控制保留的内建 HTTPS 直连入口。公开域名和可信代理地址为高级配置。")
             if appState.serverModeConfiguration.networkAccessMode != .lanHTTPS || appState.serverModeConfiguration.allowsWANAccess {
                 SettingsRow(title: "公开 HTTPS 地址", systemImage: "lock.shield") {
                     TextField("https://media.example.com", text: $serverModePublicOriginDraft)
@@ -1338,7 +1344,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsDescription(text: "轻量服务模式会停止桌面端封面/横版图等非必要视觉预热，并将服务子进程设为 utility QoS；扫描、索引、认证和媒体分发不会被关闭。名称、端口、局域网访问或轻量策略在服务运行时会安全重启。默认仅监听 127.0.0.1；开启局域网访问后会自动选取当前 Wi-Fi/有线私有 IPv4，并使用内建 HTTPS，绝不开放明文 HTTP。网页仍由浏览器通过受权 Range 媒体源原生解码，服务端不会启动网页转码。服务器身份与本机 CA 会持久化保存。")
+            SettingsDescription(text: "网站默认通过 127.0.0.1 的 HTTP 地址访问。启用旧局域网 HTTPS 后，原端口和证书继续可用，网站使用另一已保存的本机端口。网页仍由浏览器通过授权 Range 媒体源解码；轻量服务模式不会关闭索引、认证或媒体分发。")
         }
     }
 

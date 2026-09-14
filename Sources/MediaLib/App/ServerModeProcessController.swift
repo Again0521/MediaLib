@@ -220,9 +220,15 @@ final class ServerModeProcessController: ObservableObject {
 
     private static func defaultReadinessChecker(_ configuration: ServerModeConfiguration) async -> Bool {
         if configuration.networkAccessMode == .lanHTTPS {
-            return await checkLANHTTPSReadiness(configuration)
+            guard await checkLANHTTPSReadiness(configuration) else { return false }
+            guard let websiteURL = configuration.websiteBaseURL else { return true }
+            return await checkHTTPReadiness(websiteURL)
         }
-        var request = URLRequest(url: configuration.loopbackBaseURL.appendingPathComponent("health"))
+        return await checkHTTPReadiness(configuration.loopbackBaseURL)
+    }
+
+    private static func checkHTTPReadiness(_ baseURL: URL) async -> Bool {
+        var request = URLRequest(url: baseURL.appendingPathComponent("health"))
         request.httpMethod = "GET"
         request.timeoutInterval = 0.5
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -299,6 +305,11 @@ final class ServerModeProcessController: ObservableObject {
         // Do not inherit an advanced bind override from the launcher environment.
         environment.removeValue(forKey: "MEDIALIB_SERVER_LISTEN_ADDRESSES")
         environment["MEDIALIB_SERVER_PORT"] = String(configuration.port)
+        if configuration.networkAccessMode == .lanHTTPS, let websitePort = configuration.websitePort {
+            environment["MEDIALIB_SERVER_WEBSITE_PORT"] = String(websitePort)
+        } else {
+            environment.removeValue(forKey: "MEDIALIB_SERVER_WEBSITE_PORT")
+        }
         environment["MEDIALIB_SERVER_ID"] = configuration.serverID
         environment["MEDIALIB_SERVER_NAME"] = configuration.serverName
         environment["MEDIALIB_SERVER_VERSION"] = AppVersion.current

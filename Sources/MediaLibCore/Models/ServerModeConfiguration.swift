@@ -23,6 +23,8 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
     public var serverID: String
     public var serverName: String
     public var port: Int
+    /// Separate loopback HTTP port when the legacy LAN HTTPS listener owns `port`.
+    public var websitePort: Int?
     public var networkAccessMode: ServerNetworkAccessMode
     /// The current private IPv4 address selected by the desktop app for the
     /// built-in LAN HTTPS listener. It is refreshed before every launch.
@@ -44,6 +46,7 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         serverID: String = UUID().uuidString.lowercased(),
         serverName: String = ServerModeConfiguration.defaultServerName,
         port: Int = ServerModeConfiguration.defaultPort,
+        websitePort: Int? = nil,
         networkAccessMode: ServerNetworkAccessMode = .loopbackOnly,
         lanAddress: String? = nil,
         publicOrigin: String? = nil,
@@ -54,7 +57,9 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         self.isEnabled = isEnabled
         self.serverID = Self.normalizedServerID(serverID)
         self.serverName = Self.normalizedServerName(serverName)
-        self.port = Self.normalizedPort(port)
+        let normalizedPort = Self.normalizedPort(port)
+        self.port = normalizedPort
+        self.websitePort = websitePort.flatMap { (1...65_535).contains($0) && $0 != normalizedPort ? $0 : nil }
         self.networkAccessMode = networkAccessMode
         self.lanAddress = Self.normalizedLANAddress(lanAddress)
         let normalizedOrigin = Self.normalizedPublicOrigin(publicOrigin)
@@ -66,6 +71,14 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
 
     public var loopbackBaseURL: URL {
         URL(string: "http://127.0.0.1:\(port)")!
+    }
+
+    public var websiteBaseURL: URL? {
+        if networkAccessMode == .lanHTTPS {
+            guard let websitePort else { return nil }
+            return URL(string: "http://127.0.0.1:\(websitePort)")
+        }
+        return loopbackBaseURL
     }
 
     public var publicOriginURL: URL? {
@@ -123,6 +136,7 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
 
     public mutating func updatePort(_ port: Int) {
         self.port = Self.normalizedPort(port)
+        if websitePort == self.port { websitePort = nil }
     }
 
     public mutating func updatePublicOrigin(_ origin: String?) {
@@ -138,6 +152,7 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         case serverID
         case serverName
         case port
+        case websitePort
         case networkAccessMode
         case lanAddress
         case publicOrigin
@@ -153,6 +168,7 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
             serverID: try container.decodeIfPresent(String.self, forKey: .serverID) ?? UUID().uuidString.lowercased(),
             serverName: try container.decodeIfPresent(String.self, forKey: .serverName) ?? Self.defaultServerName,
             port: try container.decodeIfPresent(Int.self, forKey: .port) ?? Self.defaultPort,
+            websitePort: try container.decodeIfPresent(Int.self, forKey: .websitePort),
             networkAccessMode: try container.decodeIfPresent(
                 ServerNetworkAccessMode.self,
                 forKey: .networkAccessMode
