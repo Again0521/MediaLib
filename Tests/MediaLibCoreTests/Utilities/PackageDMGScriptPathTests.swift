@@ -351,6 +351,29 @@ final class PackageDMGScriptPathTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: candidateDMG.path))
     }
 
+    func testPublishedDMGIsVisibleAfterReplacingHiddenImage() throws {
+        let directory = try makeTemporaryDirectory(name: "MediaLib visible publish")
+        let temporaryDMG = directory.appendingPathComponent("fresh.dmg")
+        let candidateDMG = directory.appendingPathComponent(".candidate.dmg")
+        let publicDMG = directory.appendingPathComponent("MediaLib.dmg")
+        try Data("verified-new-image".utf8).write(to: temporaryDMG)
+        try Data("old-image".utf8).write(to: publicDMG)
+        let hide = try runProcess(executable: URL(fileURLWithPath: "/usr/bin/chflags"),
+                                  arguments: ["hidden", publicDMG.path])
+        XCTAssertEqual(hide.status, 0)
+
+        let publish = try runProcess(executable: URL(fileURLWithPath: "/bin/bash"), arguments: [
+            try repositoryScriptURL(named: "publish_verified_dmg.sh").path,
+            temporaryDMG.path, candidateDMG.path, publicDMG.path,
+        ], environment: ["MEDIALIB_HDIUTIL": "/usr/bin/true"])
+        XCTAssertEqual(publish.status, 0)
+        XCTAssertEqual(try Data(contentsOf: publicDMG), Data("verified-new-image".utf8))
+        let listing = try runProcess(executable: URL(fileURLWithPath: "/bin/ls"),
+                                     arguments: ["-lO", publicDMG.path])
+        XCTAssertEqual(listing.status, 0)
+        XCTAssertFalse(listing.stdout.contains(" hidden "), listing.stdout)
+    }
+
     func testPackageScriptCanSeedRepositoriesWithoutReusingBuildProducts() throws {
         let script = try String(contentsOf: repositoryPackageScriptURL(), encoding: .utf8)
 

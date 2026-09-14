@@ -95,6 +95,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             delegateQueue: nil
         )
         defer { session.finishTasksAndInvalidate() }
+        let browserOrigin = proxy ? URL(string: "https://media.example.test")! : baseURL
 
         let loginPage = try await waitForResponse(
             session: session,
@@ -109,7 +110,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
         }
 
         let loginHTML = try XCTUnwrap(String(data: loginPage.data, encoding: .utf8))
-        let csrf = try csrfToken(in: loginHTML)
+        let loginCSRF = try csrfToken(in: loginHTML)
 
         let loginBody = try JSONSerialization.data(withJSONObject: [
             "username": "admin",
@@ -123,7 +124,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
         loginRequest.httpBody = loginBody
         loginRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         loginRequest.setValue((proxy ? "https://media.example.test" : baseURL.absoluteString), forHTTPHeaderField: "Origin")
-        loginRequest.setValue(csrf, forHTTPHeaderField: "X-MediaLIB-CSRF")
+        loginRequest.setValue(loginCSRF, forHTTPHeaderField: "X-MediaLIB-CSRF")
         let (loginData, loginResponse) = try await session.data(for: loginRequest)
         let loginHTTP = try XCTUnwrap(loginResponse as? HTTPURLResponse)
         XCTAssertEqual(loginHTTP.statusCode, 200, String(data: loginData, encoding: .utf8) ?? "")
@@ -135,7 +136,10 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             for: URLRequest(url: baseURL)
         )
         XCTAssertEqual((homeResponse as? HTTPURLResponse)?.statusCode, 200)
-        XCTAssertTrue(String(data: homeData, encoding: .utf8)?.contains("MediaLIB LAN E2E") == true)
+        let homeHTML = try XCTUnwrap(String(data: homeData, encoding: .utf8))
+        XCTAssertTrue(homeHTML.contains("MediaLIB LAN E2E"))
+        let csrf = try csrfToken(in: homeHTML)
+        XCTAssertNotEqual(loginCSRF, csrf)
 
         let stateBody = Data(#"{"event":"progress","positionSeconds":2,"durationSeconds":10}"#.utf8)
         var missingCSRF = URLRequest(
@@ -171,7 +175,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             url: preferencesURL,
             method: "PATCH",
             body: preferencesBody,
-            origin: baseURL,
+            origin: browserOrigin,
             csrf: nil
         )
         rejectedPatch.setValue("\"0\"", forHTTPHeaderField: "If-Match")
@@ -201,7 +205,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             url: preferencesURL,
             method: "PATCH",
             body: unknownBody,
-            origin: baseURL,
+            origin: browserOrigin,
             csrf: csrf
         )
         unknownPatch.setValue("\"1\"", forHTTPHeaderField: "If-Match")
@@ -216,7 +220,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             url: overrideURL,
             method: "PUT",
             body: overrideBody,
-            origin: baseURL,
+            origin: browserOrigin,
             csrf: nil
         )
         let (_, rejectedPutResponse) = try await session.data(for: rejectedPut)
@@ -231,7 +235,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             url: overrideURL,
             method: "PUT",
             body: overrideBody,
-            origin: baseURL,
+            origin: browserOrigin,
             csrf: csrf
         )
         let (putData, putResponse) = try await session.data(for: put)
@@ -251,7 +255,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             url: overrideURL,
             method: "DELETE",
             body: invalidDeleteBody,
-            origin: baseURL,
+            origin: browserOrigin,
             csrf: csrf
         )
         let (_, rejectedDeleteResponse) = try await session.data(for: rejectedDelete)
@@ -266,7 +270,7 @@ final class ServerModeLANEndToEndTests: XCTestCase {
             url: overrideURL,
             method: "DELETE",
             body: Data(),
-            origin: baseURL,
+            origin: browserOrigin,
             csrf: csrf
         )
         let (_, deleteResponse) = try await session.data(for: delete)

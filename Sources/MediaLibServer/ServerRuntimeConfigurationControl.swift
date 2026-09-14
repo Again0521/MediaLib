@@ -55,11 +55,8 @@ enum ServerRuntimeConfigurationValidator {
         if request.networkAccessMode == .lanHTTPS,
            (!requestedProxies.isEmpty || requestedOrigin?.isEmpty == false) {
             issues.append("lan-https.manages-origin")
-        } else if requestedProxies.contains(where: { !isIPv4Address($0) }) {
+        } else if requestedProxies.contains(where: { !ServerModeConfiguration.isTrustedProxyAddress($0) }) {
             issues.append("trusted-proxies.invalid")
-        }
-        if !normalized.trustedProxyAddresses.isEmpty, normalized.publicOrigin == nil {
-            issues.append("trusted-proxies.require-origin")
         }
 
         return ServerRuntimeConfigurationValidation(
@@ -72,12 +69,4 @@ enum ServerRuntimeConfigurationValidator {
         )
     }
 
-    private static func isIPv4Address(_ value: String) -> Bool {
-        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 4 else { return false }
-        return parts.allSatisfy { part in
-            !part.isEmpty && part.count <= 3 && part.allSatisfy(\.isNumber) &&
-                Int(part).map { (0...255).contains($0) } == true
-        }
-    }
 }

@@ -328,6 +328,12 @@ final class ServerAuthenticationService: @unchecked Sendable {
         return Self.cookie(named: Self.refreshCookieName, in: cookieHeader)
     }
 
+    func csrfBinding(forRefreshToken token: String, at date: Date = Date()) throws -> (userID: String, deviceID: String)? {
+        guard let digest = validatedDigest(for: token) else { return nil }
+        guard let session = try identityRepository.activeSession(refreshTokenDigest: digest, at: date) else { return nil }
+        return (session.userID, session.deviceID)
+    }
+
     private func issueTokens(userID: String, deviceID: String, at date: Date) throws -> ServerIssuedTokens {
         let accessToken = tokenGenerator()
         let refreshToken = tokenGenerator()

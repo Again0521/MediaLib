@@ -58,6 +58,136 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
         if let directory { try? FileManager.default.removeItem(at: directory) }
     }
 
+    func testServerResponseCookiesFollowDirectHTTPAndTrustedProxyHTTPS() throws {
+        let login = try requestBody([
+            "username": "alice", "password": "correct horse battery staple",
+            "deviceName": "Web Browser", "platform": "Web", "delivery": "cookie"
+        ])
+        let localConfiguration = try ServerLaunchConfiguration.load(environment: [:])
+        let localServer = try LocalLoopbackHTTPServer(
+            configuration: localConfiguration,
+            authenticationService: authentication,
+            authenticationProvider: { [authentication] in try authentication?.principal(forRequestHead: $0) },
+            csrfToken: "known-csrf-token"
+        )
+        let localPage = localServer.response(for: "GET /login HTTP/1.1\r\nHost: 127.0.0.1:8098\r\n\r\n", body: Data(), clientAddressKey: "127.0.0.1")
+        let localPageHeaders = String(data: localPage.serializedHeaders(), encoding: .utf8) ?? ""
+        let localNonce = try XCTUnwrap(cookieValue(named: ServerCSRFTokenAuthority.preauthCookieName, in: localPageHeaders))
+        let localPreauthCSRF = try csrfToken(in: localPage.body)
+        XCTAssertNotEqual(localPreauthCSRF, "known-csrf-token")
+        let localHead = "POST /api/v1/auth/login HTTP/1.1\r\nHost: 127.0.0.1:8098\r\nOrigin: http://127.0.0.1:8098\r\nCookie: MediaLIBCSRF=\(localNonce)\r\nX-MediaLIB-CSRF: \(localPreauthCSRF)\r\nContent-Type: application/json\r\nContent-Length: \(login.count)\r\n\r\n"
+        XCTAssertEqual(localServer.response(
+            for: localHead.replacingOccurrences(of: localPreauthCSRF, with: "known-csrf-token"),
+            body: login, clientAddressKey: "127.0.0.1"
+        ).statusCode, 403)
+        XCTAssertEqual(localServer.response(
+            for: localHead.replacingOccurrences(of: "Cookie: MediaLIBCSRF=\(localNonce)\r\n", with: ""),
+            body: login, clientAddressKey: "127.0.0.1"
+        ).statusCode, 403)
+        let localResponse = localServer.response(for: localHead, body: login, clientAddressKey: "127.0.0.1")
+        let localHeaders = String(data: localResponse.serializedHeaders(), encoding: .utf8) ?? ""
+        XCTAssertEqual(localResponse.statusCode, 200)
+        XCTAssertTrue(localHeaders.contains("Set-Cookie: MediaLIBAccess="))
+        XCTAssertTrue(localHeaders.contains("; HttpOnly; SameSite=Strict"))
+        XCTAssertFalse(localHeaders.contains("; Secure;"))
+        let localRefreshToken = try XCTUnwrap(cookieValue(
+            named: ServerAuthenticationService.refreshCookieName, in: localHeaders
+        ))
+        let localAccessToken = try XCTUnwrap(cookieValue(named: ServerAuthenticationService.accessCookieName, in: localHeaders))
+        let homeHead = "GET / HTTP/1.1\r\nHost: 127.0.0.1:8098\r\nCookie: MediaLIBAccess=\(localAccessToken)\r\n\r\n"
+        let home = localServer.response(for: homeHead, body: Data(), clientAddressKey: "127.0.0.1")
+        let sessionCSRF = try csrfToken(in: home.body)
+        XCTAssertNotEqual(localPreauthCSRF, sessionCSRF)
+        let loginPageRefresh = "POST /api/v1/auth/refresh HTTP/1.1\r\nHost: 127.0.0.1:8098\r\nOrigin: http://127.0.0.1:8098\r\nX-MediaLIB-CSRF: \(localPreauthCSRF)\r\nCookie: MediaLIBCSRF=\(localNonce); MediaLIBRefresh=\(localRefreshToken)\r\n\r\n"
+        let loginPageRefreshResponse = localServer.response(
+            for: loginPageRefresh, body: Data(), clientAddressKey: "127.0.0.1"
+        )
+        XCTAssertEqual(loginPageRefreshResponse.statusCode, 200)
+        let loginPageRefreshHeaders = String(data: loginPageRefreshResponse.serializedHeaders(), encoding: .utf8) ?? ""
+        let rotatedRefreshToken = try XCTUnwrap(cookieValue(
+            named: ServerAuthenticationService.refreshCookieName, in: loginPageRefreshHeaders
+        ))
+        let refreshHead = "POST /api/v1/auth/refresh HTTP/1.1\r\nHost: 127.0.0.1:8098\r\nOrigin: http://127.0.0.1:8098\r\nX-MediaLIB-CSRF: \(sessionCSRF)\r\nCookie: MediaLIBRefresh=\(rotatedRefreshToken)\r\n\r\n"
+        let refreshResponse = localServer.response(for: refreshHead, body: Data(), clientAddressKey: "127.0.0.1")
+        let refreshHeaders = String(data: refreshResponse.serializedHeaders(), encoding: .utf8) ?? ""
+        XCTAssertEqual(refreshResponse.statusCode, 200)
+        XCTAssertTrue(refreshHeaders.contains("Set-Cookie: MediaLIBRefresh="))
+        XCTAssertFalse(refreshHeaders.contains("; Secure;"))
+        let refreshedAccess = try XCTUnwrap(cookieValue(
+            named: ServerAuthenticationService.accessCookieName, in: refreshHeaders
+        ))
+        let logoutHead = "POST /api/v1/auth/logout HTTP/1.1\r\nHost: 127.0.0.1:8098\r\nOrigin: http://127.0.0.1:8098\r\nX-MediaLIB-CSRF: \(sessionCSRF)\r\nCookie: MediaLIBAccess=\(refreshedAccess)\r\n\r\n"
+        let logoutResponse = localServer.response(for: logoutHead, body: Data(), clientAddressKey: "127.0.0.1")
+        let logoutHeaders = String(data: logoutResponse.serializedHeaders(), encoding: .utf8) ?? ""
+        XCTAssertEqual(logoutResponse.statusCode, 204)
+        XCTAssertTrue(logoutHeaders.contains("Max-Age=0"))
+        XCTAssertFalse(logoutHeaders.contains("; Secure;"))
+        let nextLogin = localServer.response(for: localHead, body: login, clientAddressKey: "127.0.0.1")
+        XCTAssertEqual(nextLogin.statusCode, 200)
+        let nextHeaders = String(data: nextLogin.serializedHeaders(), encoding: .utf8) ?? ""
+        let nextAccess = try XCTUnwrap(cookieValue(named: ServerAuthenticationService.accessCookieName, in: nextHeaders))
+        let nextHome = localServer.response(
+            for: "GET / HTTP/1.1\r\nHost: 127.0.0.1:8098\r\nCookie: MediaLIBAccess=\(nextAccess)\r\n\r\n",
+            body: Data(), clientAddressKey: "127.0.0.1"
+        )
+        let nextCSRF = try csrfToken(in: nextHome.body)
+        XCTAssertNotEqual(sessionCSRF, nextCSRF)
+        let nextLogout = "POST /api/v1/auth/logout HTTP/1.1\r\nHost: 127.0.0.1:8098\r\nOrigin: http://127.0.0.1:8098\r\nX-MediaLIB-CSRF: \(nextCSRF)\r\nCookie: MediaLIBAccess=\(nextAccess)\r\n\r\n"
+        XCTAssertEqual(localServer.response(
+            for: nextLogout.replacingOccurrences(of: nextCSRF, with: sessionCSRF),
+            body: Data(), clientAddressKey: "127.0.0.1"
+        ).statusCode, 403)
+        XCTAssertEqual(localServer.response(
+            for: nextLogout, body: Data(), clientAddressKey: "127.0.0.1"
+        ).statusCode, 204)
+
+        let proxyConfiguration = try ServerLaunchConfiguration.load(environment: [:])
+        let proxyServer = try LocalLoopbackHTTPServer(
+            configuration: proxyConfiguration,
+            authenticationService: authentication,
+            authenticationProvider: { [authentication] in try authentication?.principal(forRequestHead: $0) },
+            csrfToken: "known-csrf-token"
+        )
+        let proxyPage = proxyServer.response(for: "GET /login HTTP/1.1\r\nHost: 127.0.0.1:8098\r\nX-Forwarded-Host: new.example.test:8443\r\nX-Forwarded-Proto: https\r\n\r\n", body: Data(), clientAddressKey: "127.0.0.1")
+        let proxyPageHeaders = String(data: proxyPage.serializedHeaders(), encoding: .utf8) ?? ""
+        let proxyNonce = try XCTUnwrap(cookieValue(named: ServerCSRFTokenAuthority.preauthCookieName, in: proxyPageHeaders))
+        let proxyCSRF = try csrfToken(in: proxyPage.body)
+        XCTAssertTrue(proxyPageHeaders.contains("; HttpOnly; Secure; SameSite=Strict"))
+        let proxyHead = "POST /api/v1/auth/login HTTP/1.1\r\nHost: 127.0.0.1:8098\r\nX-Forwarded-Host: new.example.test:8443\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: 203.0.113.8\r\nOrigin: https://new.example.test:8443\r\nCookie: MediaLIBCSRF=\(proxyNonce)\r\nX-MediaLIB-CSRF: \(proxyCSRF)\r\nContent-Type: application/json\r\nContent-Length: \(login.count)\r\n\r\n"
+        let proxyResponse = proxyServer.response(for: proxyHead, body: login, clientAddressKey: "127.0.0.1")
+        let proxyHeaders = String(data: proxyResponse.serializedHeaders(), encoding: .utf8) ?? ""
+        XCTAssertEqual(proxyResponse.statusCode, 200)
+        XCTAssertTrue(proxyHeaders.contains("; HttpOnly; Secure; SameSite=Strict"))
+    }
+
+    func testServerFormLoginRequiresTheIssuedPreauthCookieAndToken() throws {
+        let configuration = try ServerLaunchConfiguration.load(environment: [:])
+        let server = try LocalLoopbackHTTPServer(
+            configuration: configuration,
+            authenticationService: authentication,
+            authenticationProvider: { [authentication] in try authentication?.principal(forRequestHead: $0) },
+            csrfToken: "known-csrf-token"
+        )
+        let page = server.response(
+            for: "GET /login HTTP/1.1\r\nHost: 127.0.0.1:8098\r\n\r\n",
+            body: Data(), clientAddressKey: "127.0.0.1"
+        )
+        let headers = String(data: page.serializedHeaders(), encoding: .utf8) ?? ""
+        let nonce = try XCTUnwrap(cookieValue(named: ServerCSRFTokenAuthority.preauthCookieName, in: headers))
+        let token = try csrfToken(in: page.body)
+        let form = Data("username=alice&password=correct+horse+battery+staple&csrf=\(token)".utf8)
+        let head = "POST /login HTTP/1.1\r\nHost: 127.0.0.1:8098\r\nOrigin: http://127.0.0.1:8098\r\nCookie: MediaLIBCSRF=\(nonce)\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: \(form.count)\r\n\r\n"
+        XCTAssertEqual(server.response(
+            for: head.replacingOccurrences(of: "Cookie: MediaLIBCSRF=\(nonce)\r\n", with: ""),
+            body: form, clientAddressKey: "127.0.0.1"
+        ).statusCode, 400)
+        XCTAssertEqual(server.response(
+            for: head, body: Data("username=alice&password=correct+horse+battery+staple&csrf=\(String(repeating: "a", count: 64))".utf8),
+            clientAddressKey: "127.0.0.1"
+        ).statusCode, 400)
+        XCTAssertEqual(server.response(for: head, body: form, clientAddressKey: "127.0.0.1").statusCode, 303)
+    }
+
     func testTokenDeliveryLoginAndSingleUseRefreshRoute() throws {
         let login = try requestBody([
             "username": "alice",
@@ -437,6 +567,14 @@ final class ServerAuthHTTPRouteTests: XCTestCase {
             .split(separator: ";", maxSplits: 1)
             .first
             .map(String.init)
+    }
+
+    private func csrfToken(in body: Data) throws -> String {
+        let html = try XCTUnwrap(String(data: body, encoding: .utf8))
+        let marker = #"<meta name="medialib-csrf-token" content=""#
+        let start = try XCTUnwrap(html.range(of: marker)?.upperBound)
+        let end = try XCTUnwrap(html[start...].firstIndex(of: "\""))
+        return String(html[start..<end])
     }
 }
 

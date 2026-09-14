@@ -1,5 +1,10 @@
 import Foundation
+import Darwin
 import MediaLibCore
+
+private extension Array where Element == String {
+    var only: String? { count == 1 ? first : nil }
+}
 
 /// Methods accepted by both HTTP transports before route-specific validation.
 /// Keep this list transport-level: individual handlers still decide which
@@ -10,8 +15,7 @@ enum ServerHTTPMethodContract {
     static let mutatingRawValues: Set<String> = ["POST", "PATCH", "PUT", "DELETE"]
 }
 
-/// 当前回环 HTTP 入口的严格语法与来源校验。完整 HTTP 框架接入后，这些规则仍应作为
-/// 中间件和契约测试保留，不能依赖框架默认值来防止请求走私或 DNS 重绑定。
+/// Shared HTTP syntax, proxy provenance and same-origin boundary for both listeners.
 struct HTTPRequestSecurityPolicy {
     enum Rejection: Equatable {
         case badRequest
@@ -27,6 +31,13 @@ struct HTTPRequestSecurityPolicy {
     /// is kept as a parsed URL so Host/Origin cannot be widened by string prefixes.
     let trustedProxyAddresses: Set<String>
     let publicOrigin: URL?
+
+    struct RequestContext: Equatable {
+        let clientAddressKey: String
+        let scheme: String
+        let authority: String
+        var isSecure: Bool { scheme == "https" }
+    }
 
     init(
         allowedHosts: Set<String>,
@@ -46,7 +57,8 @@ struct HTTPRequestSecurityPolicy {
         _ rawRequest: String,
         bodyLength: Int = 0,
         clientAddressKey: String? = nil,
-        isDirectTLS: Bool = false
+        isDirectTLS: Bool = false,
+        expectedCSRFTokens: [String]? = nil
     ) -> Rejection? {
         guard let headerEnd = rawRequest.range(of: "\r\n\r\n") else { return .badRequest }
         guard rawRequest[headerEnd.upperBound...].isEmpty else { return .badRequest }
@@ -96,26 +108,8 @@ struct HTTPRequestSecurityPolicy {
             headers[name.lowercased(), default: []].append(value)
         }
 
-        let hasForwardedHeaders = headers.keys.contains { key in
-            key == "forwarded" || key.hasPrefix("x-forwarded-")
-        }
-        let isTrustedProxyRequest: Bool
-        if hasForwardedHeaders {
-            guard let clientAddressKey,
-                  trustedProxyAddresses.contains(clientAddressKey),
-                  headers["x-forwarded-proto"] == ["https"],
-                  headers["forwarded"] == nil,
-                  headers["x-forwarded-host"] == nil
-            else {
-                return .forbidden
-            }
-            isTrustedProxyRequest = true
-        } else {
-            isTrustedProxyRequest = false
-        }
-
         guard let hostValues = headers["host"], hostValues.count == 1,
-              isAllowedHost(hostValues[0], allowPublicOrigin: isTrustedProxyRequest || isDirectTLS)
+              Self.normalizedAuthority(hostValues[0], scheme: isDirectTLS ? "https" : "http") != nil
         else {
             return .forbidden
         }
@@ -138,11 +132,10 @@ struct HTTPRequestSecurityPolicy {
         else {
             return .badRequest
         }
-        if let forwardedFor = headers["x-forwarded-for"]?.first {
-            guard isTrustedProxyRequest, Self.isIPv4Address(forwardedFor) else {
-                return .forbidden
-            }
-        }
+        guard let context = requestContext(
+            headers: headers, connectedAddressKey: clientAddressKey ?? "unknown",
+            isDirectTLS: isDirectTLS
+        ) else { return .badRequest }
         let declaredBodyLength: Int
         if let contentLength = headers["content-length"]?.first {
             guard !contentLength.isEmpty,
@@ -190,11 +183,10 @@ struct HTTPRequestSecurityPolicy {
                 // an opaque Origin value even for a local, user-initiated submit.
             } else {
                 guard let token = headers["x-medialib-csrf"]?.first,
-                      Self.constantTimeEqual(token, csrfToken),
-                      originIsAllowed(
-                        headers["origin"]?.first,
-                        allowPublicOrigin: isTrustedProxyRequest || isDirectTLS
-                      )
+                      (expectedCSRFTokens ?? [csrfToken]).contains(where: {
+                          Self.constantTimeEqual(token, $0)
+                      }),
+                      originIsAllowed(headers["origin"]?.first, context: context)
                 else {
                     return .forbidden
                 }
@@ -203,33 +195,7 @@ struct HTTPRequestSecurityPolicy {
         return nil
     }
 
-    private func isAllowedHost(_ value: String, allowPublicOrigin: Bool) -> Bool {
-        let normalized = value.lowercased()
-        guard !normalized.contains("@"),
-              !normalized.contains("/"),
-              !normalized.contains("\\"),
-              !normalized.contains(where: { $0.isWhitespace })
-        else {
-            return false
-        }
-        if allowPublicOrigin, let publicOrigin {
-            guard let components = URLComponents(url: publicOrigin, resolvingAgainstBaseURL: false),
-                  components.scheme?.lowercased() == "https",
-                  let publicHost = components.host?.lowercased(),
-                  let hostAndPort = Self.hostAndPort(from: normalized)
-            else { return false }
-            if hostAndPort.host == publicHost &&
-                (hostAndPort.port ?? 443) == (components.port ?? 443) { return true }
-            guard allowedHosts.contains(hostAndPort.host),
-                  LANIPv4AddressPolicy.isPrivate(hostAndPort.host) else { return false }
-        }
-        guard let hostAndPort = Self.hostAndPort(from: normalized),
-              allowedHosts.contains(hostAndPort.host)
-        else { return false }
-        return hostAndPort.port == nil || hostAndPort.port == allowedPort
-    }
-
-    private func originIsAllowed(_ value: String?, allowPublicOrigin: Bool) -> Bool {
+    private func originIsAllowed(_ value: String?, context: RequestContext) -> Bool {
         // 原生客户端不发送 Origin；浏览器只允许当前服务自身的明确 Origin。
         guard let value else { return true }
         guard let components = URLComponents(string: value),
@@ -241,33 +207,149 @@ struct HTTPRequestSecurityPolicy {
         else {
             return false
         }
-        if allowPublicOrigin, let publicOrigin,
-           let publicComponents = URLComponents(url: publicOrigin, resolvingAgainstBaseURL: false) {
-            if components.scheme?.lowercased() == "https" &&
-                components.host?.lowercased() == publicComponents.host?.lowercased() &&
-                (components.port ?? 443) == (publicComponents.port ?? 443) { return true }
-            return components.scheme?.lowercased() == "https" &&
-                components.host.map { allowedHosts.contains($0.lowercased()) && LANIPv4AddressPolicy.isPrivate($0) } == true &&
-                (components.port ?? 443) == allowedPort
-        }
-        return components.scheme?.lowercased() == "http" &&
-            components.host.map { allowedHosts.contains($0.lowercased()) } == true &&
-            (components.port == nil || components.port == allowedPort)
+        guard let scheme = components.scheme?.lowercased(), scheme == context.scheme,
+              let originAuthority = Self.normalizedAuthority(
+                String(value.dropFirst(scheme.count + 3)), scheme: scheme
+              )
+        else { return false }
+        return originAuthority == context.authority
     }
 
-    /// Returns the one client address asserted by a trusted proxy, or the socket
-    /// peer for direct loopback requests. The caller invokes this only after
-    /// `validate` has accepted the request, so an untrusted header cannot reach
-    /// rate-limit or audit keys.
+    /// Call only after validation; forwarded metadata from untrusted peers is ignored.
     func effectiveClientAddressKey(
         for rawRequest: String,
         connectedAddressKey: String
     ) -> String {
-        guard let headerValue = Self.headerValues(in: rawRequest)["x-forwarded-for"]?.first,
-              trustedProxyAddresses.contains(connectedAddressKey),
-              Self.isIPv4Address(headerValue)
-        else { return connectedAddressKey }
-        return headerValue
+        requestContext(for: rawRequest, connectedAddressKey: connectedAddressKey)?.clientAddressKey
+            ?? connectedAddressKey
+    }
+
+    func requestContext(
+        for rawRequest: String,
+        connectedAddressKey: String,
+        isDirectTLS: Bool = false
+    ) -> RequestContext? {
+        requestContext(headers: Self.headerValues(in: rawRequest),
+                       connectedAddressKey: connectedAddressKey, isDirectTLS: isDirectTLS)
+    }
+
+    private func requestContext(
+        headers: [String: [String]], connectedAddressKey: String, isDirectTLS: Bool
+    ) -> RequestContext? {
+        guard let host = headers["host"]?.only,
+              let directAuthority = Self.normalizedAuthority(host, scheme: isDirectTLS ? "https" : "http")
+        else { return nil }
+        let trusted = trustedProxyAddresses.contains(connectedAddressKey)
+        guard trusted else {
+            return RequestContext(clientAddressKey: connectedAddressKey,
+                                  scheme: isDirectTLS ? "https" : "http", authority: directAuthority)
+        }
+        // A trusted edge must overwrite client-supplied forwarding fields. Reject
+        // inconsistent or malformed edge assertions rather than mixing identities.
+        let forwarded = headers["forwarded"]?.only
+        let parsed = forwarded.flatMap { Self.parseForwarded($0, trustedAddresses: trustedProxyAddresses) }
+        if forwarded != nil && parsed == nil { return nil }
+        let xProto = headers["x-forwarded-proto"]?.only.flatMap(Self.lastForwardedValue)
+        if headers["x-forwarded-proto"] != nil && xProto == nil { return nil }
+        let proto = xProto?.lowercased() ?? parsed?.scheme
+        guard proto == nil || proto == "http" || proto == "https" else { return nil }
+        let scheme = proto ?? (isDirectTLS ? "https" : "http")
+        let xHost = headers["x-forwarded-host"]?.only.flatMap(Self.lastForwardedValue)
+        if headers["x-forwarded-host"] != nil && xHost == nil { return nil }
+        let forwardedHost = xHost ?? parsed?.authority
+        guard let authority = Self.normalizedAuthority(forwardedHost ?? host, scheme: scheme) else { return nil }
+        let forwardedFor = headers["x-forwarded-for"]?.only ?? parsed?.client
+        guard let client = Self.trustedClient(forwardedFor, peer: connectedAddressKey,
+                                              trustedAddresses: trustedProxyAddresses) else { return nil }
+        if let parsed {
+            guard (parsed.scheme == nil || parsed.scheme == scheme),
+                  (parsed.authority.flatMap { Self.normalizedAuthority($0, scheme: scheme) } ?? authority) == authority,
+                  (parsed.client == nil || parsed.client == client)
+            else { return nil }
+        }
+        return RequestContext(clientAddressKey: client, scheme: scheme, authority: authority)
+    }
+
+    private static func trustedClient(_ value: String?, peer: String, trustedAddresses: Set<String>) -> String? {
+        guard let value else { return peer }
+        let chain = value.split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        guard !chain.isEmpty, chain.count <= 16,
+              chain.allSatisfy({ isIPAddress($0) }) else { return nil }
+        for address in chain.reversed() where !trustedAddresses.contains(address) { return address }
+        return chain.first
+    }
+
+    private static func lastForwardedValue(_ value: String) -> String? {
+        let items = value.split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        guard !items.isEmpty, items.count <= 16, items.allSatisfy({ !$0.isEmpty }) else { return nil }
+        return items.last
+    }
+
+    private static func parseForwarded(
+        _ value: String, trustedAddresses: Set<String>
+    ) -> (scheme: String?, authority: String?, client: String?)? {
+        guard let elements = splitForwarded(value, separator: ","),
+              !elements.isEmpty, elements.count <= 16 else { return nil }
+        var clients: [String] = []
+        var finalFields: [String: String] = [:]
+        for element in elements {
+            guard let parts = splitForwarded(element, separator: ";"), !parts.isEmpty else { return nil }
+            var fields: [String: String] = [:]
+            for part in parts {
+                let pair = part.split(separator: "=", maxSplits: 1).map(String.init)
+                guard pair.count == 2 else { return nil }
+                let key = pair[0].trimmingCharacters(in: .whitespaces).lowercased()
+                var field = pair[1].trimmingCharacters(in: .whitespaces)
+                if field.hasPrefix("\"") && field.hasSuffix("\"") && field.count >= 2 {
+                    field = String(field.dropFirst().dropLast())
+                }
+                guard ["for", "proto", "host", "by"].contains(key),
+                      !field.isEmpty, !field.contains("\""), !field.contains("\\"),
+                      fields[key] == nil else { return nil }
+                fields[key] = field
+            }
+            guard let client = fields["for"].flatMap(normalizedForwardedAddress) else { return nil }
+            clients.append(client)
+            finalFields = fields
+        }
+        let effectiveClient = clients.reversed().first { !trustedAddresses.contains($0) } ?? clients.first
+        // Only the rightmost entry is allowed to declare the external scheme and
+        // authority; left entries may have been supplied by a client.
+        return (finalFields["proto"]?.lowercased(), finalFields["host"], effectiveClient)
+    }
+
+    private static func splitForwarded(_ value: String, separator: Character) -> [String]? {
+        var quoted = false
+        var parts: [String] = []
+        var current = ""
+        for character in value {
+            if character == "\"" { quoted.toggle() }
+            if character == separator && !quoted {
+                let part = current.trimmingCharacters(in: .whitespaces)
+                guard !part.isEmpty else { return nil }
+                parts.append(part)
+                current = ""
+            } else {
+                current.append(character)
+            }
+        }
+        let part = current.trimmingCharacters(in: .whitespaces)
+        guard !quoted, !part.isEmpty else { return nil }
+        parts.append(part)
+        return parts
+    }
+
+    private static func normalizedForwardedAddress(_ value: String) -> String? {
+        if isIPAddress(value) { return value }
+        if value.hasPrefix("["), let closing = value.firstIndex(of: "]") {
+            let address = String(value[value.index(after: value.startIndex)..<closing])
+            let suffix = value[value.index(after: closing)...]
+            guard (suffix.isEmpty || suffix.first == ":"), isIPAddress(address) else { return nil }
+            return address
+        }
+        return nil
     }
 
     private static func headerValues(in rawRequest: String) -> [String: [String]] {
@@ -281,22 +363,41 @@ struct HTTPRequestSecurityPolicy {
         }
     }
 
-    private static func hostAndPort(from value: String) -> (host: String, port: Int?)? {
-        let pieces = value.split(separator: ":", omittingEmptySubsequences: false)
-        guard pieces.count == 1 || pieces.count == 2,
-              let host = pieces.first, !host.isEmpty
+    private static func normalizedAuthority(_ value: String, scheme: String) -> String? {
+        guard !value.isEmpty, value.utf8.count <= 255,
+              !value.contains(where: { $0.isWhitespace || $0.isNewline }),
+              !value.contains("@"), !value.contains("/"), !value.contains("\\"),
+              !value.contains("#"), !value.contains("?"), !value.contains(","),
+              !value.contains("%"), !value.hasSuffix(":"),
+              let url = URLComponents(string: "\(scheme)://\(value)"),
+              url.user == nil, url.password == nil, url.path.isEmpty,
+              url.query == nil, url.fragment == nil,
+              let parsedHost = url.host?.lowercased(), !parsedHost.isEmpty
         else { return nil }
-        if pieces.count == 1 { return (String(host), nil) }
-        guard let port = Int(pieces[1]), (1...65_535).contains(port) else { return nil }
-        return (String(host), port)
+        let host = parsedHost.hasPrefix("[") && parsedHost.hasSuffix("]")
+            ? String(parsedHost.dropFirst().dropLast()) : parsedHost
+        let validHost: Bool
+        if host.contains(":") {
+            validHost = isIPAddress(host)
+        } else {
+            validHost = host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy {
+                !$0.isEmpty && $0.count <= 63 && $0.first != "-" && $0.last != "-" &&
+                $0.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-") }
+            }
+        }
+        guard validHost, url.port == nil || (1...65_535).contains(url.port!) else { return nil }
+        let port = url.port
+        let hostPart = host.contains(":") ? "[\(host)]" : host
+        let defaultPort = scheme == "https" ? 443 : 80
+        return "\(hostPart):\(port ?? defaultPort)"
     }
 
-    private static func isIPv4Address(_ value: String) -> Bool {
-        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 4 else { return false }
-        return parts.allSatisfy { part in
-            !part.isEmpty && part.count <= 3 && part.allSatisfy(\.isNumber) &&
-                Int(part).map { (0...255).contains($0) } == true
+    private static func isIPAddress(_ value: String) -> Bool {
+        var address4 = in_addr()
+        var address6 = in6_addr()
+        return value.withCString { pointer in
+            inet_pton(AF_INET, pointer, &address4) == 1 ||
+            inet_pton(AF_INET6, pointer, &address6) == 1
         }
     }
 

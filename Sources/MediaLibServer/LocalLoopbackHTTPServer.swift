@@ -10,8 +10,8 @@ import Darwin
 private func streamSocketType() -> Int32 { SOCK_STREAM }
 #endif
 
-/// 当前认证回环 HTTP 适配层。它承担严格请求解析、静态 Web、API 与流式媒体，
-/// 但仍不承担 TLS、可信代理或公网访问；开放远程前会由生产 HTTP 框架替换。
+/// Shared request adapter for loopback HTTP and the Hummingbird LAN TLS listener.
+/// It owns request validation, browser CSRF binding, routing and streaming responses.
 final class LocalLoopbackHTTPServer: @unchecked Sendable {
     private static let maximumConcurrentConnections = 32
     private static let maximumRequestsPerConnection = 64
@@ -21,6 +21,9 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
     private let configuration: ServerLaunchConfiguration
     private let router: LocalHTTPRouter
     private let requestSecurityPolicy: HTTPRequestSecurityPolicy
+    private let authenticationService: ServerAuthenticationService?
+    private let csrfAuthority: ServerCSRFTokenAuthority
+    private let legacyCSRFToken: String
     private let clientQueue = DispatchQueue(
         label: "MediaLibServer.HTTPClients",
         qos: .userInitiated,
@@ -114,6 +117,9 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             allowedHosts.insert(address)
         }
         self.configuration = configuration
+        self.authenticationService = authenticationService
+        self.csrfAuthority = ServerCSRFTokenAuthority(secret: csrfToken)
+        self.legacyCSRFToken = csrfToken
         self.requestSecurityPolicy = HTTPRequestSecurityPolicy(
             allowedHosts: allowedHosts,
             allowedPort: configuration.port,
@@ -188,40 +194,62 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         guard configuration.networkAccessMode == .loopbackOnly else {
             throw ServerConfigurationError.lanHTTPSRuntimeUnavailable
         }
-        let listener = try makeListener()
-        defer { _ = close(listener) }
+        var listeners: [Int32] = []
+        do {
+            for address in configuration.listenAddresses {
+                listeners.append(try makeListener(address: address))
+            }
+        } catch {
+            listeners.forEach { _ = close($0) }
+            throw error
+        }
+        defer { listeners.forEach { _ = close($0) } }
+        var ready = listeners.map { pollfd(fd: $0, events: Int16(POLLIN), revents: 0) }
 
         while true {
-            var peerAddress = sockaddr_in()
-            var peerAddressLength = socklen_t(MemoryLayout<sockaddr_in>.size)
-            let client = withUnsafeMutablePointer(to: &peerAddress) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    accept(listener, $0, &peerAddressLength)
-                }
+            let count = ready.withUnsafeMutableBufferPointer { buffer in
+                poll(buffer.baseAddress, nfds_t(buffer.count), -1)
             }
-            if client < 0 {
+            if count < 0 {
                 if errno == EINTR { continue }
                 throw LocalHTTPServerError.acceptFailed(errno: errno)
             }
-            guard configureTimeouts(for: client) else {
-                _ = close(client)
-                continue
+            if ready.contains(where: { $0.revents & Int16(POLLERR | POLLHUP | POLLNVAL) != 0 }) {
+                throw LocalHTTPServerError.acceptFailed(errno: EIO)
             }
-            guard connectionSlots.wait(timeout: .now()) == .success else {
-                write(response: .tooManyRequests(retryAfter: 1), to: client)
-                _ = close(client)
-                continue
-            }
-            let clientAddressKey = Self.clientAddressKey(peerAddress)
-            clientQueue.async { [self] in
-                defer { connectionSlots.signal() }
-                handle(client: client, clientAddressKey: clientAddressKey)
+            for index in ready.indices where ready[index].revents & Int16(POLLIN) != 0 {
+                var peerAddress = sockaddr_storage()
+                var peerAddressLength = socklen_t(MemoryLayout<sockaddr_storage>.size)
+                let client = withUnsafeMutablePointer(to: &peerAddress) { pointer in
+                    pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        accept(listeners[index], $0, &peerAddressLength)
+                    }
+                }
+                if client < 0 {
+                    if errno == EINTR { continue }
+                    throw LocalHTTPServerError.acceptFailed(errno: errno)
+                }
+                guard configureTimeouts(for: client) else {
+                    _ = close(client)
+                    continue
+                }
+                guard connectionSlots.wait(timeout: .now()) == .success else {
+                    write(response: .tooManyRequests(retryAfter: 1), to: client)
+                    _ = close(client)
+                    continue
+                }
+                let clientAddressKey = Self.clientAddressKey(peerAddress)
+                clientQueue.async { [self] in
+                    defer { connectionSlots.signal() }
+                    handle(client: client, clientAddressKey: clientAddressKey)
+                }
             }
         }
     }
 
-    private func makeListener() throws -> Int32 {
-        let descriptor = socket(AF_INET, streamSocketType(), 0)
+    private func makeListener(address host: String) throws -> Int32 {
+        let family = host.contains(":") ? AF_INET6 : AF_INET
+        let descriptor = socket(family, streamSocketType(), 0)
         guard descriptor >= 0 else {
             throw LocalHTTPServerError.socketCreationFailed(errno: errno)
         }
@@ -239,26 +267,54 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
             throw LocalHTTPServerError.socketOptionFailed(errno: error)
         }
 
-        var address = sockaddr_in()
-        #if !os(Linux)
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        #endif
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = in_port_t(UInt16(configuration.port).bigEndian)
-        guard inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1 else {
-            _ = close(descriptor)
-            throw LocalHTTPServerError.loopbackAddressCreationFailed
+        if family == AF_INET6 {
+            var ipv6Only: Int32 = 1
+            guard setsockopt(descriptor, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6Only,
+                             socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                let error = errno
+                _ = close(descriptor)
+                throw LocalHTTPServerError.socketOptionFailed(errno: error)
+            }
         }
 
-        let bindResult = withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        let bindResult: Int32
+        if family == AF_INET6 {
+            var address = sockaddr_in6()
+            #if !os(Linux)
+            address.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            #endif
+            address.sin6_family = sa_family_t(AF_INET6)
+            address.sin6_port = in_port_t(UInt16(configuration.port).bigEndian)
+            guard inet_pton(AF_INET6, host, &address.sin6_addr) == 1 else {
+                _ = close(descriptor)
+                throw LocalHTTPServerError.loopbackAddressCreationFailed
+            }
+            bindResult = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                }
+            }
+        } else {
+            var address = sockaddr_in()
+        #if !os(Linux)
+            address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #endif
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_port = in_port_t(UInt16(configuration.port).bigEndian)
+            guard inet_pton(AF_INET, host, &address.sin_addr) == 1 else {
+                _ = close(descriptor)
+                throw LocalHTTPServerError.loopbackAddressCreationFailed
+            }
+            bindResult = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
             }
         }
         guard bindResult == 0 else {
             let error = errno
             _ = close(descriptor)
-            throw LocalHTTPServerError.bindFailed(port: configuration.port, errno: error)
+            throw LocalHTTPServerError.bindFailed(address: host, port: configuration.port, errno: error)
         }
         guard listen(descriptor, SOMAXCONN) == 0 else {
             let error = errno
@@ -310,22 +366,62 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         clientAddressKey: String,
         isDirectTLS: Bool = false
     ) -> LocalHTTPResponse {
+        let requestLine = requestHead.components(separatedBy: "\r\n").first ?? ""
+        let methodAndTarget = requestLine.split(separator: " ", omittingEmptySubsequences: true)
+        let path = methodAndTarget.count >= 2
+            ? String(methodAndTarget[1].split(separator: "?", maxSplits: 1).first ?? "") : ""
+        let isLoginPage = methodAndTarget.first.map { $0 == "GET" || $0 == "HEAD" } == true && path == "/login"
+        let existingNonce = csrfAuthority.preauthNonce(in: requestHead)
+        let nonce = existingNonce ?? (isLoginPage ? csrfAuthority.newPreauthNonce() : nil)
+        let preauthToken = nonce.map(csrfAuthority.preauthToken)
+        let mayNeedSessionToken = !isLoginPage && path != "/api/v1/auth/login" &&
+            !path.hasPrefix("/assets/") && path != "/health" && path != "/.well-known/mlink"
+        let principal = mayNeedSessionToken
+            ? (try? authenticationService?.principal(forRequestHead: requestHead)) : nil
+        let sessionToken = principal.map {
+            csrfAuthority.sessionToken(userID: $0.userID, deviceID: $0.deviceID)
+        }
+        let refreshBinding = path == "/api/v1/auth/refresh"
+            ? authenticationService?.refreshToken(forRequestHead: requestHead)
+                .flatMap { try? authenticationService?.csrfBinding(forRefreshToken: $0) }
+            : nil
+        let refreshToken = refreshBinding.map {
+            csrfAuthority.sessionToken(userID: $0.userID, deviceID: $0.deviceID)
+        }
+        let hasBrowserCookie = httpHeader(named: "Cookie", in: requestHead) != nil
+        let expectedTokens: [String]
+        switch path {
+        case "/login", "/api/v1/auth/login":
+            expectedTokens = preauthToken.map { [$0] } ?? []
+        case "/api/v1/auth/refresh":
+            expectedTokens = [preauthToken, sessionToken, refreshToken].compactMap { $0 }
+                + (hasBrowserCookie ? [] : [legacyCSRFToken])
+        default:
+            expectedTokens = hasBrowserCookie
+                ? (sessionToken.map { [$0] } ?? [])
+                : [legacyCSRFToken]
+        }
         if let rejection = requestSecurityPolicy.validate(
             requestHead,
             bodyLength: body.count,
             clientAddressKey: clientAddressKey,
-            isDirectTLS: isDirectTLS
+            isDirectTLS: isDirectTLS,
+            expectedCSRFTokens: expectedTokens
         ) {
             return response(for: rejection)
         }
+        let context = requestSecurityPolicy.requestContext(
+            for: requestHead, connectedAddressKey: clientAddressKey, isDirectTLS: isDirectTLS
+        )
         return router.response(
             for: requestHead,
             body: body,
-            clientAddressKey: requestSecurityPolicy.effectiveClientAddressKey(
-                for: requestHead,
-                connectedAddressKey: clientAddressKey
-            )
-        )
+            clientAddressKey: context?.clientAddressKey ?? clientAddressKey,
+            csrfTokenOverride: isLoginPage ? preauthToken : (sessionToken ?? preauthToken)
+        ).addingHeaders(
+            isLoginPage && existingNonce == nil && nonce != nil
+                ? [csrfAuthority.preauthCookieHeader(nonce: nonce!)] : []
+        ).withCookieSecurity(isSecure: context?.isSecure ?? isDirectTLS)
     }
 
     private func response(for rejection: HTTPRequestSecurityPolicy.Rejection) -> LocalHTTPResponse {
@@ -434,11 +530,21 @@ final class LocalLoopbackHTTPServer: @unchecked Sendable {
         return version == "HTTP/1.0" && connectionTokens.contains("keep-alive")
     }
 
-    private static func clientAddressKey(_ address: sockaddr_in) -> String {
+    private static func clientAddressKey(_ address: sockaddr_storage) -> String {
         var address = address
-        var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-        let result = withUnsafePointer(to: &address.sin_addr) { pointer in
-            inet_ntop(AF_INET, pointer, &buffer, socklen_t(buffer.count))
+        let isIPv6 = Int32(address.ss_family) == AF_INET6
+        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        let result = withUnsafePointer(to: &address) { pointer -> UnsafePointer<CChar>? in
+            if isIPv6 {
+                return pointer.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { socketAddress in
+                    var ip = socketAddress.pointee.sin6_addr
+                    return inet_ntop(AF_INET6, &ip, &buffer, socklen_t(buffer.count))
+                }
+            }
+            return pointer.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { socketAddress in
+                var ip = socketAddress.pointee.sin_addr
+                return inet_ntop(AF_INET, &ip, &buffer, socklen_t(buffer.count))
+            }
         }
         guard result != nil else { return "unresolved-client" }
         return String(cString: buffer)
@@ -893,8 +999,10 @@ struct LocalHTTPRouter {
     func response(
         for requestHead: String,
         body: Data = Data(),
-        clientAddressKey: String = "loopback-test-client"
+        clientAddressKey: String = "loopback-test-client",
+        csrfTokenOverride: String? = nil
     ) -> LocalHTTPResponse {
+        let csrfToken = csrfTokenOverride ?? self.csrfToken
         guard let requestLine = requestHead.split(separator: "\r\n", maxSplits: 1).first else {
             return .badRequest()
         }
@@ -953,6 +1061,7 @@ struct LocalHTTPRouter {
             requestHead: requestHead,
             body: body,
             clientAddressKey: clientAddressKey,
+            csrfToken: csrfToken,
             rateLimitResponse: { scope, identityComponents in
                 limitedResponse(scope: scope, identityComponents: identityComponents)
             }
@@ -2481,6 +2590,26 @@ struct LocalHTTPResponse: @unchecked Sendable {
     let declaredContentLength: Int
     let additionalHeaders: [String]
 
+    func addingHeaders(_ headers: [String]) -> Self {
+        guard !headers.isEmpty else { return self }
+        return Self(statusCode: statusCode, reason: reason, contentType: contentType,
+                    payload: payload, declaredContentLength: declaredContentLength,
+                    additionalHeaders: additionalHeaders + headers)
+    }
+
+    func withCookieSecurity(isSecure: Bool) -> Self {
+        guard !isSecure else { return self }
+        return Self(
+            statusCode: statusCode, reason: reason, contentType: contentType,
+            payload: payload, declaredContentLength: declaredContentLength,
+            additionalHeaders: additionalHeaders.map { header in
+                header.hasPrefix("Set-Cookie: ")
+                    ? header.replacingOccurrences(of: "; Secure;", with: ";")
+                    : header
+            }
+        )
+    }
+
     /// `declaredContentLength` 取这个值时不发 `Content-Length`：长度要等 ffmpeg
     /// 转完才知道，而读者按下播放的那一刻就要开始收字节。响应因此只能以关闭连接
     /// 结束，`write(response:)` 会强制 `Connection: close`。
@@ -2994,7 +3123,7 @@ private enum LocalHTTPServerError: LocalizedError {
     case socketCreationFailed(errno: Int32)
     case socketOptionFailed(errno: Int32)
     case loopbackAddressCreationFailed
-    case bindFailed(port: Int, errno: Int32)
+    case bindFailed(address: String, port: Int, errno: Int32)
     case listenFailed(errno: Int32)
     case acceptFailed(errno: Int32)
 
@@ -3006,8 +3135,8 @@ private enum LocalHTTPServerError: LocalizedError {
             return "无法配置本机 HTTP socket：\(errorMessage(errno))"
         case .loopbackAddressCreationFailed:
             return "无法创建本机回环地址。"
-        case let .bindFailed(port, errno):
-            return "无法监听 127.0.0.1:\(port)：\(errorMessage(errno))"
+        case let .bindFailed(address, port, errno):
+            return "无法监听 \(address):\(port)：\(errorMessage(errno))"
         case let .listenFailed(errno):
             return "无法启动本机 HTTP 服务：\(errorMessage(errno))"
         case let .acceptFailed(errno):

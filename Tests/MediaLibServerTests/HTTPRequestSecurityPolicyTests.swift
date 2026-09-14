@@ -22,10 +22,11 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
             publicOrigin: URL(string: "https://media.example.com"))
         let request = "GET /health HTTP/1.1\r\nHost: media.example.com\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: 203.0.113.7\r\n\r\n"
         XCTAssertNil(policy.validate(request, clientAddressKey: "192.168.1.2", isDirectTLS: true))
-        XCTAssertEqual(policy.validate(request, clientAddressKey: "192.168.1.3", isDirectTLS: true), .forbidden)
+        XCTAssertNil(policy.validate(request, clientAddressKey: "192.168.1.3", isDirectTLS: true))
+        XCTAssertEqual(policy.effectiveClientAddressKey(for: request, connectedAddressKey: "192.168.1.3"), "192.168.1.3")
         XCTAssertNil(policy.validate("GET /health HTTP/1.1\r\nHost: 192.168.1.10:8098\r\n\r\n", isDirectTLS: true))
-        XCTAssertEqual(policy.validate("GET /health HTTP/1.1\r\nHost: media.example.com:8098\r\n\r\n", isDirectTLS: true), .forbidden)
-        XCTAssertEqual(policy.validate("GET /health HTTP/1.1\r\nHost: attacker.example\r\n\r\n", isDirectTLS: true), .forbidden)
+        XCTAssertNil(policy.validate("GET /health HTTP/1.1\r\nHost: media.example.com:8098\r\n\r\n", isDirectTLS: true))
+        XCTAssertNil(policy.validate("GET /health HTTP/1.1\r\nHost: attacker.example\r\n\r\n", isDirectTLS: true))
     }
 
     func testAcceptsStrictSameOriginProbe() {
@@ -49,29 +50,23 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
             ),
             .forbidden
         )
-        XCTAssertEqual(
+        XCTAssertNil(
             lanPolicy.validate(
                 "GET /health HTTP/1.1\r\nHost: 192.168.31.100:8098\r\nX-Forwarded-Proto: https\r\n\r\n",
                 clientAddressKey: "192.168.31.20",
                 isDirectTLS: true
-            ),
-            .forbidden
+            )
         )
     }
 
-    func testRejectsDNSRebindingAndDuplicateHostHeaders() {
-        XCTAssertEqual(
-            policy.validate("GET /health HTTP/1.1\r\nHost: attacker.example\r\n\r\n"),
-            .forbidden
-        )
+    func testAcceptsExternalHostsButRejectsDuplicateOrMalformedAuthority() {
+        XCTAssertNil(policy.validate("GET /health HTTP/1.1\r\nHost: attacker.example\r\n\r\n"))
         XCTAssertEqual(
             policy.validate("GET /health HTTP/1.1\r\nHost: localhost\r\nHost: 127.0.0.1\r\n\r\n"),
             .forbidden
         )
-        XCTAssertEqual(
-            policy.validate("GET /health HTTP/1.1\r\nHost: localhost:9999\r\n\r\n"),
-            .forbidden
-        )
+        XCTAssertNil(policy.validate("GET /health HTTP/1.1\r\nHost: localhost:9999\r\n\r\n"))
+        XCTAssertEqual(policy.validate("GET /health HTTP/1.1\r\nHost: good.example@evil.example\r\n\r\n"), .forbidden)
     }
 
     func testRejectsRequestSmugglingHeadersAndBodies() {
@@ -299,17 +294,15 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
         )
     }
 
-    func testTrustedHTTPSProxyMayUseOnlyConfiguredPublicOrigin() {
+    func testTrustedProxyDoesNotRequireConfiguredPublicOrigin() {
         let request = "GET /health HTTP/1.1\r\nHost: media.example.test\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: 192.168.1.44\r\n\r\n"
         XCTAssertNil(proxyPolicy.validate(request, clientAddressKey: "127.0.0.1"))
-        XCTAssertEqual(proxyPolicy.validate(request, clientAddressKey: "192.168.1.20"), .forbidden)
-        XCTAssertEqual(
-            proxyPolicy.validate(request.replacingOccurrences(of: "X-Forwarded-Proto: https", with: "X-Forwarded-Proto: http"), clientAddressKey: "127.0.0.1"),
-            .forbidden
+        XCTAssertNil(proxyPolicy.validate(request, clientAddressKey: "192.168.1.20"))
+        XCTAssertNil(
+            proxyPolicy.validate(request.replacingOccurrences(of: "X-Forwarded-Proto: https", with: "X-Forwarded-Proto: http"), clientAddressKey: "127.0.0.1")
         )
-        XCTAssertEqual(
-            proxyPolicy.validate(request.replacingOccurrences(of: "Host: media.example.test", with: "Host: attacker.example"), clientAddressKey: "127.0.0.1"),
-            .forbidden
+        XCTAssertNil(
+            proxyPolicy.validate(request.replacingOccurrences(of: "Host: media.example.test", with: "Host: attacker.example"), clientAddressKey: "127.0.0.1")
         )
     }
 
@@ -324,14 +317,53 @@ final class HTTPRequestSecurityPolicyTests: XCTestCase {
             proxyPolicy.effectiveClientAddressKey(for: request, connectedAddressKey: "192.168.1.20"),
             "192.168.1.20"
         )
-        XCTAssertEqual(
-            proxyPolicy.validate(request.replacingOccurrences(of: "X-Forwarded-For: 10.0.0.7", with: "X-Forwarded-For: 10.0.0.7, 10.0.0.8"), clientAddressKey: "127.0.0.1"),
-            .forbidden
+        XCTAssertNil(
+            proxyPolicy.validate(request.replacingOccurrences(of: "X-Forwarded-For: 10.0.0.7", with: "X-Forwarded-For: 10.0.0.7, 10.0.0.8"), clientAddressKey: "127.0.0.1")
         )
+        XCTAssertEqual(proxyPolicy.effectiveClientAddressKey(
+            for: request.replacingOccurrences(of: "X-Forwarded-For: 10.0.0.7", with: "X-Forwarded-For: 10.0.0.7, 10.0.0.8"),
+            connectedAddressKey: "127.0.0.1"), "10.0.0.8")
     }
 
-    func testForwardedHeadersAreRejectedWhenProxyModeIsNotConfigured() {
+    func testForwardedHeadersAreIgnoredWhenProxyModeIsNotConfigured() {
         let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-Proto: https\r\n\r\n"
-        XCTAssertEqual(policy.validate(request, clientAddressKey: "127.0.0.1"), .forbidden)
+        XCTAssertNil(policy.validate(request, clientAddressKey: "127.0.0.1"))
+        XCTAssertEqual(policy.requestContext(for: request, connectedAddressKey: "127.0.0.1")?.scheme, "http")
+    }
+
+    func testDynamicAuthorityAndTrustedProxySchemeKeepBrowserWritesSameOrigin() {
+        let request = "POST /api/v1/me/preferences HTTP/1.1\r\nHost: 127.0.0.1:8098\r\nX-Forwarded-Host: media.example.test:8443\r\nX-Forwarded-Proto: https\r\nX-Forwarded-For: 203.0.113.9\r\nOrigin: https://media.example.test:8443\r\nX-MediaLIB-CSRF: known-csrf-token\r\nContent-Length: 0\r\n\r\n"
+        XCTAssertNil(proxyPolicy.validate(request, clientAddressKey: "127.0.0.1"))
+        XCTAssertEqual(proxyPolicy.requestContext(for: request, connectedAddressKey: "127.0.0.1")?.authority,
+                       "media.example.test:8443")
+        XCTAssertEqual(proxyPolicy.validate(request, clientAddressKey: "192.168.1.20"), .forbidden)
+        XCTAssertEqual(proxyPolicy.validate(request.replacingOccurrences(of: ":8443\r\nX-MediaLIB-CSRF", with: ":8444\r\nX-MediaLIB-CSRF"), clientAddressKey: "127.0.0.1"), .forbidden)
+    }
+
+    func testForwardedIdentityConflictAndRightmostUntrustedClient() {
+        let request = "GET /health HTTP/1.1\r\nHost: media.example.test\r\nForwarded: for=203.0.113.9;proto=https;host=media.example.test\r\nX-Forwarded-For: 192.0.2.8, 203.0.113.9\r\nX-Forwarded-Proto: https\r\n\r\n"
+        XCTAssertNil(proxyPolicy.validate(request, clientAddressKey: "127.0.0.1"))
+        XCTAssertEqual(proxyPolicy.requestContext(for: request, connectedAddressKey: "127.0.0.1")?.clientAddressKey,
+                       "203.0.113.9")
+        XCTAssertEqual(proxyPolicy.validate(request.replacingOccurrences(of: "X-Forwarded-Proto: https", with: "X-Forwarded-Proto: http"), clientAddressKey: "127.0.0.1"), .badRequest)
+        XCTAssertEqual(proxyPolicy.validate(request.replacingOccurrences(of: "203.0.113.9;proto", with: "203.0.113.8;proto"), clientAddressKey: "127.0.0.1"), .badRequest)
+        let quoted = "GET /health HTTP/1.1\r\nHost: [::1]:8098\r\nForwarded: for=\"[2001:db8::8]\";proto=https;host=\"media.example.test:8443\"\r\n\r\n"
+        XCTAssertNil(proxyPolicy.validate(quoted, clientAddressKey: "127.0.0.1"))
+        XCTAssertEqual(proxyPolicy.requestContext(for: quoted, connectedAddressKey: "127.0.0.1")?.clientAddressKey,
+                       "2001:db8::8")
+        XCTAssertEqual(proxyPolicy.requestContext(for: quoted, connectedAddressKey: "127.0.0.1")?.authority,
+                       "media.example.test:8443")
+        XCTAssertEqual(proxyPolicy.validate(quoted.replacingOccurrences(of: ";proto=https", with: ";proto=ftp"), clientAddressKey: "127.0.0.1"), .badRequest)
+    }
+
+    func testIPv6AuthorityAndClientAreAcceptedWithoutTreatingUntrustedHeadersAsIdentity() {
+        let request = "GET /health HTTP/1.1\r\nHost: [::1]:8098\r\nX-Forwarded-For: 2001:db8::7\r\n\r\n"
+        XCTAssertNil(proxyPolicy.validate(request, clientAddressKey: "127.0.0.1"))
+        XCTAssertEqual(proxyPolicy.requestContext(for: request, connectedAddressKey: "127.0.0.1")?.clientAddressKey,
+                       "2001:db8::7")
+        XCTAssertNil(proxyPolicy.validate(request, clientAddressKey: "192.168.1.20"))
+        XCTAssertEqual(proxyPolicy.requestContext(for: request, connectedAddressKey: "192.168.1.20")?.clientAddressKey,
+                       "192.168.1.20")
+        XCTAssertEqual(proxyPolicy.validate("GET /health HTTP/1.1\r\nHost: ::1\r\n\r\n"), .forbidden)
     }
 }

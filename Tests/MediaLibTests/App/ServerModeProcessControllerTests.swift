@@ -97,6 +97,18 @@ final class ServerModeProcessControllerTests: XCTestCase {
         controller.stop()
     }
 
+    func testLoopbackEnvironmentPreservesDefaultAndDisabledProxyTrust() {
+        var configuration = ServerModeConfiguration()
+        let defaults = ServerModeProcessController.processEnvironment(configuration: configuration,
+            base: ["MEDIALIB_SERVER_LISTEN_ADDRESSES": "0.0.0.0"])
+        XCTAssertNil(defaults["MEDIALIB_SERVER_PUBLIC_ORIGIN"])
+        XCTAssertNil(defaults["MEDIALIB_SERVER_LISTEN_ADDRESSES"])
+        XCTAssertEqual(defaults["MEDIALIB_SERVER_TRUSTED_PROXIES"], "127.0.0.1,::1")
+        configuration.updateTrustedProxyAddresses([])
+        let disabled = ServerModeProcessController.processEnvironment(configuration: configuration, base: [:])
+        XCTAssertEqual(disabled["MEDIALIB_SERVER_TRUSTED_PROXIES"], "")
+    }
+
     func testLANEnvironmentUsesDerivedHTTPSOriginAndNeverTrustsProxyHeaders() {
         let configuration = ServerModeConfiguration(
             serverID: "server-lan",
@@ -115,7 +127,7 @@ final class ServerModeProcessControllerTests: XCTestCase {
         XCTAssertEqual(environment["MEDIALIB_SERVER_NETWORK_ACCESS_MODE"], "lan-https")
         XCTAssertEqual(environment["MEDIALIB_SERVER_VERSION"], AppVersion.current)
         XCTAssertEqual(environment["MEDIALIB_SERVER_PUBLIC_ORIGIN"], "https://192.168.31.100:8098")
-        XCTAssertNil(environment["MEDIALIB_SERVER_TRUSTED_PROXIES"])
+        XCTAssertEqual(environment["MEDIALIB_SERVER_TRUSTED_PROXIES"], "")
     }
 
     func testRealLANRuntimePassesPinnedCAHealthCheck() async throws {

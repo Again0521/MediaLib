@@ -29,6 +29,7 @@ struct ServerAuthenticationHTTPHandler {
         requestHead: String,
         body: Data,
         clientAddressKey: String,
+        csrfToken: String? = nil,
         rateLimitResponse: (ServerRateLimitScope, [String]) -> LocalHTTPResponse?
     ) -> LocalHTTPResponse? {
         guard method == "POST" else { return nil }
@@ -49,6 +50,7 @@ struct ServerAuthenticationHTTPHandler {
                 target: target,
                 body: body,
                 clientAddressKey: clientAddressKey,
+                csrfToken: csrfToken ?? self.csrfToken,
                 rateLimitResponse: rateLimitResponse
             )
         case "/api/v1/auth/refresh":
@@ -150,6 +152,7 @@ struct ServerAuthenticationHTTPHandler {
         target: String,
         body: Data,
         clientAddressKey: String,
+        csrfToken: String,
         rateLimitResponse: (ServerRateLimitScope, [String]) -> LocalHTTPResponse?
     ) -> LocalHTTPResponse {
         guard httpHeader(named: "Content-Type", in: requestHead)?.lowercased() == "application/x-www-form-urlencoded",

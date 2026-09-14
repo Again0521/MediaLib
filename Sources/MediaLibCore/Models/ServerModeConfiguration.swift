@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// 服务端对浏览器开放的网络边界。
 ///
@@ -15,6 +16,7 @@ public enum ServerNetworkAccessMode: String, Codable, CaseIterable, Equatable, S
 /// Docker 镜像和管理网页消费，不能把服务端运行时细节耦合进播放器偏好设置。
 public struct ServerModeConfiguration: Codable, Equatable, Sendable {
     public static let defaultPort = 8098
+    public static let defaultTrustedProxyAddresses = ["127.0.0.1", "::1"]
     public static let defaultServerName = "MediaLIB Server"
 
     public var isEnabled: Bool
@@ -28,8 +30,8 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
     /// Optional public HTTPS origin for a reverse proxy. LAN mode uses it only
     /// when WAN access is explicitly enabled.
     public var publicOrigin: String?
-    /// Exact IPv4 peers allowed to assert `X-Forwarded-Proto: https` and
-    /// `X-Forwarded-For`; this is intentionally not a CIDR or hostname field.
+    /// Exact IP peers allowed to assert forwarding headers, independently of the advertised URL.
+    /// An explicit empty list disables proxy trust.
     public var trustedProxyAddresses: [String]
     /// Explicit opt-in for public peers and an external reverse proxy in LAN HTTPS mode.
     public var allowsWANAccess: Bool
@@ -45,7 +47,7 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         networkAccessMode: ServerNetworkAccessMode = .loopbackOnly,
         lanAddress: String? = nil,
         publicOrigin: String? = nil,
-        trustedProxyAddresses: [String] = [],
+        trustedProxyAddresses: [String] = ServerModeConfiguration.defaultTrustedProxyAddresses,
         isLightweightMode: Bool = false,
         allowsWANAccess: Bool = false
     ) {
@@ -57,9 +59,7 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         self.lanAddress = Self.normalizedLANAddress(lanAddress)
         let normalizedOrigin = Self.normalizedPublicOrigin(publicOrigin)
         self.publicOrigin = normalizedOrigin
-        self.trustedProxyAddresses = normalizedOrigin == nil
-            ? []
-            : Self.normalizedTrustedProxyAddresses(trustedProxyAddresses)
+        self.trustedProxyAddresses = Self.normalizedTrustedProxyAddresses(trustedProxyAddresses)
         self.isLightweightMode = isLightweightMode
         self.allowsWANAccess = allowsWANAccess
     }
@@ -127,11 +127,10 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
 
     public mutating func updatePublicOrigin(_ origin: String?) {
         publicOrigin = Self.normalizedPublicOrigin(origin)
-        if publicOrigin == nil { trustedProxyAddresses = [] }
     }
 
     public mutating func updateTrustedProxyAddresses(_ values: [String]) {
-        trustedProxyAddresses = publicOrigin == nil ? [] : Self.normalizedTrustedProxyAddresses(values)
+        trustedProxyAddresses = Self.normalizedTrustedProxyAddresses(values)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -160,7 +159,7 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
             ) ?? .loopbackOnly,
             lanAddress: try container.decodeIfPresent(String.self, forKey: .lanAddress),
             publicOrigin: try container.decodeIfPresent(String.self, forKey: .publicOrigin),
-            trustedProxyAddresses: try container.decodeIfPresent([String].self, forKey: .trustedProxyAddresses) ?? [],
+            trustedProxyAddresses: try container.decodeIfPresent([String].self, forKey: .trustedProxyAddresses) ?? Self.defaultTrustedProxyAddresses,
             isLightweightMode: try container.decodeIfPresent(Bool.self, forKey: .isLightweightMode) ?? false,
             allowsWANAccess: try container.decodeIfPresent(Bool.self, forKey: .allowsWANAccess) ?? false
         )
@@ -211,20 +210,21 @@ public struct ServerModeConfiguration: Codable, Equatable, Sendable {
         var result: [String] = []
         for rawValue in values {
             let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard isIPv4Address(value), !result.contains(value) else { continue }
+            guard isTrustedProxyAddress(value), !result.contains(value) else { continue }
             result.append(value)
         }
         return result.sorted()
     }
 
-    private static func isIPv4Address(_ value: String) -> Bool {
-        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 4 else { return false }
-        return parts.allSatisfy { part in
-            !part.isEmpty && part.count <= 3 && part.allSatisfy(\.isNumber) &&
-                Int(part).map { (0...255).contains($0) } == true
+    public static func isTrustedProxyAddress(_ value: String) -> Bool {
+        guard !value.contains("\0") else { return false }
+        var ipv4 = in_addr()
+        var ipv6 = in6_addr()
+        return value.withCString {
+            inet_pton(AF_INET, $0, &ipv4) == 1 || inet_pton(AF_INET6, $0, &ipv6) == 1
         }
     }
+
 }
 
 /// 服务端配置的单独存储空间，避免与历史播放器设置的迁移耦合。

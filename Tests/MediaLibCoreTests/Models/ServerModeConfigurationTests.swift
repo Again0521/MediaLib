@@ -26,7 +26,7 @@ final class ServerModeConfigurationTests: XCTestCase {
         XCTAssertFalse(configuration.isLightweightMode)
         XCTAssertEqual(configuration.networkAccessMode, .loopbackOnly)
         XCTAssertNil(configuration.publicOrigin)
-        XCTAssertTrue(configuration.trustedProxyAddresses.isEmpty)
+        XCTAssertEqual(configuration.trustedProxyAddresses, ["127.0.0.1", "::1"])
     }
 
     func testDecoderMigratesPartialAndInvalidValues() throws {
@@ -104,8 +104,24 @@ final class ServerModeConfigurationTests: XCTestCase {
         XCTAssertNil(configuration.publicOrigin)
         XCTAssertTrue(configuration.trustedProxyAddresses.isEmpty)
 
-        configuration.updateTrustedProxyAddresses(["127.0.0.1"])
-        XCTAssertTrue(configuration.trustedProxyAddresses.isEmpty)
+        configuration.updateTrustedProxyAddresses(["127.0.0.1", "::1"])
+        XCTAssertEqual(configuration.trustedProxyAddresses, ["127.0.0.1", "::1"])
+    }
+
+    func testMissingAndExplicitEmptyProxySettingsRemainDistinct() throws {
+        let missing = try JSONDecoder().decode(ServerModeConfiguration.self, from: Data("{}".utf8))
+        XCTAssertEqual(missing.trustedProxyAddresses, ["127.0.0.1", "::1"])
+        var empty = try JSONDecoder().decode(ServerModeConfiguration.self,
+            from: Data(#"{"trustedProxyAddresses":[]}"#.utf8))
+        XCTAssertTrue(empty.trustedProxyAddresses.isEmpty)
+        empty.updateTrustedProxyAddresses(["::1", "127.0.0.1", "hostname", "127.0.0.1/8"])
+        empty.updatePublicOrigin(nil)
+        XCTAssertEqual(empty.trustedProxyAddresses, ["127.0.0.1", "::1"])
+        XCTAssertEqual(try JSONDecoder().decode(ServerModeConfiguration.self,
+            from: JSONEncoder().encode(empty)), empty)
+        empty.updateTrustedProxyAddresses([])
+        XCTAssertTrue(try JSONDecoder().decode(ServerModeConfiguration.self,
+            from: JSONEncoder().encode(empty)).trustedProxyAddresses.isEmpty)
     }
 
     func testStoreKeepsGeneratedIdentityAcrossLoads() {

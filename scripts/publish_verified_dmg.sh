@@ -21,6 +21,10 @@ trap cleanup_candidate EXIT
 "$HDIUTIL" verify "$TEMP_DMG_PATH"
 "$DITTO" --noextattr --noqtn "$TEMP_DMG_PATH" "$CANDIDATE_DMG_PATH"
 "$HDIUTIL" verify "$CANDIDATE_DMG_PATH"
+# A prior public image may carry Finder's hidden flag. Clear it on the
+# candidate before the atomic rename so every successfully published DMG is
+# visible in Finder, including when replacing a hidden older image.
+chflags nohidden "$CANDIDATE_DMG_PATH"
 
 # candidate and public paths share a filesystem, so readers see either the
 # previous verified image or the complete new image, never a partial copy.

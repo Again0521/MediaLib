@@ -138,9 +138,9 @@ enum ServerWebOperationsPage {
                 <div class="ui-field"><label class="ui-label" for="network-mode">访问模式</label><select class="ui-select" id="network-mode"><option value="loopback">仅本机/HTTPS 反代</option><option value="lan-https">内建 LAN HTTPS</option></select></div>
                 """
             ))
-            \(card("公开 Origin 与可信代理", "仅接受 HTTPS Origin 与精确 IPv4；LAN HTTPS 模式由宿主管理这些值。", id: "network-proxy", controls: """
+            \(card("公开 Origin 与可信代理", "HTTPS Origin 可选，可信代理可独立设置；默认信任本机回环，留空表示不信任任何代理。LAN HTTPS 模式由宿主管理这些值。", id: "network-proxy", controls: """
                 <div class="ui-field"><label class="ui-label" for="network-origin">公开 HTTPS Origin</label><input class="ui-input" id="network-origin" type="url" inputmode="url" autocomplete="url" placeholder="https://media.example.com"></div>
-                <div class="ui-field"><label class="ui-label" for="network-proxies">可信代理 IPv4（逗号分隔）</label><input class="ui-input" id="network-proxies" autocomplete="off" placeholder="127.0.0.1"></div>
+                <div class="ui-field"><label class="ui-label" for="network-proxies">可信代理 IP（逗号分隔）</label><input class="ui-input" id="network-proxies" autocomplete="off" placeholder="127.0.0.1"></div>
                 """))
             \(card(
                 "宿主控制",

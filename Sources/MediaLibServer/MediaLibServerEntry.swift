@@ -460,6 +460,7 @@ struct ServerLaunchConfiguration: Sendable {
     var allowsWANAccess: Bool = false
     var lanAddress: String? = nil
     let host: String
+    let listenAddresses: [String]
     let port: Int
     let networkAccessMode: ServerNetworkAccessMode
     let serverID: String
@@ -495,6 +496,29 @@ struct ServerLaunchConfiguration: Sendable {
             throw ServerConfigurationError.invalidNetworkAccessMode(networkAccessModeValue)
         }
 
+        let listenAddresses: [String]
+        if let raw = environment["MEDIALIB_SERVER_LISTEN_ADDRESSES"] {
+            let values = raw.split(separator: ",", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard networkAccessMode == .loopbackOnly, !values.isEmpty, values.count <= 16,
+                  values.allSatisfy(ServerModeConfiguration.isTrustedProxyAddress) else {
+                throw ServerConfigurationError.invalidListenAddresses(raw)
+            }
+            var unique: [String] = []
+            for value in values where !unique.contains(value) { unique.append(value) }
+            if unique.contains("0.0.0.0") {
+                unique.removeAll { $0 != "0.0.0.0" && !$0.contains(":") }
+            } else if !unique.contains("127.0.0.1") {
+                unique.insert("127.0.0.1", at: 0)
+            }
+            if unique.contains("::") {
+                unique.removeAll { $0 != "::" && $0.contains(":") }
+            }
+            listenAddresses = unique
+        } else {
+            listenAddresses = ["127.0.0.1"]
+        }
+
         let serverID = environment["MEDIALIB_SERVER_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         let serverName = environment["MEDIALIB_SERVER_NAME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         let publicOriginValue = environment["MEDIALIB_SERVER_PUBLIC_ORIGIN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -518,12 +542,13 @@ struct ServerLaunchConfiguration: Sendable {
             publicOrigin = nil
         }
 
-        let proxyValues = (environment["MEDIALIB_SERVER_TRUSTED_PROXIES"] ?? "")
+        let proxyValues = (environment["MEDIALIB_SERVER_TRUSTED_PROXIES"]
+            ?? (networkAccessMode == .loopbackOnly
+                ? ServerModeConfiguration.defaultTrustedProxyAddresses.joined(separator: ",") : ""))
             .split(separator: ",", omittingEmptySubsequences: true)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let trustedProxyAddresses = Set(proxyValues)
-        guard proxyValues.allSatisfy(Self.isIPv4Address),
-              trustedProxyAddresses.isEmpty || publicOrigin != nil
+        guard proxyValues.allSatisfy(ServerModeConfiguration.isTrustedProxyAddress)
         else {
             throw ServerConfigurationError.invalidTrustedProxyConfiguration
         }
@@ -545,6 +570,7 @@ struct ServerLaunchConfiguration: Sendable {
             allowsWANAccess: ["1", "true", "yes"].contains(environment["MEDIALIB_SERVER_ALLOW_WAN"]?.lowercased() ?? ""),
             lanAddress: environment["MEDIALIB_SERVER_LAN_ADDRESS"],
             host: normalizedHost,
+            listenAddresses: listenAddresses,
             port: port,
             networkAccessMode: networkAccessMode,
             // App/容器必须注入持久化 ID；默认值只用于开发命令和本机健康探测。
@@ -556,20 +582,14 @@ struct ServerLaunchConfiguration: Sendable {
         )
     }
 
-    private static func isIPv4Address(_ value: String) -> Bool {
-        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 4 else { return false }
-        return parts.allSatisfy { part in
-            !part.isEmpty && part.count <= 3 && part.allSatisfy(\.isNumber) &&
-                Int(part).map { (0...255).contains($0) } == true
-        }
-    }
+
 }
 
 enum ServerConfigurationError: LocalizedError, Equatable {
     case invalidPort(String)
     case invalidNetworkAccessMode(String)
     case nonLoopbackHost(String)
+    case invalidListenAddresses(String)
     case invalidPublicOrigin(String)
     case invalidTrustedProxyConfiguration
     case invalidLanDirectPlayConfiguration
@@ -585,10 +605,12 @@ enum ServerConfigurationError: LocalizedError, Equatable {
             return "MEDIALIB_SERVER_NETWORK_ACCESS_MODE 无效：\(value)。只接受 loopback 或 lan-https。"
         case let .nonLoopbackHost(host):
             return "当前安全门槛下服务端只允许监听本机回环地址，不能使用：\(host)。"
+        case let .invalidListenAddresses(value):
+            return "MEDIALIB_SERVER_LISTEN_ADDRESSES 必须是至多 16 个逗号分隔的 IPv4/IPv6 地址，并且仅用于 HTTP 模式：\(value)。"
         case let .invalidPublicOrigin(origin):
             return "MEDIALIB_SERVER_PUBLIC_ORIGIN 必须是无路径的 HTTPS 地址：\(origin)。"
         case .invalidTrustedProxyConfiguration:
-            return "MEDIALIB_SERVER_TRUSTED_PROXIES 必须是 IPv4 地址列表，并且只能与 HTTPS 公开 Origin 一起使用。"
+            return "MEDIALIB_SERVER_TRUSTED_PROXIES 必须是 IP 地址列表；空值表示不信任任何代理。"
         case .invalidLanDirectPlayConfiguration:
             return "MEDIALIB_SERVER_LAN_DIRECT_PLAY 只接受 0/1，并且必须同时配置 HTTPS 公开 Origin 与可信反向代理。"
         case .lanHTTPSRuntimeUnavailable:

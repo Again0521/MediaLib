@@ -522,6 +522,7 @@ enum ServerWebMediaDetailPage {
       background: var(--media-scrim);
       color: var(--text-on-media);
       opacity: 0;
+      pointer-events: none;
       transition: opacity var(--duration-base) var(--ease-out);
       container-type: inline-size;
       /* 控件条不再只是一层压暗：底部这条带子现在真的把画面糊掉。
@@ -543,7 +544,7 @@ enum ServerWebMediaDetailPage {
       pointer-events: none;
     }
     .player-stage.controls-visible .player-overlay-controls,
-    .player-overlay-controls:focus-within { opacity: 1; }
+    .player-overlay-controls:has(:focus-visible) { opacity: 1; pointer-events: auto; }
     .player-control-row { display: flex; min-width: 0; align-items: center; gap: var(--space-3); }
     .player-control-group { display: flex; min-width: 0; align-items: center; gap: var(--space-1); }
     .player-control-group-end { margin-left: auto; gap: var(--space-4); }
@@ -641,12 +642,18 @@ enum ServerWebMediaDetailPage {
       pointer-events: none;
       transition: opacity var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out);
     }
-    .player-hover-control:hover .player-hover-popover,
-    .player-hover-control:focus-within .player-hover-popover,
+    .player-hover-control:has(:focus-visible) .player-hover-popover,
     .player-hover-control.is-open .player-hover-popover {
       opacity: 1;
       transform: translate(-50%, 0);
       pointer-events: auto;
+    }
+    @media (hover: hover) and (pointer: fine) {
+      .player-hover-control:hover .player-hover-popover {
+        opacity: 1;
+        transform: translate(-50%, 0);
+        pointer-events: auto;
+      }
     }
     /* 悬浮层与按钮之间那段空隙不能是"断开"的：鼠标从按钮移向滑杆的途中一旦
        离开命中区，层就收起来了，滑杆永远够不着。这条透明桥把空隙补上。 */
@@ -1375,24 +1382,36 @@ enum ServerWebMediaDetailPage {
     @media (max-width: 719px) {
       .synopsis { grid-template-columns: minmax(0, 1fr); }
       .synopsis .poster { max-width: 168px; }
-      .player-overlay-controls { padding: var(--space-6) var(--space-1) var(--space-2); }
-      .player-control-row { flex-wrap: wrap; gap: var(--space-1); }
-      .player-control-group-end {
-        width: 100%;
-        margin-left: 0;
-        justify-content: flex-end;
-        gap: var(--space-1);
+      .player-overlay-controls {
+        padding: var(--space-6) var(--space-2) var(--space-2);
+        container-type: normal;
       }
-      /* 手机控制条需要稳定的 44px 目标。分成两行后每颗按钮都能保留
-         44×44，而不必靠缩小命中区把九个动作硬塞进一行。 */
+      .player-control-row { flex-wrap: nowrap; gap: 0; }
+      .player-control-row > .player-control-group:first-child { flex: 0 0 auto; }
+      #seek-backward, #seek-forward { display: none; }
+      #default-size, #wide-size { display: none; }
+      .player-control-group-end {
+        flex: 1;
+        margin-left: auto;
+        justify-content: flex-end;
+        gap: 0;
+      }
+      .player-control-group-end .player-control-cluster { display: contents; }
+      .player-control-row .playback-time { display: none; }
       .player-overlay-controls button,
       .player-settings > summary {
-        flex: 0 0 var(--control-height-lg);
+        flex: 0 1 var(--control-height-lg);
         width: var(--control-height-lg);
-        min-width: var(--control-height-lg);
+        min-width: 32px;
         height: var(--control-height-lg);
         min-height: var(--control-height-lg);
       }
+      .player-control-group-end > .player-control-cluster > :is(.player-settings, .player-hover-control) {
+        flex: 0 1 var(--control-height-lg);
+        min-width: 0;
+      }
+      .player-control-group-end :is(.player-settings > summary, .player-hover-control > button) { width: 100%; }
+      .player-stage:has(#fullscreen:not([hidden])) #web-fullscreen { display: none; }
       .player-track-panel .player-track-item {
         width: auto;
         min-width: 0;
@@ -1407,7 +1426,7 @@ enum ServerWebMediaDetailPage {
          音量归系统音量键管，iOS Safari 的原生播放器同样不画这条滑杆；倍速没有
          任何系统入口，收掉就等于没有了，所以它留下——它本来就只是一个很窄的
          下拉。 */
-      .player-volume-cluster { display: none; }
+      .player-control-group-end .player-volume-cluster { display: none; }
       .playback-time { margin-left: var(--space-1); }
       .player-shortcut-hint { display: none !important; }
       .player-subtitle-overlay {
@@ -1615,7 +1634,7 @@ enum ServerWebMediaDetailPage {
       var scrubTarget = NaN;
       var lastAdvancingTime = 0;
       var lastUserPauseAt = 0;
-      var overlayPinnedByTap = false;
+      var overlayPointerActive = false;
       var playbackHasPlayed = false;
       var selectedSubtitleTrackID = null;
       var activeSubtitleCues = [];
@@ -1705,27 +1724,25 @@ enum ServerWebMediaDetailPage {
       };
       // 保留旧名称，菜单构建点无需知道定位策略已经同时覆盖横向与纵向。
       const syncTrackMenuHeights = syncTrackMenuGeometry;
-      const showOverlayControls = (keepVisible = false) => {
-        if (!playerStage || transportControls.hidden) return;
-        playerStage.classList.add('controls-visible');
-        if (overlayHideTimer !== null) window.clearTimeout(overlayHideTimer);
-        if (keepVisible || overlayPinnedByTap || player.paused || document.fullscreenElement || document.body.classList.contains('is-web-fullscreen')) return;
-        overlayHideTimer = window.setTimeout(() => {
-          overlayHideTimer = null;
-          if (!player.paused && !document.querySelector('.player-settings[open]')) playerStage.classList.remove('controls-visible');
-        }, 2800);
-      };
+      const overlayInteractionActive = () => overlayPointerActive ||
+        !!transportControls.querySelector('.player-settings[open], .player-hover-control.is-open, :focus-visible') ||
+        (window.matchMedia('(hover: hover) and (pointer: fine)').matches && !!transportControls.querySelector('.player-hover-control:hover'));
       const hideOverlayControls = () => {
         if (overlayHideTimer !== null) window.clearTimeout(overlayHideTimer);
         overlayHideTimer = null;
-        if (!overlayPinnedByTap && !player.paused && !document.querySelector('.player-settings[open]')) playerStage?.classList.remove('controls-visible');
+        if (!player.paused && !player.ended && !overlayInteractionActive()) playerStage?.classList.remove('controls-visible');
       };
-      const setOverlayPinnedByTap = active => {
-        overlayPinnedByTap = active;
-        if (active) showOverlayControls(true);
-        else if (!player.paused && !document.querySelector('.player-settings[open]')) {
-          playerStage?.classList.remove('controls-visible');
-        }
+      const showOverlayControls = () => {
+        if (!playerStage || transportControls.hidden) return;
+        playerStage.classList.add('controls-visible');
+        if (overlayHideTimer !== null) window.clearTimeout(overlayHideTimer);
+        overlayHideTimer = null;
+        if (player.paused || player.ended) return;
+        overlayHideTimer = window.setTimeout(() => {
+          overlayHideTimer = null;
+          if (overlayInteractionActive()) showOverlayControls();
+          else hideOverlayControls();
+        }, 2800);
       };
       const setBusy = (busy) => {
         isStarting = busy;
@@ -3342,7 +3359,7 @@ enum ServerWebMediaDetailPage {
       directButton.addEventListener('click', () => { void startPlayback(); });
       defaultSizeButton?.addEventListener('click', () => setPlayerLayout('default'));
       wideSizeButton?.addEventListener('click', () => setPlayerLayout('wide'));
-      webFullscreenButton?.addEventListener('click', () => { toggleWebFullscreen(); showOverlayControls(true); });
+      webFullscreenButton?.addEventListener('click', () => { toggleWebFullscreen(); showOverlayControls(); });
       episodeSeasonTabs.forEach(tab => tab.addEventListener('click', () => {
         const season = tab.dataset.season || '';
         if (!seasonKeyIsSafe(season)) return;
@@ -3419,7 +3436,7 @@ enum ServerWebMediaDetailPage {
       speedControl.addEventListener('change', setPlaybackRate);
       if (fullscreenButton) {
         fullscreenButton.hidden = typeof playerStage.requestFullscreen !== 'function';
-        fullscreenButton.addEventListener('click', () => { void toggleFullscreen(); showOverlayControls(true); });
+        fullscreenButton.addEventListener('click', () => { void toggleFullscreen(); showOverlayControls(); });
       }
       if (pictureInPictureButton) {
         pictureInPictureButton.hidden = !document.pictureInPictureEnabled || typeof player.requestPictureInPicture !== 'function';
@@ -3428,15 +3445,27 @@ enum ServerWebMediaDetailPage {
       document.addEventListener('fullscreenchange', updateFullscreenLabel, { signal: lifecycle.signal });
       const coarsePointer = window.matchMedia('(hover: none), (pointer: coarse)');
       playerStage.addEventListener('pointermove', () => { if (!coarsePointer.matches) showOverlayControls(); });
-      playerStage.addEventListener('pointerdown', () => showOverlayControls(true));
+      transportControls.addEventListener('pointerdown', () => {
+        overlayPointerActive = true;
+        showOverlayControls();
+      });
+      const finishOverlayPointer = () => {
+        if (!overlayPointerActive) return;
+        overlayPointerActive = false;
+        showOverlayControls();
+      };
+      document.addEventListener('pointerup', finishOverlayPointer, { signal: lifecycle.signal });
+      document.addEventListener('pointercancel', finishOverlayPointer, { signal: lifecycle.signal });
+      transportControls.addEventListener('click', () => showOverlayControls());
       playerStage.addEventListener('pointerleave', () => { if (!coarsePointer.matches) hideOverlayControls(); });
-      transportControls.addEventListener('focusin', () => showOverlayControls(true));
+      transportControls.addEventListener('focusin', () => showOverlayControls());
       transportControls.addEventListener('focusout', () => { window.setTimeout(() => { if (!transportControls.contains(document.activeElement)) showOverlayControls(); }, 0); });
       player.addEventListener('click', () => {
-        // 触摸屏上单击画面只负责显隐控制栏：第一次固定显示，第二次隐藏。
-        // 播放/暂停由明确的播放键承担，避免“刚想点按钮，整条 UI 已经收走”。
+        // Touch reveals controls temporarily; transport buttons own playback.
+        // Do not reveal on pointerdown before this visibility toggle runs.
         if (coarsePointer.matches) {
-          setOverlayPinnedByTap(!overlayPinnedByTap);
+          if (playerStage.classList.contains('controls-visible')) hideOverlayControls();
+          else showOverlayControls();
           return;
         }
         void togglePlayback();
@@ -3539,7 +3568,7 @@ enum ServerWebMediaDetailPage {
           setBufferingVisible(false);
         }
         updateTransportUI();
-        showOverlayControls(true);
+        showOverlayControls();
         if (playbackStartedReported && !player.ended) {
           void reportPlaybackState('stopped');
         }
@@ -3547,7 +3576,7 @@ enum ServerWebMediaDetailPage {
       });
       player.addEventListener('ended', () => {
         updateTransportUI();
-        showOverlayControls(true);
+        showOverlayControls();
         playbackCompleted = true;
         directButton.disabled = !canDirectPlay;
         directButton.setAttribute('aria-label', '重新播放');
@@ -3596,6 +3625,7 @@ enum ServerWebMediaDetailPage {
       });
       player.addEventListener('volumechange', scheduleTransportUI);
       window.addEventListener('pagehide', () => {
+        if (overlayHideTimer !== null) { window.clearTimeout(overlayHideTimer); overlayHideTimer = null; }
         if (autoplayTimer !== null) { window.clearTimeout(autoplayTimer); autoplayTimer = null; }
         if (currentHLSClient) { currentHLSClient.destroy(); currentHLSClient = null; }
         if (playbackStartedReported) void reportPlaybackState('stopped', true, lastKnownPlaybackPosition);
@@ -3604,6 +3634,7 @@ enum ServerWebMediaDetailPage {
         pendingHLSSessionIDs.clear();
       }, { signal: lifecycle.signal });
       document.addEventListener('medialib:pagewillunload', () => {
+        if (overlayHideTimer !== null) { window.clearTimeout(overlayHideTimer); overlayHideTimer = null; }
         if (autoplayTimer !== null) { window.clearTimeout(autoplayTimer); autoplayTimer = null; }
         if (currentHLSClient) { currentHLSClient.destroy(); currentHLSClient = null; }
         if (transportFrame !== null) window.cancelAnimationFrame(transportFrame);

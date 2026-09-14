@@ -295,6 +295,9 @@ final class ServerModeProcessController: ObservableObject {
     ) -> [String: String] {
         var environment = base
         environment["MEDIALIB_SERVER_HOST"] = "127.0.0.1"
+        // The desktop setting currently exposes only the loopback HTTP listener.
+        // Do not inherit an advanced bind override from the launcher environment.
+        environment.removeValue(forKey: "MEDIALIB_SERVER_LISTEN_ADDRESSES")
         environment["MEDIALIB_SERVER_PORT"] = String(configuration.port)
         environment["MEDIALIB_SERVER_ID"] = configuration.serverID
         environment["MEDIALIB_SERVER_NAME"] = configuration.serverName
@@ -308,11 +311,8 @@ final class ServerModeProcessController: ObservableObject {
         } else {
             environment.removeValue(forKey: "MEDIALIB_SERVER_PUBLIC_ORIGIN")
         }
-        if configuration.effectiveTrustedProxyAddresses.isEmpty {
-            environment.removeValue(forKey: "MEDIALIB_SERVER_TRUSTED_PROXIES")
-        } else {
-            environment["MEDIALIB_SERVER_TRUSTED_PROXIES"] = configuration.effectiveTrustedProxyAddresses.joined(separator: ",")
-        }
+        // Preserve an explicit empty list; omission enables the runtime's loopback defaults.
+        environment["MEDIALIB_SERVER_TRUSTED_PROXIES"] = configuration.effectiveTrustedProxyAddresses.joined(separator: ",")
         return environment
     }
 }
